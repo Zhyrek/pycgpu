@@ -15,11 +15,15 @@ from pycalphad.codegen.callables import build_phase_records
 from pycalphad.core.cache import cacheit
 from pycalphad.core.light_dataset import LightDataset
 from pycalphad.model import Model
+import pycalphad.gpu as gpu
+import cupy as cp
 from pycalphad.core.phase_rec import PhaseRecord
 from pycalphad.core.utils import endmember_matrix, extract_parameters, \
     get_pure_elements, filter_phases, instantiate_models, point_sample, \
     unpack_components, unpack_condition, unpack_kwarg
 from pycalphad.core.constants import MIN_SITE_FRACTION, MAX_ENDMEMBER_PAIRS, MAX_EXTRA_POINTS
+
+built_gpu_arrays = False
 
 
 def hr_point_sample(constraint_jac, constraint_rhs, initial_point, num_points):
@@ -200,7 +204,7 @@ def _sample_phase_constitution(model, sampler, fixed_grid, pdens):
 def _compute_phase_values(components, statevar_dict,
                           points, phase_record, output, maximum_internal_dof, broadcast=True,
                           parameters=None, fake_points=False,
-                          largest_energy=None):
+                          largest_energy=None, use_gpu=False):
     """
     Calculate output values for a particular phase.
 
@@ -238,6 +242,11 @@ def _compute_phase_values(components, statevar_dict,
     --------
     None yet.
     """
+    pure_elements = [list(x.constituents.keys()) for x in components]
+    pure_elements = sorted(set([el.upper() for constituents in pure_elements for el in constituents]))
+    pure_elements = [x for x in pure_elements if x != 'VA']
+    param_symbols, parameter_array = extract_parameters(parameters)
+    parameter_array_length = parameter_array.shape[0]
     if broadcast:
         # Broadcast compositions and state variables along orthogonal axes
         # This lets us eliminate an expensive Python loop
@@ -256,56 +265,64 @@ def _compute_phase_values(components, statevar_dict,
                                  'broadcast=False.')
             statevars_.append(statevar)
         statevars = statevars_
-    pure_elements = [list(x.constituents.keys()) for x in components]
-    pure_elements = sorted(set([el.upper() for constituents in pure_elements for el in constituents]))
-    pure_elements = [x for x in pure_elements if x != 'VA']
+    pshape = points.shape
     # func may only have support for vectorization along a single axis (no broadcasting)
     # we need to force broadcasting and flatten the result before calling
-    bc_statevars = np.ascontiguousarray([broadcast_to(x, points.shape[:-1]).reshape(-1) for x in statevars])
-    pts = points.reshape(-1, points.shape[-1])
-    dof = np.ascontiguousarray(np.concatenate((bc_statevars.T, pts), axis=1))
-    phase_compositions = np.zeros((dof.shape[0], len(pure_elements)), order='F')
-
-    param_symbols, parameter_array = extract_parameters(parameters)
-    parameter_array_length = parameter_array.shape[0]
-    if parameter_array_length == 0:
-        # No parameters specified
-        phase_output = np.zeros(dof.shape[0], order='C')
-        phase_record.obj_2d(phase_output, dof)
+    if(use_gpu):
+        #assume N,P are unused, and only T is specified for broadcasting
+        T_gpu = cp.asarray(statevar_dict["T"], dtype=np.float64)
+        p_gpu = cp.asarray(points[0][0][0], dtype=np.float64)
+        out_gpu = cp.empty(points[0][0][0].shape[0]*len(statevar_dict["T"]), dtype=np.float64)
+        mout_gpu = cp.empty([points[0][0][0].shape[0]*len(statevar_dict["T"]), len(pure_elements)], dtype=np.float64)
+        kernel = getattr(gpu, f"_pycgpu_{phase_record.phase_name}_kernel")
+        kernel[256, 256](T_gpu, p_gpu, out_gpu, mout_gpu)
+        phase_output = cp.asnumpy(out_gpu)
+        phase_compositions = cp.asnumpy(mout_gpu)
     else:
-        # Vectorized parameter arrays
-        phase_output = np.zeros((dof.shape[0], parameter_array_length), order='C')
-        phase_record.obj_parameters_2d(phase_output, dof, parameter_array)
+        bc_statevars = np.ascontiguousarray([broadcast_to(x, points.shape[:-1]).reshape(-1) for x in statevars])
+        pts = points.reshape(-1, points.shape[-1])
+        dof = np.ascontiguousarray(np.concatenate((bc_statevars.T, pts), axis=1))
+        phase_compositions = np.zeros((dof.shape[0], len(pure_elements)), order='F')
+        
+        if parameter_array_length == 0:
+            # No parameters specified
+            phase_output = np.zeros(dof.shape[0], order='C')
+            phase_record.obj_2d(phase_output, dof)
+        else:
+            # Vectorized parameter arrays
+            phase_output = np.zeros((dof.shape[0], parameter_array_length), order='C')
+            phase_record.obj_parameters_2d(phase_output, dof, parameter_array)
 
-    for el_idx in range(len(pure_elements)):
-        phase_record.mass_obj_2d(phase_compositions[:, el_idx], dof, el_idx)
+        for el_idx in range(len(pure_elements)):
+            phase_record.mass_obj_2d(phase_compositions[:, el_idx], dof, el_idx)
 
     max_tieline_vertices = len(pure_elements)
     if isinstance(phase_output, (float, int)):
-        phase_output = broadcast_to(phase_output, points.shape[:-1])
+        phase_output = broadcast_to(phase_output, pshape[:-1])
     if isinstance(phase_compositions, (float, int)):
-        phase_compositions = broadcast_to(phase_output, points.shape[:-1] + (len(pure_elements),))
+        phase_compositions = broadcast_to(phase_output, pshape[:-1] + (len(pure_elements),))
+    
     phase_output = np.asarray(phase_output, dtype=np.float_)
     if parameter_array_length <= 1:
-        phase_output.shape = points.shape[:-1]
+        phase_output.shape = pshape[:-1]
     else:
-        phase_output.shape = points.shape[:-1] + (parameter_array_length,)
+        phase_output.shape = pshape[:-1] + (parameter_array_length,)
     phase_compositions = np.asarray(phase_compositions, dtype=np.float_)
-    phase_compositions.shape = points.shape[:-1] + (len(pure_elements),)
+    phase_compositions.shape = pshape[:-1] + (len(pure_elements),)
     if fake_points:
-        output_shape = points.shape[:-2] + (max_tieline_vertices,)
+        output_shape = pshape[:-2] + (max_tieline_vertices,)
         if parameter_array_length > 1:
             output_shape = output_shape + (parameter_array_length,)
             concat_axis = -2
         else:
             concat_axis = -1
         phase_output = np.concatenate((broadcast_to(largest_energy, output_shape), phase_output), axis=concat_axis)
-        phase_names = np.concatenate((broadcast_to('_FAKE_', points.shape[:-2] + (max_tieline_vertices,)),
-                                      np.full(points.shape[:-1], phase_record.phase_name, dtype='U' + str(len(phase_record.phase_name)))), axis=-1)
+        phase_names = np.concatenate((broadcast_to('_FAKE_', pshape[:-2] + (max_tieline_vertices,)),
+                                      np.full(pshape[:-1], phase_record.phase_name, dtype='U' + str(len(phase_record.phase_name)))), axis=-1)
     else:
-        phase_names = np.full(points.shape[:-1], phase_record.phase_name, dtype='U'+str(len(phase_record.phase_name)))
+        phase_names = np.full(pshape[:-1], phase_record.phase_name, dtype='U'+str(len(phase_record.phase_name)))
     if fake_points:
-        phase_compositions = np.concatenate((np.broadcast_to(np.eye(len(pure_elements)), points.shape[:-2] + (max_tieline_vertices, len(pure_elements))), phase_compositions), axis=-2)
+        phase_compositions = np.concatenate((np.broadcast_to(np.eye(len(pure_elements)), pshape[:-2] + (max_tieline_vertices, len(pure_elements))), phase_compositions), axis=-2)
 
     coordinate_dict = {'component': pure_elements}
     # Resize 'points' so it has the same number of columns as the maximum
@@ -315,18 +332,18 @@ def _compute_phase_values(components, statevar_dict,
     # In each case, first check if we need to do this...
     # It can be expensive for many points (~14s for 500M points)
     if fake_points:
-        desired_shape = points.shape[:-2] + (max_tieline_vertices + points.shape[-2], maximum_internal_dof)
+        desired_shape = pshape[:-2] + (max_tieline_vertices + pshape[-2], maximum_internal_dof)
         expanded_points = np.full(desired_shape, np.nan)
-        expanded_points[..., len(pure_elements):, :points.shape[-1]] = points
+        expanded_points[..., len(pure_elements):, :pshape[-1]] = points
     else:
-        desired_shape = points.shape[:-1] + (maximum_internal_dof,)
-        if points.shape == desired_shape:
+        desired_shape = pshape[:-1] + (maximum_internal_dof,)
+        if pshape == desired_shape:
             expanded_points = points
         else:
             # TODO: most optimal solution would be to take pre-extended arrays as an argument and remove this
             # This still copies the array, but is more efficient than filling
             # an array with np.nan, then copying the existing points
-            append_nans = np.full(desired_shape[:-1] + (desired_shape[-1] - points.shape[-1],), np.nan)
+            append_nans = np.full(desired_shape[:-1] + (desired_shape[-1] - pshape[-1],), np.nan)
             expanded_points = np.append(points, append_nans, axis=-1)
     if broadcast:
         coordinate_dict.update({key: np.atleast_1d(value) for key, value in statevar_dict.items()})
@@ -352,7 +369,7 @@ def _compute_phase_values(components, statevar_dict,
     return LightDataset(data_arrays, coords=coordinate_dict)
 
 
-def calculate(dbf, comps, phases, mode=None, output='GM', fake_points=False, broadcast=True, parameters=None, to_xarray=True, phase_records=None, **kwargs):
+def calculate(dbf, comps, phases, mode=None, output='GM', fake_points=False, broadcast=True, parameters=None, to_xarray=True, phase_records=None, use_gpu=False, **kwargs):
     """
     Sample the property surface of 'output' containing the specified
     components and phases. Model parameters are taken from 'dbf' and any
@@ -478,6 +495,14 @@ def calculate(dbf, comps, phases, mode=None, output='GM', fake_points=False, bro
             raise ValueError(f"model must contain a Model instance for every active phase. Missing Model objects for {sorted(active_phases_without_models)}")
 
     maximum_internal_dof = max(len(models[phase_name].site_fractions) for phase_name in active_phases)
+    
+    if(use_gpu):
+        global built_gpu_arrays
+        if not(built_gpu_arrays):
+            built_gpu_arrays = True
+            for phase_name in sorted(active_phases):
+                mod = models[phase_name]
+                gpu.create_calculate_kernel(mod)
 
     for phase_name in sorted(active_phases):
         mod = models[phase_name]
@@ -492,7 +517,7 @@ def calculate(dbf, comps, phases, mode=None, output='GM', fake_points=False, bro
         phase_ds = _compute_phase_values(nonvacant_components, str_statevar_dict,
                                          points, phase_record, output,
                                          maximum_internal_dof, broadcast=broadcast, parameters=parameters,
-                                         largest_energy=float(largest_energy), fake_points=fp)
+                                         largest_energy=float(largest_energy), fake_points=fp, use_gpu=use_gpu)
         all_phase_data.append(phase_ds)
 
     fp_offset = len(nonvacant_elements) if fake_points else 0

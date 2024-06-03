@@ -23,8 +23,6 @@ from pycalphad.core.utils import endmember_matrix, extract_parameters, \
     unpack_components, unpack_condition, unpack_kwarg
 from pycalphad.core.constants import MIN_SITE_FRACTION, MAX_ENDMEMBER_PAIRS, MAX_EXTRA_POINTS
 
-built_gpu_arrays = False
-
 
 def hr_point_sample(constraint_jac, constraint_rhs, initial_point, num_points):
     "Hit-and-run sampling of linearly-constrained site fraction spaces"
@@ -497,11 +495,9 @@ def calculate(dbf, comps, phases, mode=None, output='GM', fake_points=False, bro
     maximum_internal_dof = max(len(models[phase_name].site_fractions) for phase_name in active_phases)
     
     if(use_gpu):
-        global built_gpu_arrays
-        if not(built_gpu_arrays):
-            built_gpu_arrays = True
-            for phase_name in sorted(active_phases):
-                mod = models[phase_name]
+        for phase_name in sorted(active_phases):
+            mod = models[phase_name]
+            if not(hasattr(gpu, f"_pycgpu_{phase_name}_kernel")):
                 gpu.create_calculate_kernel(mod)
 
     for phase_name in sorted(active_phases):

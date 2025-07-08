@@ -377,24 +377,12 @@ cdef void fill_equilibrium_system(double[::1,:] equilibrium_matrix, double[::1] 
     # Show first few residuals for debugging
     debug_log(f"  equilibrium_rhs[0:3]: {equilibrium_rhs[0]:.15e}, {equilibrium_rhs[1]:.15e}, {equilibrium_rhs[2]:.15e}", debug_enabled)
     
-    # DEBUG: Always print for iteration 0
-    if state.iteration == 0:
-        print(f"[CPU DEBUG] Before residual subtraction, equilibrium_rhs[{component_row_offset}] = {equilibrium_rhs[component_row_offset]:.15e}")
-    
     # Add mass residual to fixed component row RHS, plus N=1 row
     component_row_offset = num_stable_phases + num_fixed_phases
     system_amount_index = component_row_offset + num_fixed_mole_fraction_conditions
-    print(f"[CPU DEBUG] num_fixed_mole_fraction_conditions = {num_fixed_mole_fraction_conditions}")
     for fixed_molefrac_cond_idx in range(num_fixed_mole_fraction_conditions):
-        # DEBUG: Print RHS before residual subtraction
-        print(f"[CPU MOLE FRAC] Row {fixed_molefrac_cond_idx} RHS before residual: {equilibrium_rhs[component_row_offset + fixed_molefrac_cond_idx]:.15e}")
-        
         component_residual = np.dot(spec.prescribed_mole_fraction_coefficients[fixed_molefrac_cond_idx, :], state.mole_fractions) - spec.prescribed_mole_fraction_rhs[fixed_molefrac_cond_idx]
         equilibrium_rhs[component_row_offset + fixed_molefrac_cond_idx] -= component_residual
-        
-        # DEBUG: Print RHS after residual subtraction
-        print(f"[CPU MOLE FRAC] Row {fixed_molefrac_cond_idx} RHS after residual: {equilibrium_rhs[component_row_offset + fixed_molefrac_cond_idx]:.15e} (residual was {component_residual:.15e})")
-        
         debug_log(f"  constraint_{fixed_molefrac_cond_idx}_residual: {component_residual:.15e}", debug_enabled)
     
     system_residual = state.system_amount - spec.prescribed_system_amount

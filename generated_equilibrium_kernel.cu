@@ -1588,11 +1588,33 @@ typedef struct SystemState {
                         // Call formulamole_grad with full workspace DOF
                         compset->phase_record->formulamole_grad(mass_jac_temp, compset->dof);
                         
+                        // DEBUG: Print raw gradient values from formulamole_grad
+                        if (idx == 0 && iteration < 2) {
+                            printf("GPU DEBUG: Raw formulamole_grad output (phase %d):\n", idx);
+                            // The gradient should be in format: [dNB/dx0, dNB/dx1, ..., dTI/dx0, dTI/dx1, ...]
+                            // With workspace DOF: x[0]=N, x[1]=P, x[2]=T, x[3]=Y_NB, x[4]=Y_TI
+                            // CRITICAL FIX: The gradient array is packed with actual DOF count, not MAX sizes
+                            int actual_dof = spec->num_statevars + compset->phase_record->phase_dof;
+                            for (int comp_idx = 0; comp_idx < spec->num_components && comp_idx < 2; ++comp_idx) {
+                                printf("  Component %d gradients: ", comp_idx);
+                                for (int j = 0; j < actual_dof; ++j) {
+                                    printf("d/dx[%d]=%e ", j, mass_jac_temp[comp_idx * actual_dof + j]);
+                                }
+                                printf("\n");
+                            }
+                        }
+                        
                         // Copy to csst mass_jac array
+                        // CRITICAL FIX: The gradient array from formulamole_grad is packed with actual DOF count
+                        int actual_dof = spec->num_statevars + compset->phase_record->phase_dof;
                         for (int comp_idx = 0; comp_idx < spec->num_components; ++comp_idx) {
                             for (int j = 0; j < csst->mass_jac_cols; ++j) {
-                                if (comp_idx * csst->mass_jac_cols + j < MAX_COMPONENTS * (MAX_STATEVARS + MAX_DOF_PER_PHASE)) {
-                                    csst->mass_jac[comp_idx * csst->mass_jac_cols + j] = mass_jac_temp[comp_idx * csst->mass_jac_cols + j];
+                                if (j < actual_dof) {
+                                    // Read from packed array with actual DOF stride
+                                    csst->mass_jac[comp_idx * csst->mass_jac_cols + j] = mass_jac_temp[comp_idx * actual_dof + j];
+                                } else {
+                                    // Zero out unused columns
+                                    csst->mass_jac[comp_idx * csst->mass_jac_cols + j] = 0.0;
                                 }
                             }
                         }
@@ -2337,22 +2359,10 @@ __device__ void write_row_stable_phase(double* out_row, double* out_rhs,
 
 
     for (i = 0; i < num_free_statevars; i++) {
-        statevar_idx = free_statevar_indices[i]; // This is the global index of the free state variable
-        // CRITICAL FIX: Map workspace state variable index to model state variable index
-        // The model only has temperature (index 0) while workspace has [N, P, T]
-        // So workspace index 2 (T) maps to model index 0
-        int model_statevar_idx = -1;
-        if (statevar_idx == 2) {  // Temperature in workspace [N, P, T]
-            model_statevar_idx = 0;  // Temperature in model [T]
-        } else if (statevar_idx == 1) {  // Pressure in workspace (if model uses it)
-            model_statevar_idx = 1;  // Would be index 1 if model had [T, P]
-        }
-        
-        if (model_statevar_idx >= 0) {
-            out_row[free_variable_column_offset + i] = -grad_for_compset[model_statevar_idx];
-        } else {
-            out_row[free_variable_column_offset + i] = 0.0;  // State var not in model
-        }
+        statevar_idx = free_statevar_indices[i]; // This is the workspace index of the free state variable
+        // CRITICAL FIX: Use workspace indices directly, just like CPU code does!
+        // The gradient array is already populated with workspace indices from formulagrad
+        out_row[free_variable_column_offset + i] = -grad_for_compset[statevar_idx];
     }
 
     out_rhs[0] = energy_for_compset;
@@ -2510,7 +2520,13 @@ __device__ void write_row_fixed_mole_fraction(double* out_row, double* out_rhs,
         printf("  c_G_length=%d, c_G[0]=%e, c_G[1]=%e\n", c_G_length_cs, 
                c_G_length_cs > 0 ? c_G_cs[0] : 0.0, c_G_length_cs > 1 ? c_G_cs[1] : 0.0);
         printf("  rhs_term1=%e, rhs_term2=%e\n", rhs_term1, rhs_term2);
+        printf("  phase_amt=%e, system_amt=%e, prefactor=%e\n",
+               phase_amt_sys[compset_original_idx_sys], current_system_amount_sys, prefactor_for_this_component);
         printf("  RHS contribution: %e\n", 
+               -prefactor_for_this_component * (phase_amt_sys[compset_original_idx_sys] / current_system_amount_sys) * (rhs_term1 + rhs_term2));
+        printf("  Formula: -%.3f * (%.3f / %.3f) * (%.3f + %.3f) = %.6f\n",
+               prefactor_for_this_component, phase_amt_sys[compset_original_idx_sys], current_system_amount_sys,
+               rhs_term1, rhs_term2,
                -prefactor_for_this_component * (phase_amt_sys[compset_original_idx_sys] / current_system_amount_sys) * (rhs_term1 + rhs_term2));
     }
 
@@ -2708,13 +2724,9 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
     }
     current_row_offset += num_fixed_stable_cs;
 
-    for (stable_idx = 0; stable_idx < state->num_compsets; stable_idx++) { // Iterate ALL active compsets for these rows
-        bool is_phase_active = false; // Check if this phase (stable_idx) contributes
-        if (state->phase_amt[stable_idx] > MIN_PHASE_FRACTION / 100.0 || state->compsets[stable_idx].fixed) {
-            is_phase_active = true;
-        }
-        if (!is_phase_active) continue;
-
+    // Loop over free stable phases only (matching CPU behavior)
+    for (int free_idx = 0; free_idx < state->num_free_stable_compsets; free_idx++) {
+        stable_idx = state->free_stable_compset_indices[free_idx];
         compset_original_idx = stable_idx; // The index in the main compsets array
         current_compset = &state->compsets[compset_original_idx];
         current_cs_state = &state->cs_states[compset_original_idx];
@@ -2744,22 +2756,72 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
         }
         // System amount row is handled after all phase rows
     }
-
-    // CRITICAL FIX: Initialize mole fraction constraint rows to zero before accumulating
-    for (int mole_frac_cond_row_idx = 0; mole_frac_cond_row_idx < num_fixed_mole_frac_conds; mole_frac_cond_row_idx++) {
-        int row_idx = current_row_offset + mole_frac_cond_row_idx;
-        for (int col = 0; col < equilibrium_matrix_cols; col++) {
-            equilibrium_matrix[row_idx * equilibrium_matrix_cols + col] = 0.0;
+    
+    // DEBUG: Check c_G values before calling write_row_fixed_mole_fraction
+    if (state->iteration < 2) {
+        printf("\n[GPU] Before write_row_fixed_mole_fraction calls:\n");
+        for (int i = 0; i < state->num_compsets && i < 2; ++i) {
+            printf("  Phase %d c_G: [%.6e, %.6e]\n", i,
+                   state->cs_states[i].c_G_length > 0 ? state->cs_states[i].c_G[0] : 0.0,
+                   state->cs_states[i].c_G_length > 1 ? state->cs_states[i].c_G[1] : 0.0);
         }
-        equilibrium_rhs[row_idx] = 0.0;
     }
     
-    // Now accumulate contributions from ALL phases (matching CPU behavior)
+    // Loop over fixed stable phases (matching CPU behavior)
+    for (int fixed_idx = 0; fixed_idx < spec->num_fixed_stable_compsets; fixed_idx++) {
+        stable_idx = spec->fixed_stable_compset_indices[fixed_idx];
+        compset_original_idx = stable_idx;
+        current_compset = &state->compsets[compset_original_idx];
+        current_cs_state = &state->cs_states[compset_original_idx];
+        if (current_compset->phase_record == nullptr) continue;
+
+        for (int mole_frac_cond_row_idx = 0; mole_frac_cond_row_idx < num_fixed_mole_frac_conds; mole_frac_cond_row_idx++) {
+            for (current_component_idx = 0; current_component_idx < spec->num_prescribed_mole_fraction_coefficients_cols; current_component_idx++) {
+                prefactor = spec->prescribed_mole_fraction_coefficients[mole_frac_cond_row_idx][current_component_idx];
+                write_row_fixed_mole_fraction(
+                    &equilibrium_matrix[(current_row_offset + mole_frac_cond_row_idx) * equilibrium_matrix_cols],
+                    &equilibrium_rhs[current_row_offset + mole_frac_cond_row_idx],
+                    current_component_idx,
+                    spec->free_chemical_potential_indices, spec->num_free_chemical_potentials,
+                    state->free_stable_compset_indices, state->num_free_stable_compsets,
+                    spec->free_statevar_indices, spec->num_free_statevars,
+                    spec->fixed_chemical_potential_indices, spec->num_fixed_chemical_potentials,
+                    state->chemical_potentials, state->mole_fractions, state->system_amount,
+                    current_cs_state->mass_jac, current_cs_state->mass_jac_cols,
+                    current_cs_state->c_component, current_cs_state->c_component_cols,
+                    current_cs_state->c_statevars, current_cs_state->c_statevars_cols,
+                    current_cs_state->c_G, current_cs_state->c_G_length, current_cs_state->masses,
+                    current_cs_state->moles_normalization, current_cs_state->moles_normalization_grad,
+                    state->phase_amt, compset_original_idx, prefactor);
+            }
+        }
+    }
+
+    // REMOVED: The zeroing was incorrectly discarding contributions from the first loop
+    // The first loop already handles all active phases, so we don't need a second loop
+    
+    // COMMENTED OUT: This second loop is redundant - the first loop already handles all phases
+    /*
     for (int phase_idx = 0; phase_idx < state->num_compsets; phase_idx++) {
         CompositionSet* phase_compset = &state->compsets[phase_idx];
         CompsetState* phase_cs_state = &state->cs_states[phase_idx];
         
         if (phase_compset->phase_record == nullptr) continue;
+        
+        // DEBUG: Print which phases are contributing
+        if (state->condition_idx == 0 && state->iteration == 0) {
+            printf("[GPU DEBUG] Phase %d contributing to mole frac constraints\n", phase_idx);
+            printf("  Phase amount: %e\n", state->phase_amt[phase_idx]);
+            printf("  Is this phase in free_stable_compset_indices? ");
+            bool is_free = false;
+            for (int i = 0; i < state->num_free_stable_compsets; i++) {
+                if (state->free_stable_compset_indices[i] == phase_idx) {
+                    is_free = true;
+                    break;
+                }
+            }
+            printf("%s\n", is_free ? "YES" : "NO");
+        }
         
         // Contribute this phase to all mole fraction constraint rows
         for (int mole_frac_cond_row_idx = 0; mole_frac_cond_row_idx < num_fixed_mole_frac_conds; mole_frac_cond_row_idx++) {
@@ -2792,6 +2854,15 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
             }
         }
     }
+    */
+    
+    // DEBUG: Print RHS values before residual subtraction
+    if (state->condition_idx == 0 && state->iteration == 0) {
+        printf("[GPU DEBUG] Before residual subtraction:\n");
+        for (int i = 0; i < num_fixed_mole_frac_conds; i++) {
+            printf("  Mole frac constraint %d RHS: %e\n", i, equilibrium_rhs[current_row_offset + i]);
+        }
+    }
     
     // After accumulating all phase contributions, subtract the residual from RHS
     for (int mole_frac_cond_row_idx = 0; mole_frac_cond_row_idx < num_fixed_mole_frac_conds; mole_frac_cond_row_idx++) {
@@ -2812,7 +2883,18 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
                    state->mole_fractions[0], state->mole_fractions[1]);
         }
         
+        // DEBUG: Print RHS before and after residual subtraction
+        if (state->condition_idx == 0 && state->iteration < 3) {
+            printf("[GPU MOLE FRAC] Row %d RHS before residual: %e\n", 
+                   mole_frac_cond_row_idx, equilibrium_rhs[current_row_offset + mole_frac_cond_row_idx]);
+        }
+        
         equilibrium_rhs[current_row_offset + mole_frac_cond_row_idx] -= component_residual;
+        
+        if (state->condition_idx == 0 && state->iteration < 3) {
+            printf("[GPU MOLE FRAC] Row %d RHS after residual: %e (residual was %e)\n", 
+                   mole_frac_cond_row_idx, equilibrium_rhs[current_row_offset + mole_frac_cond_row_idx], component_residual);
+        }
     }
     int system_amount_row_true_idx = current_row_offset + num_fixed_mole_frac_conds;
     

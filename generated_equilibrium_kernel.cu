@@ -3303,6 +3303,24 @@ __device__ bool remove_and_consolidate_phases(SystemSpecification* spec, SystemS
 
         // Remove unstable phases (matching CPU minimizer.pyx line 1328)
         if (state->phase_amt[idx1] < 1e-10) {
+            // CRITICAL FIX: Check if removing this phase would leave us unable to satisfy mass balance
+            // Count how many phases would remain after removal
+            int phases_remaining = 0;
+            for (int j = 0; j < state->num_free_stable_compsets; ++j) {
+                int idx_check = state->free_stable_compset_indices[j];
+                if (idx_check != idx1 && state->phase_amt[idx_check] >= 1e-10) {
+                    phases_remaining++;
+                }
+            }
+            
+            // If this is the last phase that could satisfy constraints, don't remove it
+            if (phases_remaining == 0 && spec->num_prescribed_mole_fraction_conditions > 0) {
+                if (thread_id == 0 && state->iteration < 5) {
+                    printf("  Phase %d NOT removed - last phase needed for mass balance\n", idx1);
+                }
+                continue;
+            }
+            
             if (num_to_remove < MAX_PHASES) compset_indices_to_remove_temp[num_to_remove++] = idx1;
             state->phase_amt[idx1] = 0.0;  // CPU sets to 0 at line 1330
             if (thread_id == 0 && state->iteration < 5) {

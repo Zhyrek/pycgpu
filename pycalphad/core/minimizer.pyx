@@ -1,6 +1,7 @@
 cimport cython
 import numpy as np
 cimport numpy as np
+import sys
 from pycalphad.core.composition_set cimport CompositionSet
 from pycalphad.core.constants import MIN_SITE_FRACTION
 cimport scipy.linalg.cython_lapack as cython_lapack
@@ -156,6 +157,12 @@ cdef void write_row_fixed_mole_fraction(double[:] out_row, double* out_rhs, int 
                                         double[::1] phase_amt, int idx, double prefactor):
     if prefactor == 0.0:
         return
+    
+    # DEBUG: Print when this function is called
+    import sys
+    sys.stderr.write(f"[CPU] write_row_fixed_mole_fraction called: phase_idx={idx}, component_idx={component_idx}, prefactor={prefactor}\n")
+    sys.stderr.write(f"  out_rhs[0] on entry: {out_rhs[0]}\n")
+    sys.stderr.flush()
     cdef int free_variable_column_offset = 0
     cdef int num_statevars = c_statevars.shape[1]
     cdef int chempot_idx, compset_idx, statevar_idx, i, j
@@ -197,12 +204,34 @@ cdef void write_row_fixed_mole_fraction(double[:] out_row, double* out_rhs, int 
             out_row[free_variable_column_offset + i] += prefactor * \
                 (phase_amt[idx]/current_system_amount) * (-system_mole_fractions[component_idx] * moles_normalization_grad[num_statevars+j]) * c_statevars[j, statevar_idx]
     # 3.
+    # DEBUG: Print RHS calculation details
+    if idx < 2 and component_idx == 1 and prefactor != 0.0:
+        print(f"[CPU MOLE FRAC RHS DEBUG] Phase {idx}, Component 1:")
+        print(f"  c_G.shape[0]={c_G.shape[0]}")
+        if c_G.shape[0] > 0:
+            print(f"  c_G values: {np.asarray(c_G)}")
+        print(f"  mass_jac[1,:]: {np.asarray(mass_jac[1,:])}")
+        print(f"  moles_normalization_grad: {np.asarray(moles_normalization_grad)}")
+        
+    cdef double rhs_term1 = 0.0
+    cdef double rhs_term2 = 0.0
+    
     for j in range(c_G.shape[0]):
+        if idx < 2 and component_idx == 1 and prefactor != 0.0:
+            print(f"    j={j}: mass_jac[1,{num_statevars+j}]={mass_jac[component_idx, num_statevars+j]:.6e}, c_G[{j}]={c_G[j]:.6e}")
+        rhs_term1 += mass_jac[component_idx, num_statevars+j] * c_G[j]
         out_rhs[0] += -prefactor * (phase_amt[idx]/current_system_amount) * \
             mass_jac[component_idx, num_statevars+j] * c_G[j]
     for j in range(c_G.shape[0]):
+        rhs_term2 += (-system_mole_fractions[component_idx] * moles_normalization_grad[num_statevars+j]) * c_G[j]
         out_rhs[0] += -prefactor * (phase_amt[idx]/current_system_amount) * \
             (-system_mole_fractions[component_idx] * moles_normalization_grad[num_statevars+j]) * c_G[j]
+            
+    if idx < 2 and component_idx == 1 and prefactor != 0.0:
+        print(f"  [CPU] Phase {idx} rhs_term1={rhs_term1}, rhs_term2={rhs_term2}")
+        print(f"  phase_amt={phase_amt[idx]}, system_amt={current_system_amount}, prefactor={prefactor}")
+        print(f"  RHS contribution: {-prefactor * (phase_amt[idx]/current_system_amount) * (rhs_term1 + rhs_term2)}")
+        print(f"  out_rhs[0] after this phase: {out_rhs[0]}")
     # 4. Subtract fixed chemical potentials from phase RHS
     for i in range(fixed_chemical_potential_indices.shape[0]):
         chempot_idx = fixed_chemical_potential_indices[i]
@@ -213,6 +242,7 @@ cdef void write_row_fixed_mole_fraction(double[:] out_row, double* out_rhs, int 
         for j in range(c_component.shape[1]):
             out_rhs[0] -= prefactor * (phase_amt[idx]/current_system_amount) * chemical_potentials[
                 chempot_idx] * (-system_mole_fractions[component_idx] * moles_normalization_grad[num_statevars+j]) * c_component[chempot_idx, j]
+    
 
 cdef void write_row_fixed_mole_amount(double[:] out_row, double* out_rhs, int component_idx,
                                       int[::1] free_chemical_potential_indices, int[::1] free_stable_compset_indices,
@@ -308,6 +338,12 @@ cdef void fill_equilibrium_system(double[::1,:] equilibrium_matrix, double[::1] 
     debug_log(29, f"Fill equilibrium system - constraint rows (iteration {state.iteration})")
     debug_log(f"  num_fixed_mole_fraction_conditions: {num_fixed_mole_fraction_conditions}", debug_enabled)
     
+    # DEBUG: Always print to check if mole fraction constraints are being filled
+    import sys
+    sys.stderr.write(f"[CPU DEBUG] Iteration {state.iteration}: num_fixed_mole_fraction_conditions = {num_fixed_mole_fraction_conditions}\n")
+    sys.stderr.write(f"[CPU DEBUG] num_stable_phases = {state.free_stable_compset_indices.shape[0]}\n")
+    sys.stderr.flush()
+    
     for stable_idx in range(state.free_stable_compset_indices.shape[0]):
         idx = state.free_stable_compset_indices[stable_idx]
         compset = state.compsets[idx]
@@ -384,6 +420,11 @@ cdef void fill_equilibrium_system(double[::1,:] equilibrium_matrix, double[::1] 
         component_residual = np.dot(spec.prescribed_mole_fraction_coefficients[fixed_molefrac_cond_idx, :], state.mole_fractions) - spec.prescribed_mole_fraction_rhs[fixed_molefrac_cond_idx]
         equilibrium_rhs[component_row_offset + fixed_molefrac_cond_idx] -= component_residual
         debug_log(f"  constraint_{fixed_molefrac_cond_idx}_residual: {component_residual:.15e}", debug_enabled)
+        # DEBUG: Print mole fraction constraint RHS
+        if state.iteration < 3:
+            print(f"[CPU] Mole fraction constraint {fixed_molefrac_cond_idx} RHS before residual: {equilibrium_rhs[component_row_offset + fixed_molefrac_cond_idx] + component_residual:.6f}")
+            print(f"[CPU] Mole fraction constraint {fixed_molefrac_cond_idx} residual: {component_residual:.6f}")
+            print(f"[CPU] Mole fraction constraint {fixed_molefrac_cond_idx} RHS after residual: {equilibrium_rhs[component_row_offset + fixed_molefrac_cond_idx]:.6f}")
     
     system_residual = state.system_amount - spec.prescribed_system_amount
     equilibrium_rhs[system_amount_index] -= system_residual

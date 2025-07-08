@@ -1054,17 +1054,15 @@ def notebook_get_all_sym_names_for_model(model_obj: Model, wks_obj: Workspace) -
     site_variables = []
     for sf in site_fracs:
         site_variables.append(sf.phase_name+str(sf.sublattice_index)+sf.species.name)
-    
     # CRITICAL FIX: Use phase_record_factory's state variables to match CPU behavior
-    # The CPU builds functions with all state variables, not just the ones the model uses
     if hasattr(wks_obj, 'phase_record_factory') and wks_obj.phase_record_factory is not None:
         state_variables = [str(var) for var in wks_obj.phase_record_factory.state_variables]
     else:
         # Fallback to model's state variables if phase_record_factory not available
         state_variables = [str(var) for var in model_obj.state_variables]
     
-    # This gives CPU DOF ordering:
-    # For BCC_A2: ['N', 'P', 'T'] + ['BCC_A20NB', 'BCC_A20TI'] = indices 0, 1, 2, 3, 4
+    # This should match exactly what the CPU expects:
+    # For BCC_A2: ['N', 'P', 'T'] + ['BCC_A20NB', 'BCC_A20TI']
     
     return state_variables + site_variables
 
@@ -1699,11 +1697,9 @@ def _generate_c_code_for_phase_models(wks_obj: Workspace, include_hess: bool = F
         # Get model metadata
         # CRITICAL FIX: Use phase_record_factory's state variables for consistency with CPU
         # The phase record needs to know about ALL state variables, not just ones the model uses
-        # The generated functions expect workspace DOF format with ALL state variables
         if hasattr(wks_obj, 'phase_record_factory') and wks_obj.phase_record_factory is not None:
             num_statevars = len(wks_obj.phase_record_factory.state_variables)
         else:
-            # Fallback to model's state variables if phase_record_factory not available
             num_statevars = len(model_obj.state_variables)
         phase_dof = len(model_obj.site_fractions)
         num_elements = len(wks_obj.components)
@@ -1886,8 +1882,8 @@ __global__ void init_all_gpu_phase_records() {{
         printf("GPU DEBUG: init_all_gpu_phase_records kernel completed\\n");
         // Debug: Print what was initialized
         for (int i = 0; i < {num_unique_models if num_unique_models > 0 else 1}; ++i) {{
-            // printf("GPU DEBUG: g_phase_records_array[%d].obj = %p\\n", i, (void*)g_phase_records_array[i].obj);
-            // printf("GPU DEBUG: g_phase_records_array[%d].formulamole_obj = %p\\n", i, (void*)g_phase_records_array[i].formulamole_obj);
+            printf("GPU DEBUG: g_phase_records_array[%d].obj = %p\\n", i, g_phase_records_array[i].obj);
+            printf("GPU DEBUG: g_phase_records_array[%d].formulamole_obj = %p\\n", i, g_phase_records_array[i].formulamole_obj);
         }}
     }}
 }}
@@ -2301,19 +2297,6 @@ __device__ void solve_state_global_mem(
     
     // CRITICAL: Call recompute at the beginning of solve_state, just like CPU does
     // This ensures all CompsetState arrays (masses, jacobians, energies) are up-to-date
-    
-    // DEBUG: Verify spec pointer before calling recompute
-    if (thread_id == 0) {{
-        printf("GPU DEBUG: solve_state_global_mem - spec=%p, spec->num_statevars=%d\\n", 
-               spec, spec->num_statevars);
-        if (spec->num_statevars < 0 || spec->num_statevars > 10) {{
-            printf("GPU ERROR: spec appears corrupted in solve_state_global_mem!\\n");
-            printf("  spec->num_statevars=%d (0x%X)\\n", spec->num_statevars, spec->num_statevars);
-            printf("  spec->num_components=%d\\n", spec->num_components);
-            // Try to continue anyway
-        }}
-    }}
-    
     state->recompute(spec);
     
     // The old manual update loop is not needed since recompute handles everything
@@ -2451,41 +2434,17 @@ __device__ void solve_equilibrium_at_condition_global_mem(
     // Step 1: Validate inputs and global memory arrays
     if (!A_lstsq_copy || !result || !global_spec_base || !initial_data) {{
         if (result) result->converged = false;
-        return; // Cannot proceed without required arrays - memory not allocated yet
+        return; // Cannot proceed without required arrays
     }}
     
     // Step 2: Initialize local spec copy from the global spec passed from Python
     // CRITICAL FIX: Use simple assignment copy instead of manual byte copy
     // The manual byte copy was causing struct field corruption
-    // CRITICAL FIX: Safely read SystemSpecification from GPU memory
-    // Cannot dereference struct pointer directly due to alignment/memory access issues
-    // WORKAROUND: Use global memory to store SystemSpecification to avoid stack pointer issues
-    // Use the beginning of the work_inv array which is large enough
-    SystemSpecification* current_spec_ptr = (SystemSpecification*)work_inv;
-    SystemSpecification& current_spec = *current_spec_ptr;
-    
-    // Copy the entire struct byte-by-byte from GPU memory
-    // This preserves the exact layout from Python
-    const char* spec_bytes = (const char*)global_spec_base;
-    memcpy(current_spec_ptr, spec_bytes, sizeof(SystemSpecification));
-    
-    // DEBUG: Verify the copy worked
-    if (thread_id == 0) {{
-        printf("GPU DEBUG: Copied SystemSpecification to global memory at %p\\n", current_spec_ptr);
-        printf("  num_statevars=%d, num_components=%d\\n", 
-               current_spec.num_statevars, current_spec.num_components);
-    }}
-    
-    // The struct is now fully copied with correct layout from Python
-    // No need for manual field-by-field reading
-    
-    // Note: We'll need to free current_spec_ptr before any return
+    SystemSpecification current_spec = *global_spec_base;
     
     // Debug: print what we received from Python
     if (thread_id < 3) {{
         printf("GPU DEBUG: Thread %d SystemSpecification from Python:\\n", thread_id);
-        printf("  Thread %d: num_statevars = %d\\n", thread_id, current_spec.num_statevars);
-        printf("  Thread %d: num_components = %d\\n", thread_id, current_spec.num_components);
         printf("  Thread %d: num_free_chemical_potentials = %d\\n", thread_id, current_spec.num_free_chemical_potentials);
         printf("  Thread %d: num_prescribed_mole_fraction_conditions = %d\\n", thread_id, current_spec.num_prescribed_mole_fraction_conditions);
         
@@ -2679,21 +2638,6 @@ __device__ void solve_equilibrium_at_condition_global_mem(
             continue;
         }}
         
-        // Bounds check to prevent overflow
-        if (current_sys_state.num_compsets >= MAX_PHASES) {{
-            printf("GPU ERROR: Too many phases! num_compsets=%d >= MAX_PHASES=%d\\n", 
-                   current_sys_state.num_compsets, MAX_PHASES);
-            break;
-        }}
-        
-        // DEBUG: Check memory before accessing arrays
-        if (thread_id == 0) {{
-            printf("GPU DEBUG: About to access compsets[%d] and cs_states[%d], MAX_PHASES=%d\\n", 
-                   current_sys_state.num_compsets, current_sys_state.num_compsets, MAX_PHASES);
-            printf("GPU DEBUG: current_spec at %p still valid? num_statevars=%d\\n", 
-                   &current_spec, current_spec.num_statevars);
-        }}
-        
         // Set up CompositionSet directly in SystemState (avoiding stack arrays)
         CompositionSet* cs = &current_sys_state.compsets[current_sys_state.num_compsets];
         CompsetState* css = &current_sys_state.cs_states[current_sys_state.num_compsets];
@@ -2702,7 +2646,6 @@ __device__ void solve_equilibrium_at_condition_global_mem(
         if (thread_id == 0) {{
             printf("GPU DEBUG: Setting phase_record for phase %d, phase_data=%p, pr_idx=%d\\n", 
                    current_sys_state.num_compsets, phase_data, pr_idx);
-            printf("GPU DEBUG: Before init - current_spec.num_statevars = %d\\n", current_spec.num_statevars);
         }}
         if (phase_data == nullptr || phase_data->phase_records_array == nullptr) {{
             printf("GPU ERROR: phase_data or phase_records_array is null!\\n");
@@ -2837,29 +2780,15 @@ __device__ void solve_equilibrium_at_condition_global_mem(
         // Initialize CompositionSet first
         cs->init(cs->phase_record);
         
-        if (thread_id == 0) {{
-            printf("GPU DEBUG: After cs->init - current_spec.num_statevars = %d\\n", current_spec.num_statevars);
-        }}
-        
         // CRITICAL: Initialize CompsetState with proper arrays
         // This is where masses, jacobians, etc. get set up
         css->init(&current_spec, cs);
-        
-        if (thread_id == 0) {{
-            printf("GPU DEBUG: After css->init - current_spec.num_statevars = %d\\n", current_spec.num_statevars);
-        }}
         
         // STACK OVERFLOW FIX: CompsetState arrays are fixed arrays, not pointers
         // We need a different approach - we'll copy data between CompsetState and global memory
         // Initialize CompsetState arrays with reasonable starting values
         
         if (current_sys_state.num_compsets < MAX_PHASES) {{
-            // DEBUG: Check before masses init
-            if (thread_id == 0) {{
-                printf("GPU DEBUG: Before masses init - current_spec.num_statevars = %d, num_components = %d\\n", 
-                       current_spec.num_statevars, current_spec.num_components);
-            }}
-            
             // Initialize masses from composition data directly into CompsetState
             for (int comp_idx = 0; comp_idx < MAX_COMPONENTS; ++comp_idx) {{
                 if (comp_idx < current_spec.num_components) {{
@@ -2869,35 +2798,14 @@ __device__ void solve_equilibrium_at_condition_global_mem(
                 }}
             }}
             
-            // DEBUG: Check after masses init
-            if (thread_id == 0) {{
-                printf("GPU DEBUG: After masses init - current_spec.num_statevars = %d\\n", current_spec.num_statevars);
-            }}
-            
             // Initialize mass jacobian rows/cols
             css->mass_jac_rows = current_spec.num_components;
             css->mass_jac_cols = current_spec.num_statevars + cs->phase_record->phase_dof;
             
-            // DEBUG: Check sizes before initializing
-            if (thread_id == 0) {{
-                printf("GPU DEBUG: mass_jac dimensions: rows=%d, cols=%d, phase_dof=%d\\n",
-                       css->mass_jac_rows, css->mass_jac_cols, cs->phase_record->phase_dof);
-            }}
-            
             // Initialize mass jacobian to reasonable values
             int jac_size = css->mass_jac_rows * css->mass_jac_cols;
-            int max_jac_size = MAX_COMPONENTS * (MAX_STATEVARS + MAX_DOF_PER_PHASE);
-            if (jac_size > max_jac_size) {{
-                printf("GPU ERROR: mass_jac size %d exceeds max %d!\\n", jac_size, max_jac_size);
-                jac_size = max_jac_size;
-            }}
-            for (int j = 0; j < jac_size; ++j) {{
+            for (int j = 0; j < jac_size && j < (MAX_COMPONENTS * (MAX_STATEVARS + MAX_DOF_PER_PHASE)); ++j) {{
                 css->mass_jac[j] = 0.0;
-            }}
-            
-            // DEBUG: Check if current_spec is still valid after mass_jac init
-            if (thread_id == 0) {{
-                printf("GPU DEBUG: After mass_jac init - current_spec.num_statevars = %d\\n", current_spec.num_statevars);
             }}
         }}
         
@@ -2925,32 +2833,31 @@ __device__ void solve_equilibrium_at_condition_global_mem(
         
         // Call formulamole_obj once to fill all components
         if (cs->phase_record && cs->phase_record->formulamole_obj) {{
-            // CRITICAL FIX: Pass workspace DOF directly to functions
-            // The generated functions now expect workspace DOF format [N, P, T, Y1, Y2...]
+            // CRITICAL FIX: Create Model DOF array from Workspace DOF
+            // Model expects [T, Y1, Y2...] but we have [N, P, T, Y1, Y2...]
+            double model_dof[MAX_STATEVARS + MAX_DOF_PER_PHASE];
             
-            // DEBUG: Check before formulamole_obj call
-            if (thread_id == 0) {{
-                printf("GPU DEBUG: Before formulamole_obj - current_spec.num_statevars = %d\\n", current_spec.num_statevars);
-                printf("GPU DEBUG: Workspace DOF for formulamole_obj: [");
-                for (int i = 0; i < current_spec.num_statevars + cs->phase_record->phase_dof; i++) {{
-                    printf("%.6f", cs->dof[i]);
-                    if (i < current_spec.num_statevars + cs->phase_record->phase_dof - 1) printf(", ");
+            // Extract temperature from workspace state variables
+            if (cs->phase_record->num_statevars == 1) {{
+                // Model expects just T
+                if (current_spec.num_statevars == 2) {{
+                    // Workspace has [N, T], so T is at index 1
+                    model_dof[0] = cs->dof[1];
+                }} else if (current_spec.num_statevars >= 3) {{
+                    // Workspace has [N, P, T], so T is at index 2
+                    model_dof[0] = cs->dof[2];
+                }} else {{
+                    // Fallback
+                    model_dof[0] = 298.15;
                 }}
-                printf("]\\n");
             }}
             
-            cs->phase_record->formulamole_obj(masses_tmp, cs->dof);
-            
-            // DEBUG: Check after formulamole_obj call
-            if (thread_id == 0) {{
-                printf("GPU DEBUG: After formulamole_obj - current_spec.num_statevars = %d\\n", current_spec.num_statevars);
-                printf("GPU DEBUG: formulamole_obj returned masses: [");
-                for (int i = 0; i < current_spec.num_components; i++) {{
-                    printf("%.6f", masses_tmp[i]);
-                    if (i < current_spec.num_components - 1) printf(", ");
-                }}
-                printf("]\\n");
+            // Copy site fractions
+            for (int sf_idx = 0; sf_idx < cs->phase_record->phase_dof; ++sf_idx) {{
+                model_dof[cs->phase_record->num_statevars + sf_idx] = cs->dof[current_spec.num_statevars + sf_idx];
             }}
+            
+            cs->phase_record->formulamole_obj(masses_tmp, model_dof);
             
             // Sum up the masses for all active components
             for (int comp_idx = 0; comp_idx < current_spec.num_components; ++comp_idx) {{
@@ -2981,33 +2888,7 @@ __device__ void solve_equilibrium_at_condition_global_mem(
         // Without this, energy=0 and the solver behaves differently than CPU
         // cs->update expects: (site_fractions, phase_amount, state_variables, workspace_num_statevars)
         // In workspace DOF format: site fractions start at current_spec.num_statevars
-        
-        // DEBUG: Check before cs->update call
-        if (thread_id == 0) {{
-            printf("GPU DEBUG: Before cs->update - current_spec.num_statevars = %d\\n", current_spec.num_statevars);
-        }}
-        
-        // WORKAROUND: Save critical values before cs->update in case of corruption
-        int saved_num_statevars = current_spec.num_statevars;
-        int saved_num_components = current_spec.num_components;
-        
         cs->update(&cs->dof[current_spec.num_statevars], cs->NP, cs->dof, current_spec.num_statevars);
-        
-        // WORKAROUND: Restore values if corrupted
-        if (current_spec.num_statevars < 0 || current_spec.num_statevars > 10) {{
-            if (thread_id == 0) {{
-                printf("GPU WARNING: Detected corruption after cs->update, restoring values\\n");
-                printf("  Corrupted: num_statevars=%d, num_components=%d\\n", 
-                       current_spec.num_statevars, current_spec.num_components);
-            }}
-            current_spec.num_statevars = saved_num_statevars;
-            current_spec.num_components = saved_num_components;
-        }}
-        
-        // DEBUG: Check after cs->update call
-        if (thread_id == 0) {{
-            printf("GPU DEBUG: After cs->update - current_spec.num_statevars = %d\\n", current_spec.num_statevars);
-        }}
         
         // DEBUG: Check DOF array after update call
         if (thread_id == 0 && current_sys_state.num_compsets < 2) {{
@@ -3018,12 +2899,6 @@ __device__ void solve_equilibrium_at_condition_global_mem(
                 if (k < num_dof_elements - 1) printf(", ");
             }}
             printf("]\\n");
-        }}
-        
-        // DEBUG: Check if current_spec is still valid after processing this phase
-        if (thread_id == 0) {{
-            printf("GPU DEBUG: After phase %d - current_spec.num_statevars = %d, num_components = %d\\n", 
-                   current_sys_state.num_compsets, current_spec.num_statevars, current_spec.num_components);
         }}
         
         current_sys_state.num_compsets++;
@@ -3088,8 +2963,20 @@ __device__ void solve_equilibrium_at_condition_global_mem(
             formulamoles[i] = 0.0;
         }}
         
-        // CRITICAL FIX: Pass workspace DOF directly to formulamole_obj
-        // The generated functions now expect workspace DOF format [N, P, T, Y1, Y2...]
+        // CRITICAL FIX: Create Model DOF from Workspace DOF before calling formulamole_obj
+        double model_dof_temp[MAX_STATEVARS + MAX_DOF_PER_PHASE];
+        if (cs->phase_record->num_statevars == 1) {{
+            // Extract temperature from workspace state variables
+            if (current_spec.num_statevars == 2) {{
+                model_dof_temp[0] = cs->dof[1];  // [N, T]
+            }} else if (current_spec.num_statevars >= 3) {{
+                model_dof_temp[0] = cs->dof[2];  // [N, P, T]
+            }}
+        }}
+        // Copy site fractions
+        for (int sf_idx = 0; sf_idx < cs->phase_record->phase_dof; ++sf_idx) {{
+            model_dof_temp[cs->phase_record->num_statevars + sf_idx] = cs->dof[current_spec.num_statevars + sf_idx];
+        }}
         
         if (thread_id == 0) {{
             printf("GPU DEBUG: Calling formulamole_obj for phase %d\\n", idx);
@@ -3104,7 +2991,7 @@ __device__ void solve_equilibrium_at_condition_global_mem(
             if (thread_id == 0) {{
                 printf("GPU DEBUG: Calling formulamole_obj with valid function pointer\\n");
             }}
-            cs->phase_record->formulamole_obj(formulamoles, cs->dof);
+            cs->phase_record->formulamole_obj(formulamoles, model_dof_temp);
         }} else {{
             if (thread_id == 0) {{
                 printf("GPU DEBUG: formulamole_obj is null, using fallback\\n");
@@ -3361,7 +3248,10 @@ __device__ void solve_equilibrium_at_condition_global_mem(
         CompsetState* css = &current_sys_state.cs_states[i];
         if (cs->phase_record == nullptr) continue;
         
-        // Simple energy calculation using workspace DOF directly
+        // Simple energy calculation without complex formula unit conversion
+        double current_dof_for_phase[MAX_STATEVARS + MAX_DOF_PER_PHASE];
+        // Initialize entire array to zero to avoid garbage values
+        for(int k=0; k < MAX_STATEVARS + MAX_DOF_PER_PHASE; ++k) current_dof_for_phase[k] = 0.0;
         // DEBUG: Check cs->dof array right before energy calculation
         if (thread_id == 0) {{
             printf("GPU DEBUG: Phase %d - cs->dof before energy calc: [", i);
@@ -3374,38 +3264,57 @@ __device__ void solve_equilibrium_at_condition_global_mem(
             printf("]\\n");
         }}
         
-        // CRITICAL FIX: Pass workspace DOF directly to energy functions
-        // The generated functions now expect workspace DOF format [N, P, T, Y1, Y2...]
+        // CRITICAL FIX: Create Model DOF from Workspace DOF
+        // The Model functions expect [T, Y_NB, Y_TI] format, not workspace [N, P, T, Y1, Y2] format
+        // Extract temperature from workspace state variables
+        if (cs->phase_record->num_statevars == 1) {{
+            // Model expects just T
+            if (current_spec.num_statevars == 2) {{
+                // Workspace has [N, T], so T is at index 1
+                current_dof_for_phase[0] = cs->dof[1];
+            }} else if (current_spec.num_statevars >= 3) {{
+                // Workspace has [N, P, T], so T is at index 2
+                current_dof_for_phase[0] = cs->dof[2];
+            }} else {{
+                // Fallback
+                current_dof_for_phase[0] = 298.15;
+            }}
+        }}
+        
+        // Copy site fractions from workspace DOF
+        for (int sf_idx = 0; sf_idx < cs->phase_record->phase_dof; ++sf_idx) {{
+            current_dof_for_phase[cs->phase_record->num_statevars + sf_idx] = cs->dof[current_spec.num_statevars + sf_idx];
+        }}
         
         // DEBUG: Check DOF values before energy calculation
         if (thread_id == 0) {{
-            printf("GPU DEBUG: Phase %d - DOF for energy calc (Workspace format): [", i);
-            int num_workspace_vars = current_spec.num_statevars + cs->phase_record->phase_dof;
-            for(int k=0; k < num_workspace_vars; ++k) {{
-                printf("%.15f", cs->dof[k]);
-                if (k < num_workspace_vars - 1) printf(", ");
+            printf("GPU DEBUG: Phase %d - DOF for energy calc (Model format): [", i);
+            int num_model_vars = cs->phase_record->num_statevars + cs->phase_record->phase_dof;
+            for(int k=0; k < num_model_vars; ++k) {{
+                printf("%.15f", current_dof_for_phase[k]);
+                if (k < num_model_vars - 1) printf(", ");
             }}
-            printf("] (N, P, T, Y(NB), Y(TI)...)\\n");
-            printf("GPU DEBUG: Phase %d - Expected: %d workspace_statevars + %d phase_dof = %d total\\n", 
-                   i, current_spec.num_statevars, cs->phase_record->phase_dof, num_workspace_vars);
+            printf("] (T, Y(NB), Y(TI)...)\\n");
+            printf("GPU DEBUG: Phase %d - Expected: %d model_statevars + %d phase_dof = %d total\\n", 
+                   i, cs->phase_record->num_statevars, cs->phase_record->phase_dof, num_model_vars);
         }}
         
         // Calculate energy using the same function as the first calculation (obj, not formulaobj)
-        css->energy = cs->phase_record->obj(cs->dof);
+        css->energy = cs->phase_record->obj(current_dof_for_phase);
         
         // DEBUG: Check energy result - energies should be negative for this system!
         if (thread_id == 0) {{
-            int num_workspace_vars = current_spec.num_statevars + cs->phase_record->phase_dof;
+            int num_model_vars = cs->phase_record->num_statevars + cs->phase_record->phase_dof;
             printf("[GPU DEBUG] Phase %d energy result = %.6f J/mol\\n", i, css->energy);
-            printf("[GPU DEBUG] Phase %d DOF values (Workspace format): ", i);
-            for (int k = 0; k < num_workspace_vars; ++k) {{
-                printf("%.15f ", cs->dof[k]);
+            printf("[GPU DEBUG] Phase %d DOF values (Model format): ", i);
+            for (int k = 0; k < num_model_vars; ++k) {{
+                printf("%.15f ", current_dof_for_phase[k]);
             }}
             printf("\\n");
-            printf("[GPU DEBUG] Phase %d: N=%.3f, P=%.3f, T=%.3f, Y(NB)=%.15f, Y(TI)=%.15f, energy=%.6f\\n", 
-                   i, cs->dof[0], cs->dof[1], cs->dof[2],
-                   (num_workspace_vars > 3 ? cs->dof[3] : 0.0), 
-                   (num_workspace_vars > 4 ? cs->dof[4] : 0.0), 
+            printf("[GPU DEBUG] Phase %d: T=%.3f, Y(NB)=%.15f, Y(TI)=%.15f, energy=%.6f\\n", 
+                   i, current_dof_for_phase[0], 
+                   (num_model_vars > 1 ? current_dof_for_phase[1] : 0.0), 
+                   (num_model_vars > 2 ? current_dof_for_phase[2] : 0.0), 
                    css->energy);
             
         }}
@@ -3643,8 +3552,6 @@ __device__ void solve_equilibrium_at_condition_global_mem(
                final_gm_calc, stable_phase_count, converged);
         printf("GPU DEBUG: Using CPU-matched result: final_system_gm=%f\\n", result->final_system_gm);
     }}
-    
-    // No cleanup needed - spec_buffer is on stack
 }}
 
 // --- Back to Basics: Simple GPU kernel that mirrors successful CPU logic ---
@@ -3793,10 +3700,8 @@ __global__ void top_level_equilibrium_kernel(
         // - If num_statevars = 2: [N, T] (no pressure)
         // - If num_statevars = 3: [N, P, T] or [N, T, P] depending on order
         
-        // CRITICAL FIX: Safely read num_statevars from spec data
-        // Cast to SystemSpecification struct to read the field correctly
-        const SystemSpecification* global_spec = (const SystemSpecification*)global_spec_ptr_raw;
-        int num_statevars = global_spec->num_statevars;  // First field in SystemSpecification
+        const SystemSpecification* sys_spec = (const SystemSpecification*)global_spec_ptr_raw;
+        int num_statevars = sys_spec->num_statevars;
         
         if (num_statevars == 2) {{
             // Most common case: [N, T] with no pressure variable
@@ -3818,7 +3723,7 @@ __global__ void top_level_equilibrium_kernel(
         // CRITICAL: Extract composition values for this specific thread
         double thread_mole_fractions[MAX_COMPONENTS];
         for (int i = 0; i < MAX_COMPONENTS; ++i) {{
-            if (i < global_spec->num_components) {{
+            if (i < sys_spec->num_components) {{
                 // Compositions are stored after MAX_STATEVARS positions in condition_data_array
                 // Python packs as: [state_vars (padded to MAX_STATEVARS), compositions (MAX_COMPONENTS)]
                 // So compositions start at condition_offset + MAX_STATEVARS
@@ -4204,25 +4109,7 @@ __global__ void top_level_equilibrium_kernel(
             if (tid == 0) {{
                 printf("GPU DEBUG: About to prepare solver data structures\\n");
             }}
-            
-            // CRITICAL: Create thread-local copy of SystemSpecification with correct composition
-            // CRITICAL: Create thread-local SystemSpecification from global_spec_ptr_raw
-            char thread_spec_bytes[sizeof(SystemSpecification)];
-            memset(thread_spec_bytes, 0, sizeof(SystemSpecification));
-            SystemSpecification* thread_spec_ptr = (SystemSpecification*)thread_spec_bytes;
-            SystemSpecification& thread_spec = *thread_spec_ptr;
-            
-            // Copy the entire struct byte-by-byte from GPU memory
-            // This preserves the exact layout from Python
-            const char* spec_bytes = (const char*)global_spec_ptr_raw;
-            memcpy(thread_spec_bytes, spec_bytes, sizeof(SystemSpecification));
-            
-            // The struct is now fully copied with correct layout from Python
-            // No need for manual field-by-field reading
-            
-            // CRITICAL FIX: Safely read SystemSpecification fields
-            // sys_spec_data no longer needed - we copy the struct directly
-            // Read fields by offset: num_statevars=0, num_components=1, prescribed_system_amount=2
+            const SystemSpecification* sys_spec = (const SystemSpecification*)global_spec_ptr_raw;
             ConditionArgsSingle condition_args_single;
             EquilibriumResultSingle equilibrium_result;
             DevicePhaseData device_phase_data;
@@ -4235,7 +4122,7 @@ __global__ void top_level_equilibrium_kernel(
             // - If state_vars = [N, T]: copy N at 0, T at 1  
             // - If state_vars = [N, P, T]: copy N at 0, P at 1, T at 2
             // For now, assume [N, T] order which is most common
-            int actual_num_statevars = thread_spec.num_statevars;
+            int actual_num_statevars = sys_spec->num_statevars;
             
             // Copy the actual state variables that were sent from Python
             for (int i = 0; i < MAX_STATEVARS; ++i) {{
@@ -4265,7 +4152,8 @@ __global__ void top_level_equilibrium_kernel(
                 initial_phase_data_single.chemical_potentials[i] = chemical_potentials[i];
             }}
             
-            // thread_spec already created above - no need to recreate
+            // CRITICAL: Create thread-local copy of SystemSpecification with correct composition
+            SystemSpecification thread_spec = *sys_spec;  // Copy global spec
             
             // DO NOT update the prescribed mole fraction RHS - it should remain constant!
             // The RHS values are the target mole fractions we're trying to achieve.
@@ -4323,7 +4211,7 @@ __global__ void top_level_equilibrium_kernel(
             // This is the full equilibrium solver using global memory to avoid stack overflow
             if (condition_idx == 0) {{
                 printf("GPU DEBUG: CALLING solve_equilibrium_at_condition_global_mem for condition %d\\n", condition_idx);
-                printf("GPU DEBUG: global_spec_ptr_raw=%p, thread arrays ready\\n", global_spec_ptr_raw);
+                printf("GPU DEBUG: sys_spec=%p, thread arrays ready\\n", sys_spec);
             }}
             solve_equilibrium_at_condition_global_mem(
                 condition_idx,           // thread_id

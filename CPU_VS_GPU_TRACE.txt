@@ -1,0 +1,220 @@
+=== INTERLEAVED CPU-GPU EQUILIBRIUM DEBUG TRACE ===
+Started: 2025-07-07T15:41:05.364019
+
+
+================================================================================
+SEGMENT 01 COMPARISON
+================================================================================
+
+--- CPU ---
+(No CPU data for this segment)
+
+--- GPU ---
+
+[SEGMENT 01] [GPU] Entry point and parameter validation
+  gpu_mode: True
+  components: ['NB', 'TI', 'VA']
+  phases: ['LIQUID', 'BCC_A2']
+  conditions: {T: 1300.0, P: 101325, X_TI: 0.5}
+  output_requested: ['GM']
+  verbose: True
+  force_cpu: False
+
+================================================================================
+SEGMENT 02 COMPARISON
+================================================================================
+
+--- CPU ---
+(No CPU data for this segment)
+
+--- GPU ---
+
+[SEGMENT 02] [GPU] Workspace initialization
+  database: Elements: ['NB', 'TI', 'VA']
+Species: [Species('NB', 'NB1'), Species('TI', 'TI1'), Species('VA', 'VA1')]
+Phase({'name': 'BCC_A2', 'constituents': (frozenset({Species('NB', 'NB1'), Species('TI', 'TI1')}),), 'sublattices': (1.0,), 'model_hints': {}})
+Phase({'name': 'LIQUID', 'constituents': (frozenset({Species('NB', 'NB1'), Species('TI', 'TI1')}),), 'sublattices': (1.0,), 'model_hints': {'liquid': True}})
+21 symbols in database
+6 parameters in database
+
+  models: None
+  parameters: None
+  calc_opts: {'N': 1}
+  solver: None
+  phase_records: None
+
+================================================================================
+SEGMENT 03 COMPARISON
+================================================================================
+
+--- CPU ---
+(No CPU data for this segment)
+
+--- GPU ---
+
+[SEGMENT 03] Workspace constructor start
+  args: ()
+  kwargs: ['database', 'components', 'phases', 'conditions', 'models', 'parameters', 'verbose', 'calc_opts', 'solver', 'phase_record_factory']
+
+[SEGMENT 03] Workspace constructor complete
+  components: [Component('NB', 'NB1'), Component('TI', 'TI1'), Component('VA', 'VA1')]
+  phases: ['BCC_A2', 'LIQUID']
+  conditions: {N: array([1.]), P: array([101325.]), T: array([1300.]), X_TI: array([0.5])}
+
+================================================================================
+SEGMENT 05 COMPARISON
+================================================================================
+
+--- CPU ---
+(No CPU data for this segment)
+
+--- GPU ---
+
+[SEGMENT 05] Phase record factory creation
+  components: [Component('NB', 'NB1'), Component('TI', 'TI1'), Component('VA', 'VA1')]
+  conditions: [N, P, T, X_TI]
+  models: ['BCC_A2', 'LIQUID']
+  parameters: OrderedDict()
+
+[SEGMENT 05] Phase record factory created
+  phases: ['BCC_A2', 'LIQUID']
+
+================================================================================
+SEGMENT 08 COMPARISON
+================================================================================
+
+--- CPU ---
+(No CPU data for this segment)
+
+--- GPU ---
+
+[SEGMENT 08] Starting point calculation
+  conditions: OrderedDict({N: array([1.]), P: array([101325.]), T: array([1300.]), X_TI: array([0.5])})
+  state_variables: [N, P, T]
+  phase_records: ['BCC_A2', 'LIQUID']
+  grid_shape: (1, 1, 1, 246)
+
+[SEGMENT 08] Global min check
+  global_min_enabled: True
+
+================================================================================
+SEGMENT 09 COMPARISON
+================================================================================
+
+--- CPU ---
+(No CPU data for this segment)
+
+--- GPU ---
+
+[SEGMENT 09] Lower convex hull setup
+  state_variables: [N, P, T]
+  conds_keys: [N, P, T, X_TI]
+  global_grid_shape: (1, 1, 1, 246)
+  result_array_shape: (1, 1, 1, 1)
+
+[SEGMENT 09] Lower convex hull arrays cached
+  num_components: 2
+  local_conds_keys: []
+  str_conds_keys: ['N', 'P', 'T', 'X_TI']
+
+================================================================================
+SEGMENT 10 COMPARISON
+================================================================================
+
+--- CPU ---
+(No CPU data for this segment)
+
+--- GPU ---
+
+[SEGMENT 10] [CONDITION 0] Lower convex hull condition loop
+  condition_idx: 0
+  primary_index: (0, 0, 0, 0)
+
+================================================================================
+SEGMENT 11 COMPARISON
+================================================================================
+
+--- CPU ---
+(No CPU data for this segment)
+
+--- GPU ---
+
+[SEGMENT 11] [CONDITION 0] Hyperplane calculation
+  grid_index: (0, 0, 0)
+  fixed_chempot_indices: []
+  lincomb_coefs_shape: (2, 2)
+  lincomb_rhs_shape: (2,)
+
+[SEGMENT 11] [CONDITION 0] Hyperplane result
+  GM: -7.284651188958104e+04
+  MU: [-75185.15105780892, -70507.87272135317]
+  NP: [0.5000000000000009, 0.49999999999999917, 0.0]
+  points: [34, 33, 0]
+
+================================================================================
+SEGMENT 12 COMPARISON
+================================================================================
+
+--- CPU ---
+(No CPU data for this segment)
+
+--- GPU ---
+
+[SEGMENT 12] [CONDITION 0] Copy results from grid
+  points: [34, 33, 0]
+
+[SEGMENT 12] [CONDITION 0] Copy results complete
+  phases: ['BCC_A2', 'BCC_A2', '']
+  X: [[0.5084745762711862, 0.4915254237288138], [0.4915254237288138, 0.5084745762711862]]
+  final_GM: -7.284651188958104e+04
+
+================================================================================
+SEGMENT 13 COMPARISON
+================================================================================
+
+--- CPU ---
+(No CPU data for this segment)
+
+--- GPU ---
+
+[SEGMENT 13] Solver input validation
+
+================================================================================
+SEGMENT 28 COMPARISON
+================================================================================
+
+--- CPU ---
+(No CPU data for this segment)
+
+--- GPU ---
+
+[SEGMENT 28] Post-equilibrium property calculation
+
+================================================================================
+SEGMENT 32 COMPARISON
+================================================================================
+
+--- CPU ---
+(No CPU data for this segment)
+
+--- GPU ---
+
+[SEGMENT 32] Final result formatting
+
+================================================================================
+SEGMENT 40 COMPARISON
+================================================================================
+
+--- CPU ---
+(No CPU data for this segment)
+
+--- GPU ---
+
+[SEGMENT 40] [GPU] Equilibrium calculation complete
+  converged: True
+  properties_shape: (1, 1, 1, 1)
+  final_GM: -1.325553868802509e+05
+
+================================================================================
+TRACE COMPLETE - 2025-07-07T15:41:05.364055
+================================================================================

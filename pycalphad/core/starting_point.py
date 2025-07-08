@@ -5,6 +5,7 @@ from pycalphad.property_framework.computed_property import LinearCombination
 from xarray import Dataset
 import numpy as np
 from collections import OrderedDict
+from pycalphad.core.debug_output import debug_log, debug_log_array_comparison
 
 
 def global_min_is_possible(conditions, state_variables):
@@ -39,7 +40,7 @@ def global_min_is_possible(conditions, state_variables):
     return global_min
 
 
-def starting_point(conditions, state_variables, phase_records, grid):
+def starting_point(conditions, state_variables, phase_records, grid, verbose=False):
     """
     Find a starting point for the solution using a sample of the system energy surface.
 
@@ -59,7 +60,32 @@ def starting_point(conditions, state_variables, phase_records, grid):
     -------
     Dataset
     """
+    # SEGMENT 8: STARTING POINT CALCULATION
+    debug_log(8, "Starting point calculation", {
+        "conditions": conditions,
+        "state_variables": state_variables,
+        "phase_records": list(phase_records.keys()),
+        "grid_shape": grid.GM.shape if hasattr(grid, 'GM') else "unknown"
+    })
+    
+    # DEBUG: Use passed verbose flag for debug logging
+    debug_enabled = verbose
+    
     global_min_enabled = global_min_is_possible(conditions, state_variables)
+    
+    debug_log(8, "Global min check", {
+        "global_min_enabled": global_min_enabled
+    })
+    
+    # DEBUG: Log starting point calculation
+    if debug_enabled:
+        print(f"\n--- CPU Starting Point Calculation ---")
+        print(f"Conditions: {conditions}")
+        print(f"Global min enabled: {global_min_enabled}")
+        print(f"Active phases: {sorted(phase_records.keys())}")
+        if hasattr(grid, 'GM') and grid.GM is not None:
+            gm_vals = grid.GM.values if hasattr(grid.GM, 'values') else grid.GM
+            print(f"Input grid GM range: [{np.nanmin(gm_vals):.6f}, {np.nanmax(gm_vals):.6f}]")
     from pycalphad import __version__ as pycalphad_version
     active_phases = sorted(phase_records.keys())
     # Ensure that '_FAKE_' will fit in the phase name array
@@ -104,7 +130,22 @@ def starting_point(conditions, state_variables, phase_records, grid):
     result = LightDataset(ds_vars, coords=coord_dict, attrs={'engine': 'pycalphad %s' % pycalphad_version})
 
     if global_min_enabled:
+        # DEBUG: Log before convex hull
+        if debug_enabled:
+            print(f"Calculating lower convex hull...")
+        
         result = lower_convex_hull(grid, state_variables, sorted(conditions.keys(), key=str), phase_records, result)
+        
+        # DEBUG: Log convex hull results
+        if debug_enabled:
+            print(f"Lower convex hull calculation complete")
+            if hasattr(result, 'GM') and result.GM is not None:
+                result_gm = result.GM.values if hasattr(result.GM, 'values') else result.GM
+                print(f"Result GM: {result_gm.flatten()[0]:.6f}")
+            if hasattr(result, 'MU') and result.MU is not None:
+                result_mu = result.MU.values if hasattr(result.MU, 'values') else result.MU
+                print(f"Result chemical potentials: {result_mu.flatten()}")
+            print(f"--- CPU Starting Point Complete ---\n")
     else:
         raise NotImplementedError('Conditions not yet supported')
 

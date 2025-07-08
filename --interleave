@@ -1,0 +1,394 @@
+=== FILTERED DEBUG OUTPUT: SEGMENTS 1-40 ===
+
+=== CPU TRACE START ===
+[SEGMENT 01] Entry point and parameter validation
+  gpu_mode: False
+  components: ['NB', 'TI', 'VA']
+  phases: ['LIQUID', 'BCC_A2']
+  conditions: {X_TI: 0.5, T: 1000}
+  output_requested: None
+  verbose: True
+
+[SEGMENT 02] Workspace initialization
+  database: Elements: ['NB', 'TI', 'VA']
+Species: [Species('NB', 'NB1'), Species('TI', 'TI1'), Species('VA', 'VA1')]
+Phase({'name': 'BCC_A2', 'constituents': (frozenset({Species('NB', 'NB1'), Species('TI', 'TI1')}),), 'sublattices': (1.0,), 'model_hints': {}})
+Phase({'name': 'LIQUID', 'constituents': (frozenset({Species('NB', 'NB1'), Species('TI', 'TI1')}),), 'sublattices': (1.0,), 'model_hints': {'liquid': True}})
+21 symbols in database
+6 parameters in database
+
+  models: None
+  parameters: None
+  calc_opts: None
+  solver: None
+  phase_records: None
+
+[SEGMENT 03] Workspace constructor start
+  args: ()
+  kwargs: ['database', 'components', 'phases', 'conditions', 'models', 'parameters', 'verbose', 'calc_opts', 'solver', 'phase_record_factory']
+
+[SEGMENT 05] Phase record factory creation
+  components: [Component('NB', 'NB1'), Component('TI', 'TI1'), Component('VA', 'VA1')]
+  conditions: [N, T, X_TI]
+  models: ['BCC_A2', 'LIQUID']
+  parameters: OrderedDict()
+
+[SEGMENT 05] Phase record factory created
+  phases: ['BCC_A2', 'LIQUID']
+
+[SEGMENT 03] Workspace constructor complete
+  components: [Component('NB', 'NB1'), Component('TI', 'TI1'), Component('VA', 'VA1')]
+  phases: ['BCC_A2', 'LIQUID']
+  conditions: {N: array([1.]), T: array([1000.]), X_TI: array([0.5])}
+
+[SEGMENT 06] Workspace recompute setup
+  conditions: {N: array([1.]), T: array([1000.]), X_TI: array([0.5])}
+  phase_record_factory: <pycalphad.codegen.phase_record_factory.PhaseRecordFactory object at 0x73a89d8321b0>
+  parameters: OrderedDict()
+
+[SEGMENT 06] Workspace recompute setup complete
+  unitless_conds: OrderedDict({N: array([1.]), T: array([1000.]), X_TI: array([0.5])})
+  str_conds: OrderedDict({'N': array([1.]), 'T': array([1000.]), 'X_TI': array([0.5])})
+  local_conds: {}
+  state_variables: [N, T]
+  grid_opts: OrderedDict({'N': array([1.]), 'T': array([1000.]), 'pdens': 60})
+
+[SEGMENT 07] Calculate grid start
+  database: Elements: ['NB', 'TI', 'VA']
+Species: [Species('NB', 'NB1'), Species('TI', 'TI1'), Species('VA', 'VA1')]
+Phase({'name': 'BCC_A2', 'constituents': (frozenset({Species('NB', 'NB1'), Species('TI', 'TI1')}),), 'sublattices': (1.0,), 'model_hints': {}})
+Phase({'name': 'LIQUID', 'constituents': (frozenset({Species('NB', 'NB1'), Species('TI', 'TI1')}),), 'sublattices': (1.0,), 'model_hints': {'liquid': True}})
+21 symbols in database
+6 parameters in database
+
+  components: [Component('NB', 'NB1'), Component('TI', 'TI1'), Component('VA', 'VA1')]
+  phases: ['BCC_A2', 'LIQUID']
+  local_conds: {}
+  grid_opts: OrderedDict({'N': array([1.]), 'T': array([1000.]), 'pdens': 60})
+
+[SEGMENT 07] Calculate grid complete
+  grid_shape: (1, 1, 246)
+  grid_coords: ['component', 'N', 'T']
+  GM_range: [-50452.70885252365, 10000000000.0]
+
+[SEGMENT 08] Starting point calculation
+  conditions: OrderedDict({N: array([1.]), T: array([1000.]), X_TI: array([0.5])})
+  state_variables: [N, T]
+  phase_records: ['BCC_A2', 'LIQUID']
+  grid_shape: (1, 1, 246)
+
+[SEGMENT 08] Global min check
+  global_min_enabled: True
+
+[SEGMENT 09] Lower convex hull setup
+  state_variables: [N, T]
+  conds_keys: [N, T, X_TI]
+  global_grid_shape: (1, 1, 246)
+  result_array_shape: (1, 1, 1)
+
+[SEGMENT 09] Lower convex hull arrays cached
+  num_components: 2
+  local_conds_keys: []
+  str_conds_keys: ['N', 'T', 'X_TI']
+
+[SEGMENT 10] [CONDITION 0] Lower convex hull condition loop
+  condition_idx: 0
+  primary_index: (0, 0, 0)
+
+[SEGMENT 11] [CONDITION 0] Hyperplane calculation
+  grid_index: (0, 0)
+  fixed_chempot_indices: []
+  lincomb_coefs_shape: (2, 2)
+  lincomb_rhs_shape: (2,)
+
+[SEGMENT 11] [CONDITION 0] Hyperplane result
+  GM: -4.927889179229182e+04
+  MU: [-51884.594565288724, -46673.1890192949]
+  NP: [0.5000000000000009, 0.49999999999999917, 0.0]
+  points: [34, 33, 0]
+
+[SEGMENT 12] [CONDITION 0] Copy results from grid
+  points: [34, 33, 0]
+
+[SEGMENT 12] [CONDITION 0] Copy results complete
+  phases: ['BCC_A2', 'BCC_A2', '']
+  X: [[0.5084745762711862, 0.4915254237288138], [0.4915254237288138, 0.5084745762711862]]
+  final_GM: -4.927889179229182e+04
+
+[SEGMENT 33] Solver remove metastable
+
+[SEGMENT 34] Solver result assembly
+
+[SEGMENT 28] Post-equilibrium property calculation
+
+[SEGMENT 32] Final result formatting
+
+[SEGMENT 40] Equilibrium calculation complete
+  converged: True
+  properties_shape: (1, 1, 1)
+  final_GM: -4.927914922523282e+04
+
+=== CPU TRACE END ===
+CPU Ended: 2025-06-24T13:35:37.128798
+
+
+=== GPU TRACE START ===
+GPU Started: 2025-06-24T13:35:37.145309
+
+
+[SEGMENT 01] [GPU] Entry point and parameter validation
+  gpu_mode: True
+  components: ['NB', 'TI', 'VA']
+  phases: ['LIQUID', 'BCC_A2']
+  conditions: {X_TI: 0.5, T: 1000}
+  output_requested: None
+  verbose: True
+  force_cpu: False
+
+[SEGMENT 02] [GPU] Workspace initialization
+  database: Elements: ['NB', 'TI', 'VA']
+Species: [Species('NB', 'NB1'), Species('TI', 'TI1'), Species('VA', 'VA1')]
+Phase({'name': 'BCC_A2', 'constituents': (frozenset({Species('NB', 'NB1'), Species('TI', 'TI1')}),), 'sublattices': (1.0,), 'model_hints': {}})
+Phase({'name': 'LIQUID', 'constituents': (frozenset({Species('NB', 'NB1'), Species('TI', 'TI1')}),), 'sublattices': (1.0,), 'model_hints': {'liquid': True}})
+21 symbols in database
+6 parameters in database
+
+  models: None
+  parameters: None
+  calc_opts: None
+  solver: None
+  phase_records: None
+
+[SEGMENT 03] Workspace constructor start
+  args: ()
+  kwargs: ['database', 'components', 'phases', 'conditions', 'models', 'parameters', 'verbose', 'calc_opts', 'solver', 'phase_record_factory']
+
+[SEGMENT 05] Phase record factory creation
+  components: [Component('NB', 'NB1'), Component('TI', 'TI1'), Component('VA', 'VA1')]
+  conditions: [N, T, X_TI]
+  models: ['BCC_A2', 'LIQUID']
+  parameters: OrderedDict()
+
+[SEGMENT 05] Phase record factory created
+  phases: ['BCC_A2', 'LIQUID']
+
+[SEGMENT 03] Workspace constructor complete
+  components: [Component('NB', 'NB1'), Component('TI', 'TI1'), Component('VA', 'VA1')]
+  phases: ['BCC_A2', 'LIQUID']
+  conditions: {N: array([1.]), T: array([1000.]), X_TI: array([0.5])}
+
+[SEGMENT 06] Workspace recompute setup
+  conditions: {N: array([1.]), T: array([1000.]), X_TI: array([0.5])}
+  phase_record_factory: <pycalphad.codegen.phase_record_factory.PhaseRecordFactory object at 0x73a88ee212b0>
+  parameters: OrderedDict()
+
+[SEGMENT 06] Workspace recompute setup complete
+  unitless_conds: OrderedDict({N: array([1.]), T: array([1000.]), X_TI: array([0.5])})
+  str_conds: OrderedDict({'N': array([1.]), 'T': array([1000.]), 'X_TI': array([0.5])})
+  local_conds: {}
+  state_variables: [N, T]
+  grid_opts: OrderedDict({'N': array([1.]), 'T': array([1000.]), 'pdens': 60})
+
+[SEGMENT 07] Calculate grid start
+  database: Elements: ['NB', 'TI', 'VA']
+Species: [Species('NB', 'NB1'), Species('TI', 'TI1'), Species('VA', 'VA1')]
+Phase({'name': 'BCC_A2', 'constituents': (frozenset({Species('NB', 'NB1'), Species('TI', 'TI1')}),), 'sublattices': (1.0,), 'model_hints': {}})
+Phase({'name': 'LIQUID', 'constituents': (frozenset({Species('NB', 'NB1'), Species('TI', 'TI1')}),), 'sublattices': (1.0,), 'model_hints': {'liquid': True}})
+21 symbols in database
+6 parameters in database
+
+  components: [Component('NB', 'NB1'), Component('TI', 'TI1'), Component('VA', 'VA1')]
+  phases: ['BCC_A2', 'LIQUID']
+  local_conds: {}
+  grid_opts: OrderedDict({'N': array([1.]), 'T': array([1000.]), 'pdens': 60})
+
+[SEGMENT 07] Calculate grid complete
+  grid_shape: (1, 1, 246)
+  grid_coords: ['component', 'N', 'T']
+  GM_range: [-50452.70885252365, 10000000000.0]
+
+[SEGMENT 08] Starting point calculation
+  conditions: OrderedDict({N: array([1.]), T: array([1000.]), X_TI: array([0.5])})
+  state_variables: [N, T]
+  phase_records: ['BCC_A2', 'LIQUID']
+  grid_shape: (1, 1, 246)
+
+[SEGMENT 08] Global min check
+  global_min_enabled: True
+
+[SEGMENT 09] Lower convex hull setup
+  state_variables: [N, T]
+  conds_keys: [N, T, X_TI]
+  global_grid_shape: (1, 1, 246)
+  result_array_shape: (1, 1, 1)
+
+[SEGMENT 09] Lower convex hull arrays cached
+  num_components: 2
+  local_conds_keys: []
+  str_conds_keys: ['N', 'T', 'X_TI']
+
+[SEGMENT 10] [CONDITION 0] Lower convex hull condition loop
+  condition_idx: 0
+  primary_index: (0, 0, 0)
+
+[SEGMENT 11] [CONDITION 0] Hyperplane calculation
+  grid_index: (0, 0)
+  fixed_chempot_indices: []
+  lincomb_coefs_shape: (2, 2)
+  lincomb_rhs_shape: (2,)
+
+[SEGMENT 11] [CONDITION 0] Hyperplane result
+  GM: -4.927889179229182e+04
+  MU: [-51884.594565288724, -46673.1890192949]
+  NP: [0.5000000000000009, 0.49999999999999917, 0.0]
+  points: [34, 33, 0]
+
+[SEGMENT 12] [CONDITION 0] Copy results from grid
+  points: [34, 33, 0]
+
+[SEGMENT 12] [CONDITION 0] Copy results complete
+  phases: ['BCC_A2', 'BCC_A2', '']
+  X: [[0.5084745762711862, 0.4915254237288138], [0.4915254237288138, 0.5084745762711862]]
+  final_GM: -4.927889179229182e+04
+
+[SEGMENT 33] Solver remove metastable
+
+[SEGMENT 34] Solver result assembly
+
+[SEGMENT 08] [GPU] Starting point from workspace
+  using_wks_eq: True
+  properties_shape: (1, 1, 1)
+
+[SEGMENT 13] [GPU] Generate C code for phase models
+  validate_code: False
+  phases: ['BCC_A2', 'LIQUID']
+  components: [Component('NB', 'NB1'), Component('TI', 'TI1'), Component('VA', 'VA1')]
+
+[SEGMENT 13] [GPU] C code generation complete
+  num_unique_models: 2
+  phase_to_idx_map: {'BCC_A2': 0, 'LIQUID': 1}
+
+[SEGMENT 14] [GPU] Kernel compilation setup
+  needs_compilation: True
+
+[SEGMENT 14] [GPU] Dynamic kernel sizes computed
+  dynamic_sizes: {'MAX_COMPONENTS': 4, 'MAX_PHASES': 4, 'MAX_STATEVARS': 4, 'MAX_DOF_PER_PHASE': 4, 'MAX_INTERNAL_CONSTRAINTS': 4, 'MAX_FIXED_MOLE_FRACTION_CONDITIONS': 4, 'MAX_GRID_POINTS': 10000, 'MIN_PHASE_FRACTION': 1e-06}
+  cache_key: fb0172299b48a16e343667f0fee43ffa
+
+[SEGMENT 15] [GPU] Prepare data for GPU transfer
+  dynamic_sizes: {'MAX_COMPONENTS': 4, 'MAX_PHASES': 4, 'MAX_STATEVARS': 4, 'MAX_DOF_PER_PHASE': 4, 'MAX_INTERNAL_CONSTRAINTS': 4, 'MAX_FIXED_MOLE_FRACTION_CONDITIONS': 4, 'MAX_GRID_POINTS': 10000, 'MIN_PHASE_FRACTION': 1e-06}
+
+[SEGMENT 15] [GPU] _prepare_gpu_data start
+  unique_models: 2
+  phase_map: {'BCC_A2': 0, 'LIQUID': 1}
+
+[SEGMENT 08] Starting point calculation
+  conditions: OrderedDict({N: array([1.]), T: array([1000.]), X_TI: array([0.5])})
+  state_variables: [N, T]
+  phase_records: ['BCC_A2', 'LIQUID']
+  grid_shape: (1, 1, 246)
+
+[SEGMENT 08] Global min check
+  global_min_enabled: True
+
+[SEGMENT 09] Lower convex hull setup
+  state_variables: [N, T]
+  conds_keys: [N, T, X_TI]
+  global_grid_shape: (1, 1, 246)
+  result_array_shape: (1, 1, 1)
+
+[SEGMENT 09] Lower convex hull arrays cached
+  num_components: 2
+  local_conds_keys: []
+  str_conds_keys: ['N', 'T', 'X_TI']
+
+[SEGMENT 10] [CONDITION 0] Lower convex hull condition loop
+  condition_idx: 0
+  primary_index: (0, 0, 0)
+
+[SEGMENT 11] [CONDITION 0] Hyperplane calculation
+  grid_index: (0, 0)
+  fixed_chempot_indices: []
+  lincomb_coefs_shape: (2, 2)
+  lincomb_rhs_shape: (2,)
+
+[SEGMENT 11] [CONDITION 0] Hyperplane result
+  GM: -4.927889179229182e+04
+  MU: [-51884.594565288724, -46673.1890192949]
+  NP: [0.5000000000000009, 0.49999999999999917, 0.0]
+  points: [34, 33, 0]
+
+[SEGMENT 12] [CONDITION 0] Copy results from grid
+  points: [34, 33, 0]
+
+[SEGMENT 12] [CONDITION 0] Copy results complete
+  phases: ['BCC_A2', 'BCC_A2', '']
+  X: [[0.5084745762711862, 0.4915254237288138], [0.4915254237288138, 0.5084745762711862]]
+  final_GM: -4.927889179229182e+04
+
+[SEGMENT 15] [GPU] Initial GM values
+  CPU array: shape=(1, 1, 1), dtype=float64
+  CPU values: [-49278.89179229182]
+  CPU min: -4.927889179229182e+04, max: -4.927889179229182e+04, mean: -4.927889179229182e+04
+
+[SEGMENT 15] [GPU] Initial NP values
+  CPU array: shape=(1, 1, 1, 3), dtype=float64
+  CPU values: [0.5000000000000009, 0.49999999999999917, 0.0]
+  CPU min: 0.000000000000000e+00, max: 5.000000000000009e-01, mean: 3.333333333333333e-01
+
+[SEGMENT 15] [GPU] Initial MU values
+  CPU array: shape=(1, 1, 1, 2), dtype=float64
+  CPU values: [-51884.594565288724, -46673.1890192949]
+  CPU min: -5.188459456528872e+04, max: -4.667318901929490e+04, mean: -4.927889179229181e+04
+
+[SEGMENT 15] [GPU] Initial Phase values
+  phases: ['BCC_A2', 'BCC_A2', '']
+
+[SEGMENT 15] [GPU] Initial X values
+  CPU array: shape=(1, 1, 1, 3, 2), dtype=float64
+  CPU values: [0.5084745762711862, 0.4915254237288138, 0.4915254237288138, 0.5084745762711862, nan, nan]
+  CPU min: 4.915254237288138e-01, max: 5.084745762711862e-01, mean: 5.000000000000000e-01
+
+[SEGMENT 15] [GPU] Data preparation complete
+  num_conditions: 1
+  condition_args_shape: (1, 8)
+  num_phases_initial: [2]
+
+[SEGMENT 17] [GPU] Kernel launch preparation
+  num_conditions: 1
+  threads_per_block: 256
+
+[SEGMENT 17] [GPU] Kernel launch parameters
+  blocks_per_grid: 1
+  threads_per_block: 256
+  total_threads: 256
+
+[SEGMENT 20] [GPU] Launching equilibrium kernel
+  blocks: 1
+  threads: 256
+  debug_enabled: True
+
+[SEGMENT 20] [GPU] Kernel launched successfully
+
+[SEGMENT 20] [GPU] Kernel execution complete
+
+[SEGMENT 24] [GPU] Processing GPU results
+  num_conditions: 1
+  results_shape: (1,)
+
+[SEGMENT 24] [GPU] Processing GPU results
+  num_conditions: 1
+  results_shape: (1,)
+
+[SEGMENT 24] [GPU] Result processing complete
+  dataset_shape: (1, 1, 1)
+
+[SEGMENT 40] [GPU] Equilibrium calculation complete
+  converged: True
+  properties_shape: (1, 1, 1)
+  final_GM: unknown
+
+=== GPU TRACE END ===
+GPU Ended: 2025-06-24T13:35:37.877932
+
+=== END FILTERED OUTPUT ===

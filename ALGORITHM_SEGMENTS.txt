@@ -1,0 +1,385 @@
+PYCALPHAD CPU EQUILIBRIUM ALGORITHM SEGMENTS
+============================================
+
+This document divides the equilibrium calculation algorithm into 40 logical segments for detailed comparison with GPU implementation.
+
+SEGMENT 1: ENTRY POINT AND PARAMETER VALIDATION
+File: pycalphad/core/equilibrium.py:68-82
+- Check if GPU mode is requested
+- Initialize output parameter set
+- Log initial debug information if verbose
+- Convert single outputs to list format
+
+SEGMENT 2: WORKSPACE INITIALIZATION
+File: pycalphad/core/equilibrium.py:83-88
+- Create Workspace object with all parameters
+- Initialize database, components, phases, conditions
+- Set up models, parameters, solver configuration
+- Compute equilibrium values stored in wks.eq
+
+SEGMENT 3: WORKSPACE CONSTRUCTOR
+File: pycalphad/core/workspace.py:316-339
+- Initialize internal state with suspension of dependency updates
+- Process positional and keyword arguments
+- Initialize attributes in dependency-optimal order
+- Re-enable dependency updates
+
+SEGMENT 4: ADJUST CONDITIONS
+File: pycalphad/core/workspace.py:29-49
+- Convert conditions to implementation units
+- Adjust composition values to solver numerical limits
+- Apply minimum_composition threshold (1e-10)
+- Handle units conversion for state variables
+
+SEGMENT 5: PHASE RECORD FACTORY CREATION
+File: pycalphad/core/workspace.py:253-261 (PRFField)
+- Create PhaseRecordFactory with database, components, conditions, models
+- Handle model unwrapping if needed
+- Pass parameters for symbol override
+
+SEGMENT 6: WORKSPACE RECOMPUTE - SETUP
+File: pycalphad/core/workspace.py:341-361
+- Convert conditions to unitless implementation units
+- Create string conditions dictionary
+- Extract local conditions (phase-specific)
+- Update phase record factory parameters
+
+SEGMENT 7: CALCULATE GRID
+File: pycalphad/core/workspace.py:363-375
+- Call calculate() to create energy surface sample
+- Pass fake_points=True for invariant point handling
+- Use phase_records from factory
+- Merge grid options with state variable conditions
+
+SEGMENT 8: STARTING POINT CALCULATION
+File: pycalphad/core/workspace.py:401
+File: pycalphad/core/starting_point.py:42-139
+- Check if global minimization is possible
+- Set up coordinate dictionaries and grid shape
+- Initialize result dataset structure
+- Call lower_convex_hull if global_min_enabled
+
+SEGMENT 9: LOWER CONVEX HULL - SETUP
+File: pycalphad/core/lower_convex_hull.py:43-60
+- Extract local condition keys
+- Create string condition keys
+- Cache dataset value arrays for performance
+- Initialize iterator over result array
+
+SEGMENT 10: LOWER CONVEX HULL - CONDITION LOOP
+File: pycalphad/core/lower_convex_hull.py:63-156
+- For each condition point:
+  - Build grid index from local conditions and state variables
+  - Extract fixed chemical potential indices
+  - Build linear combination constraints
+  - Handle different condition types (MoleFraction, MassFraction, ChemicalPotential, etc.)
+
+SEGMENT 11: HYPERPLANE CALCULATION
+File: pycalphad/core/lower_convex_hull.py:161-164
+- Call hyperplane() function with:
+  - Grid compositions and energies
+  - Chemical potentials
+  - Constraint matrices
+  - Output arrays for phase amounts and point indices
+
+SEGMENT 12: LOWER CONVEX HULL - COPY RESULTS
+File: pycalphad/core/lower_convex_hull.py:165-188
+- Copy phase values from grid using calculated point indices
+- Copy composition values (X)
+- Copy site fractions (Y)
+- Handle fictitious '_FAKE_' phases
+- Recalculate energy if fake phases present
+
+SEGMENT 13: CREATE COMPOSITION SETS FROM STARTING POINT
+CPU: pycalphad/core/eqsolver.pyx:238-273
+GPU: pycalphad/gpu/eqsolver.h:initial phase setup
+- For each non-empty phase in starting point
+- Create PhaseRecord and CompositionSet
+- Extract site fractions and phase amounts
+- Apply MIN_PHASE_FRACTION (1e-12)
+- Call compset.update() with site fractions
+
+SEGMENT 14: ADD NEARLY STABLE PHASES
+CPU: pycalphad/core/eqsolver.pyx:273-293
+GPU: pycalphad/gpu/eqsolver.h:add_nearly_stable
+- Call add_nearly_stable() with -1000 J/mol threshold
+- Calculate driving forces for all grid points
+- Add phases with driving force > threshold
+- Normalize phase amounts to sum to 1.0
+
+SEGMENT 15: SOLVER.SOLVE() ENTRY
+CPU: pycalphad/core/solver.py:145-161
+GPU: pycalphad/gpu/eqsolver.h:solve entry
+- Entry into solve() method
+- Call get_system_spec()
+- Call _fix_state_variables_in_compsets()
+
+SEGMENT 16: GET SYSTEM SPECIFICATION - SETUP
+CPU: pycalphad/core/solver.py:35-63
+GPU: pycalphad/gpu/eqsolver.h:system spec setup
+- Extract state variables and nonvacant elements
+- Initialize chemical potentials array
+- Initialize constraint coefficient arrays
+- Process phase-local conditions
+
+SEGMENT 17: GET SYSTEM SPEC - PROCESS CONDITIONS
+CPU: pycalphad/core/solver.py:69-111
+GPU: pycalphad/gpu/eqsolver.h:process conditions
+- Process MoleFraction conditions
+- Process MassFraction conditions
+- Process LinComb conditions
+- Build constraint matrices
+
+SEGMENT 18: GET SYSTEM SPEC - IDENTIFY INDICES
+CPU: pycalphad/core/solver.py:112-126
+GPU: pycalphad/gpu/eqsolver.h:identify indices
+- Create prescribed_mole_fraction arrays
+- Identify fixed/free chemical potential indices
+- Identify fixed/free state variable indices
+- Identify fixed stable composition sets
+
+SEGMENT 19: CREATE SYSTEM SPECIFICATION OBJECT
+CPU: pycalphad/core/solver.py:127-133
+GPU: pycalphad/gpu/eqsolver.h:create spec
+- Instantiate SystemSpecification
+- Calculate max_num_free_stable_phases
+- Set ALLOWED_MASS_RESIDUAL
+
+SEGMENT 20: CREATE SYSTEM STATE
+CPU: pycalphad/core/solver.py:162-163 + minimizer.pyx:554-603
+GPU: pycalphad/gpu/eqsolver.h:create state
+- Call spec.get_new_state()
+- Create CompsetState for each composition set
+- Initialize phase amounts and compositions
+- Convert phase fractions to formula units
+
+SEGMENT 21: RUN_LOOP ENTRY
+CPU: pycalphad/core/minimizer.pyx:394-415
+GPU: pycalphad/gpu/minimizer.h:run_loop entry
+- Set initial step size = 1.0
+- Initialize converged = False
+- Enable debug if verbose
+- Begin iteration loop
+
+SEGMENT 22: STATE RECOMPUTE - GLOBAL QUANTITIES
+CPU: pycalphad/core/minimizer.pyx:619-648
+GPU: pycalphad/gpu/minimizer.h:recompute global
+- Zero mole_fractions and system_amount
+- Sum phase contributions to get system composition
+- Calculate mole fractions
+- Calculate mass residual
+
+SEGMENT 23: STATE RECOMPUTE - PHASE QUANTITIES
+CPU: pycalphad/core/minimizer.pyx:649-674
+GPU: pycalphad/gpu/minimizer.h:recompute phases
+- For each composition set:
+  - Update phase with current DOF
+  - Calculate energy, gradient, Hessian
+  - Calculate mass contributions
+  - Build phase matrix
+
+SEGMENT 24: STATE RECOMPUTE - PHASE MATRIX
+CPU: pycalphad/core/minimizer.pyx:77-101
+GPU: pycalphad/gpu/minimizer.h:compute_phase_matrix
+- Build Hessian submatrix
+- Add internal constraint Jacobian
+- Add phase-local constraint Jacobian
+- Form symmetric matrix
+
+SEGMENT 25: STATE RECOMPUTE - INVERT MATRIX
+CPU: pycalphad/core/minimizer.pyx:675-680
+GPU: pycalphad/gpu/minimizer.h:invert matrix
+- Copy phase matrix to full_e_matrix
+- Call invert_matrix() (LAPACK dgetrf/dgetri)
+- Store inverted matrix and pivot indices
+
+SEGMENT 26: STATE RECOMPUTE - C MATRICES
+CPU: pycalphad/core/minimizer.pyx:681-708
+GPU: pycalphad/gpu/minimizer.h:compute c matrices
+- Calculate c_G (gradient contributions)
+- Calculate c_statevars (state variable sensitivities)
+- Calculate c_component (composition sensitivities)
+- Calculate delta_ms and moles normalization
+
+SEGMENT 27: CONSTRUCT EQUILIBRIUM SYSTEM
+CPU: pycalphad/core/minimizer.pyx:734-751
+GPU: pycalphad/gpu/minimizer.h:construct system
+- Allocate equilibrium matrix and RHS
+- Check Gibbs phase rule
+- Call fill_equilibrium_system()
+
+SEGMENT 28: FILL EQUILIBRIUM SYSTEM - PHASE ROWS
+CPU: pycalphad/core/minimizer.pyx:239-258
+GPU: pycalphad/gpu/minimizer.h:fill phase rows
+- For each stable phase:
+  - Write row for energy minimization
+  - Include chemical potential contributions
+  - Include state variable contributions
+
+SEGMENT 29: FILL EQUILIBRIUM SYSTEM - CONSTRAINT ROWS
+CPU: pycalphad/core/minimizer.pyx:259-320
+GPU: pycalphad/gpu/minimizer.h:fill constraint rows
+- Write fixed mole fraction constraint rows
+- Write system amount (N=1) constraint row
+- Add contributions from all phases
+
+SEGMENT 30: FILL EQUILIBRIUM SYSTEM - RESIDUALS
+CPU: pycalphad/core/minimizer.pyx:322-329
+GPU: pycalphad/gpu/minimizer.h:add residuals
+- Calculate composition residuals
+- Calculate system amount residual
+- Add to RHS vector
+
+SEGMENT 31: SOLVE LINEAR SYSTEM
+CPU: pycalphad/core/minimizer.pyx:10-40
+GPU: pycalphad/gpu/svd.c:solve_svd
+- Call LAPACK dgelsd (CPU) or custom SVD (GPU)
+- Handle singular/ill-conditioned matrices
+- Check for NaN values
+- Return solution vector
+
+SEGMENT 32: UPDATE CHEMICAL POTENTIALS
+CPU: pycalphad/core/minimizer.pyx:922-930
+GPU: pycalphad/gpu/minimizer.h:update chempots
+- Extract chemical potentials from solution
+- Update free chemical potentials
+- Force fixed chemical potentials to prescribed values
+
+SEGMENT 33: POST SOLVE HOOK
+CPU: pycalphad/core/minimizer.pyx:464-466
+GPU: pycalphad/gpu/minimizer.h:post solve
+- Call post_solve_hook()
+- Currently returns True (no-op)
+
+SEGMENT 34: REMOVE AND CONSOLIDATE PHASES
+CPU: pycalphad/core/minimizer.pyx:1068-1131
+GPU: pycalphad/gpu/minimizer.h:remove_consolidate
+- Remove phases with amount < 1e-10
+- Consolidate phases within COMPSET_CONSOLIDATE_DISTANCE
+- Update free_stable_compset_indices
+
+SEGMENT 35: CHECK CONVERGENCE
+CPU: pycalphad/core/minimizer.pyx:372-386
+GPU: pycalphad/gpu/minimizer.h:check_convergence
+- Check phase amount change < 1e-10
+- Check site fraction change < 5e-9
+- Check state variable change < 1e-5
+- Check mass residual < ALLOWED_MASS_RESIDUAL
+- Require 5 iterations since last phase change
+
+SEGMENT 36: CHANGE PHASES
+CPU: pycalphad/core/minimizer.pyx:1133-1208
+GPU: pycalphad/gpu/minimizer.h:change_phases
+- Calculate driving forces
+- Remove phases with amount < MIN_PHASE_AMOUNT
+- Add phases with positive driving force
+- Ensure Gibbs phase rule compliance
+
+SEGMENT 37: ADVANCE STATE
+CPU: pycalphad/core/minimizer.pyx:949-1066
+GPU: pycalphad/gpu/minimizer.h:advance_state
+- Apply linear corrections to phase amounts
+- Update state variables
+- Update site fractions with step size control
+- Check bounds and apply damping
+
+SEGMENT 38: SOLVER REMOVE METASTABLE
+CPU: pycalphad/core/solver.py:174-191
+GPU: Post-processing
+- If remove_metastable flag set
+- Mark phases with NP <= 0 for removal
+- Remove in reverse order
+
+SEGMENT 39: SOLVER RESULT ASSEMBLY
+CPU: pycalphad/core/solver.py:193-224
+GPU: Result packing
+- Extract phase amounts
+- Concatenate DOF vectors
+- Append phase amounts to solution
+- Return SolverResult
+
+SEGMENT 40: FINAL GIBBS ENERGY CALCULATION
+CPU: pycalphad/core/eqsolver.pyx:431-461
+GPU: pycalphad/gpu/eqsolver.h:final GM
+- For each active phase:
+  - Copy site fractions to Y array
+  - Copy mole fractions to X array
+  - Add weighted energy: GM += NP * energy
+- Store final results in properties arrays
+
+SEGMENT 41: POST-EQUILIBRIUM PROPERTY CALCULATION
+File: pycalphad/core/equilibrium.py:151-164
+- Extract condition keys from results
+- Sort additional output properties
+- For each additional property:
+  - Create property calculator
+  - Allocate result array
+  - Enumerate composition sets
+
+SEGMENT 42: COMPOSITION SET ENUMERATION
+File: pycalphad/core/workspace.py:530-558
+- Iterate over all condition points
+- For each point:
+  - Build condition dictionary
+  - Extract state variable values
+  - Create composition sets from results
+  - Skip empty phases
+
+SEGMENT 43: PROPERTY COMPUTATION
+File: pycalphad/core/equilibrium.py:157-163
+- For each composition set:
+  - Get current conditions
+  - Get chemical potentials
+  - Compute property value
+  - Store in result array
+
+SEGMENT 44: PROPERTY MERGE
+File: pycalphad/core/equilibrium.py:163-164
+- Create LightDataset with property values
+- Merge into main properties dataset
+- Use 'equals' compatibility mode
+
+SEGMENT 45: FINAL RESULT FORMATTING
+File: pycalphad/core/equilibrium.py:165-170
+- Convert to xarray if requested
+- Add creation timestamp
+- Check for unused kwargs and warn
+- Return final properties
+
+SEGMENT 46: DEBUG OUTPUT AND CLEANUP
+File: pycalphad/core/equilibrium.py:220-227
+- Log final equilibrium results if verbose
+- Print GM, phase amounts, chemical potentials
+- Print active phases and compositions
+- Close debug output streams
+
+==================================
+LOOP TRACING FOR FIRST 3 ITERATIONS
+==================================
+
+For the main equilibrium solver loop (Segments 17-23):
+
+ITERATION 1:
+- Initial phases from starting point (usually 1-2 phases)
+- Solve for equilibrium with initial phases
+- Check for new stable phases in grid
+- Often adds 1-2 metastable phases
+
+ITERATION 2:
+- Solve with expanded phase set
+- Some metastable phases may drop out (NP -> 0)
+- Check again for new phases
+- Usually fewer additions than iteration 1
+
+ITERATION 3:
+- Solve with refined phase set
+- System approaching equilibrium
+- Rarely adds new phases
+- Often reaches convergence
+
+For multiple condition sets, the first three typically show:
+- Condition 1: Single phase region or simple two-phase
+- Condition 2: May be similar or show phase transition
+- Condition 3: Continues pattern or shows new behavior
+
+The exact behavior depends on the phase diagram region being calculated.

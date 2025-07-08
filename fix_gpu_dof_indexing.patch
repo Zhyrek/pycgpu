@@ -1,0 +1,41 @@
+--- a/pycalphad/gpu/minimizer.h
++++ b/pycalphad/gpu/minimizer.h
+@@ -910,8 +910,35 @@
+             }
+             
+             if (pr->formulahess != nullptr) {
+-                // Calling formulahess - MUST pass full workspace DOF like CPU does
+-                pr->formulahess(csst->hess, compset->dof);
++                // CRITICAL FIX: The compiled functions expect only the state variables
++                // that the model uses, not all state variables in the phase record.
++                // We need to extract the correct subset and reorder.
++                
++                // Create temporary array with the variables the model expects
++                double model_dof[MAX_STATEVARS + MAX_DOF_PER_PHASE];
++                
++                // The model expects its own state variables followed by site fractions
++                // For BCC_A2: expects [T, Y(NB), Y(TI)] not [N, P, T, Y(NB), Y(TI)]
++                
++                // Copy only the state variables the model uses
++                // Since we don't have the mapping, we need to assume the model uses
++                // the last num_statevars state variables from the phase record
++                // This works for the common case where model uses [T] and phase rec has [N, P, T]
++                int model_statevar_offset = spec->num_statevars - pr->num_statevars;
++                for (int i = 0; i < pr->num_statevars; i++) {
++                    model_dof[i] = compset->dof[model_statevar_offset + i];
++                }
++                
++                // Copy all site fractions
++                for (int i = 0; i < pr->phase_dof; i++) {
++                    model_dof[pr->num_statevars + i] = compset->dof[spec->num_statevars + i];
++                }
++                
++                // Now call with the correctly ordered array
++                pr->formulahess(csst->hess, model_dof);
++                
++                // Original code that passes wrong array:
++                // pr->formulahess(csst->hess, compset->dof);
++                
+         // DEBUG: Print Hessian values
+         if (thread_id == 0 && idx < 2) {
+             printf("GPU DEBUG: Hessian calculated for phase record %d\n", idx);

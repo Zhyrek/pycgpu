@@ -1,0 +1,73 @@
+  Mole fractions: <MemoryView of 'ndarray' object>
+[CPU MATRIX DEBUG] construct_equilibrium_system called, state.iteration=2
+[CPU MATRIX DEBUG] construct_equilibrium_system called, state.iteration=3
+[CPU MATRIX DEBUG] construct_equilibrium_system called, state.iteration=4
+[CPU MATRIX DEBUG] construct_equilibrium_system called, state.iteration=5
+[CPU EQUILIBRIUM MATRIX DEBUG] Writing row for stable phase:
+  Energy: -4.955750e+04
+  Masses: 5.555556e-01 4.444444e-01 
+  Row values (first 4): 5.555556e-01 4.444444e-01 0.000000e+00 0.000000e+00 
+  RHS: -4.955750e+04
+[CPU EQUILIBRIUM MATRIX DEBUG] Writing row for stable phase:
+  Energy: -4.897846e+04
+  Masses: 4.444444e-01 5.555556e-01 
+  Row values (first 4): 4.444444e-01 5.555556e-01 0.000000e+00 0.000000e+00 
+  RHS: -4.897846e+04
+[CPU EQUILIBRIUM MATRIX DEBUG] Writing row for stable phase:
+  Energy: -4.928974e+04
+  Masses: 5.020355e-01 4.979645e-01 
+  Row values (first 4): 5.020355e-01 4.979645e-01 0.000000e+00 0.000000e+00 
+  RHS: -4.928974e+04
+[CPU EQUILIBRIUM MATRIX DEBUG] Writing row for stable phase:
+  Energy: -4.926853e+04
+  Masses: 4.979645e-01 5.020355e-01 
+  Row values (first 4): 4.979645e-01 5.020355e-01 0.000000e+00 0.000000e+00 
+  RHS: -4.926853e+04
+[CPU EQUILIBRIUM MATRIX DEBUG] Writing row for stable phase:
+  Energy: -4.927915e+04
+  Masses: 5.000001e-01 4.999999e-01 
+  Row values (first 4): 5.000001e-01 4.999999e-01 0.000000e+00 0.000000e+00 
+  RHS: -4.927915e+04
+[CPU EQUILIBRIUM MATRIX DEBUG] Writing row for stable phase:
+  Energy: -4.927915e+04
+  Masses: 4.999999e-01 5.000001e-01 
+  Row values (first 4): 4.999999e-01 5.000001e-01 0.000000e+00 0.000000e+00 
+  RHS: -4.927915e+04
+[CPU EQUILIBRIUM MATRIX DEBUG] Writing row for stable phase:
+  Energy: -4.927915e+04
+  Masses: 5.000001e-01 4.999999e-01 
+  Row values (first 3): 5.000001e-01 4.999999e-01 0.000000e+00 
+  RHS: -4.927915e+04
+[CPU EQUILIBRIUM MATRIX DEBUG] Writing row for stable phase:
+  Energy: -4.927915e+04
+  Masses: 5.000000e-01 5.000000e-01 
+  Row values (first 3): 5.000000e-01 5.000000e-01 0.000000e+00 
+  RHS: -4.927915e+04
+[CPU EQUILIBRIUM MATRIX DEBUG] Writing row for stable phase:
+  Energy: -4.927915e+04
+  Masses: 5.000000e-01 5.000000e-01 
+  Row values (first 3): 5.000000e-01 5.000000e-01 0.000000e+00 
+  RHS: -4.927915e+04
+GPU DEBUG: init_all_gpu_phase_records kernel called
+GPU DEBUG: init_all_gpu_phase_records kernel completed
+GPU DEBUG: g_phase_records_array[0].obj = 0x8
+GPU DEBUG: g_phase_records_array[0].formulamole_obj = 0x40
+GPU DEBUG: g_phase_records_array[1].obj = 0x50
+GPU DEBUG: g_phase_records_array[1].formulamole_obj = 0x88
+  Dot product: 4.999999999997625e-01
+  RHS: 5.000000000000000e-01
+  Residual contribution: 2.374767049673210e-13
+[CPU] Phase 0 gradient (iteration 2): [     0.              0.            -74.62843055 -40309.02662427
+ -35097.62182619]
+[CPU] Phase 0 energy: -4.927914976904249e+04
+[CPU] Phase 0 masses: [[0.5000001]
+ [0.4999999]]
+[CPU] Phase 0 equilibrium_rhs before: -4.927914976904249e+04
+[CPU] Phase 1 gradient (iteration 2): [     0.              0.            -74.6284309  -40309.02737219
+--
+
+Phase comparison:
+CPU phases: [(np.str_('BCC_A2'), np.float64(1.0))]
+GPU phases: []
+
+NOTE: Look for '[CPU/GPU] EQUILIBRIUM MATRIX' in the output above to compare matrices

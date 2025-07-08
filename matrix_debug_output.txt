@@ -1,0 +1,739 @@
+/mnt/c/users/scott/Documents/pycalphad/pycalphad/io/tdb.py:995: UserWarning: The type definition character `%` was defined in the following phases: ['LIQUID', 'BCC_A2'], but no corresponding TYPE_DEFINITION line was found in the TDB.
+  warnings.warn(f"The type definition character `{typechar}` was defined in the following phases: "
+/mnt/c/users/scott/Documents/pycalphad/pycalphad/io/tdb.py:995: UserWarning: The type definition character `B` was defined in the following phases: ['BCC_A2'], but no corresponding TYPE_DEFINITION line was found in the TDB.
+  warnings.warn(f"The type definition character `{typechar}` was defined in the following phases: "
+[CPU MATRIX DEBUG] construct_equilibrium_system called, state.iteration=0
+[CPU MATRIX DEBUG] construct_equilibrium_system called, state.iteration=1
+Comparing CPU and GPU equilibrium matrices...
+
+================================================================================
+CPU CALCULATION:
+================================================================================
+
+=== CPU EQUILIBRIUM FUNCTION START ===
+Components: ['NB', 'TI']
+Phases: ['LIQUID', 'BCC_A2']
+Conditions: {'T': 1000, 'P': 101325, 'X(TI)': 0.5}
+
+
+[WORKSPACE DEBUG] recompute() called
+Stack trace:
+  File "/mnt/c/users/scott/Documents/pycalphad/test_equilibrium_matrix_comparison.py", line 29, in <module>
+    cpu_eq = equilibrium(dbf, comps, phases, conditions, gpu=False, verbose=True,
+  File "/mnt/c/users/scott/Documents/pycalphad/pycalphad/core/equilibrium.py", line 114, in equilibrium
+    properties = wks.eq
+  File "/mnt/c/users/scott/Documents/pycalphad/pycalphad/core/workspace.py", line 307, in __get__
+    default_value = obj.recompute()
+  File "/mnt/c/users/scott/Documents/pycalphad/pycalphad/core/workspace.py", line 389, in recompute
+    for line in traceback.format_stack():
+
+=== CPU WORKSPACE DEBUG START ===
+Conditions: OrderedDict({N: array([1.]), P: array([101325.]), T: array([1000.]), X_TI: array([0.5])})
+Phases: ['BCC_A2', 'LIQUID']
+Components: [Component('NB', 'NB1'), Component('TI', 'TI1')]
+Grid calculation complete - grid shape: (1, 1, 1, 46)
+Grid GM range: [-50415.899474, 10000000000.000000]
+[CPU] GRID DETAILED ANALYSIS:
+[CPU]   Unique phases in grid: ['BCC_A2' 'LIQUID' '_FAKE_']
+[CPU]   Phase counts: [22 22  2]
+[CPU]   BCC_A2 GM values: [-49383.00476547 -44171.59921947 -44171.59921947 -46362.58404967
+ -47479.18832299 -48302.0758982  -48978.45976236 -49557.50482302
+ -50039.2110802  -50374.41362632]...
+[CPU]   BCC_A2 GM range: [-50415.899474, -44171.599219]
+[CPU] STARTING_POINT CALL DEBUG:
+[CPU]   unitless_conds type: <class 'collections.OrderedDict'>
+[CPU]   unitless_conds: OrderedDict({N: array([1.]), P: array([101325.]), T: array([1000.]), X_TI: array([0.5])})
+[CPU]   state_variables type: <class 'list'>
+[CPU]   state_variables: [N, P, T]
+[CPU]   phase_record_factory type: <class 'pycalphad.codegen.phase_record_factory.PhaseRecordFactory'>
+[CPU]   grid type: <class 'pycalphad.core.light_dataset.LightDataset'>
+[CPU]   grid coords: ['component', 'N', 'P', 'T']
+
+--- CPU Starting Point Calculation ---
+Conditions: OrderedDict({N: array([1.]), P: array([101325.]), T: array([1000.]), X_TI: array([0.5])})
+Global min enabled: True
+Active phases: ['BCC_A2', 'LIQUID']
+Input grid GM range: [-50415.899474, 10000000000.000000]
+Calculating lower convex hull...
+Lower convex hull calculation complete
+Result GM: -49267.982293
+Result chemical potentials: [-51873.68506569 -46662.27951969]
+--- CPU Starting Point Complete ---
+
+Starting point calculation complete
+Starting point GM: -49267.982293
+[CPU] SOLVER INPUT VALIDATION:
+[CPU]   properties type: <class 'pycalphad.core.light_dataset.LightDataset'>
+[CPU]   properties.GM shape: (1, 1, 1, 1)
+[CPU]   properties.NP shape: (1, 1, 1, 1, 3)
+[CPU]   properties.MU shape: (1, 1, 1, 1, 2)
+[CPU]   properties.Phase shape: (1, 1, 1, 1, 3)
+[CPU]   properties.X shape: (1, 1, 1, 1, 3, 2)
+[CPU]   phase_record_factory: <class 'pycalphad.codegen.phase_record_factory.PhaseRecordFactory'>
+[CPU]   phase_record_factory keys: ['BCC_A2', 'LIQUID']
+[CPU]   grid type: <class 'pycalphad.core.light_dataset.LightDataset'>
+[CPU]   conds_keys: [N, P, T, X_TI]
+[CPU]   state_variables: [N, P, T]
+[CPU]   solver: <class 'pycalphad.core.solver.Solver'>
+[CPU] DETAILED DATA VALIDATION:
+[CPU]   GM values: [-49267.98229269]
+[CPU]   NP values: [0.5 0.5 0. ]
+[CPU]   MU values: [-51873.68506569 -46662.27951969]
+[CPU]   Phase values: ['BCC_A2' 'BCC_A2' '']
+[CPU]   X values: [ 5.55555556e-001  4.44444444e-001  4.44444444e-001  5.55555556e-001
+ -3.64984099e+171  1.27319828e-313]...
+[CPU] SEGMENT 13: Numerical validation
+  cpu_initial_np_mean: 5.000000000000000e-01
+  cpu_initial_np_min: 4.999999999999998e-01
+  cpu_initial_np_max: 5.000000000000002e-01
+  cpu_initial_energy_mean: -4.926798229269055e+04
+  cpu_initial_energy_min: -4.955750482302353e+04
+  cpu_initial_energy_max: -4.897845976235758e+04
+  cpu_total_energy: -4.926798229269056e+04
+  cpu_composition_mean: 5.000000000000000e-01
+  cpu_composition_min: 4.444444444444455e-01
+  cpu_composition_max: 5.555555555555545e-01
+[CPU] Mass residual calc (iteration 0):
+  Coefficients: <MemoryView of 'ndarray' object>
+  Mole fractions: <MemoryView of 'ndarray' object>
+  Dot product: 5.000000000000000e-01
+  RHS: 5.000000000000000e-01
+  Residual contribution: 0.000000000000000e+00
+[CPU] Phase 0 gradient (iteration 0): [     0.              0.            -74.48289566 -40157.74587968
+ -35352.18961331]
+[CPU] Phase 0 energy: -4.955750482302353e+04
+[CPU] Phase 0 masses: [[0.55555556]
+ [0.44444444]]
+[CPU] Phase 0 equilibrium_rhs before: -4.955750482302353e+04
+[CPU] Phase 1 gradient (iteration 0): [     0.              0.            -74.67110538 -40563.59515931
+ -34946.34033369]
+[CPU] Phase 1 energy: -4.897845976235758e+04
+[CPU] Phase 1 masses: [[0.44444444]
+ [0.55555556]]
+[CPU] Phase 1 equilibrium_rhs before: -4.897845976235758e+04
+
+[CPU MATRIX DEBUG] Equilibrium matrix at iteration 0 (rows=4, cols=4):
+  Row 0: +5.555556e-01 +4.444444e-01 +0.000000e+00 +0.000000e+00 | RHS: -4.955750e+04
+  Row 1: +4.444444e-01 +5.555556e-01 +0.000000e+00 +0.000000e+00 | RHS: -4.897846e+04
+  Row 2: -1.318718e-04 +1.318718e-04 -5.555556e-02 +5.555556e-02 | RHS: +6.872372e-01
+  Row 3: +1.355253e-20 +0.000000e+00 +1.000000e+00 +1.000000e+00 | RHS: -4.440892e-16
+
+[CPU TRACE] ===== AFTER ITERATION 0 =====
+[CPU TRACE] Chemical potentials: [-51873.68506569 -46662.27951969]
+[CPU TRACE] System amount: 1.000000000000000e+00
+[CPU TRACE] Mole fractions: [0.5 0.5]
+[CPU TRACE] Mass residual: 0.000000000000000e+00
+[CPU TRACE] Number of active phases: 2
+[CPU TRACE] Free stable indices: <MemoryView of 'ndarray' object>
+
+[CPU TRACE] Phase 0 (BCC_A2):
+  NP (mole fraction): 5.000000000000002e-01
+  phase_amt (formula units): 4.999999999998156e-01
+  energy: -4.955750482302353e+04
+  phase_compositions: <MemoryView of 'ndarray' object>
+  phase_comp_sum: 1.000000000000000e+00
+  Site fractions: [0.5020355 0.4979645]
+  State variables: [1.00000e+00 1.01325e+05 1.00000e+03]
+
+[CPU TRACE] Phase 1 (BCC_A2):
+  NP (mole fraction): 4.999999999999998e-01
+  phase_amt (formula units): 5.000000000001847e-01
+  energy: -4.897845976235758e+04
+  phase_compositions: <MemoryView of 'ndarray' object>
+  phase_comp_sum: 1.000000000000000e+00
+  Site fractions: [0.4979645 0.5020355]
+  State variables: [1.00000e+00 1.01325e+05 1.00000e+03]
+
+[CPU TRACE] Convergence status:
+  converged: False
+  phases_changed: False
+  largest_phase_amt_change: 1.848521336000886e-13
+  largest_y_change: 5.352005665530424e-02
+  largest_statevar_change: 0.000000000000000e+00
+[CPU TRACE] ===== END ITERATION 0 =====
+
+[CPU] Mass residual calc (iteration 1):
+  Coefficients: <MemoryView of 'ndarray' object>
+  Mole fractions: <MemoryView of 'ndarray' object>
+  Dot product: 4.999999999999958e-01
+  RHS: 5.000000000000000e-01
+  Residual contribution: 4.163336342344337e-15
+[CPU] Phase 0 gradient (iteration 1): [     0.              0.            -74.62491392 -40301.8010926
+ -35104.98515541]
+[CPU] Phase 0 energy: -4.928974218711450e+04
+[CPU] Phase 0 masses: [[0.5020355]
+ [0.4979645]]
+[CPU] Phase 0 equilibrium_rhs before: -4.928974218711450e+04
+[CPU] Phase 1 gradient (iteration 1): [     0.              0.            -74.63180973 -40316.3907014
+ -35090.39554661]
+[CPU] Phase 1 energy: -4.926852656659918e+04
+[CPU] Phase 1 masses: [[0.4979645]
+ [0.5020355]]
+[CPU] Phase 1 equilibrium_rhs before: -4.926852656659918e+04
+
+[CPU MATRIX DEBUG] Equilibrium matrix at iteration 1 (rows=4, cols=4):
+  Row 0: +5.020355e-01 +4.979645e-01 +0.000000e+00 +0.000000e+00 | RHS: -4.928974e+04
+  Row 1: +4.979645e-01 +5.020355e-01 +0.000000e+00 +0.000000e+00 | RHS: -4.926853e+04
+  Row 2: -1.395099e-04 +1.395099e-04 -2.035499e-03 +2.035499e-03 | RHS: +7.270426e-01
+  Row 3: -1.355253e-20 +0.000000e+00 +1.000000e+00 +1.000000e+00 | RHS: +4.440892e-16
+[CPU] Mass residual calc (iteration 2):
+  Coefficients: <MemoryView of 'ndarray' object>
+  Mole fractions: <MemoryView of 'ndarray' object>
+[CPU MATRIX DEBUG] construct_equilibrium_system called, state.iteration=2
+[CPU MATRIX DEBUG] construct_equilibrium_system called, state.iteration=3
+[CPU MATRIX DEBUG] construct_equilibrium_system called, state.iteration=4
+[CPU MATRIX DEBUG] construct_equilibrium_system called, state.iteration=5
+[CPU EQUILIBRIUM MATRIX DEBUG] Writing row for stable phase:
+  Energy: -4.955750e+04
+  Masses: 5.555556e-01 4.444444e-01 
+  Row values (first 4): 5.555556e-01 4.444444e-01 0.000000e+00 0.000000e+00 
+  RHS: -4.955750e+04
+[CPU EQUILIBRIUM MATRIX DEBUG] Writing row for stable phase:
+  Energy: -4.897846e+04
+  Masses: 4.444444e-01 5.555556e-01 
+  Row values (first 4): 4.444444e-01 5.555556e-01 0.000000e+00 0.000000e+00 
+  RHS: -4.897846e+04
+[CPU EQUILIBRIUM MATRIX DEBUG] Writing row for stable phase:
+  Energy: -4.928974e+04
+  Masses: 5.020355e-01 4.979645e-01 
+  Row values (first 4): 5.020355e-01 4.979645e-01 0.000000e+00 0.000000e+00 
+  RHS: -4.928974e+04
+[CPU EQUILIBRIUM MATRIX DEBUG] Writing row for stable phase:
+  Energy: -4.926853e+04
+  Masses: 4.979645e-01 5.020355e-01 
+  Row values (first 4): 4.979645e-01 5.020355e-01 0.000000e+00 0.000000e+00 
+  RHS: -4.926853e+04
+[CPU EQUILIBRIUM MATRIX DEBUG] Writing row for stable phase:
+  Energy: -4.927915e+04
+  Masses: 5.000001e-01 4.999999e-01 
+  Row values (first 4): 5.000001e-01 4.999999e-01 0.000000e+00 0.000000e+00 
+  RHS: -4.927915e+04
+[CPU EQUILIBRIUM MATRIX DEBUG] Writing row for stable phase:
+  Energy: -4.927915e+04
+  Masses: 4.999999e-01 5.000001e-01 
+  Row values (first 4): 4.999999e-01 5.000001e-01 0.000000e+00 0.000000e+00 
+  RHS: -4.927915e+04
+[CPU EQUILIBRIUM MATRIX DEBUG] Writing row for stable phase:
+  Energy: -4.927915e+04
+  Masses: 5.000001e-01 4.999999e-01 
+  Row values (first 3): 5.000001e-01 4.999999e-01 0.000000e+00 
+  RHS: -4.927915e+04
+[CPU EQUILIBRIUM MATRIX DEBUG] Writing row for stable phase:
+  Energy: -4.927915e+04
+  Masses: 5.000000e-01 5.000000e-01 
+  Row values (first 3): 5.000000e-01 5.000000e-01 0.000000e+00 
+  RHS: -4.927915e+04
+[CPU EQUILIBRIUM MATRIX DEBUG] Writing row for stable phase:
+  Energy: -4.927915e+04
+  Masses: 5.000000e-01 5.000000e-01 
+  Row values (first 3): 5.000000e-01 5.000000e-01 0.000000e+00 
+  RHS: -4.927915e+04
+GPU DEBUG: init_all_gpu_phase_records kernel called
+GPU DEBUG: init_all_gpu_phase_records kernel completed
+GPU DEBUG: g_phase_records_array[0].obj = 0x8
+GPU DEBUG: g_phase_records_array[0].formulamole_obj = 0x40
+GPU DEBUG: g_phase_records_array[1].obj = 0x50
+GPU DEBUG: g_phase_records_array[1].formulamole_obj = 0x88
+  Dot product: 4.999999999999978e-01
+  RHS: 5.000000000000000e-01
+  Residual contribution: 2.220446049250313e-15
+[CPU] Phase 0 gradient (iteration 2): [     0.              0.            -74.62843055 -40309.02662427
+ -35097.62182619]
+[CPU] Phase 0 energy: -4.927914976904126e+04
+[CPU] Phase 0 masses: [[0.5000001]
+ [0.4999999]]
+[CPU] Phase 0 equilibrium_rhs before: -4.927914976904126e+04
+[CPU] Phase 1 gradient (iteration 2): [     0.              0.            -74.6284309  -40309.02737219
+ -35097.62107828]
+[CPU] Phase 1 energy: -4.927914868142437e+04
+[CPU] Phase 1 masses: [[0.4999999]
+ [0.5000001]]
+[CPU] Phase 1 equilibrium_rhs before: -4.927914868142437e+04
+
+[CPU MATRIX DEBUG] Equilibrium matrix at iteration 2 (rows=4, cols=4):
+  Row 0: +5.000001e-01 +4.999999e-01 +0.000000e+00 +0.000000e+00 | RHS: -4.927915e+04
+  Row 1: +4.999999e-01 +5.000001e-01 +0.000000e+00 +0.000000e+00 | RHS: -4.927915e+04
+  Row 2: -1.395206e-04 +1.395206e-04 -1.043497e-07 +1.043497e-07 | RHS: +7.270985e-01
+  Row 3: +0.000000e+00 +0.000000e+00 +1.000000e+00 +1.000000e+00 | RHS: +0.000000e+00
+[CPU DEBUG] CONSOLIDATING phases 0 and 1: max_diff=0.000000
+Result from _solve_eq_at_conditions: <pycalphad.core.light_dataset.LightDataset object at 0x7e4f6e2e2f90>
+Result type: <class 'pycalphad.core.light_dataset.LightDataset'>
+Result has GM: [[[[-49279.14922523]]]]
+=== CPU WORKSPACE DEBUG END ===
+
+DEBUG equilibrium: properties = <pycalphad.core.light_dataset.LightDataset object at 0x7e4f6e2e2f90>
+
+=== CPU EQUILIBRIUM FINAL RESULTS ===
+
+CPU Final GM: -49279.149225 J/mol
+CPU Final active phase amounts: [1.]
+CPU All phase amounts: [ 1. nan nan]...
+CPU Final chemical potentials: [-51884.85199823 -46673.44645224]
+CPU Final active phases: [np.str_('BCC_A2')]
+CPU Phase 0 composition: [0.5 0.5]
+=== END CPU EQUILIBRIUM DEBUG ===
+
+  condition_keys: ['N', 'P', 'T', 'X_TI']
+  additional_properties: []
+  converted to xarray Dataset
+  added creation timestamp: 2025-07-03T15:38:54.411432
+[CPU] DEBUG: CPU buffer has 484 entries before close
+[CPU] DEBUG: First entry: ('segment', 1, "\n[SEGMENT 01] Entry point and parameter validation\n  gpu_mode: False\n  components: ['NB', 'TI']\n  phases: ['LIQUID', 'BCC_A2']\n  conditions: {'T': 1000, 'P': 101325, 'X(TI)': 0.5}\n  output_requested: GM\n  verbose: True\n  force_cpu: False\n")
+
+================================================================================
+GPU CALCULATION:
+================================================================================
+[GPU] Starting GPU-accelerated equilibrium calculation...
+[GPU] Creating workspace with same parameters as CPU path...
+[GPU] Starting GPU equilibrium calculation...
+[GPU DEBUG] Input conditions: N=[1.0] mole
+P=[101325.0] pascal
+T=[1000.0] kelvin
+X_TI=[0.5] fraction
+
+[GPU DEBUG] Components: [Component('NB', 'NB1'), Component('TI', 'TI1')]
+[GPU DEBUG] Phases: ['BCC_A2', 'LIQUID']
+[GPU DEBUG] Preparing to calculate starting point...
+[GPU DEBUG] unitless_conds: OrderedDict({N: array([1.]), P: array([101325.]), T: array([1000.]), X_TI: array([0.5])})
+[GPU DEBUG] state_variables: [N, P, T]
+[GPU DEBUG] Running calculate()...
+[GPU DEBUG] Grid calculated with shape: (1, 1, 1, 46)
+[GPU DEBUG] Running starting_point()...
+
+--- CPU Starting Point Calculation ---
+Conditions: OrderedDict({N: array([1.]), P: array([101325.]), T: array([1000.]), X_TI: array([0.5])})
+Global min enabled: True
+Active phases: ['BCC_A2', 'LIQUID']
+Input grid GM range: [-50415.899474, 10000000000.000000]
+Calculating lower convex hull...
+Lower convex hull calculation complete
+Result GM: -49267.982293
+Result chemical potentials: [-51873.68506569 -46662.27951969]
+--- CPU Starting Point Complete ---
+
+[GPU DEBUG] Starting point calculated
+[GPU DEBUG] Starting NP shape: (1, 1, 1, 1, 3)
+[GPU] Generating C code for phase models...
+[GPU] Phase name to unique index mapping: {'BCC_A2': 0, 'LIQUID': 1}
+[GPU] Generating functions for model 0: BCC_A2
+[GPU] Generating functions for model 1: LIQUID
+[GPU] Generated C code for 2 unique phase models.
+[GPU] Compiling new GPU module with cache key: c08585ea528c64b47abe32555cd3ba92
+[GPU] Assembling full GPU source code...
+[GPU] DEBUG: Saved generated kernel source to 'generated_equilibrium_kernel.cu'
+[GPU] Using dynamic kernel sizing: {'MAX_COMPONENTS': 4, 'MAX_PHASES': 4, 'MAX_STATEVARS': 4, 'MAX_DOF_PER_PHASE': 4, 'MAX_INTERNAL_CONSTRAINTS': 4, 'MAX_FIXED_MOLE_FRACTION_CONDITIONS': 4, 'MAX_GRID_POINTS': 10000, 'MIN_PHASE_FRACTION': 1e-06}
+[GPU] Compiler defines: ['-DMAX_COMPONENTS=4', '-DMAX_PHASES=4', '-DMAX_STATEVARS=4', '-DMAX_DOF_PER_PHASE=4', '-DMAX_INTERNAL_CONSTRAINTS=4', '-DMAX_FIXED_MOLE_FRACTION_CONDITIONS=4', '-DMAX_GRID_POINTS=10000', '-DMIN_PHASE_FRACTION=1e-06']
+[GPU] DEBUG: Kernel compilation successful with dynamic sizing
+[GPU] Global PhaseRecords initialized on GPU.
+[GPU] DEBUG: Successfully got top_level_equilibrium_kernel function: <cupy._core.raw.RawKernel object at 0x7e4f5f76fdc0>
+
+[GPU] DEBUG: Testing struct-like argument passing...
+[GPU] DEBUG: Getting test_struct_kernel function...
+[GPU] DEBUG: Creating test struct data...
+[GPU] DEBUG: Testing struct kernel with pointer arguments...
+[GPU] DEBUG: Struct test args: (30104617984, 30104618496, 30104619008, 100, 30104617472, 30104619520)
+[GPU] DEBUG: Struct test args types: [<class 'int'>, <class 'int'>, <class 'int'>, <class 'int'>, <class 'int'>, <class 'int'>]
+[GPU] Preparing data for GPU transfer...
+[GPU] Using starting point properties...
+[GPU]   state_variables: [N, P, T]
+[GPU] STEP1 DEBUG - starting_point() output:
+[GPU]   Type: <class 'pycalphad.core.light_dataset.LightDataset'>
+[GPU]   GM shape: (1, 1, 1, 1), values: [-49267.98229269]
+[GPU]   MU shape: (1, 1, 1, 1, 2), values: [-51873.68506569 -46662.27951969]
+[GPU]   Phase shape: (1, 1, 1, 1, 3), values: ['BCC_A2' 'BCC_A2' '']
+[GPU]   NP shape: (1, 1, 1, 1, 3), values: [0.5 0.5 0. ]
+[GPU]   Active phases in starting_point: 2
+[GPU]   Active phase names: ['BCC_A2' 'BCC_A2']
+[GPU]   Active phase amounts: [0.5 0.5]
+[GPU] ✅ Preserving original starting point: 2 phases (same as CPU)
+[GPU]   X shape: (1, 1, 1, 1, 3, 2), values: [ 5.55555556e-001  4.44444444e-001  4.44444444e-001  5.55555556e-001
+ -3.64984099e+171              nan]
+[GPU] ✅ Using original properties from wks.eq - NO consolidation (same as CPU)
+[GPU] DEBUG: Determining number of conditions from properties...
+[GPU] Properties GM array: [[[[-49267.98229269]]]]
+[GPU] GM array shape: (1, 1, 1, 1)
+[GPU] DEBUG: gm_shape = (1, 1, 1, 1)
+[GPU] DEBUG: len(gm_shape) = 4
+[GPU] DEBUG: gm_shape dimensions = (1, 1, 1, 1)
+[GPU] DEBUG: total_combinations = 1
+[GPU] DEBUG: num_conditions_total = 1
+[GPU] DEBUG: State variable N: (1,) = [1.]
+[GPU] DEBUG: State variable P: (1,) = [101325.]
+[GPU] DEBUG: State variable T: (1,) = [1000.]
+[GPU] DEBUG: Condition 0 state_vals before packing: [1.00000e+00 1.01325e+05 1.00000e+03 0.00000e+00]
+[GPU] DEBUG: Condition 0 condition_data after packing: [1.00000e+00 1.01325e+05 1.00000e+03 0.00000e+00 0.00000e+00 5.00000e-01
+ 0.00000e+00 0.00000e+00]
+[GPU] DEBUG: Creating SystemSpecification...
+[GPU] DEBUG: SystemSpec constants: components=4, mole=4, statevars=4, phases=4
+[GPU] DEBUG: Calling _populate_system_specification...
+[GPU] DEBUG: _populate_system_specification started
+[GPU] DEBUG: Populate constants: components=4, statevars=4, constraints=4
+[GPU] DEBUG: Basic fields set - num_statevars=3.0, num_components=2.0
+[GPU] DEBUG: Arrays already initialized with correct default values...
+[GPU] DEBUG: Arrays initialized successfully
+[GPU] DEBUG: Analyzing conditions...
+[GPU] DEBUG: wks_obj.conditions = N=[1.0] mole
+P=[101325.0] pascal
+T=[1000.0] kelvin
+X_TI=[0.5] fraction
+
+[GPU] DEBUG: Checking chemical potential conditions...
+[GPU] DEBUG: Processing component 0: NB
+[GPU] DEBUG: mu_var = MU_NB
+[GPU] DEBUG: mu_var not in conditions, adding to free list
+[GPU] CRITICAL FIX: Set initial_chemical_potentials[0] = -51873.685066 from workspace
+[GPU] DEBUG: Processing component 1: TI
+[GPU] DEBUG: mu_var = MU_TI
+[GPU] DEBUG: mu_var not in conditions, adding to free list
+[GPU] CRITICAL FIX: Set initial_chemical_potentials[1] = -46662.279520 from workspace
+[GPU] DEBUG: Checking state variable conditions...
+[GPU] DEBUG: Processing state var 0: N
+[GPU] DEBUG: Found state_var in conditions
+[GPU] DEBUG: Processing state var 1: P
+[GPU] DEBUG: Found state_var in conditions
+[GPU] DEBUG: Processing state var 2: T
+[GPU] DEBUG: Found state_var in conditions
+[GPU] DEBUG: Checking mole fraction constraints...
+[GPU] DEBUG: Processing mole fraction for component 0: NB
+[GPU] DEBUG: x_var = X_NB
+[GPU] DEBUG: x_var not in conditions or constraint limit reached
+[GPU] DEBUG: Processing mole fraction for component 1: TI
+[GPU] DEBUG: x_var = X_TI
+[GPU] DEBUG: Found x_var in conditions
+[GPU] DEBUG: x_value = [0.5] (type: <class 'numpy.ndarray'>)
+[GPU] DEBUG: x_scalar = 0.5
+[GPU] CRITICAL FIX: Adjusting num_free_chemical_potentials from 2 to 1
+[GPU]   Components: 2.0, Fixed chempot: 0, Mole fraction constraints: 1
+[GPU] DEBUG: _populate_system_specification completed
+[GPU] Using dynamic array sizes: phases=4, dof=4, components=4
+[GPU] Processing condition 0, multi_idx = (np.int64(0), np.int64(0), np.int64(0), np.int64(0)), gm_array.shape = (1, 1, 1, 1)
+[GPU] Full properties.MU shape: (1, 1, 1, 1, 2)
+[GPU] MU array shape: (1, 1, 1, 1, 2)
+[GPU] All MU values:
+  [0]: [-51873.68506569 -46662.27951969]
+[GPU] Condition 0 - extracted MU: [-51873.68506569 -46662.27951969]...
+[GPU] Condition 0 - extracted Phase: [np.str_('BCC_A2'), np.str_('BCC_A2'), np.str_('')]
+[GPU] Condition 0 - phases: 3, np_values: 3
+[GPU] Condition 0 - phase_names: ['BCC_A2' 'BCC_A2' '']
+[GPU] Condition 0 - np_values: [0.5 0.5 0. ]...
+[GPU] Condition 0 phase 0: 'BCC_A2' -> unique_idx 0
+[GPU] Condition 0 phase 1: 'BCC_A2' -> unique_idx 0
+[GPU] Condition 0 - active phases: 2
+[GPU] WARNING: Condition 0 has duplicate phase names: [np.str_('BCC_A2'), np.str_('BCC_A2')]
+[GPU] This indicates an immiscibility gap. GPU calculation may be incorrect.
+[GPU] Consider using CPU calculation for this case.
+[GPU]   Phase 'BCC_A2' appears 2 times (immiscibility)
+[GPU] Condition 0 phase instance 0: BCC_A2 uses model_idx 0 (amount=0.500000)
+[GPU] DEBUG: Copying site fractions for condition 0, phase 0:
+  orig_phase_idx: 0
+  y_values.shape: (3, 2)
+  y_row from y_values[0]: [0.55555556 0.44444444]
+  Stored at initial_phase_data_arrays['site_fractions'][0, 0, :]: [0.55555556 0.44444444]
+[GPU] DEBUG: x_values shape: (3, 2), orig_phase_idx: 0
+[GPU] DEBUG: x_values content: [ 5.55555556e-001  4.44444444e-001  4.44444444e-001  5.55555556e-001
+ -3.64984099e+171              nan]
+[GPU] DEBUG: Copied X for phase 0: [0.55555556 0.44444444]
+[GPU] Condition 0 phase instance 1: BCC_A2 uses model_idx 0 (amount=0.500000)
+[GPU] DEBUG: Copying site fractions for condition 0, phase 1:
+  orig_phase_idx: 1
+  y_values.shape: (3, 2)
+  y_row from y_values[1]: [0.44444444 0.55555556]
+  Stored at initial_phase_data_arrays['site_fractions'][0, 1, :]: [0.44444444 0.55555556]
+[GPU] DEBUG: x_values shape: (3, 2), orig_phase_idx: 1
+[GPU] DEBUG: x_values content: [ 5.55555556e-001  4.44444444e-001  4.44444444e-001  5.55555556e-001
+ -3.64984099e+171              nan]
+[GPU] DEBUG: Copied X for phase 1: [0.44444444 0.55555556]
+[GPU] About to prepare grid data, grid type: <class 'pycalphad.core.light_dataset.LightDataset'>
+[GPU] _prepare_grid_data_for_gpu_from_calculate_result called
+[GPU] Grid data shape - Y: (1, 1, 1, 46, 2), X: (1, 1, 1, 46, 2), GM: (1, 1, 1, 46), Phase: (1, 1, 1, 46)
+[GPU] Grid preparation: num_grid_points_total=46, actual_grid_points=46, num_unique_phases=2
+[GPU] Prepared grid data from calculate(): 46 grid points (limited from 46), 2 phases
+[GPU] DEBUG: Creating struct-compatible memory layouts...
+[GPU Python] prescribed_mole_fraction_coefficients shape: (4, 4)
+[GPU Python] prescribed_mole_fraction_coefficients: [[0. 1. 0. 0.]
+ [0. 0. 0. 0.]
+ [0. 0. 0. 0.]
+ [0. 0. 0. 0.]]
+[GPU Python] prescribed_mole_fraction_rhs: [0.5 0.  0.  0. ]
+[GPU Python] After assignment, system_spec['prescribed_mole_fraction_rhs']: [0.5 0.  0.  0. ]
+[GPU Python] First 4 values: [0.5 0.  0.  0. ]
+[GPU Python] Struct offsets:
+  num_statevars offset: 0
+  prescribed_mole_fraction_coefficients offset: 48
+  prescribed_mole_fraction_rhs offset: 176
+  num_prescribed_mole_fraction_conditions offset: 208
+[GPU Python] Raw bytes at prescribed_mole_fraction_rhs offset 176:
+  Bytes: 000000000000e03f000000000000000000000000000000000000000000000000
+[GPU] DEBUG: SystemSpecification struct created
+[GPU] DEBUG: ConditionArgsSingle[0] state_variables_values: [1.00000e+00 1.01325e+05 1.00000e+03 0.00000e+00 0.00000e+00 5.00000e-01
+ 0.00000e+00 0.00000e+00]
+[GPU] DEBUG: ConditionArgsSingle struct array created with 1 conditions
+[GPU] NEW All-double layout: 45 doubles per condition = 360 bytes
+[GPU] Total initial phase data: 360 bytes for 1 conditions
+[GPU] DEBUG: SITE_FRACTIONS DETAILED for condition 0:
+  Original shape: (4, 4)
+  Original data: [[0.55555556 0.44444444 0.         0.        ]
+ [0.44444444 0.55555556 0.         0.        ]
+ [0.         0.         0.         0.        ]
+ [0.         0.         0.         0.        ]]
+  Flattened sf_flat: [0.55555556 0.44444444 0.         0.         0.44444444 0.55555556
+ 0.         0.         0.         0.         0.         0.
+ 0.         0.         0.         0.        ]
+  Padded sf_padded: [0.55555556 0.44444444 0.         0.         0.44444444 0.55555556
+ 0.         0.         0.         0.         0.         0.
+ 0.         0.         0.         0.        ]
+  Stored in flat array at offset 8: [0.55555556 0.44444444 0.         0.         0.44444444 0.55555556
+ 0.         0.         0.         0.         0.         0.
+ 0.         0.         0.         0.        ]
+  Phase indices: [ 0  0 -1 -1]
+  Phase amounts: [0.5 0.5 0.  0. ]
+  Compositions: [0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0.]
+[GPU] PYTHON SIDE FLAT ARRAY DUMP - First 45 values:
+  [0]: 0.0
+  [1]: 0.0
+  [2]: -1.0
+  [3]: -1.0
+  [4]: 0.5000000000000002
+  [5]: 0.49999999999999983
+  [6]: 0.0
+  [7]: 0.0
+  [8]: 0.5555555555555545
+  [9]: 0.44444444444444553
+  [10]: 0.0
+  [11]: 0.0
+  [12]: 0.44444444444444553
+  [13]: 0.5555555555555545
+  [14]: 0.0
+  [15]: 0.0
+  [16]: 0.0
+  [17]: 0.0
+  [18]: 0.0
+  [19]: 0.0
+  [20]: 0.0
+  [21]: 0.0
+  [22]: 0.0
+  [23]: 0.0
+  [24]: 0.5555555555555545
+  [25]: 0.44444444444444553
+  [26]: 0.0
+  [27]: 0.0
+  [28]: 0.44444444444444553
+  [29]: 0.5555555555555545
+  [30]: 0.0
+  [31]: 0.0
+  [32]: 0.0
+  [33]: 0.0
+  [34]: 0.0
+  [35]: 0.0
+  [36]: 0.0
+  [37]: 0.0
+  [38]: 0.0
+  [39]: 0.0
+  [40]: -51873.68506568742
+  [41]: -46662.279519693686
+  [42]: 0.0
+  [43]: 0.0
+  [44]: 2.0
+[GPU] InitialPhaseData[0]: num_phases=2, phases=[0 0], amounts=[0.5 0.5]
+[GPU] DEBUG: InitialPhaseDataSingle struct array created with 1 conditions
+[GPU] DEBUG: Array shape: (1, 45), dtype: float64
+[GPU] DEBUG: Array sample values: [0]=0.0, [44]=2.0
+[GPU] DEBUG: Results flat array created with 47 doubles (1 conditions * 47 per condition)
+[GPU] DEBUG: EquilibriumResultSingle struct array created for post-processing
+[GPU] DEBUG: Transferring struct data to GPU...
+[GPU] DEBUG: Packing structs into byte arrays...
+[GPU] DEBUG: initial_phase_data_struct BEFORE transfer:
+[GPU] DEBUG:   shape: (1, 45)
+[GPU] DEBUG:   dtype: float64
+[GPU] DEBUG:   BEFORE - first 45 values: [ 0.00000000e+00  0.00000000e+00 -1.00000000e+00 -1.00000000e+00
+  5.00000000e-01  5.00000000e-01  0.00000000e+00  0.00000000e+00
+  5.55555556e-01  4.44444444e-01  0.00000000e+00  0.00000000e+00
+  4.44444444e-01  5.55555556e-01  0.00000000e+00  0.00000000e+00
+  0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00
+  0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00
+  5.55555556e-01  4.44444444e-01  0.00000000e+00  0.00000000e+00
+  4.44444444e-01  5.55555556e-01  0.00000000e+00  0.00000000e+00
+  0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00
+  0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00
+ -5.18736851e+04 -4.66622795e+04  0.00000000e+00  0.00000000e+00
+  2.00000000e+00]
+[GPU] DEBUG: BEFORE - phase_amounts: []
+[GPU] DEBUG: BEFORE - chemical_potentials: []
+[GPU] DEBUG: BEFORE - num_phases: (44, np.float64(2.0))
+[GPU] DEBUG: system_spec bytes at offset 176-184 (prescribed_mole_fraction_rhs[0]):
+  Hex: 000000000000e03f
+  Decoded double: 0.5
+TEST KERNEL: Received data at 0x702603800
+TEST KERNEL: First 10 values: [0]=0.000000 [1]=0.000000 [2]=-1.000000 [3]=-1.000000 [4]=0.500000 [5]=0.500000 [6]=0.000000 [7]=0.000000 [8]=0.555556 [9]=0.444444 
+TEST KERNEL: Value at [44]: 2.000000
+GPU DEBUG: top_level_equilibrium_kernel STARTED with tid=0, num_conditions=1
+GPU DEBUG: Thread 0 extracted conditions - T=1000.000000
+GPU DEBUG: Thread 0 condition_offset=0, MAX_STATEVARS=4
+GPU DEBUG: Thread 0 condition_data_array values at offset 0:
+  [0] = 1.000000
+  [1] = 101325.000000
+  [2] = 1000.000000
+  [3] = 0.000000
+  [4] = 0.000000
+  [5] = 0.500000
+  [6] = 0.000000
+  [7] = 0.000000
+GPU DEBUG: Thread 0 mole fractions: X(NB)=0.000000, X(TI)=0.500000, X(VA)=0.000000
+GPU DEBUG: Initial data check passed, proceeding with calculation
+[GPU] SEGMENT 13: Create composition sets from starting point (condition 0)
+GPU DEBUG: Thread 0 - condition_idx=0, doubles_per_struct=45, struct_offset=0
+GPU DEBUG: Thread 0 reading chemical potentials from struct_offset=0 + chem_pot_offset=40 = 40
+GPU DEBUG: Thread 0 SystemSpecification check - num_components=2
+  Thread 0 chemical_potentials[0] = -5.187369e+04 (from initial_data offset 40)
+  Thread 0 chemical_potentials[1] = -4.666228e+04 (from initial_data offset 41)
+  Thread 0 chemical_potentials[2] = 0.000000e+00 (from initial_data offset 42)
+GPU DEBUG: Thread 0 extracted phase data - phase_indices[0]=0, phase_amounts[0]=0.500000
+GPU DEBUG: Thread 0 chem_pot[0]=-51873.685066, chem_pot[1]=-46662.279520
+[GPU]   total_composition_sets_created: 2.000000000000000e+00
+GPU DEBUG: debug_num_phases=2, safe_num_phases=2
+GPU DEBUG: Starting phase loop with 2 phases
+GPU DEBUG: Processing phase 0 - record_idx=0, amount=0.500000
+GPU DEBUG: Phase 0 validation - valid=1 (amount>1e-12=1, idx>=0=1, idx<max=1)
+GPU DEBUG: Entered phase_valid block for phase 0
+GPU DEBUG: Setting up DOF array (GPU format: N, P, T, site_fractions)
+GPU DEBUG: DOF state vars from condition_data: N=1.000000 (pos 0), P=101325.000000 (pos 1), T=1000.000000 (pos 2)
+GPU DEBUG: State variables processed, moving to site fractions
+GPU DEBUG: Site fraction 0 = 0.555555555555554 (phase_dof=2)
+GPU DEBUG: Site fraction 1 = 0.444444444444446 (phase_dof=2)
+[GPU]   phase_site_fractions: [0.555556, 0.444444]
+GPU DEBUG: Site fractions processed, calculating phase energy
+GPU DEBUG: DOF for energy calc - T=1000.000000000000000, Y(NB)=0.555555555555554, Y(TI)=0.444444444444446
+[GPU]   phase_0_energy: -4.955750482302353e+04
+GPU DEBUG: Phase 0 energy = -49557.504823 J/mol
+GPU DEBUG: Phase 0 - amount=0.500000, energy=-49557.504823
+GPU DEBUG: Processing phase 1 - record_idx=0, amount=0.500000
+GPU DEBUG: Phase 1 validation - valid=1 (amount>1e-12=1, idx>=0=1, idx<max=1)
+GPU DEBUG: Entered phase_valid block for phase 1
+[GPU]   phase_site_fractions: [0.444444, 0.555556]
+[GPU]   phase_1_energy: -4.897845976235758e+04
+GPU DEBUG: Phase 1 energy = -48978.459762 J/mol
+GPU DEBUG: Phase 1 - amount=0.500000, energy=-48978.459762
+GPU DEBUG: About to prepare solver data structures
+GPU DEBUG: Copied 3 state variables to condition_args_single:
+  [0]=1.000000 (N), [1]=101325.000000 (P), [2]=1000.000000 (T)
+GPU DEBUG: Using prescribed_mole_fraction_rhs[0] = 0.500000 (should be constant)
+GPU DEBUG: CALLING solve_equilibrium_at_condition_global_mem for condition 0
+GPU DEBUG: sys_spec=0x702600c00, thread arrays ready
+GPU DEBUG: solve_equilibrium_at_condition_global_mem STARTED
+GPU DEBUG: Thread 0 SystemSpecification from Python:
+  Thread 0: num_free_chemical_potentials = 1
+  Thread 0: num_prescribed_mole_fraction_conditions = 1
+  Thread 0: Struct base address: 0x7e4f53ffd528
+  Thread 0: Address of prescribed_mole_fraction_rhs: 0x7e4f53ffd5d8
+  Thread 0: Offset of prescribed_mole_fraction_rhs: 176
+  Thread 0: Direct read prescribed_mole_fraction_rhs[0] = 5.000000e-01
+  Thread 0: Copy read prescribed_mole_fraction_rhs[0] = 5.000000e-01
+  Thread 0: Value at offset 176: 5.000000e-01
+  Thread 0: Raw bytes at offset 176: 000000000000e03f
+  Thread 0: Value at offset 168: 0.000000e+00
+  Thread 0: Value at offset 176: 5.000000e-01
+  Thread 0: Value at offset 184: 0.000000e+00
+  Thread 0: prescribed_system_amount = 1.000000
+GPU ERROR: global_system_states is null for thread 0
+GPU DEBUG: Storing final result - equilibrium_result.final_system_gm=-49267.982293
+[GPU] DEBUG: First two doubles in condition_args_bytes: (1.0, 101325.0)
+[GPU] DEBUG: condition_args as doubles - shape: (8,)
+[GPU] DEBUG: First 8 doubles: [1.00000e+00 1.01325e+05 1.00000e+03 0.00000e+00 0.00000e+00 5.00000e-01
+ 0.00000e+00 0.00000e+00]
+[GPU] DEBUG: After cp.asarray and flatten - GPU array shape: (45,), dtype: float64
+[GPU] DEBUG: GPU array sample values: [0]=0.0, [44]=2.0
+[GPU] DEBUG: Memory transfer test completed
+[GPU] DEBUG: Using uint8 byte array approach
+[GPU] Grid data transferred to GPU successfully (3544 bytes)
+[GPU] Creating debug arrays to track solver steps...
+[GPU] Creating global memory arrays to replace stack memory...
+[GPU] Allocated 19 global memory arrays, total: 0.1 MB
+[GPU] Launching kernel with 1 blocks, 256 threads...
+[GPU] Debug arrays enabled for 1 conditions
+[GPU] DEBUG: Verifying initial phase data AFTER GPU transfer...
+[GPU] DEBUG: initial_phase_data_gpu type: <class 'cupy.ndarray'>
+[GPU] DEBUG: initial_phase_data_gpu shape: (45,)
+[GPU] DEBUG: initial_phase_data_gpu dtype: float64
+[GPU] DEBUG: AFTER - first 45 values: [ 0.00000000e+00  0.00000000e+00 -1.00000000e+00 -1.00000000e+00
+  5.00000000e-01  5.00000000e-01  0.00000000e+00  0.00000000e+00
+  5.55555556e-01  4.44444444e-01  0.00000000e+00  0.00000000e+00
+  4.44444444e-01  5.55555556e-01  0.00000000e+00  0.00000000e+00
+  0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00
+  0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00
+  5.55555556e-01  4.44444444e-01  0.00000000e+00  0.00000000e+00
+  4.44444444e-01  5.55555556e-01  0.00000000e+00  0.00000000e+00
+  0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00
+  0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00
+ -5.18736851e+04 -4.66622795e+04  0.00000000e+00  0.00000000e+00
+  2.00000000e+00]
+[GPU] DEBUG: AFTER - phase_amounts: []
+[GPU] DEBUG: AFTER - chemical_potentials: []
+[GPU] DEBUG: AFTER - num_phases: (44, np.float64(2.0))
+[GPU] DEBUG: ❌ Data transfer INCOMPLETE - missing some expected values
+[GPU] Kernel execution completed.
+
+[GPU] ===== SOLVER DEBUG ANALYSIS =====
+
+[GPU] Condition 0 solver history:
+  Total iterations: 6
+  Step 0: GM=-49267.982293, MU=[-51873.69, -46662.28], Conv=0
+  Step 1: GM=-999.000000, MU=[0.00, 0.00], Conv=-1
+  Step 2: GM=-49267.982293, MU=[-51873.69, -46662.28], Conv=0
+  Step 3: GM=-1000.000000, MU=[0.00, 0.00], Conv=0
+  Step 4: GM=-2000.000000, MU=[0.00, 0.00], Conv=0
+  Step 5: GM=0.000000, MU=[0.00, 0.00], Conv=0
+[GPU] Threads with valid results: 1/1
+[GPU] Threads that converged: 0/1
+[GPU] Temperature range: 1000.0 - 1000.0 K
+[GPU] DEBUG: Converted flat array to structured format
+[GPU] DEBUG: First result GM = -49267.98229269056
+[GPU] DEBUG: First result converged = False
+[GPU] DEBUG: First result num_stable_phases = 1
+[GPU] DEBUG: Valid GM values in structured array: 1/1
+[GPU] DEBUG: Converged results in structured array: 0/1
+[GPU] ✓ GPU results successfully converted to structured format
+[GPU] Processing GPU results...
+[GPU] Using dynamic result array sizes: phases=4, components=4, dof=4
+[GPU] DEBUG: Using original coordinate structure from properties
+[GPU] DEBUG: Original coords: ['N', 'P', 'T', 'X_TI', 'vertex', 'component']
+[GPU] DEBUG: Output shape from properties: (1, 1, 1, 1)
+[GPU] DEBUG: Coord keys for shape: ['N', 'P', 'T', 'X_TI']
+[GPU] Raw GPU results debug:
+[GPU] x_flat shape: (1, 16)
+[GPU] First condition X values: [0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0.]
+[GPU] Expected layout: phase0[NB,TI,VA,?], phase1[NB,TI,VA,?], ...
+[GPU] Reshaped X:
+  Phase 0: [0. 0. 0. 0.]
+  Phase 1: [0. 0. 0. 0.]
+[GPU] Analyzing X data layout...
+[GPU] Raw x_flat[0] first 16 values: [0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0.]
+[GPU] Checking for symmetric composition phase merger...
+[GPU] Phase merger check complete.
+[GPU] DEBUG: Reshaping results - GM flat shape: (1,), output_shape: (1, 1, 1, 1)
+[GPU] DEBUG: MU flat shape: (1, 4), expected components: 2
+[GPU] Results processed into LightDataset.
+[GPU] Computing additional output properties...
+[GPU] Warning: Additional output properties ['GM'] not yet fully supported in GPU version.
+[GPU] Returning core equilibrium results (GM, MU, NP, Phase, X, Y).
+[GPU] GPU equilibrium calculation completed successfully.
+[GPU DEBUG] Final GM: [[[[-49267.98229269]]]]
+[GPU DEBUG] Final phase amounts: [[[[[0. 0. 0. 0.]]]]]
+[GPU DEBUG] Final chemical potentials: [[[[[-51873.68506569 -46662.27951969]]]]]
+[GPU DEBUG] Final phase names: [[[[['' '' '' '']]]]]
+[GPU DEBUG] Final compositions: [[[[[[0. 0.]
+     [0. 0.]
+     [0. 0.]
+     [0. 0.]]]]]]
+
+================================================================================
+RESULTS COMPARISON:
+================================================================================
+CPU GM: -49279.14922523283
+GPU GM: -49267.98229269056
+Difference: 11.166933 J/mol
+
+Phase comparison:
+CPU phases: [(np.str_('BCC_A2'), np.float64(1.0))]
+GPU phases: []
+
+NOTE: Look for '[CPU/GPU] EQUILIBRIUM MATRIX' in the output above to compare matrices

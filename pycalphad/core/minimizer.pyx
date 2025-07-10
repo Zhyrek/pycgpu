@@ -812,6 +812,12 @@ cdef class SystemState:
         
         debug_log(f"  zeroed_arrays", True)
         
+        # DEBUG: Track total phase amounts through iterations
+        cdef double phase_amt_sum = 0.0
+        for idx in range(len(self.compsets)):
+            phase_amt_sum += self.phase_amt[idx]
+        print(f"[CPU MASS BALANCE] recompute() - iteration {self.iteration}: sum(phase_amt) = {phase_amt_sum:.15e}")
+        
         # Compute normalized global quantities
         for idx in range(len(self.compsets)):
             x = self.dof[idx]
@@ -933,9 +939,19 @@ cdef class SystemState:
             csst.moles_normalization_grad[:] = 0
             
             # Calculate c_G
+            # DEBUG: Print c_G calculation details
+            if idx < 2 and self.iteration < 2:
+                print(f"[CPU c_G DEBUG] Phase {idx} calculation:")
+                print(f"  gradient values: {np.asarray(csst.grad[spec.num_statevars:spec.num_statevars+num_phase_dof])}")
+                print(f"  full_e_matrix diagonal: {[csst.full_e_matrix[i,i] for i in range(num_phase_dof)]}")
+                print(f"  Before c_G calc, c_G = {np.asarray(csst.c_G)}")
             for i in range(num_phase_dof):
                 for j in range(num_phase_dof):
+                    if idx < 2 and self.iteration < 2 and i == 0:
+                        print(f"    c_G[{i}] -= {csst.full_e_matrix[i, j]:.6e} * {csst.grad[spec.num_statevars+j]:.6e} = {csst.full_e_matrix[i, j] * csst.grad[spec.num_statevars+j]:.6e}")
                     csst.c_G[i] -= csst.full_e_matrix[i, j] * csst.grad[spec.num_statevars+j]
+            if idx < 2 and self.iteration < 2:
+                print(f"  After c_G calc, c_G = {np.asarray(csst.c_G[:num_phase_dof])}")
             
             debug_log(f"  c_G: {np.array(csst.c_G[:num_phase_dof])}", True)
             
@@ -1308,6 +1324,8 @@ cpdef advance_state(SystemSpecification spec, SystemState state, double[::1] equ
     for i in range(state.free_stable_compset_indices.shape[0]):
         compset_idx = state.free_stable_compset_indices[i]
         old_amt = state.phase_amt[compset_idx]
+        delta = equilibrium_soln[soln_index_offset + i]
+        print(f"[CPU ADVANCE] Phase {compset_idx}: old={old_amt:.6e}, delta={delta:.6e}, step_size={phase_amt_step_size:.6e}, actual_change={phase_amt_step_size * delta:.6e}")
         state.phase_amt[compset_idx] += phase_amt_step_size * equilibrium_soln[soln_index_offset + i]
         state.largest_phase_amt_change[0] = max(state.largest_phase_amt_change[0], abs(phase_amt_step_size * equilibrium_soln[soln_index_offset + i]))
         
@@ -1315,6 +1333,12 @@ cpdef advance_state(SystemSpecification spec, SystemState state, double[::1] equ
         if debug_enabled and abs(old_amt - state.phase_amt[compset_idx]) > 1e-12:
             print(f"Phase amount change {compset_idx}: {old_amt:.6e} -> {state.phase_amt[compset_idx]:.6e} (delta: {state.phase_amt[compset_idx] - old_amt:.6e})")
     soln_index_offset += state.free_stable_compset_indices.shape[0]
+    
+    # DEBUG: Check total phase amounts after update
+    cdef double phase_amt_sum_after = 0.0
+    for idx in range(len(state.compsets)):
+        phase_amt_sum_after += state.phase_amt[idx]
+    print(f"[CPU MASS BALANCE] advance_state() - after phase update: sum(phase_amt) = {phase_amt_sum_after:.15e}")
 
     # 2. Step in state variables
     debug_log(f"  largest_phase_amt_change: {state.largest_phase_amt_change[0]:.15e}", True)

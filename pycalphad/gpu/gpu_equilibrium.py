@@ -564,7 +564,8 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
                 else:
                     np_value = 0.0
                     
-                if phase_name in py_phase_name_to_unique_idx_map and np_value > 1e-8:  # Use constant value instead of _get_c_define call
+                # Match CPU behavior: include phases even with NP=0, will be set to MIN_PHASE_FRACTION
+                if phase_name in py_phase_name_to_unique_idx_map:  # Remove np_value check to match CPU
                     active_phases.append((phase_idx, phase_name, py_phase_name_to_unique_idx_map[phase_name]))
                     # DEBUG: Print phase mapping
                     if wks_obj.verbose and cond_idx < 5:
@@ -616,6 +617,9 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
                 np_amount = float(np_values_safe[orig_phase_idx])
             else:
                 np_amount = 0.0
+            
+            # Match CPU behavior: set minimum phase fraction like CPU does in eqsolver.pyx line 265
+            np_amount = max(np_amount, MIN_PHASE_FRACTION)
             initial_phase_data_arrays['phase_amounts'][cond_idx, i] = np_amount
             
             # DEBUG: Log what we're storing for first few conditions
@@ -2619,6 +2623,20 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                     raise e  # Raise the original kernel error
 
     cp.cuda.runtime.deviceSynchronize()
+    
+    # Force flush of any kernel output
+    import sys
+    sys.stdout.flush()
+    
+    # Check for CUDA errors
+    try:
+        err = cp.cuda.runtime.getLastError()
+        if err != 0:
+            print(f"[GPU] CUDA Error after kernel: {err}")
+    except AttributeError:
+        # getLastError may not be available in all CuPy versions
+        pass
+    
     if verbose: print("[GPU] Kernel execution completed.")
     
     

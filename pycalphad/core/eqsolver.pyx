@@ -244,6 +244,13 @@ def _solve_eq_at_conditions(properties, phase_records, grid, conds_keys, state_v
         
         composition_sets = []
         removed_compsets = []
+        
+        # DEBUG: Print what phases we're starting with
+        if verbose:
+            print(f"[CPU] Creating composition sets from starting_point result:")
+            print(f"[CPU]   prop_Phase_values at index: {prop_Phase_values[it.multi_index]}")
+            print(f"[CPU]   prop_NP_values at index: {prop_NP_values[it.multi_index]}")
+        
         for phase_idx, phase_name in enumerate(prop_Phase_values[it.multi_index]):
             if phase_name == '' or phase_name == '_FAKE_':
                 continue

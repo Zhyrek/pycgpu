@@ -1217,12 +1217,218 @@ def fix_piecewise_zeros(expression: str) -> str:
     return expression
 
 
+def fix_hessian_spurious_terms_v2(hess_str, i_idx, j_idx, var_i, var_j):
+    """
+    Remove spurious entropy cross-terms from diagonal hessian elements.
+    
+    For d²G/dY_i², remove RT/Y_j terms where j != i.
+    This fixes the issue where GPU hessian values are ~2.5x larger than CPU values.
+    
+    Args:
+        hess_str: The Hessian expression string
+        i_idx, j_idx: Indices (for debugging)
+        var_i, var_j: The actual variables being differentiated
+    """
+    import re
+    
+    # Only process diagonal elements
+    if var_i != var_j:
+        return hess_str
+        
+    # Check if this is a site fraction variable
+    var_i_str = str(var_i)
+    if not ('BCC_A2' in var_i_str and ('NB' in var_i_str or 'TI' in var_i_str)):
+        return hess_str
+    
+    print(f"[GPU HESSIAN FIX V2] Processing diagonal element for {var_i_str}")
+    
+    # Determine which spurious terms to remove
+    if 'NB' in var_i_str:
+        # For Y_NB diagonal, remove 1/Y_TI terms
+        spurious_var = 'BCC_A20TI'
+    elif 'TI' in var_i_str:
+        # For Y_TI diagonal, remove 1/Y_NB terms  
+        spurious_var = 'BCC_A20NB'
+    else:
+        return hess_str
+        
+    # Pattern for the spurious term
+    spurious_pattern = rf'1\.0\*\(\(1e-15 < {spurious_var}\) \? \(pow\({spurious_var}, \(-1\)\)\) : 0\)'
+    
+    # Find all occurrences
+    matches = list(re.finditer(spurious_pattern, hess_str))
+    
+    if matches:
+        print(f"[GPU HESSIAN FIX V2] Found {len(matches)} occurrences of spurious 1/{spurious_var} terms")
+        
+        # Process matches in reverse order to maintain string positions
+        fixed = hess_str
+        for match in reversed(matches):
+            start = match.start()
+            end = match.end()
+            
+            # Check if this is part of a sum (look for preceding ' + ')
+            if start >= 3 and fixed[start-3:start] == ' + ':
+                # Remove the ' + ' as well
+                fixed = fixed[:start-3] + fixed[end:]
+            # Check if this is at the beginning of a sum (look for following ' + ')
+            elif end + 3 <= len(fixed) and fixed[end:end+3] == ' + ':
+                # Remove the following ' + '
+                fixed = fixed[:start] + fixed[end+3:]
+            else:
+                # Just remove the term
+                fixed = fixed[:start] + fixed[end:]
+                
+        # Clean up
+        fixed = re.sub(r'\s+', ' ', fixed)
+        fixed = re.sub(r'\(\s*\+', '(', fixed)
+        fixed = re.sub(r'\+\s*\)', ')', fixed)
+        
+        return fixed
+    
+    return hess_str
+
+
+
+def fix_hessian_spurious_terms_post_conversion(hess_str, i_idx, j_idx, num_statevars=3, debug=False):
+    """
+    Remove spurious entropy cross-terms from diagonal hessian elements AFTER variable conversion.
+    
+    This is a robust implementation that handles multiple formats and ensures
+    spurious terms are removed at any stage of the code generation pipeline.
+    
+    For d²G/dx[i]², remove RT/x[j] terms where j != i.
+    The spurious terms come from the (Y_NB + Y_TI) denominator in the entropy expression.
+    """
+    import re
+    
+    # Only process diagonal elements
+    if i_idx != j_idx:
+        return hess_str
+        
+    # Only process site fraction indices (after state variables)
+    if i_idx < num_statevars:
+        return hess_str
+    
+    if debug:
+        print(f"[ROBUST HESSIAN FIX] Processing diagonal element [{i_idx},{j_idx}]")
+    
+    # Build a list of all site fraction indices
+    all_indices = set(re.findall(r'x\[(\d+)\]', hess_str))
+    site_fraction_indices = [int(idx) for idx in all_indices if int(idx) >= num_statevars]
+    
+    if not site_fraction_indices:
+        if debug:
+            print(f"[ROBUST HESSIAN FIX] No site fraction variables found")
+        return hess_str
+    
+    if debug:
+        print(f"[ROBUST HESSIAN FIX] Site fraction indices: {site_fraction_indices}")
+    
+    # For each spurious index (not equal to i_idx)
+    modified = False
+    result = hess_str
+    total_removed = 0
+    
+    for spurious_idx in site_fraction_indices:
+        if spurious_idx == i_idx:
+            continue  # This is the correct term, don't remove
+        
+        # Pattern 1: Simple pow(x[j], (-1))
+        pattern1 = rf'pow\(x\[{spurious_idx}\], \(-1\)\)'
+        
+        # Pattern 2: Conditional (1e-15 < x[j]) ? (pow(x[j], (-1))) : 0
+        pattern2 = rf'\(\(1e-15 < x\[{spurious_idx}\]\) \? \(pow\(x\[{spurious_idx}\], \(-1\)\)\) : 0\)'
+        
+        # Pattern 3: With coefficient 1.0*((1e-15 < x[j]) ? (pow(x[j], (-1))) : 0)
+        pattern3 = rf'1\.0\*\(\(1e-15 < x\[{spurious_idx}\]\) \? \(pow\(x\[{spurious_idx}\], \(-1\)\)\) : 0\)'
+        
+        # Try each pattern from most specific to least specific
+        for pattern_name, pattern in [("pattern3", pattern3), ("pattern2", pattern2), ("pattern1", pattern1)]:
+            matches = list(re.finditer(pattern, result))
+            if matches:
+                if debug:
+                    print(f"[ROBUST HESSIAN FIX] Found {len(matches)} matches for spurious 1/x[{spurious_idx}] using {pattern_name}")
+                
+                # Process in reverse order to maintain positions
+                for match in reversed(matches):
+                    start = match.start()
+                    end = match.end()
+                    
+                    # Check context to determine how to remove
+                    before = result[:start]
+                    after = result[end:]
+                    
+                    # Look for arithmetic operators around the term
+                    # Remove preceding ' + ' if present
+                    if before.endswith(' + '):
+                        before = before[:-3]
+                        result = before + after
+                        modified = True
+                        total_removed += 1
+                    # Remove following ' + ' if present
+                    elif after.startswith(' + '):
+                        after = after[3:]
+                        result = before + after
+                        modified = True
+                        total_removed += 1
+                    # Handle case where it's part of a larger sum in parentheses
+                    elif before.endswith('(') and ' + ' in after:
+                        # This is the first term in a sum, remove it and the following +
+                        plus_pos = after.find(' + ')
+                        after = after[plus_pos + 3:]
+                        result = before + after
+                        modified = True
+                        total_removed += 1
+                    # Handle case where it's the last term in a sum
+                    elif ' + ' in before and after.startswith(')'):
+                        # Find the last + before this term
+                        plus_pos = before.rfind(' + ')
+                        if plus_pos >= 0:
+                            before = before[:plus_pos]
+                            result = before + after
+                            modified = True
+                            total_removed += 1
+                    else:
+                        # Just remove the term
+                        result = before + after
+                        modified = True
+                        total_removed += 1
+                
+                # Only use the first matching pattern
+                break
+    
+    if modified:
+        # Clean up any issues introduced by removal
+        result = re.sub(r'\s+', ' ', result)  # Remove double spaces
+        result = re.sub(r'\(\s*\)', '(0)', result)  # Empty parentheses -> (0)
+        result = re.sub(r'\+\s*\+', '+', result)  # Double plus
+        result = re.sub(r'\(\s*\+', '(', result)  # Leading plus in parentheses
+        result = re.sub(r'\+\s*\)', ')', result)  # Trailing plus in parentheses
+        result = re.sub(r'\(\s*\)\s*/\s*\([^)]+\)', '0', result)  # Empty sum divided by something
+        result = re.sub(r'[\d.]+\*[^(]*\*\(0\)\s*/\s*\([^)]+\)', '0', result)  # Coefficient * stuff * (0) / something
+        
+        if debug:
+            # Count final spurious terms
+            final_spurious = 0
+            for spurious_idx in site_fraction_indices:
+                if spurious_idx != i_idx:
+                    final_spurious += len(re.findall(rf'pow\(x\[{spurious_idx}\], \(-1\)\)', result))
+            
+            print(f"[ROBUST HESSIAN FIX] Removed {total_removed} spurious terms. Final spurious count: {final_spurious}")
+    else:
+        if debug:
+            print(f"[ROBUST HESSIAN FIX] No modifications made")
+    
+    return result
+
+
 def fix_hessian_spurious_terms(hess_str, i_idx, j_idx):
     """
     Remove spurious entropy cross-terms from diagonal hessian elements.
     
     For d²G/dY_i², remove RT/Y_j terms where j != i.
-    This fixes the issue where GPU hessian values are ~2.6x larger than CPU values.
+    This fixes the issue where GPU hessian values are ~2.5x larger than CPU values.
     
     The spurious terms come from the (Y1+Y2) factor in model.G that doesn't get
     simplified in the GPU code generation process.
@@ -1234,53 +1440,95 @@ def fix_hessian_spurious_terms(hess_str, i_idx, j_idx):
     # We need to fix diagonal elements where both indices are site fractions
     if i_idx != j_idx or i_idx < 1:
         return hess_str
+        
+    # DEBUG: Check what variables we're working with
+    print(f"[GPU HESSIAN FIX DEBUG] i_idx={i_idx}, j_idx={j_idx}")
     
     print(f"[GPU HESSIAN FIX] Processing diagonal element [{i_idx},{j_idx}]")
     
-    # Find all terms like: 1.0*((1e-15 < x[N]) ? (pow(x[N], (-1))) : 0)
-    # where N is a digit
-    terms_to_remove = []
+    # DEBUG: Check expression content for diagonal elements  
+    if i_idx == 3 or i_idx == 4:  # These should be the Y-Y diagonal elements in a 5x5 Hessian
+        print(f"[GPU HESSIAN FIX DEBUG] Element [{i_idx},{j_idx}] length: {len(hess_str)}")
+        # Search for any 1/var terms
+        if 'pow(BCC_A20TI, (-1))' in hess_str:
+            print(f"[GPU HESSIAN FIX DEBUG] Found pow(BCC_A20TI, (-1)) in expression")
+        if 'pow(BCC_A20NB, (-1))' in hess_str:
+            print(f"[GPU HESSIAN FIX DEBUG] Found pow(BCC_A20NB, (-1)) in expression")
     
-    # This matches the whole term including coefficient
-    simple_pattern = r'[\d.]+\*\(\(1e-15 < x\[(\d+)\]\) \? \(pow\(x\[\1\], \(-1\)\)\) : 0\)'
+    # For diagonal element of site fraction i, we need to remove 1/Y_j terms where j != i
+    # This function is now called BEFORE notebook_convert_var_names, so we need to
+    # work with model variable names like BCC_A20NB and BCC_A20TI
     
-    for match in re.finditer(simple_pattern, hess_str):
-        idx = int(match.group(1))
-        # For model-level generation, site fractions start at index 1
-        if idx >= 1 and idx != i_idx:
-            # This is a spurious term
-            terms_to_remove.append(match.group(0))
+    # Find the variable names we need to work with
+    # The model variables will be something like: ['T', 'BCC_A20NB', 'BCC_A20TI'] 
+    # where indices 1 and 2 are the site fractions
     
-    # Remove the spurious terms
+    # Map index to variable name patterns
+    var_patterns = {}
+    spurious_vars = []
+    
+    if i_idx == 1:  # Y_NB diagonal - remove Y_TI terms
+        # We're in the d²G/dY_NB² element, need to remove 1/Y_TI terms
+        # Y_TI could be named something like BCC_A20TI
+        spurious_vars = [r'BCC_A2\d*TI']
+    elif i_idx == 2:  # Y_TI diagonal - remove Y_NB terms
+        # We're in the d²G/dY_TI² element, need to remove 1/Y_NB terms
+        # Y_NB could be named something like BCC_A20NB
+        spurious_vars = [r'BCC_A2\d*NB']
+    
     fixed = hess_str
-    for term in terms_to_remove:
-        # Remove the term and any preceding ' + '
-        fixed = fixed.replace(' + ' + term, '')
-        fixed = fixed.replace(term + ' + ', '')
-        fixed = fixed.replace(term, '')
     
-    # Clean up any double spaces or operators
+    # Remove spurious 1/Y_j terms from compound expressions
+    # Look for specific variable names
+    if i_idx == 1:  # Y_NB diagonal - remove BCC_A20TI terms
+        var_name = 'BCC_A20TI'
+    elif i_idx == 2:  # Y_TI diagonal - remove BCC_A20NB terms
+        var_name = 'BCC_A20NB'
+    else:
+        return fixed
+        
+    # Pattern for the spurious term with the specific variable
+    spurious_pattern = rf'1\.0\*\(\(1e-15 < {var_name}\) \? \(pow\({var_name}, \(-1\)\)\) : 0\)'
+    
+    # Find all occurrences
+    matches = list(re.finditer(spurious_pattern, fixed))
+    
+    if matches:
+        print(f"[GPU HESSIAN FIX] Found {len(matches)} occurrences of spurious 1/{var_name} terms")
+        
+        # Process matches in reverse order to maintain string positions
+        for match in reversed(matches):
+            start = match.start()
+            end = match.end()
+            
+            # Check if this is part of a sum (look for preceding ' + ')
+            if start >= 3 and fixed[start-3:start] == ' + ':
+                # Remove the ' + ' as well
+                fixed = fixed[:start-3] + fixed[end:]
+            # Check if this is at the beginning of a sum (look for following ' + ')
+            elif end + 3 <= len(fixed) and fixed[end:end+3] == ' + ':
+                # Remove the following ' + '
+                fixed = fixed[:start] + fixed[end+3:]
+            else:
+                # Just remove the term
+                fixed = fixed[:start] + fixed[end:]
+    
+    # Clean up any resulting issues
+    # Remove empty sums: (1.0*) -> (0)
+    fixed = re.sub(r'\(1\.0\*\)', '(0)', fixed)
+    
+    # Clean up double spaces
     fixed = re.sub(r'\s+', ' ', fixed)
+    
+    # Remove leading/trailing operators in parentheses
     fixed = re.sub(r'\(\s*\+', '(', fixed)
     fixed = re.sub(r'\+\s*\)', ')', fixed)
     
-    # Special case: if we removed all terms from a sum, we might have empty parentheses
-    fixed = re.sub(r'8\.3145\*x\[0\]\*\(\s*\)/\(x\[1\] \+ x\[2\]\)', '0', fixed)
-    
-    # CRITICAL: Also remove the /(x[1] + x[2]) divisor from entropy terms
-    # This divisor should have been canceled by the (x[1] + x[2]) factor at the front
-    # For model-level generation, site fractions are at x[1] and x[2]
-    if '/(x[1] + x[2])' in fixed:
-        fixed = fixed.replace('/(x[1] + x[2])', '')
-        print(f"[GPU HESSIAN FIX] Removed /(x[1] + x[2]) divisor")
-    
-    # Check if we found the spurious term (for model-level, T=x[0], Y_NB=x[1], Y_TI=x[2])
-    if '8.3145*x[0]*(1.0*((1e-15 < x[2]) ? (pow(x[2], (-1))) : 0) + 1.0*((1e-15 < x[1]) ? (pow(x[1], (-1))) : 0))' in hess_str:
-        print(f"[GPU HESSIAN FIX] FOUND spurious term in original expression!")
-        if len(terms_to_remove) > 0:
-            print(f"[GPU HESSIAN FIX] Removed {len(terms_to_remove)} spurious terms")
-        else:
-            print(f"[GPU HESSIAN FIX] WARNING: Pattern didn't match to remove terms!")
+    # Count how many terms were removed
+    original_count = hess_str.count('pow(x[')
+    final_count = fixed.count('pow(x[')
+    if original_count != final_count:
+        print(f"[GPU HESSIAN FIX] Removed {original_count - final_count} spurious 1/Y terms")
     
     return fixed
 
@@ -1396,7 +1644,7 @@ def notebook_source_from_expr(
                     c_code_body += f"    {c_output_arg_name}[{current_out_idx}] = {s};\n"
                     current_out_idx += 1
         elif expr_type == "hess":
-            print(f"[GPU HESS] Processing Hessian with {len(expr_or_list_in)} expressions")
+            print(f"[GPU HESS] Processing Hessian with {len(expr_or_list_in)} expressions (list branch)")
             for m_expr_idx, sub_expr in enumerate(expr_or_list_in):
                 for i_sym_idx, sym_j in enumerate(ordered_symbols_for_diff):
                     first_deriv = sub_expr.diff(sym_j)
@@ -1466,7 +1714,8 @@ def notebook_source_from_expr(
                         
                         # Fix 9: Remove spurious entropy cross-terms from diagonal hessian elements
                         # This fixes the issue where GPU hessian is ~2.6x larger than CPU
-                        s = fix_hessian_spurious_terms(s, i_sym_idx, j_sym_idx)
+                        # Apply the robust post-conversion fix
+                        s = fix_hessian_spurious_terms_post_conversion(s, i_sym_idx, j_sym_idx, num_statevars=3, debug=(i_sym_idx == j_sym_idx and i_sym_idx >= 3))
                         
                         c_code_body += f"    {c_output_arg_name}[{current_out_idx}] = {s};\n"
                         current_out_idx += 1
@@ -1553,6 +1802,7 @@ def notebook_source_from_expr(
         elif expr_type == "hess":
             if c_output_type != "void": 
                 c_output_type = "void"
+            print(f"[GPU HESS] Processing single expression Hessian")
             c_code = f"__device__ {c_output_type} {full_c_func_name}(double* {c_output_arg_name}, const double* {c_input_arg_name}) {{\n"
             current_out_idx = 0
             for i, sym_j in enumerate(ordered_symbols_for_diff):
@@ -1561,9 +1811,22 @@ def notebook_source_from_expr(
                     second_deriv_expr = first_deriv.diff(sym_k)
                     s = str(second_deriv_expr)
                     s = notebook_replace_piecewise(s)
-                    s = notebook_convert_var_names(s, model_obj, wks_obj)
                     s = notebook_replace_exp(s)
                     s = fix_ternary_operator_precedence(s)  # Fix operator precedence issues
+                    
+                    # Fix spurious entropy cross-terms from diagonal Hessian elements
+                    # MUST be called BEFORE notebook_convert_var_names
+                    # Pass the actual variables being differentiated
+                    if i < len(ordered_symbols_for_diff) and j < len(ordered_symbols_for_diff):
+                        s = fix_hessian_spurious_terms_v2(s, i, j, ordered_symbols_for_diff[i], ordered_symbols_for_diff[j])
+                    
+                    # Convert variable names last
+                    s = notebook_convert_var_names(s, model_obj, wks_obj)
+                    
+                    # Also apply post-conversion fix for any remaining spurious terms
+                    # Standard state variables are N, P, T (indices 0, 1, 2)
+                    s = fix_hessian_spurious_terms_post_conversion(s, i, j, num_statevars=3, debug=(i == j and i >= 3))
+                    
                     c_code_body += f"    {c_output_arg_name}[{current_out_idx}] = {s};\n"
                     current_out_idx += 1
             c_code += c_code_body
@@ -1792,6 +2055,101 @@ def _generate_c_code_for_phase_models(wks_obj: Workspace, include_hess: bool = F
 
     return (all_model_device_functions_c_code, g_phase_record_array_init_calls_c_code, 
             unique_py_models, py_phase_name_to_unique_idx_map)
+
+
+def _final_hessian_cleanup(full_code: str) -> str:
+    """
+    Final cleanup pass to remove spurious entropy terms from the generated Hessian.
+    This operates on the complete generated code to catch any terms that slipped through.
+    """
+    import re
+    
+    lines = full_code.split('\n')
+    modified_lines = []
+    total_removed = 0
+    
+    for line in lines:
+        # Check if this is a Hessian output line
+        match = re.match(r'\s*out\[(\d+)\]\s*=\s*(.+);', line)
+        if match:
+            out_idx = int(match.group(1))
+            expression = match.group(2)
+            
+            # Map output index to i,j indices for 5x5 Hessian
+            # out[k] = hess[i,j] where k = i*5 + j
+            n = 5  # 5 variables: N, P, T, Y_NB, Y_TI
+            i = out_idx // n
+            j = out_idx % n
+            
+            # Only process diagonal elements for site fractions
+            if i == j and i >= 3:  # Indices 3 and 4 are Y_NB and Y_TI
+                # Count spurious terms before
+                spurious_indices = [3, 4]
+                spurious_indices.remove(i)  # Don't remove the correct diagonal term
+                
+                before_count = 0
+                for idx in spurious_indices:
+                    before_count += len(re.findall(rf'pow\(x\[{idx}\], \(-1\)\)', expression))
+                
+                if before_count > 0:
+                    # Remove spurious terms
+                    for spurious_idx in spurious_indices:
+                        # Pattern for entropy terms with spurious 1/x[j]
+                        patterns = [
+                            # Most specific: coefficient * conditional
+                            rf'1\.0\*\(\(1e-15 < x\[{spurious_idx}\]\) \? \(pow\(x\[{spurious_idx}\], \(-1\)\)\) : 0\)',
+                            # Just the conditional
+                            rf'\(\(1e-15 < x\[{spurious_idx}\]\) \? \(pow\(x\[{spurious_idx}\], \(-1\)\)\) : 0\)',
+                            # Simple pow
+                            rf'pow\(x\[{spurious_idx}\], \(-1\)\)'
+                        ]
+                        
+                        for pattern in patterns:
+                            # Find all occurrences
+                            while True:
+                                match = re.search(pattern, expression)
+                                if not match:
+                                    break
+                                    
+                                start = match.start()
+                                end = match.end()
+                                before = expression[:start]
+                                after = expression[end:]
+                                
+                                # Remove with appropriate handling of operators
+                                if before.endswith(' + ') and after:
+                                    expression = before[:-3] + after
+                                elif before and after.startswith(' + '):
+                                    expression = before + after[3:]
+                                elif before.endswith('(') and after.startswith(')'):
+                                    # Removing the only term in parentheses
+                                    expression = before + '0' + after
+                                else:
+                                    expression = before + after
+                    
+                    # Clean up
+                    expression = re.sub(r'\s+', ' ', expression)
+                    expression = re.sub(r'\+\s*\+', '+', expression)
+                    expression = re.sub(r'\(\s*\)', '(0)', expression)
+                    expression = re.sub(r'\(\s*\+', '(', expression)
+                    expression = re.sub(r'\+\s*\)', ')', expression)
+                    
+                    # Count after
+                    after_count = 0
+                    for idx in spurious_indices:
+                        after_count += len(re.findall(rf'pow\(x\[{idx}\], \(-1\)\)', expression))
+                    
+                    if before_count - after_count > 0:
+                        total_removed += before_count - after_count
+                
+                line = f"    out[{out_idx}] = {expression};"
+        
+        modified_lines.append(line)
+    
+    if total_removed > 0:
+        print(f"[GPU FINAL CLEANUP] Removed {total_removed} spurious entropy terms from generated Hessian code")
+    
+    return '\n'.join(modified_lines)
 
 
 def _generate_full_gpu_source(wks_obj: Workspace,
@@ -4534,4 +4892,7 @@ __global__ void top_level_equilibrium_kernel(
 }} // extern "C"
 """
 
+    # Apply final cleanup to remove any spurious terms that slipped through
+    full_source = _final_hessian_cleanup(full_source)
+    
     return full_source

@@ -1,4 +1,4 @@
-#\!/usr/bin/env python3
+#!/usr/bin/env python3
 """Check if GPU Hessian fix is being applied correctly"""
 
 from pycalphad import Database, equilibrium, variables as v
@@ -25,4 +25,3 @@ print("\nIf the fix is working, we should see:")
 print("1. '[GPU HESSIAN FIX] Processing diagonal element' messages")
 print("2. Messages about removing spurious terms")
 print("3. GPU Hessian values matching CPU values")
-EOF < /dev/null

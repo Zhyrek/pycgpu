@@ -1,72 +1,69 @@
-#!/usr/bin/env python
-"""Verify that the Hessian fix is present in the GPU header files."""
+#!/usr/bin/env python3
+"""Verify if Hessian fix is applied in generated code"""
 
-import os
+from pycalphad import Database
+from pycalphad.core.workspace import Workspace
+from pycalphad.model import Model
+from pycalphad.gpu.gpu_codegen import notebook_source_from_expr
+import pycalphad.variables as v
 
-# Check minimizer.h directly
-minimizer_h_path = "/mnt/c/users/scott/Documents/pycalphad/pycalphad/gpu/minimizer.h"
+# Load database and create workspace
+db = Database('NbTi.tdb')
+comps = ['NB', 'TI', 'VA']
+phases = ['BCC_A2']
 
-print("Checking minimizer.h for Hessian fix...")
-print("=" * 80)
+# Create models
+models = {}
+for phase in phases:
+    models[phase] = Model(db, comps, phase)
 
-with open(minimizer_h_path, 'r') as f:
-    content = f.read()
-    
-# Look for the critical fix
-if "pr->formulahess(csst->hess, compset->dof);" in content:
-    print("✓ FOUND: Hessian correctly uses compset->dof (workspace DOF)")
-    # Find the line number
-    lines = content.split('\n')
-    for i, line in enumerate(lines):
-        if "pr->formulahess(csst->hess, compset->dof);" in line:
-            print(f"  Found at line {i+1}")
-            # Print surrounding context
-            print("\n  Context:")
-            for j in range(max(0, i-2), min(len(lines), i+3)):
-                print(f"  {j+1}: {lines[j]}")
-            break
-elif "pr->formulahess(csst->hess, model_dof_for_calcs);" in content:
-    print("✗ ERROR: Hessian still uses model_dof_for_calcs (OLD BROKEN CODE)")
-    # Find the line number
-    lines = content.split('\n')
-    for i, line in enumerate(lines):
-        if "pr->formulahess(csst->hess, model_dof_for_calcs);" in line:
-            print(f"  Found at line {i+1}")
-            print("\n  THIS NEEDS TO BE FIXED!")
-            break
-else:
-    print("? WARNING: Could not find formulahess call")
+# Create workspace
+state_vars = [v.T]
+conditions = {v.T: 300, v.P: 101325}
+wks = Workspace(db, comps, phases, conditions, models=models, phase_record_factory=None)
 
-# Also check for the comment that explains the fix
-if "MUST pass full workspace DOF like CPU does" in content:
-    print("\n✓ Found comment explaining the fix")
-else:
-    print("\n? No explanatory comment found")
+# Generate Hessian with verbose output
+print("Generating Hessian with verbose=True to see fix messages...")
+model = models['BCC_A2']
+hess_code = notebook_source_from_expr(
+    model.G, 
+    "formulahess", 
+    model, 
+    0, 
+    wks, 
+    expr_type="hess", 
+    c_output_type="void", 
+    validate=True, 
+    verbose=True
+)
 
-# Check if there's a GPU-specific version that might be overriding this
-print("\n" + "=" * 80)
-print("Checking for any GPU-specific minimizer implementations...")
+# Check if the spurious terms are present
+print("\nChecking for spurious terms in generated code...")
+print("Looking for pow(x[4], (-1)) in diagonal element for x[3]...")
 
-gpu_codegen_path = "/mnt/c/users/scott/Documents/pycalphad/pycalphad/gpu/gpu_codegen.py"
-with open(gpu_codegen_path, 'r') as f:
-    codegen_content = f.read()
-    
-# Check if there's a gpu_phase_minimize function that might override the fix
-if "gpu_phase_minimize" in codegen_content:
-    print("! Found gpu_phase_minimize function in gpu_codegen.py")
-    lines = codegen_content.split('\n')
-    for i, line in enumerate(lines):
-        if "formulahess" in line and "model_dof" in line:
-            print(f"  Line {i+1}: {line.strip()}")
-            if "model_dof_for_calcs" in line:
-                print("  ⚠️  This line may be overriding the fix!")
-
-# Check for phase_minimize in the global mem solver
-if "phase_minimize" in codegen_content and "global_mem" in codegen_content:
-    print("\nFound phase_minimize references in global memory solver")
-    
-print("\n" + "=" * 80)
-print("Summary:")
-print("The fix should be in minimizer.h where formulahess is called with compset->dof")
-print("This ensures the GPU Hessian receives the full workspace DOF format [N, P, T, Y1, Y2...]")
-print("instead of the model DOF format [T, Y1, Y2...]")
+# Find out[18] which should be the diagonal element
+import re
+out18_match = re.search(r'out\[18\] = ([^;]+);', hess_code)
+if out18_match:
+    out18_expr = out18_match.group(1)
+    print(f"\nFound out[18] expression (length={len(out18_expr)}):")
+    # Check for spurious terms
+    if 'pow(x[4], (-1))' in out18_expr:
+        print("ERROR: Spurious term pow(x[4], (-1)) found in diagonal element!")
+        # Count occurrences
+        count = out18_expr.count('pow(x[4], (-1))')
+        print(f"Found {count} occurrences of pow(x[4], (-1))")
+    else:
+        print("SUCCESS: No spurious pow(x[4], (-1)) terms found!")
+        
+# Also check out[24] for the other diagonal
+out24_match = re.search(r'out\[24\] = ([^;]+);', hess_code)
+if out24_match:
+    out24_expr = out24_match.group(1)
+    print(f"\nFound out[24] expression (length={len(out24_expr)}):")
+    if 'pow(x[3], (-1))' in out24_expr:
+        print("ERROR: Spurious term pow(x[3], (-1)) found in diagonal element!")
+        count = out24_expr.count('pow(x[3], (-1))')
+        print(f"Found {count} occurrences of pow(x[3], (-1))")
+    else:
+        print("SUCCESS: No spurious pow(x[3], (-1)) terms found!")

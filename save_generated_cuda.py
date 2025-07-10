@@ -21,28 +21,39 @@ models = instantiate_models(dbf, comps, phases)
 
 # Generate model functions C code first
 print("Generating model functions C code...")
-model_funcs_c, pr_init_calls_c, unique_models, phase_name_map = _generate_c_code_for_phase_models(
+result = _generate_c_code_for_phase_models(
     wks,
-    include_hess=True
+    include_hess=True,
+    validate=True
 )
-num_unique_models = len(unique_models)
 
-# Generate the CUDA source
-print("Generating CUDA source code...")
-cuda_source = _generate_full_gpu_source(wks, model_funcs_c, pr_init_calls_c, num_unique_models)
-
-# Save to file
-with open("generated_cuda_code.cu", "w") as f:
-    f.write(cuda_source)
-
-print(f"CUDA source saved to generated_cuda_code.cu ({len(cuda_source)} chars)")
-
-# Find line 5513
-lines = cuda_source.split('\n')
-if len(lines) > 5513:
-    print(f"\nLine 5513: {lines[5512]}")  # 0-indexed
-    print("Context:")
-    for i in range(max(0, 5510), min(len(lines), 5520)):
-        print(f"{i+1}: {lines[i]}")
+# Handle both 2 and 3 return value cases
+print(f"Result type: {type(result)}, length: {len(result) if isinstance(result, tuple) else 'N/A'}")
+if isinstance(result, tuple):
+    if len(result) == 3:
+        model_funcs_c, pr_init_calls_c, _ = result
+    elif len(result) == 2:
+        model_funcs_c, pr_init_calls_c = result
+    else:
+        # Maybe it returns 4 values?
+        model_funcs_c = result[0]
+        pr_init_calls_c = result[1]
+        print(f"Warning: Got {len(result)} values, using first 2")
 else:
-    print(f"Code only has {len(lines)} lines")
+    raise ValueError(f"Unexpected return type from _generate_c_code_for_phase_models: {type(result)}")
+
+# Save just the model functions to file
+with open("generated_equilibrium_kernel.cu", "w") as f:
+    f.write("// Generated CUDA code for equilibrium kernel\n\n")
+    f.write("// Phase functions:\n")
+    f.write(model_funcs_c)
+    f.write("\n// Phase initialization calls:\n")
+    # pr_init_calls_c is a list of strings
+    if isinstance(pr_init_calls_c, list):
+        for call in pr_init_calls_c:
+            f.write(call + "\n")
+    else:
+        f.write(pr_init_calls_c)
+
+print("Generated code saved to generated_equilibrium_kernel.cu")
+print("Look for the formulahess function to see if fix_hessian_spurious_terms was applied")

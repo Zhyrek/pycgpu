@@ -119,6 +119,9 @@ def add_nearly_stable(object composition_sets, object phase_records,
     cdef int num_statevars = len(compset.phase_record.state_variables)
     cdef int df_idx, minimum_df_idx
     cdef bint phases_added = False
+    
+    from pycalphad.core.debug_output import debug_log
+    
     driving_forces = np.dot(current_grid_X, chemical_potentials) - current_grid_GM
     # Add unrepresented phases as metastable composition sets
     # This should help catch phases around the limit of stability

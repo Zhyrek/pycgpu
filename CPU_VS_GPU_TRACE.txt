@@ -1,5 +1,5 @@
 === INTERLEAVED CPU-GPU EQUILIBRIUM DEBUG TRACE ===
-Started: 2025-07-10T10:47:10.295093
+Started: 2025-07-16T11:30:18.689436
 
 
 ================================================================================
@@ -14,8 +14,8 @@ SEGMENT 01 COMPARISON
 [SEGMENT 01] [GPU] Entry point and parameter validation
   gpu_mode: True
   components: ['NB', 'TI', 'VA']
-  phases: ['BCC_A2']
-  conditions: {X_TI: 0.4, T: 1000, P: 101325, N: 1}
+  phases: ['LIQUID', 'BCC_A2']
+  conditions: {'T': 1000, 'P': 101325, 'X(TI)': 0.01}
   output_requested: None
   verbose: True
   force_cpu: False
@@ -32,8 +32,8 @@ SEGMENT 02 COMPARISON
 [SEGMENT 02] [GPU] Workspace initialization
   database: Elements: ['NB', 'TI', 'VA']
 Species: [Species('NB', 'NB1'), Species('TI', 'TI1'), Species('VA', 'VA1')]
-Phase({'name': 'BCC_A2', 'constituents': (frozenset({Species('NB', 'NB1'), Species('TI', 'TI1')}),), 'sublattices': (1.0,), 'model_hints': {}})
-Phase({'name': 'LIQUID', 'constituents': (frozenset({Species('NB', 'NB1'), Species('TI', 'TI1')}),), 'sublattices': (1.0,), 'model_hints': {'liquid': True}})
+Phase({'name': 'BCC_A2', 'constituents': (frozenset({Species('TI', 'TI1'), Species('NB', 'NB1')}),), 'sublattices': (1.0,), 'model_hints': {}})
+Phase({'name': 'LIQUID', 'constituents': (frozenset({Species('TI', 'TI1'), Species('NB', 'NB1')}),), 'sublattices': (1.0,), 'model_hints': {'liquid': True}})
 21 symbols in database
 6 parameters in database
 
@@ -58,8 +58,8 @@ SEGMENT 03 COMPARISON
 
 [SEGMENT 03] Workspace constructor complete
   components: [Component('NB', 'NB1'), Component('TI', 'TI1'), Component('VA', 'VA1')]
-  phases: ['BCC_A2']
-  conditions: {N: array([1.]), P: array([101325.]), T: array([1000.]), X_TI: array([0.4])}
+  phases: ['BCC_A2', 'LIQUID']
+  conditions: {N: array([1.]), P: array([101325.]), T: array([1000.]), X_TI: array([0.01])}
 
 ================================================================================
 SEGMENT 05 COMPARISON
@@ -73,11 +73,11 @@ SEGMENT 05 COMPARISON
 [SEGMENT 05] Phase record factory creation
   components: [Component('NB', 'NB1'), Component('TI', 'TI1'), Component('VA', 'VA1')]
   conditions: [N, P, T, X_TI]
-  models: ['BCC_A2']
+  models: ['BCC_A2', 'LIQUID']
   parameters: OrderedDict()
 
 [SEGMENT 05] Phase record factory created
-  phases: ['BCC_A2']
+  phases: ['BCC_A2', 'LIQUID']
 
 ================================================================================
 SEGMENT 08 COMPARISON
@@ -89,10 +89,10 @@ SEGMENT 08 COMPARISON
 --- GPU ---
 
 [SEGMENT 08] Starting point calculation
-  conditions: OrderedDict({N: array([1.]), P: array([101325.]), T: array([1000.]), X_TI: array([0.4])})
+  conditions: OrderedDict({N: array([1.]), P: array([101325.]), T: array([1000.]), X_TI: array([0.01])})
   state_variables: [N, P, T]
-  phase_records: ['BCC_A2']
-  grid_shape: (1, 1, 1, 124)
+  phase_records: ['BCC_A2', 'LIQUID']
+  grid_shape: (1, 1, 1, 246)
 
 [SEGMENT 08] Global min check
   global_min_enabled: True
@@ -109,7 +109,7 @@ SEGMENT 09 COMPARISON
 [SEGMENT 09] Lower convex hull setup
   state_variables: [N, P, T]
   conds_keys: [N, P, T, X_TI]
-  global_grid_shape: (1, 1, 1, 124)
+  global_grid_shape: (1, 1, 1, 246)
   result_array_shape: (1, 1, 1, 1)
 
 [SEGMENT 09] Lower convex hull arrays cached
@@ -146,10 +146,10 @@ SEGMENT 11 COMPARISON
   lincomb_rhs_shape: (2,)
 
 [SEGMENT 11] [CONDITION 0] Hyperplane result
-  GM: -4.976304924725855e+04
-  MU: [-51536.02603551901, -47103.58406486786]
-  NP: [0.3838621047273983, 0.6161378952726017, 0.0]
-  points: [40, 89, 0]
+  GM: -4.965278974394861e+04
+  MU: [-49452.95049472784, -69436.87541680463]
+  NP: [0.5743033239254361, 0.4256966760745639, 0.0]
+  points: [103, 62, 0]
 
 ================================================================================
 SEGMENT 12 COMPARISON
@@ -161,12 +161,12 @@ SEGMENT 12 COMPARISON
 --- GPU ---
 
 [SEGMENT 12] [CONDITION 0] Copy results from grid
-  points: [40, 89, 0]
+  points: [103, 62, 0]
 
 [SEGMENT 12] [CONDITION 0] Copy results complete
   phases: ['BCC_A2', 'BCC_A2', '']
-  X: [[0.6101694915254215, 0.3898305084745785], [0.5936642715033319, 0.40633572849666816]]
-  final_GM: -4.976304924725855e+04
+  X: [[0.9951509908015289, 0.004849009198471176], [0.9830508474576174, 0.016949152542382537]]
+  final_GM: -4.965278974394861e+04
 
 ================================================================================
 SEGMENT 13 COMPARISON
@@ -213,8 +213,8 @@ SEGMENT 40 COMPARISON
 [SEGMENT 40] [GPU] Equilibrium calculation complete
   converged: True
   properties_shape: (1, 1, 1, 1)
-  final_GM: -4.417159981700723e+04
+  final_GM: -4.967303841766708e+04
 
 ================================================================================
-TRACE COMPLETE - 2025-07-10T10:47:10.295149
+TRACE COMPLETE - 2025-07-16T11:30:18.689504
 ================================================================================

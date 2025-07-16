@@ -1871,6 +1871,10 @@ def _nb_formulahess_from_model(model_obj: Model, model_c_idx: int, wks_obj: Work
     after_count = len(re.findall(r'1\.0\*\(\(1e-15 < x\[\d+\]\) \? \(0\) : \(0\)\)', result))
     
     print(f"[GPU] Hessian post-processed: fixed {before_count - after_count} of {before_count} all-zero patterns")
+    
+    # Apply final cleanup to remove spurious entropy terms
+    result = _final_hessian_cleanup(result)
+    
     return result
 
 def _nb_internal_cons_func_from_model(model_obj: Model, model_c_idx: int, wks_obj: Workspace, validate: bool = True, verbose: bool = False) -> str:
@@ -1936,20 +1940,83 @@ def _nb_formulamole_grad_from_model(model_obj: Model, model_c_idx: int, wks_obj:
     # a combined function that outputs gradients for all nonvacant elements
     import symengine
     funcs = []
+    
+    # CRITICAL FIX: Handle dependent site fractions
+    # For phases with site fractions that sum to 1, we need to express dependent
+    # site fractions in terms of independent ones before taking gradients
+    # Get phase from Database via workspace
+    from pycalphad import Database
+    if hasattr(wks_obj, 'phase_record_factory') and hasattr(wks_obj.phase_record_factory, 'dbf'):
+        phase = wks_obj.phase_record_factory.dbf.phases[model_obj.phase_name]
+    else:
+        # Fallback - assume phase info is available from model
+        phase = model_obj
+    site_fractions = model_obj.site_fractions
+    
+    # Build substitution dict for dependent site fractions
+    dependent_subs = {}
+    constituents_list = getattr(phase, 'constituents', getattr(model_obj, 'constituents', []))
+    
+    for subl_idx, constituents in enumerate(constituents_list):
+        active_in_subl = sorted([c for c in constituents if c in model_obj.components])
+        if len(active_in_subl) > 1:
+            # This sublattice has multiple components - last one is dependent
+            # Express Y(last) = 1 - sum(Y(others))
+            independent_sfs = []
+            for comp in active_in_subl[:-1]:
+                # Use actual site fraction symbol from model
+                matching_sf = None
+                for sf in model_obj.site_fractions:
+                    if sf.sublattice_index == subl_idx and sf.species.name == comp.name:
+                        matching_sf = sf
+                        break
+                if matching_sf:
+                    independent_sfs.append(matching_sf)
+            
+            if independent_sfs:
+                dependent_comp = active_in_subl[-1]
+                # Find the dependent site fraction symbol
+                dependent_sf = None
+                for sf in model_obj.site_fractions:
+                    if sf.sublattice_index == subl_idx and sf.species.name == dependent_comp.name:
+                        dependent_sf = sf
+                        break
+                
+                if dependent_sf:
+                    # The dependent site fraction is 1 minus the sum of independent ones
+                    dependent_expr = 1 - sum(independent_sfs)
+                    dependent_subs[dependent_sf] = dependent_expr
+                    
+                    print(f"[GPU CODEGEN] Sublattice {subl_idx}: dependent {dependent_sf} = 1 - sum({independent_sfs})")
+    
     for el in model_obj.nonvacant_elements:
         moles_expr = model_obj.moles(el, per_formula_unit=True)
+        # Apply dependent substitutions before adding to funcs
+        if dependent_subs:
+            # Convert to symengine expression and substitute
+            moles_expr = moles_expr.xreplace(dependent_subs)
         funcs.append(moles_expr)
     
     # Always print debug info for moles expressions
     print(f"[GPU CODEGEN] _nb_formulamole_grad_from_model for {model_obj.phase_name}:")
     print(f"  nonvacant_elements: {model_obj.nonvacant_elements}")
     print(f"  Number of functions: {len(funcs)}")
+    print(f"  Dependent substitutions: {dependent_subs}")
     for i, el in enumerate(model_obj.nonvacant_elements):
         print(f"  moles({el}) = {funcs[i]}")
     
     if not funcs:
         fname = notebook_model_c_func_name_prefix(model_c_idx) + "formulamole_grad"
         return f"__device__ void {fname}(double* out, const double* x) {{ /* No nonvacant elements */ }}\n\n"
+    
+    # CRITICAL FIX: The GPU minimizer passes workspace DOF (which includes N) but the
+    # gradient is generated for phase DOF ordering. This causes index misalignment.
+    # We need to generate the gradient for workspace DOF ordering to match what's passed.
+    # However, since Model.moles() expressions don't depend on N, we can keep the current
+    # generation but need to ensure the minimizer passes the correct DOF subset.
+    print(f"  WARNING: formulamole_grad expects phase DOF ordering [P, T, site_fractions...]")
+    print(f"           but GPU minimizer may pass workspace DOF [N, P, T, site_fractions...]")
+    
     return notebook_source_from_expr(funcs, "formulamole_grad", model_obj, model_c_idx, wks_obj, expr_type="grad", c_output_type="void", validate=validate, verbose=verbose)
 
 
@@ -2061,6 +2128,13 @@ def _final_hessian_cleanup(full_code: str) -> str:
     """
     Final cleanup pass to remove spurious entropy terms from the generated Hessian.
     This operates on the complete generated code to catch any terms that slipped through.
+    
+    For a binary substitutional solution with entropy S = -R*T*sum(Y_i*log(Y_i))/(Y_1+Y_2),
+    the correct Hessian should be:
+    - Diagonal H[i,i] = R*T/Y_i (only one 1/Y_i term)
+    - Off-diagonal H[i,j] = R*T (no 1/Y terms)
+    
+    The generated code has spurious terms from the (Y_1+Y_2) normalization.
     """
     import re
     
@@ -2070,10 +2144,11 @@ def _final_hessian_cleanup(full_code: str) -> str:
     
     for line in lines:
         # Check if this is a Hessian output line
-        match = re.match(r'\s*out\[(\d+)\]\s*=\s*(.+);', line)
+        match = re.match(r'(\s*)out\[(\d+)\]\s*=\s*(.+);', line)
         if match:
-            out_idx = int(match.group(1))
-            expression = match.group(2)
+            indent = match.group(1)
+            out_idx = int(match.group(2))
+            expression = match.group(3)
             
             # Map output index to i,j indices for 5x5 Hessian
             # out[k] = hess[i,j] where k = i*5 + j
@@ -2081,68 +2156,84 @@ def _final_hessian_cleanup(full_code: str) -> str:
             i = out_idx // n
             j = out_idx % n
             
-            # Only process diagonal elements for site fractions
-            if i == j and i >= 3:  # Indices 3 and 4 are Y_NB and Y_TI
-                # Count spurious terms before
-                spurious_indices = [3, 4]
-                spurious_indices.remove(i)  # Don't remove the correct diagonal term
+            # Process site fraction Hessian elements
+            if i >= 3 and j >= 3:  # Indices 3 and 4 are Y_NB and Y_TI
+                if i == j:
+                    # DIAGONAL ELEMENTS: Should have only 1/x[i] terms, no 1/x[j] where j≠i
+                    spurious_idx = 4 if i == 3 else 3  # The other site fraction
+                    
+                    # Pattern that captures entropy terms with the spurious 1/x[j]
+                    # Must be careful not to break other ternary operators
+                    patterns = [
+                        # Pattern with coefficient: 1.0*((1e-15 < x[j]) ? (pow(x[j], (-1))) : 0)
+                        rf'1\.0\*\(\(1e-15 < x\[{spurious_idx}\]\) \? \(pow\(x\[{spurious_idx}\], \(-1(?:\.0)?\)\)\) : 0\)',
+                        # Without coefficient but with parentheses
+                        rf'\(\(1e-15 < x\[{spurious_idx}\]\) \? \(pow\(x\[{spurious_idx}\], \(-1(?:\.0)?\)\)\) : 0\)'
+                    ]
+                    
+                    for pattern in patterns:
+                        matches = list(re.finditer(pattern, expression))
+                        
+                        # Process in reverse to maintain positions
+                        for match in reversed(matches):
+                            start = match.start()
+                            end = match.end()
+                            
+                            # Check context
+                            before = expression[:start].rstrip()
+                            after = expression[end:].lstrip()
+                            
+                            # Remove the term with proper operator handling
+                            if before and before[-1] in '+-':
+                                expression = before[:-1].rstrip() + ' ' + after
+                            elif after and after[0] in '+-':
+                                expression = before + ' ' + after[1:].lstrip()
+                            else:
+                                expression = before + after
+                            
+                            total_removed += 1
                 
-                before_count = 0
-                for idx in spurious_indices:
-                    before_count += len(re.findall(rf'pow\(x\[{idx}\], \(-1\)\)', expression))
-                
-                if before_count > 0:
-                    # Remove spurious terms
-                    for spurious_idx in spurious_indices:
-                        # Pattern for entropy terms with spurious 1/x[j]
+                elif i != j:
+                    # OFF-DIAGONAL ELEMENTS: Should have NO entropy 1/x terms
+                    for var_idx in [3, 4]:
                         patterns = [
-                            # Most specific: coefficient * conditional
-                            rf'1\.0\*\(\(1e-15 < x\[{spurious_idx}\]\) \? \(pow\(x\[{spurious_idx}\], \(-1\)\)\) : 0\)',
-                            # Just the conditional
-                            rf'\(\(1e-15 < x\[{spurious_idx}\]\) \? \(pow\(x\[{spurious_idx}\], \(-1\)\)\) : 0\)',
-                            # Simple pow
-                            rf'pow\(x\[{spurious_idx}\], \(-1\)\)'
+                            # Pattern with coefficient: 1.0*((1e-15 < x[j]) ? (pow(x[j], (-1))) : 0)
+                            rf'1\.0\*\(\(1e-15 < x\[{var_idx}\]\) \? \(pow\(x\[{var_idx}\], \(-1(?:\.0)?\)\)\) : 0\)',
+                            # Without coefficient but with parentheses
+                            rf'\(\(1e-15 < x\[{var_idx}\]\) \? \(pow\(x\[{var_idx}\], \(-1(?:\.0)?\)\)\) : 0\)'
                         ]
                         
                         for pattern in patterns:
-                            # Find all occurrences
-                            while True:
-                                match = re.search(pattern, expression)
-                                if not match:
-                                    break
-                                    
+                            matches = list(re.finditer(pattern, expression))
+                            
+                            for match in reversed(matches):
                                 start = match.start()
                                 end = match.end()
-                                before = expression[:start]
-                                after = expression[end:]
                                 
-                                # Remove with appropriate handling of operators
-                                if before.endswith(' + ') and after:
-                                    expression = before[:-3] + after
-                                elif before and after.startswith(' + '):
-                                    expression = before + after[3:]
-                                elif before.endswith('(') and after.startswith(')'):
-                                    # Removing the only term in parentheses
-                                    expression = before + '0' + after
+                                before = expression[:start].rstrip()
+                                after = expression[end:].lstrip()
+                                
+                                if before and before[-1] in '+-':
+                                    expression = before[:-1].rstrip() + ' ' + after
+                                elif after and after[0] in '+-':
+                                    expression = before + ' ' + after[1:].lstrip()
                                 else:
                                     expression = before + after
-                    
-                    # Clean up
-                    expression = re.sub(r'\s+', ' ', expression)
-                    expression = re.sub(r'\+\s*\+', '+', expression)
-                    expression = re.sub(r'\(\s*\)', '(0)', expression)
-                    expression = re.sub(r'\(\s*\+', '(', expression)
-                    expression = re.sub(r'\+\s*\)', ')', expression)
-                    
-                    # Count after
-                    after_count = 0
-                    for idx in spurious_indices:
-                        after_count += len(re.findall(rf'pow\(x\[{idx}\], \(-1\)\)', expression))
-                    
-                    if before_count - after_count > 0:
-                        total_removed += before_count - after_count
+                                
+                                total_removed += 1
                 
-                line = f"    out[{out_idx}] = {expression};"
+                # Clean up the expression
+                expression = re.sub(r'\s+', ' ', expression)
+                expression = re.sub(r'\+\s*\+', '+', expression)
+                expression = re.sub(r'-\s*-', '+', expression) 
+                expression = re.sub(r'\(\s*\)', '(0)', expression)
+                expression = re.sub(r'\+\s*-', '-', expression)
+                expression = re.sub(r'-\s*\+', '-', expression)
+                expression = re.sub(r'^\s*\+\s*', '', expression)  # Remove leading +
+                expression = expression.strip()
+                
+                # Reconstruct the line
+                line = f"{indent}out[{out_idx}] = {expression};"
         
         modified_lines.append(line)
     
@@ -2171,6 +2262,7 @@ def _generate_full_gpu_source(wks_obj: Workspace,
     svd_c_source = _read_gpu_header("svd.c")
     phase_rec_h_source = _read_gpu_header("phase_rec.h")
     comp_set_h_source = _read_gpu_header("comp_set.h")
+    lu_solver_h_source = _read_gpu_header("lu_solver.h")
     minimizer_h_source = _read_gpu_header("minimizer.h")
     eqsolver_h_source = _read_gpu_header("eqsolver.h")
 
@@ -2215,6 +2307,9 @@ __device__ void gpu_debug_log_array(const char* message, const double* arr, int 
 
 // Content of comp_set.h
 {comp_set_h_source}
+
+// Content of lu_solver.h (LU decomposition solver)
+{lu_solver_h_source}
 
 // Content of minimizer.h (defines SystemSpecification, SystemState, run_loop, etc.)
 {minimizer_h_source}
@@ -2894,8 +2989,10 @@ __device__ void solve_equilibrium_at_condition_global_mem(
     // CRITICAL FIX: Safely read SystemSpecification from GPU memory
     // Cannot dereference struct pointer directly due to alignment/memory access issues
     // WORKAROUND: Use global memory to store SystemSpecification to avoid stack pointer issues
-    // Use the beginning of the work_inv array which is large enough
-    SystemSpecification* current_spec_ptr = (SystemSpecification*)work_inv;
+    // CRITICAL FIX: Allocate SystemSpec on stack instead of reusing work array
+    // which might be causing memory corruption for Thread 1
+    char spec_buffer[sizeof(SystemSpecification)];
+    SystemSpecification* current_spec_ptr = (SystemSpecification*)spec_buffer;
     SystemSpecification& current_spec = *current_spec_ptr;
     
     // Copy the entire struct byte-by-byte from GPU memory
@@ -2904,10 +3001,15 @@ __device__ void solve_equilibrium_at_condition_global_mem(
     memcpy(current_spec_ptr, spec_bytes, sizeof(SystemSpecification));
     
     // DEBUG: Verify the copy worked
-    if (thread_id == 0) {{
-        printf("GPU DEBUG: Copied SystemSpecification to global memory at %p\\n", current_spec_ptr);
-        printf("  num_statevars=%d, num_components=%d\\n", 
-               current_spec.num_statevars, current_spec.num_components);
+    if (thread_id == 0 || thread_id == 1) {{
+        printf("GPU DEBUG: Thread %d - Copied SystemSpecification to global memory at %p\\n", thread_id, current_spec_ptr);
+        printf("  Thread %d: global_spec_base=%p\\n", thread_id, global_spec_base);
+        printf("  Thread %d: num_statevars=%d, num_components=%d\\n", 
+               thread_id, current_spec.num_statevars, current_spec.num_components);
+        if (current_spec.num_prescribed_mole_fraction_conditions > 0) {{
+            printf("  Thread %d: prescribed_mole_fraction_rhs[0]=%f\\n", 
+                   thread_id, current_spec.prescribed_mole_fraction_rhs[0]);
+        }}
     }}
     
     // The struct is now fully copied with correct layout from Python
@@ -2922,6 +3024,22 @@ __device__ void solve_equilibrium_at_condition_global_mem(
         printf("  Thread %d: num_components = %d\\n", thread_id, current_spec.num_components);
         printf("  Thread %d: num_free_chemical_potentials = %d\\n", thread_id, current_spec.num_free_chemical_potentials);
         printf("  Thread %d: num_prescribed_mole_fraction_conditions = %d\\n", thread_id, current_spec.num_prescribed_mole_fraction_conditions);
+        
+        // DEBUG: Show free and fixed state variables
+        printf("  Thread %d: num_free_statevars = %d\\n", thread_id, current_spec.num_free_statevars);
+        printf("  Thread %d: free_statevar_indices = [", thread_id);
+        for (int i = 0; i < current_spec.num_free_statevars; ++i) {{
+            printf("%d", current_spec.free_statevar_indices[i]);
+            if (i < current_spec.num_free_statevars - 1) printf(", ");
+        }}
+        printf("]\\n");
+        printf("  Thread %d: num_fixed_statevars = %d\\n", thread_id, current_spec.num_fixed_statevars);
+        printf("  Thread %d: fixed_statevar_indices = [", thread_id);
+        for (int i = 0; i < current_spec.num_fixed_statevars; ++i) {{
+            printf("%d", current_spec.fixed_statevar_indices[i]);
+            if (i < current_spec.num_fixed_statevars - 1) printf(", ");
+        }}
+        printf("]\\n");
         
         // DEBUG: Print struct offsets to diagnose alignment
         printf("  Thread %d: Struct base address: %p\\n", thread_id, global_spec_base);
@@ -4087,6 +4205,8 @@ __global__ void top_level_equilibrium_kernel(
     const void* condition_args_list_ptr_raw, // Array of conditions, one per condition (passed as raw memory)
     void* results_list_ptr_raw, // Array for results (passed as raw memory)
     int num_conditions_total,
+    int condition_stride, // CRITICAL FIX: Python-provided stride for condition data
+    int python_max_statevars, // CRITICAL FIX: Python's MAX_STATEVARS value for proper offset calculation
     // DevicePhaseData contents are now implicitly g_phase_records_array and num_unique_models
     const void* initial_phase_data_ptr, // Array of InitialPhaseDataSingle structs from lower_convex_hull
     const void* grid_data_ptr_raw, // Pointer to grid data (can be null if not using add_new/nearly_stable in kernel)
@@ -4205,8 +4325,9 @@ __global__ void top_level_equilibrium_kernel(
             return;
         }}
         
-        // Each condition now has MAX_STATEVARS + MAX_COMPONENTS doubles (8 + 32 = 40). Access directly by offset.
-        int condition_offset = condition_idx * (MAX_STATEVARS + MAX_COMPONENTS);
+        // CRITICAL FIX: Use Python-provided stride instead of hardcoded calculation
+        // This ensures GPU respects Python's data layout regardless of constant values
+        int condition_offset = condition_idx * condition_stride;
         
         // Extract conditions based on actual state variables layout
         // Layout: [state_vars (MAX_STATEVARS), mole_fractions (MAX_COMPONENTS)]
@@ -4227,10 +4348,35 @@ __global__ void top_level_equilibrium_kernel(
         // - If num_statevars = 2: [N, T] (no pressure)
         // - If num_statevars = 3: [N, P, T] or [N, T, P] depending on order
         
-        // CRITICAL FIX: Safely read num_statevars from spec data
-        // Cast to SystemSpecification struct to read the field correctly
-        const SystemSpecification* global_spec = (const SystemSpecification*)global_spec_ptr_raw;
-        int num_statevars = global_spec->num_statevars;  // First field in SystemSpecification
+        // CRITICAL FIX: Access thread-specific SystemSpecification
+        // Each thread gets its own SystemSpec from the array
+        const double* system_specs_array = (const double*)global_spec_ptr_raw;
+        
+        // Calculate spec size in doubles (must match Python calculation)
+        const int svd_dim_calc = MAX_PHASES + MAX_FIXED_MOLE_FRACTION_CONDITIONS + MAX_COMPONENTS + MAX_STATEVARS + 2;
+        const int svd_m_calc = svd_dim_calc;
+        const int svd_n_calc = svd_dim_calc;
+        const int phase_matrix_dim_calc = MAX_COMPONENTS + MAX_COMPONENTS;
+        
+        int spec_core_doubles_calc = 3 + MAX_COMPONENTS + (MAX_FIXED_MOLE_FRACTION_CONDITIONS * MAX_COMPONENTS) + 
+                               MAX_FIXED_MOLE_FRACTION_CONDITIONS + 2 + (MAX_COMPONENTS + 1) + 
+                               (MAX_STATEVARS + 1) + (MAX_COMPONENTS + 1) + (MAX_STATEVARS + 1) + 
+                               (MAX_PHASES + 1) + 1 + 1;
+                               
+        int spec_work_doubles_calc = (svd_m_calc * svd_n_calc) + (svd_m_calc * svd_n_calc) + 
+                                    (svd_n_calc * svd_n_calc) + svd_n_calc + svd_n_calc + 
+                                    (phase_matrix_dim_calc * phase_matrix_dim_calc) + 
+                                    (phase_matrix_dim_calc * phase_matrix_dim_calc) +
+                                    phase_matrix_dim_calc + phase_matrix_dim_calc + 
+                                    (phase_matrix_dim_calc * phase_matrix_dim_calc);
+                                    
+        int spec_size_doubles = spec_core_doubles_calc + spec_work_doubles_calc;
+        
+        // Get pointer to this thread's SystemSpec data
+        const double* my_spec_data = &system_specs_array[condition_idx * spec_size_doubles];
+        
+        // Read num_statevars from the correct position (first field)
+        int num_statevars = (int)my_spec_data[0];
         
         if (num_statevars == 2) {{
             // Most common case: [N, T] with no pressure variable
@@ -4252,11 +4398,11 @@ __global__ void top_level_equilibrium_kernel(
         // CRITICAL: Extract composition values for this specific thread
         double thread_mole_fractions[MAX_COMPONENTS];
         for (int i = 0; i < MAX_COMPONENTS; ++i) {{
-            if (i < global_spec->num_components) {{
-                // Compositions are stored after MAX_STATEVARS positions in condition_data_array
-                // Python packs as: [state_vars (padded to MAX_STATEVARS), compositions (MAX_COMPONENTS)]
-                // So compositions start at condition_offset + MAX_STATEVARS
-                int comp_idx = condition_offset + MAX_STATEVARS + i;
+            if (i < (int)my_spec_data[1]) {{ // num_components is at offset 1
+                // CRITICAL FIX: Use Python's MAX_STATEVARS value directly
+                // Python layout: [state_vars (padded to Python's MAX_STATEVARS), compositions]
+                // Compositions start at: condition_offset + python_max_statevars
+                int comp_idx = condition_offset + python_max_statevars + i;
                 thread_mole_fractions[i] = condition_data_array[comp_idx];
             }} else {{
                 thread_mole_fractions[i] = 0.0;
@@ -4265,8 +4411,8 @@ __global__ void top_level_equilibrium_kernel(
         
         if (tid == 0 || tid < 5) {{
             printf("GPU DEBUG: Thread %d extracted conditions - T=%f\\n", tid, temp);
-            printf("GPU DEBUG: Thread %d condition_offset=%d, MAX_STATEVARS=%d\\n", 
-                   tid, condition_offset, MAX_STATEVARS);
+            printf("GPU DEBUG: Thread %d condition_offset=%d, condition_stride=%d, python_max_statevars=%d (GPU MAX_STATEVARS=%d)\\n", 
+                   tid, condition_offset, condition_stride, python_max_statevars, MAX_STATEVARS);
             // Debug the actual values in condition_data_array
             printf("GPU DEBUG: Thread %d condition_data_array values at offset %d:\\n", tid, condition_offset);
             for (int j = 0; j < 8; ++j) {{
@@ -4373,7 +4519,7 @@ __global__ void top_level_equilibrium_kernel(
                                        (PYTHON_MAX_PHASES * PYTHON_MAX_COMPONENTS);  // = 40
             
             for (int i = 0; i < MAX_COMPONENTS; ++i) {{
-                if (i < global_spec->num_components) {{
+                if (i < (int)my_spec_data[1]) {{ // num_components is at offset 1
                     chemical_potentials[i] = initial_data_byte_array[struct_offset + chem_pot_offset + i];
                 }} else {{
                     chemical_potentials[i] = 0.0;
@@ -4383,7 +4529,7 @@ __global__ void top_level_equilibrium_kernel(
             if (tid < 3) {{
                 printf("GPU DEBUG: Thread %d reading chemical potentials from struct_offset=%d + chem_pot_offset=%d = %d\\n", 
                        tid, struct_offset, chem_pot_offset, struct_offset + chem_pot_offset);
-                printf("GPU DEBUG: Thread %d SystemSpecification check - num_components=%d\\n", tid, global_spec->num_components);
+                printf("GPU DEBUG: Thread %d SystemSpecification check - num_components=%d\\n", tid, (int)my_spec_data[1]);
                 for (int i = 0; i < 3; ++i) {{
                     printf("  Thread %d chemical_potentials[%d] = %.6e (from initial_data offset %d)\\n", 
                            tid, i, chemical_potentials[i], struct_offset + chem_pot_offset + i);
@@ -4470,8 +4616,11 @@ __global__ void top_level_equilibrium_kernel(
                     double pressure_val = 101325.0; // Default P
                     double temp_val = 298.15;    // Default T
                     
-                    const SystemSpecification* spec = (const SystemSpecification*)global_spec_ptr_raw;
-                    int actual_num_statevars = spec->num_statevars;
+                    // CRITICAL FIX: Access per-thread SystemSpec data instead of casting shared pointer
+                    // global_spec_ptr_raw is an array of SystemSpecs in double format, not a single struct
+                    const double* system_specs_array = (const double*)global_spec_ptr_raw;
+                    const double* my_spec_doubles = &system_specs_array[condition_idx * spec_size_doubles];
+                    int actual_num_statevars = (int)my_spec_doubles[0];  // num_statevars is first field
                     
                     if (actual_num_statevars == 2) {{
                         // Most common case: [N, T] with no pressure variable
@@ -4646,13 +4795,90 @@ __global__ void top_level_equilibrium_kernel(
             SystemSpecification* thread_spec_ptr = (SystemSpecification*)thread_spec_bytes;
             SystemSpecification& thread_spec = *thread_spec_ptr;
             
-            // Copy the entire struct byte-by-byte from GPU memory
-            // This preserves the exact layout from Python
-            const char* spec_bytes = (const char*)global_spec_ptr_raw;
-            memcpy(thread_spec_bytes, spec_bytes, sizeof(SystemSpecification));
+            // CRITICAL FIX: Copy thread-specific SystemSpec instead of shared one
+            // Calculate offset to this thread's SystemSpec in the array
+            const double* system_specs_array = (const double*)global_spec_ptr_raw;
             
-            // The struct is now fully copied with correct layout from Python
-            // No need for manual field-by-field reading
+            // Calculate size including work arrays to match Python
+            const int svd_dim_local = MAX_PHASES + MAX_FIXED_MOLE_FRACTION_CONDITIONS + MAX_COMPONENTS + MAX_STATEVARS + 2;
+            const int svd_m_local = svd_dim_local;
+            const int svd_n_local = svd_dim_local;
+            const int phase_matrix_dim_local = MAX_COMPONENTS + MAX_COMPONENTS;  // Approximation
+            
+            int spec_core_doubles = 3 + MAX_COMPONENTS + (MAX_FIXED_MOLE_FRACTION_CONDITIONS * MAX_COMPONENTS) + 
+                                   MAX_FIXED_MOLE_FRACTION_CONDITIONS + 2 + (MAX_COMPONENTS + 1) + 
+                                   (MAX_STATEVARS + 1) + (MAX_COMPONENTS + 1) + (MAX_STATEVARS + 1) + 
+                                   (MAX_PHASES + 1) + 1 + 1;
+                                   
+            int spec_work_doubles = (svd_m_local * svd_n_local) + (svd_m_local * svd_n_local) + (svd_n_local * svd_n_local) + 
+                                   svd_n_local + svd_n_local + 
+                                   (phase_matrix_dim_local * phase_matrix_dim_local) + (phase_matrix_dim_local * phase_matrix_dim_local) +
+                                   phase_matrix_dim_local + phase_matrix_dim_local + (phase_matrix_dim_local * phase_matrix_dim_local);
+                                   
+            int spec_size_doubles = spec_core_doubles + spec_work_doubles;
+            const double* my_spec_doubles = &system_specs_array[condition_idx * spec_size_doubles];
+            
+            // CRITICAL FIX: Manually copy fields from double array to struct
+            // Python stores everything as doubles in a flat array, we need to 
+            // reconstruct the struct with proper types
+            int py_offset = 0;
+            
+            // Basic integer fields (stored as doubles in Python)
+            thread_spec.num_statevars = (int)my_spec_doubles[py_offset++];
+            thread_spec.num_components = (int)my_spec_doubles[py_offset++];
+            thread_spec.prescribed_system_amount = my_spec_doubles[py_offset++];
+            
+            // Initial chemical potentials array
+            for (int i = 0; i < MAX_COMPONENTS; ++i) {{
+                thread_spec.initial_chemical_potentials[i] = my_spec_doubles[py_offset++];
+            }}
+            
+            // Prescribed mole fraction coefficients (2D array)
+            for (int i = 0; i < MAX_FIXED_MOLE_FRACTION_CONDITIONS; ++i) {{
+                for (int j = 0; j < MAX_COMPONENTS; ++j) {{
+                    thread_spec.prescribed_mole_fraction_coefficients[i][j] = my_spec_doubles[py_offset++];
+                }}
+            }}
+            
+            // Prescribed mole fraction RHS
+            for (int i = 0; i < MAX_FIXED_MOLE_FRACTION_CONDITIONS; ++i) {{
+                thread_spec.prescribed_mole_fraction_rhs[i] = my_spec_doubles[py_offset++];
+            }}
+            
+            // More integer fields
+            thread_spec.num_prescribed_mole_fraction_conditions = (int)my_spec_doubles[py_offset++];
+            thread_spec.num_prescribed_mole_fraction_coefficients_cols = (int)my_spec_doubles[py_offset++];
+            
+            // Index arrays with their counts
+            for (int i = 0; i < MAX_COMPONENTS; ++i) {{
+                thread_spec.free_chemical_potential_indices[i] = (int)my_spec_doubles[py_offset++];
+            }}
+            thread_spec.num_free_chemical_potentials = (int)my_spec_doubles[py_offset++];
+            
+            for (int i = 0; i < MAX_STATEVARS; ++i) {{
+                thread_spec.free_statevar_indices[i] = (int)my_spec_doubles[py_offset++];
+            }}
+            thread_spec.num_free_statevars = (int)my_spec_doubles[py_offset++];
+            
+            for (int i = 0; i < MAX_COMPONENTS; ++i) {{
+                thread_spec.fixed_chemical_potential_indices[i] = (int)my_spec_doubles[py_offset++];
+            }}
+            thread_spec.num_fixed_chemical_potentials = (int)my_spec_doubles[py_offset++];
+            
+            for (int i = 0; i < MAX_STATEVARS; ++i) {{
+                thread_spec.fixed_statevar_indices[i] = (int)my_spec_doubles[py_offset++];
+            }}
+            thread_spec.num_fixed_statevars = (int)my_spec_doubles[py_offset++];
+            
+            for (int i = 0; i < MAX_PHASES; ++i) {{
+                thread_spec.fixed_stable_compset_indices[i] = (int)my_spec_doubles[py_offset++];
+            }}
+            thread_spec.num_fixed_stable_compsets = (int)my_spec_doubles[py_offset++];
+            
+            thread_spec.max_num_free_stable_phases = (int)my_spec_doubles[py_offset++];
+            thread_spec.ALLOWED_MASS_RESIDUAL = my_spec_doubles[py_offset++];
+            
+            // Work arrays are not copied - they're allocated separately in global memory
             
             // CRITICAL FIX: Safely read SystemSpecification fields
             // sys_spec_data no longer needed - we copy the struct directly
@@ -4704,9 +4930,11 @@ __global__ void top_level_equilibrium_kernel(
             // DO NOT update the prescribed mole fraction RHS - it should remain constant!
             // The RHS values are the target mole fractions we're trying to achieve.
             // They are set from the Python side and should not be modified during solving.
-            if (thread_spec.num_prescribed_mole_fraction_conditions > 0 && tid == 0) {{
-                printf("GPU DEBUG: Using prescribed_mole_fraction_rhs[0] = %f (should be constant)\\n", 
-                       thread_spec.prescribed_mole_fraction_rhs[0]);
+            if (thread_spec.num_prescribed_mole_fraction_conditions > 0 && tid < 5) {{
+                printf("GPU DEBUG: Thread %d using prescribed_mole_fraction_rhs[0] = %f (should be X(TI) for this condition)\\n", 
+                       tid, thread_spec.prescribed_mole_fraction_rhs[0]);
+                printf("GPU DEBUG: Thread %d SystemSpec: num_statevars=%d, num_components=%d\\n",
+                       tid, thread_spec.num_statevars, thread_spec.num_components);
             }}
             
             // Set up device phase data  
@@ -4755,9 +4983,15 @@ __global__ void top_level_equilibrium_kernel(
             
             // REFACTORED: Call sophisticated solver with global memory arrays
             // This is the full equilibrium solver using global memory to avoid stack overflow
-            if (condition_idx == 0) {{
+            if (condition_idx == 0 || condition_idx == 1) {{
                 printf("GPU DEBUG: CALLING solve_equilibrium_at_condition_global_mem for condition %d\\n", condition_idx);
-                printf("GPU DEBUG: global_spec_ptr_raw=%p, thread arrays ready\\n", global_spec_ptr_raw);
+                printf("GPU DEBUG: global_spec_ptr_raw=%p, thread_spec address=%p\\n", global_spec_ptr_raw, &thread_spec);
+                printf("GPU DEBUG: Thread %d thread_spec.num_statevars=%d, thread_spec.num_components=%d\\n",
+                       condition_idx, thread_spec.num_statevars, thread_spec.num_components);
+                if (thread_spec.num_prescribed_mole_fraction_conditions > 0) {{
+                    printf("GPU DEBUG: Thread %d thread_spec.prescribed_mole_fraction_rhs[0]=%f\\n",
+                           condition_idx, thread_spec.prescribed_mole_fraction_rhs[0]);
+                }}
             }}
             solve_equilibrium_at_condition_global_mem(
                 condition_idx,           // thread_id

@@ -232,6 +232,9 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
         # Format: [state_vars (MAX_STATEVARS), mole_fraction_values (MAX_COMPONENTS)]
         condition_data_size = max_statevars_scalar + max_components_scalar
         condition_args_np = np.zeros((num_conditions_total, condition_data_size), dtype=np.float64)
+        
+        # CRITICAL FIX: Store the stride for GPU kernel to use
+        condition_data_stride = condition_data_size
             
     except Exception as e:
         raise
@@ -803,9 +806,11 @@ def _populate_system_specification(global_spec_np, global_spec_arrays, wks_obj, 
             if wks_obj.verbose:
                 print(f"[GPU] DEBUG: Processing state var {sv_idx}: {state_var}")
             
+            # CRITICAL FIX: For equilibrium calculations, all state variables that are
+            # specified in conditions should be FIXED, not free. The original logic was backwards.
             if state_var in wks_obj.conditions:
                 if wks_obj.verbose:
-                    print(f"[GPU] DEBUG: Found state_var in conditions")
+                    print(f"[GPU] DEBUG: Found state_var in conditions, marking as FIXED")
                 fixed_statevar_indices.append(sv_idx)
             else:
                 if wks_obj.verbose:
@@ -886,6 +891,16 @@ def _populate_system_specification(global_spec_np, global_spec_arrays, wks_obj, 
     for i, idx in enumerate(fixed_statevar_indices[:max_statevars]):
         global_spec_arrays['fixed_statevar_indices'][i] = idx
     global_spec_np[8] = len(fixed_statevar_indices)  # num_fixed_statevars
+    
+    # DEBUG: Print what we're storing
+    if wks_obj.verbose:
+        print(f"[GPU Python] State variable configuration:")
+        print(f"  free_statevar_indices: {free_statevar_indices}")
+        print(f"  fixed_statevar_indices: {fixed_statevar_indices}")
+        print(f"  global_spec_arrays['free_statevar_indices']: {global_spec_arrays['free_statevar_indices']}")
+        print(f"  global_spec_arrays['fixed_statevar_indices']: {global_spec_arrays['fixed_statevar_indices']}")
+        print(f"  global_spec_np[6] (num_free_statevars): {global_spec_np[6]}")
+        print(f"  global_spec_np[8] (num_fixed_statevars): {global_spec_np[8]}")
     
     # No fixed stable composition sets (phases) by default
     global_spec_np[9] = 0  # num_fixed_stable_compsets
@@ -2144,8 +2159,14 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         print("[GPU] DEBUG: Creating struct-compatible memory layouts...")
     
     try:
-        # Create SystemSpecification struct
-        system_spec_struct = _create_system_specification_struct(global_spec_scalars, global_spec_arrays, dynamic_sizes)
+        # CRITICAL FIX: Create one SystemSpecification per condition instead of sharing
+        from .gpu_systemspec_per_condition import create_system_specifications_array
+        system_specs_array = create_system_specifications_array(
+            wks_obj, num_total_conditions_pts, dynamic_sizes, properties, verbose
+        )
+        
+        # For backward compatibility, keep old single spec creation commented
+        # system_spec_struct = _create_system_specification_struct(global_spec_scalars, global_spec_arrays, dynamic_sizes)
         if verbose:
             print("[GPU] DEBUG: SystemSpecification struct created")
         
@@ -2190,7 +2211,8 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         if verbose:
             print("[GPU] DEBUG: Packing structs into byte arrays...")
         
-        system_spec_bytes = _pack_struct_to_bytes(system_spec_struct)
+        # CRITICAL FIX: Pass array of SystemSpecifications instead of single spec
+        system_spec_bytes = system_specs_array  # Already a flat double array
         condition_args_bytes = _pack_struct_to_bytes(condition_args_struct)
         # BUGFIX: initial_phase_data_struct is already a flat array, use tobytes() directly
         if verbose:
@@ -2467,6 +2489,19 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     # Add global memory arrays to prevent garbage collection
     gpu_arrays.extend(global_memory_arrays.values())
     
+    # Calculate condition_data_stride based on dynamic_sizes
+    # This matches the calculation in _prepare_gpu_data
+    if dynamic_sizes is not None:
+        max_statevars_scalar = int(dynamic_sizes["MAX_STATEVARS"])
+        max_components_scalar = int(dynamic_sizes["MAX_COMPONENTS"])
+    else:
+        max_statevars_scalar = int(_get_c_define("MAX_STATEVARS"))
+        max_components_scalar = int(_get_c_define("MAX_COMPONENTS"))
+    
+    condition_data_stride = max_statevars_scalar + max_components_scalar
+    
+    if wks_obj.verbose:
+        print(f"[GPU] Passing to kernel: condition_data_stride={condition_data_stride} (max_statevars={max_statevars_scalar} + max_components={max_components_scalar})")
     
     # Now use the proper struct pointers for the kernel call
     # Try different argument formats to see which one works
@@ -2476,6 +2511,8 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             condition_args_gpu_doubles.data.ptr,        # const ConditionArgsSingle* condition_args_list_ptr - FIX: use doubles
             results_gpu.data.ptr,               # EquilibriumResultSingle* results_list_ptr
             num_total_conditions_pts,           # int num_conditions_total
+            condition_data_stride,              # int condition_stride - CRITICAL FIX for multi-condition support
+            max_statevars_scalar,               # int python_max_statevars - Python's MAX_STATEVARS value
             initial_phase_data_gpu.data.ptr,    # const void* initial_phase_data_ptr
             grid_data_ptr_for_kernel,           # const DeviceGrid* grid_data_ptr
             debug_arrays['gm_history'].data.ptr,    # double* debug_gm_history
@@ -2511,6 +2548,8 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             condition_args_gpu_doubles.data.ptr,        # const ConditionArgsSingle* condition_args_list_ptr - FIX: use doubles
             results_gpu.data.ptr,               # EquilibriumResultSingle* results_list_ptr
             num_total_conditions_pts,           # int num_conditions_total
+            condition_data_stride,              # int condition_stride - CRITICAL FIX for multi-condition support
+            max_statevars_scalar,               # int python_max_statevars - Python's MAX_STATEVARS value
             initial_phase_data_gpu.data.ptr,    # const void* initial_phase_data_ptr
             grid_data_ptr_for_kernel,           # const DeviceGrid* grid_data_ptr
             0, 0, 0, 0, 0,                      # null debug arrays

@@ -897,6 +897,11 @@ cdef class SystemState:
             
             for comp_idx in range(num_components):
                 compset.phase_record.formulamole_grad(csst.mass_jac[comp_idx, :], x, comp_idx)
+            if state.iteration < 3:
+                printf("[CPU FORMULAHESS INPUT] Phase %d iteration %d, DOF: ", idx, state.iteration);
+                for i in range(5):
+                    printf("%.15e ", x[i])
+                printf("\n")
             compset.phase_record.formulahess(csst.hess, x)
             
             # DEBUG: Print CPU Hessian values after calculation

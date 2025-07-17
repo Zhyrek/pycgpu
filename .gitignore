@@ -55,3 +55,8 @@ env/
 *.sublime-project
 *.sublime-workspace
 *.cpp
+
+# Exception for GPU source files - these should be tracked
+!pycalphad/gpu/*.h
+!pycalphad/gpu/*.c
+!pycalphad/gpu/*.cu

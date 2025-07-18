@@ -778,6 +778,13 @@ typedef struct SystemState {
             CompositionSet* compset = &compsets[idx];
             CompsetState* csst = &cs_states[idx];
             if (compset->phase_record == nullptr) continue;
+            
+            // CRITICAL FIX: Skip phases with zero amount to match CPU behavior
+            // The CPU solver doesn't process removed phases in recompute
+            if (phase_amt[idx] < 1e-10) {
+                continue;
+            }
+            
             const PhaseRecord* pr = compset->phase_record;
 
             // REMOVED: Old code that created current_dof_for_phase incorrectly
@@ -1081,9 +1088,10 @@ typedef struct SystemState {
             for(int i=0; i < csst->moles_normalization_grad_length; ++i) csst->moles_normalization_grad[i] = 0.0;
 
             // DEBUG: Print gradient values before computing c_G
-            if (idx < 2 && iteration < 2) {
-                printf("GPU DEBUG: Phase %d gradients before c_G calculation:\n", idx);
+            if (idx < 2 && iteration < 5) {
+                printf("GPU DEBUG: Phase %d gradients before c_G calculation (iter %d):\n", idx, iteration);
                 printf("  energy = %.15e\n", csst->energy);
+                printf("  phase_amt = %.15e\n", phase_amt[idx]);
                 for (int j = 0; j < csst->grad_length; ++j) {
                     printf("  grad[%d] = %.15e\n", j, csst->grad[j]);
                 }
@@ -1112,8 +1120,9 @@ typedef struct SystemState {
             }
             
             // DEBUG: Print c_G values after calculation
-            if (idx < 2 && iteration < 2) {
+            if (idx < 2 && iteration < 5) {
                 printf("GPU DEBUG: Phase %d c_G values (iter %d):\n", idx, iteration);
+                printf("  phase_amt = %.15e\n", phase_amt[idx]);
                 printf("  gradient values: [");
                 for (int i = 0; i < pr->phase_dof; ++i) {
                     printf("%.6e", csst->grad[spec->num_statevars + i]);
@@ -1169,8 +1178,9 @@ typedef struct SystemState {
             }
             
             // DEBUG: Print c_component matrix for BOTH phases
-            if (thread_id == 0 && iteration == 0) {
-                printf("[GPU C_COMPONENT] Phase %d matrix:\n", idx);
+            if (thread_id == 0 && iteration < 5) {
+                printf("[GPU C_COMPONENT] Phase %d matrix (iter %d):\n", idx, iteration);
+                printf("  phase_amt = %.15e\n", phase_amt[idx]);
                 for (int cidx = 0; cidx < 2; cidx++) {
                     printf("  Component %d: ", cidx);
                     for (int i = 0; i < 2; i++) {
@@ -2120,6 +2130,14 @@ __device__ void solve_state(SystemSpecification* spec, SystemState* state, doubl
                              spec->num_fixed_stable_compsets +
                              spec->num_prescribed_mole_fraction_conditions + 1;
     int num_eq_matrix_cols = soln_length;
+    
+    // DEBUG: Print matrix size calculation
+    if (state->iteration < 5 && thread_id == 0) {
+        printf("[GPU MATRIX SIZE] Iteration %d: num_free_stable_compsets=%d, fixed=%d, mole_frac_conds=%d\n",
+               state->iteration, state->num_free_stable_compsets, spec->num_fixed_stable_compsets,
+               spec->num_prescribed_mole_fraction_conditions);
+        printf("  Matrix dimensions: %dx%d (soln_length=%d)\n", num_eq_matrix_rows, num_eq_matrix_cols, soln_length);
+    }
 
     if (num_eq_matrix_rows > EQ_SYS_MAX_ROWS_LOCAL || num_eq_matrix_cols > EQ_SYS_MAX_COLS_LOCAL ||
         num_eq_matrix_rows > MAX_SVD_M || num_eq_matrix_cols > MAX_SVD_N ) { // Check against spec buffers too
@@ -2431,6 +2449,13 @@ __device__ void advance_state(SystemSpecification* spec, SystemState* state, con
         CompsetState* csst = &state->cs_states[idx];
         CompositionSet* compset = &state->compsets[idx];
         if (compset->phase_record == nullptr) continue;
+        
+        // CRITICAL FIX: Skip phases with zero amount
+        // Removed phases shouldn't have their site fractions updated
+        if (state->phase_amt[idx] < 1e-10) {
+            continue;
+        }
+        
         const PhaseRecord* pr = compset->phase_record;
         int num_site_fracs = pr->phase_dof;
 
@@ -2504,22 +2529,9 @@ __device__ void advance_state(SystemSpecification* spec, SystemState* state, con
                 state->largest_y_change = change_this_y;
             }
 
-        // CRITICAL FIX: For single-sublattice phases, ensure X = Y
-        // This is required because formulamole_obj returns X values, not Y values
-        if (compset->phase_record != nullptr && compset->phase_record->phase_dof == spec->num_components - 1) {
-            // Single sublattice phase - recompute phase compositions
-            double formulamoles[MAX_COMPONENTS];
-            for (int i = 0; i < MAX_COMPONENTS; ++i) formulamoles[i] = 0.0;
-            
-            if (compset->phase_record->formulamole_obj != nullptr) {
-                compset->phase_record->formulamole_obj(formulamoles, compset->dof);
-            }
-            
-            // Update phase compositions to match site fractions
-            for (int comp_idx = 0; comp_idx < spec->num_components; ++comp_idx) {
-                state->phase_compositions[idx * MAX_COMPONENTS + comp_idx] = formulamoles[comp_idx];
-            }
-        }
+        // REMOVED: Special handling for single-sublattice phases was causing issues
+        // Phase compositions will be recalculated in the next recompute() call
+        // This matches CPU behavior which doesn't have special handling here
         
         }
     }
@@ -2708,6 +2720,17 @@ __device__ bool remove_and_consolidate_phases(SystemSpecification* spec, SystemS
         state->num_free_stable_compsets = new_count;
         for (int i = 0; i < new_count; ++i) {
             state->free_stable_compset_indices[i] = new_free_stable_indices[i];
+        }
+        
+        // DEBUG: Print the updated free stable compsets
+        if (thread_id == 0) {
+            printf("[GPU PHASE CONSOLIDATION] Updated num_free_stable_compsets from %d to %d\n", 
+                   state->num_free_stable_compsets + num_to_remove, new_count);
+            printf("  Remaining free phases: ");
+            for (int i = 0; i < new_count; ++i) {
+                printf("%d ", new_free_stable_indices[i]);
+            }
+            printf("\n");
         }
     }
     
@@ -2968,13 +2991,29 @@ __device__ bool run_loop(SystemSpecification* spec, SystemState* state, int max_
             break;
         }
         
-        // Only advance if problem is still validly sized
-        if (eq_soln_len > 0 && eq_soln_len <= MAX_EQ_SOLN_LEN_LOCAL) {
+        // Only advance if problem is still validly sized AND phases haven't changed
+        // CRITICAL FIX: Match CPU behavior - skip advance_state if phases changed
+        if (thread_id == 0 && iteration_count < 5) {
+            printf("GPU DEBUG iter %d: phases_changed_iter=%d, eq_soln_len=%d, should_advance=%d\n", 
+                   iteration_count, phases_changed_iter, eq_soln_len, 
+                   (!phases_changed_iter && eq_soln_len > 0 && eq_soln_len <= MAX_EQ_SOLN_LEN_LOCAL));
+        }
+        
+        if (!phases_changed_iter && eq_soln_len > 0 && eq_soln_len <= MAX_EQ_SOLN_LEN_LOCAL) {
+            if (thread_id == 0 && iteration_count < 5) {
+                printf("GPU DEBUG iter %d: Calling advance_state\n", iteration_count);
+            }
             advance_state(spec, state, eq_soln, eq_soln_len, step_size);
-        } else if (state->num_free_stable_compsets == 0 && state->num_compsets > 0 && !converged) {
-            // No free phases left to solve for, but not converged. This might be a problematic state.
-            // Could try to re-introduce a phase or declare non-convergence.
-            // For now, this will likely exit the loop if max_iterations is reached or if converged remains false.
+        } else {
+            if (thread_id == 0 && iteration_count < 5) {
+                printf("GPU DEBUG iter %d: SKIPPING advance_state (phases_changed=%d)\n", 
+                       iteration_count, phases_changed_iter);
+            }
+            if (state->num_free_stable_compsets == 0 && state->num_compsets > 0 && !converged) {
+                // No free phases left to solve for, but not converged. This might be a problematic state.
+                // Could try to re-introduce a phase or declare non-convergence.
+                // For now, this will likely exit the loop if max_iterations is reached or if converged remains false.
+            }
         }
 
         // DEBUG: Add detailed output after first iteration

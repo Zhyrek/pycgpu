@@ -2648,34 +2648,17 @@ __device__ bool run_loop_global_mem(
             }}
         }}
         
-        // DEBUG: Before advance_state
-        if (thread_id < 3 && iteration_count < 3) {{ 
-            printf("GPU DEBUG iter %d: Before advance_state\\n", iteration_count);
-            printf("  Phase amounts: [%.6f, %.6f]\\n", state->phase_amt[0], state->phase_amt[1]);
-            printf("  eq_soln phase deltas: [%.6e, %.6e]\\n", 
-                   eq_soln[spec->num_free_chemical_potentials], 
-                   eq_soln[spec->num_free_chemical_potentials + 1]);
-        }}
-        
-        // SEGMENT 31: ADVANCE STATE
+        // SEGMENT 33-34: PHASE REMOVAL AND ADDITION (moved before advance_state to match CPU)
         if (thread_id < 3 && iteration_count < 3) {{
-            printf("[GPU] SEGMENT 31: Advance state\\n");
-            printf("[GPU]   step_size: %.6f\\n", step_size);
+            printf("[GPU] SEGMENT 33: Remove and consolidate phases\\n");
         }}
         
-        // Call advance_state (this should be safe, no large arrays)
-        advance_state(spec, state, eq_soln, eq_soln_len, step_size);
-        
-        // DEBUG: After advance_state 
-        if (thread_id < 3 && iteration_count < 3) {{ 
-            printf("GPU DEBUG iter %d: After advance_state\\n", iteration_count);
-            printf("  Chemical potentials: [%.6f, %.6f]\\n", 
-                   state->chemical_potentials[0], state->chemical_potentials[1]);
-            printf("  Phase amounts: [%.6f, %.6f]\\n",
-                   state->phase_amt[0], state->phase_amt[1]);
-            printf("  Actual phase changes: [%.6e, %.6e]\\n",
-                   state->phase_amt[0] - 0.179268,  // hardcoded initial value for debugging
-                   state->phase_amt[1] - 0.820732); // hardcoded initial value for debugging
+        // Phase change operations (these should be safe, no large arrays)
+        if (remove_and_consolidate_phases(spec, state)) {{
+            phases_changed_iter = true;
+            if (thread_id < 3 && iteration_count < 3) {{
+                printf("[GPU]   phases_removed: true\\n");
+            }}
         }}
         
         // SEGMENT 32: CHECK CONVERGENCE
@@ -2692,40 +2675,65 @@ __device__ bool run_loop_global_mem(
             printf("  iterations_since_last_phase_change=%d (need >=5)\\n", state->iterations_since_last_phase_change);
             printf("  Converged: %s\\n", convergence_result ? "YES" : "NO");
         }}
+        
         if (convergence_result) {{
-            converged = true;
-            break;
-        }}
-        
-        // SEGMENT 33-34: PHASE REMOVAL AND ADDITION
-        if (thread_id < 3 && iteration_count < 3) {{
-            printf("[GPU] SEGMENT 33: Remove and consolidate phases\\n");
-        }}
-        
-        // Phase change operations (these should be safe, no large arrays)
-        if (remove_and_consolidate_phases(spec, state)) {{
-            phases_changed_iter = true;
-            if (thread_id < 3 && iteration_count < 3) {{
-                printf("[GPU]   phases_removed: true\\n");
+            // Try to add phases if converged
+            if (change_phases(spec, state)) {{
+                phases_changed_iter = true;
+                if (thread_id < 3 && iteration_count < 3) {{
+                    printf("[GPU]   phases_added: true\\n");
+                }}
+            }}
+            
+            if (!phases_changed_iter) {{
+                // Truly converged with no phase changes
+                converged = true;
+                break;
             }}
         }}
         
-        if (thread_id < 3 && iteration_count < 3) {{
-            printf("[GPU] SEGMENT 34: Change phases\\n");
-        }}
-        
-        if (change_phases(spec, state)) {{
-            phases_changed_iter = true;
-            if (thread_id < 3 && iteration_count < 3) {{
-                printf("[GPU]   phases_changed: true\\n");
-            }}
-        }}
-        
-        // Update iteration tracking
+        // Update phase change tracking
         if (phases_changed_iter) {{
             state->iterations_since_last_phase_change = 0;
         }} else {{
             state->iterations_since_last_phase_change++;
+        }}
+        
+        // DEBUG: Before advance_state
+        if (thread_id < 3 && iteration_count < 3) {{ 
+            printf("GPU DEBUG iter %d: Before advance_state\\n", iteration_count);
+            printf("  Phase amounts: [%.6f, %.6f]\\n", state->phase_amt[0], state->phase_amt[1]);
+            printf("  eq_soln phase deltas: [%.6e, %.6e]\\n", 
+                   eq_soln[spec->num_free_chemical_potentials], 
+                   eq_soln[spec->num_free_chemical_potentials + 1]);
+        }}
+        
+        // SEGMENT 31: ADVANCE STATE
+        if (thread_id < 3 && iteration_count < 3) {{
+            printf("[GPU] SEGMENT 31: Advance state\\n");
+            printf("[GPU]   step_size: %.6f\\n", step_size);
+        }}
+        
+        // CRITICAL FIX: Skip advance_state if phases changed (match CPU behavior)
+        if (!phases_changed_iter) {{
+            // Call advance_state (this should be safe, no large arrays)
+            advance_state(spec, state, eq_soln, eq_soln_len, step_size);
+        }} else {{
+            if (thread_id < 3 && iteration_count < 3) {{
+                printf("[GPU] SKIPPING advance_state due to phase changes\\n");
+            }}
+        }}
+        
+        // DEBUG: After advance_state (conditional) 
+        if (thread_id < 3 && iteration_count < 3) {{ 
+            printf("GPU DEBUG iter %d: After advance_state\\n", iteration_count);
+            printf("  Chemical potentials: [%.6f, %.6f]\\n", 
+                   state->chemical_potentials[0], state->chemical_potentials[1]);
+            printf("  Phase amounts: [%.6f, %.6f]\\n",
+                   state->phase_amt[0], state->phase_amt[1]);
+            printf("  Actual phase changes: [%.6e, %.6e]\\n",
+                   state->phase_amt[0] - 0.179268,  // hardcoded initial value for debugging
+                   state->phase_amt[1] - 0.820732); // hardcoded initial value for debugging
         }}
         
         // Call post_solve_hook (this should be safe, no large arrays)
@@ -2829,6 +2837,16 @@ __device__ void solve_state_global_mem(
                                  state->num_free_stable_compsets + 
                                  spec->num_free_statevars;
     
+    // DEBUG: Print matrix size calculation
+    if (state->iteration < 5 && thread_id == 0) {{
+        printf("[GPU MATRIX SIZE] Iteration %d: num_free_stable_compsets=%d, fixed=%d, mole_frac_conds=%d\\n",
+               state->iteration, state->num_free_stable_compsets, spec->num_fixed_stable_compsets,
+               spec->num_prescribed_mole_fraction_conditions);
+        printf("  Matrix dimensions: %dx%d (cols = %d + %d + %d)\\n", 
+               equilibrium_matrix_rows, equilibrium_matrix_cols,
+               spec->num_free_chemical_potentials, state->num_free_stable_compsets, spec->num_free_statevars);
+    }}
+    
     // CRITICAL: Call recompute at the beginning of solve_state, just like CPU does
     // This ensures all CompsetState arrays (masses, jacobians, energies) are up-to-date
     
@@ -2856,9 +2874,12 @@ __device__ void solve_state_global_mem(
         state->system_amount += state->phase_amt[cs_idx];
     }}
     
-    // CRITICAL FIX: Manually zero the RHS array before calling fill_equilibrium_system
-    // This appears to be needed because the RHS is accumulating across iterations
-    // BUG FIX: Use equilibrium_matrix_rows, not soln_length!
+    // CRITICAL FIX: Manually zero the equilibrium matrix AND RHS before calling fill_equilibrium_system
+    // This is needed because these arrays are in global memory and persist across iterations
+    // When matrix size changes (e.g., 4x4 to 3x3 after phase consolidation), old values remain!
+    for (int i = 0; i < equilibrium_matrix_rows * equilibrium_matrix_cols; ++i) {{
+        equilibrium_matrix[i] = 0.0;
+    }}
     for (int i = 0; i < equilibrium_matrix_rows; ++i) {{
         equilibrium_rhs[i] = 0.0;
     }}

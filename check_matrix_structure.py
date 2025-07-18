@@ -1,0 +1,31 @@
+#!/usr/bin/env python
+"""Check equilibrium matrix structure for single phase."""
+
+import numpy as np
+
+print("Equilibrium Matrix Structure for Single Phase")
+print("=============================================")
+print("\nAfter consolidation to single BCC_A2 phase:")
+print("Current state: X(TI) = 0.9029604, need X(TI) = 0.9000000")
+print("\nVariables (columns):")
+print("  0: delta_mu(NB)")
+print("  1: delta_mu(TI)")
+print("  2: delta_NP (phase amount)")
+print("\nEquations (rows):")
+print("  0: Stable phase equation (gradient = 0)")
+print("  1: Mass balance: X(TI) = 0.9")
+print("  2: System amount: N = 1")
+print("\nMatrix structure:")
+print("       | d_mu(NB) | d_mu(TI) | d_NP |   RHS")
+print("-------+----------+----------+------+--------")
+print("Phase  |  X(NB)   |  X(TI)   |  0   | energy - sum(mu*X)")
+print("X(TI)  |  c_comp  |  c_comp  | term | -residual")
+print("N=1    |  terms   |  terms   | term | -residual")
+print("\nKey issue: The corrections calculated by solving this system")
+print("should adjust Y(TI) from 0.903 to 0.900, but GPU produces")
+print("corrections that are too small.")
+print("\nPossible causes:")
+print("1. c_component matrix values are incorrect")
+print("2. Residual calculation is wrong")
+print("3. Matrix becomes ill-conditioned")
+print("4. Step size limiting prevents full correction")

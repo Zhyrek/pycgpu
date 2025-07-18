@@ -1702,8 +1702,17 @@ typedef struct SystemState {
                 phase_comp_sum += formulamoles[comp_idx];
             }
             
-            // CRITICAL FIX: Don't normalize here - let recompute() handle it
-            // The normalization should only happen in recompute() to match CPU exactly
+            // CRITICAL FIX: Convert phase amounts to formula units like CPU does
+            // CPU minimizer.pyx line 776: self.phase_amt[idx] /= phase_comp_sum
+            // This normalization must happen in __init__ to match CPU behavior!
+            if (phase_comp_sum > 1e-12) {
+                // DEBUG: Print normalization
+                printf("[GPU INIT] Phase %d: phase_amt before = %.15e, phase_comp_sum = %.15e\n", 
+                       idx, phase_amt[idx], phase_comp_sum);
+                phase_amt[idx] /= phase_comp_sum;
+                printf("[GPU INIT] Phase %d: phase_amt after = %.15e (formula units)\n", 
+                       idx, phase_amt[idx]);
+            }
         }
 
         num_free_stable_compsets = 0;
@@ -1919,6 +1928,8 @@ typedef struct SystemState {
                     printf("GPU: Phase %d composition[%d] = %.6f\n", idx, comp_idx, formulamoles[comp_idx]);
                 }
 
+                // CRITICAL FIX: phase_amt is already in formula units (normalized in constructor)
+                // So we use it directly like CPU does in recompute()
                 if (phase_amt[idx] > 1e-20) { // Avoid adding noise from zero phase_amt
                     mole_fractions[comp_idx] += phase_amt[idx] * csst->masses[comp_idx];
                     system_amount += phase_amt[idx] * csst->masses[comp_idx];
@@ -2054,8 +2065,17 @@ typedef struct SystemState {
 
             // Call compset update. NP is moles of formula units.
             // CRITICAL: Match CPU algorithm - multiply phase_amt by phase_sum_moles_atoms_per_formula
-            // This converts from mole fraction units to formula units, matching minimizer.pyx line 592
+            // This converts from formula units back to mole fractions, matching CPU minimizer.pyx line 885
             double update_amount = phase_amt[idx] * phase_sum_moles_atoms_per_formula;
+            
+            // DEBUG: Print update calculation
+            if (thread_id == 0 && iteration < 3) {
+                printf("[GPU UPDATE] Phase %d: phase_amt=%.15e (formula units), phase_comp_sum=%.15e\n",
+                       idx, phase_amt[idx], phase_sum_moles_atoms_per_formula);
+                printf("[GPU UPDATE] Phase %d: update_amount=%.15e (mole fractions for NP)\n",
+                       idx, update_amount);
+            }
+            
             // Additional safety check for update amount
             if (update_amount < 1e-15 || update_amount > 1e6) {
                 update_amount = phase_amt[idx]; // Fallback to original amount
@@ -3390,6 +3410,21 @@ __device__ void solve_state(SystemSpecification* spec, SystemState* state, doubl
             }
             printf("| RHS: %+.6e\n", equilibrium_rhs_static[i]);
         }
+        
+        // CRITICAL DEBUG: At iteration 1, show why solver produces tiny solution
+        if (state->iteration == 1) {
+            printf("\n[GPU SOLVER DEBUG] Iteration 1 analysis:\n");
+            printf("  Number of free stable phases: %d\n", state->num_free_stable_compsets);
+            if (state->num_free_stable_compsets == 1) {
+                int phase_idx = state->free_stable_compset_indices[0];
+                printf("  Single phase index: %d\n", phase_idx);
+                printf("  Phase amount: %.15e\n", state->phase_amt[phase_idx]);
+                printf("  Phase X(TI): %.15e\n", state->phase_compositions[phase_idx * MAX_COMPONENTS + 1]);
+                printf("  System X(TI): %.15e\n", state->mole_fractions[1]);
+                printf("  Target X(TI): %.15e\n", spec->prescribed_mole_fraction_rhs[0]);
+                printf("  Residual: %.15e\n", state->mole_fractions[1] - spec->prescribed_mole_fraction_rhs[0]);
+            }
+        }
     }
 
     // DEBUG: Print RHS values before solving
@@ -3471,6 +3506,24 @@ __device__ void solve_state(SystemSpecification* spec, SystemState* state, doubl
             printf("%.6e ", out_equilibrium_soln[offset + i]);
         }
         printf("\n");
+        
+        // CRITICAL: Show site fraction deltas at iteration 1
+        if (state->iteration == 1 && state->num_free_stable_compsets == 1) {
+            printf("  Site fraction deltas: ");
+            int sf_offset = spec->num_free_chemical_potentials + state->num_free_stable_compsets + spec->num_free_statevars;
+            int phase_idx = state->free_stable_compset_indices[0];
+            CompositionSet* cs = &state->compsets[phase_idx];
+            int phase_dof = cs->phase_record->phase_dof;
+            for (int i = 0; i < phase_dof - spec->num_statevars; ++i) {
+                if (sf_offset + i < soln_length) {
+                    printf("%.15e ", out_equilibrium_soln[sf_offset + i]);
+                }
+            }
+            printf("\n");
+            printf("  These deltas should adjust X(TI) from %.15e to %.15e\n",
+                   state->phase_compositions[phase_idx * MAX_COMPONENTS + 1], 
+                   spec->prescribed_mole_fraction_rhs[0]);
+        }
     }
 
     // SEGMENT 32: UPDATE CHEMICAL POTENTIALS (matching CPU minimizer.pyx)
@@ -3658,9 +3711,10 @@ __device__ void advance_state(SystemSpecification* spec, SystemState* state, con
             }
             for (int cp_idx = 0; cp_idx < spec->num_components; ++cp_idx) {
                  if (cp_idx < 0 || cp_idx >= spec->num_components) continue;
-                // CRITICAL FIX: Use delta chemical potentials like CPU (calculated as current - previous)
-                double delta_chempot = state->chemical_potentials[cp_idx] - state->previous_chemical_potentials[cp_idx];
-                csst->delta_y[i] += csst->c_component[cp_idx * csst->c_component_cols + i] * delta_chempot;
+                // CRITICAL FIX: Use absolute chemical potentials, NOT deltas!
+                // CPU code at minimizer.pyx line 1388 uses state.chemical_potentials[chempot_idx] directly
+                // This matches Eq. 43 in Sundman 2015
+                csst->delta_y[i] += csst->c_component[cp_idx * csst->c_component_cols + i] * state->chemical_potentials[cp_idx];
             }
             for (int cons_idx = 0; cons_idx < csst->internal_cons_length; ++cons_idx) {
                 csst->delta_y[i] -= csst->full_e_matrix[(num_site_fracs + cons_idx) * csst->full_e_matrix_dim + i] * csst->internal_cons[cons_idx];
@@ -3676,8 +3730,7 @@ __device__ void advance_state(SystemSpecification* spec, SystemState* state, con
                 printf("    Chemical potential contribution: ");
                 double cp_contrib = 0.0;
                 for (int cp_idx = 0; cp_idx < spec->num_components; ++cp_idx) {
-                    double delta_chempot = state->chemical_potentials[cp_idx] - state->previous_chemical_potentials[cp_idx];
-                    double contrib = csst->c_component[cp_idx * csst->c_component_cols + i] * delta_chempot;
+                    double contrib = csst->c_component[cp_idx * csst->c_component_cols + i] * state->chemical_potentials[cp_idx];
                     cp_contrib += contrib;
                     if (fabs(contrib) > 1e-15) {
                         printf("cp[%d]=%.6e ", cp_idx, contrib);
@@ -3718,22 +3771,9 @@ __device__ void advance_state(SystemSpecification* spec, SystemState* state, con
                 state->largest_y_change = change_this_y;
             }
 
-        // CRITICAL FIX: For single-sublattice phases, ensure X = Y
-        // This is required because formulamole_obj returns X values, not Y values
-        if (compset->phase_record != nullptr && compset->phase_record->phase_dof == spec->num_components - 1) {
-            // Single sublattice phase - recompute phase compositions
-            double formulamoles[MAX_COMPONENTS];
-            for (int i = 0; i < MAX_COMPONENTS; ++i) formulamoles[i] = 0.0;
-            
-            if (compset->phase_record->formulamole_obj != nullptr) {
-                compset->phase_record->formulamole_obj(formulamoles, compset->dof);
-            }
-            
-            // Update phase compositions to match site fractions
-            for (int comp_idx = 0; comp_idx < spec->num_components; ++comp_idx) {
-                state->phase_compositions[idx * MAX_COMPONENTS + comp_idx] = formulamoles[comp_idx];
-            }
-        }
+        // REMOVED: Special handling for single-sublattice phases was causing issues
+        // Phase compositions will be recalculated in the next recompute() call
+        // This matches CPU behavior which doesn't have special handling here
         
         }
     }
@@ -4182,13 +4222,29 @@ __device__ bool run_loop(SystemSpecification* spec, SystemState* state, int max_
             break;
         }
         
-        // Only advance if problem is still validly sized
-        if (eq_soln_len > 0 && eq_soln_len <= MAX_EQ_SOLN_LEN_LOCAL) {
+        // Only advance if problem is still validly sized AND phases haven't changed
+        // CRITICAL FIX: Match CPU behavior - skip advance_state if phases changed
+        if (thread_id == 0 && iteration_count < 5) {
+            printf("GPU DEBUG iter %d: phases_changed_iter=%d, eq_soln_len=%d, should_advance=%d\n", 
+                   iteration_count, phases_changed_iter, eq_soln_len, 
+                   (!phases_changed_iter && eq_soln_len > 0 && eq_soln_len <= MAX_EQ_SOLN_LEN_LOCAL));
+        }
+        
+        if (!phases_changed_iter && eq_soln_len > 0 && eq_soln_len <= MAX_EQ_SOLN_LEN_LOCAL) {
+            if (thread_id == 0 && iteration_count < 5) {
+                printf("GPU DEBUG iter %d: Calling advance_state\n", iteration_count);
+            }
             advance_state(spec, state, eq_soln, eq_soln_len, step_size);
-        } else if (state->num_free_stable_compsets == 0 && state->num_compsets > 0 && !converged) {
-            // No free phases left to solve for, but not converged. This might be a problematic state.
-            // Could try to re-introduce a phase or declare non-convergence.
-            // For now, this will likely exit the loop if max_iterations is reached or if converged remains false.
+        } else {
+            if (thread_id == 0 && iteration_count < 5) {
+                printf("GPU DEBUG iter %d: SKIPPING advance_state (phases_changed=%d)\n", 
+                       iteration_count, phases_changed_iter);
+            }
+            if (state->num_free_stable_compsets == 0 && state->num_compsets > 0 && !converged) {
+                // No free phases left to solve for, but not converged. This might be a problematic state.
+                // Could try to re-introduce a phase or declare non-convergence.
+                // For now, this will likely exit the loop if max_iterations is reached or if converged remains false.
+            }
         }
 
         // DEBUG: Add detailed output after first iteration
@@ -5809,34 +5865,17 @@ __device__ bool run_loop_global_mem(
             }
         }
         
-        // DEBUG: Before advance_state
-        if (thread_id < 3 && iteration_count < 3) { 
-            printf("GPU DEBUG iter %d: Before advance_state\n", iteration_count);
-            printf("  Phase amounts: [%.6f, %.6f]\n", state->phase_amt[0], state->phase_amt[1]);
-            printf("  eq_soln phase deltas: [%.6e, %.6e]\n", 
-                   eq_soln[spec->num_free_chemical_potentials], 
-                   eq_soln[spec->num_free_chemical_potentials + 1]);
-        }
-        
-        // SEGMENT 31: ADVANCE STATE
+        // SEGMENT 33-34: PHASE REMOVAL AND ADDITION (moved before advance_state to match CPU)
         if (thread_id < 3 && iteration_count < 3) {
-            printf("[GPU] SEGMENT 31: Advance state\n");
-            printf("[GPU]   step_size: %.6f\n", step_size);
+            printf("[GPU] SEGMENT 33: Remove and consolidate phases\n");
         }
         
-        // Call advance_state (this should be safe, no large arrays)
-        advance_state(spec, state, eq_soln, eq_soln_len, step_size);
-        
-        // DEBUG: After advance_state 
-        if (thread_id < 3 && iteration_count < 3) { 
-            printf("GPU DEBUG iter %d: After advance_state\n", iteration_count);
-            printf("  Chemical potentials: [%.6f, %.6f]\n", 
-                   state->chemical_potentials[0], state->chemical_potentials[1]);
-            printf("  Phase amounts: [%.6f, %.6f]\n",
-                   state->phase_amt[0], state->phase_amt[1]);
-            printf("  Actual phase changes: [%.6e, %.6e]\n",
-                   state->phase_amt[0] - 0.179268,  // hardcoded initial value for debugging
-                   state->phase_amt[1] - 0.820732); // hardcoded initial value for debugging
+        // Phase change operations (these should be safe, no large arrays)
+        if (remove_and_consolidate_phases(spec, state)) {
+            phases_changed_iter = true;
+            if (thread_id < 3 && iteration_count < 3) {
+                printf("[GPU]   phases_removed: true\n");
+            }
         }
         
         // SEGMENT 32: CHECK CONVERGENCE
@@ -5853,40 +5892,65 @@ __device__ bool run_loop_global_mem(
             printf("  iterations_since_last_phase_change=%d (need >=5)\n", state->iterations_since_last_phase_change);
             printf("  Converged: %s\n", convergence_result ? "YES" : "NO");
         }
+        
         if (convergence_result) {
-            converged = true;
-            break;
-        }
-        
-        // SEGMENT 33-34: PHASE REMOVAL AND ADDITION
-        if (thread_id < 3 && iteration_count < 3) {
-            printf("[GPU] SEGMENT 33: Remove and consolidate phases\n");
-        }
-        
-        // Phase change operations (these should be safe, no large arrays)
-        if (remove_and_consolidate_phases(spec, state)) {
-            phases_changed_iter = true;
-            if (thread_id < 3 && iteration_count < 3) {
-                printf("[GPU]   phases_removed: true\n");
+            // Try to add phases if converged
+            if (change_phases(spec, state)) {
+                phases_changed_iter = true;
+                if (thread_id < 3 && iteration_count < 3) {
+                    printf("[GPU]   phases_added: true\n");
+                }
+            }
+            
+            if (!phases_changed_iter) {
+                // Truly converged with no phase changes
+                converged = true;
+                break;
             }
         }
         
-        if (thread_id < 3 && iteration_count < 3) {
-            printf("[GPU] SEGMENT 34: Change phases\n");
-        }
-        
-        if (change_phases(spec, state)) {
-            phases_changed_iter = true;
-            if (thread_id < 3 && iteration_count < 3) {
-                printf("[GPU]   phases_changed: true\n");
-            }
-        }
-        
-        // Update iteration tracking
+        // Update phase change tracking
         if (phases_changed_iter) {
             state->iterations_since_last_phase_change = 0;
         } else {
             state->iterations_since_last_phase_change++;
+        }
+        
+        // DEBUG: Before advance_state
+        if (thread_id < 3 && iteration_count < 3) { 
+            printf("GPU DEBUG iter %d: Before advance_state\n", iteration_count);
+            printf("  Phase amounts: [%.6f, %.6f]\n", state->phase_amt[0], state->phase_amt[1]);
+            printf("  eq_soln phase deltas: [%.6e, %.6e]\n", 
+                   eq_soln[spec->num_free_chemical_potentials], 
+                   eq_soln[spec->num_free_chemical_potentials + 1]);
+        }
+        
+        // SEGMENT 31: ADVANCE STATE
+        if (thread_id < 3 && iteration_count < 3) {
+            printf("[GPU] SEGMENT 31: Advance state\n");
+            printf("[GPU]   step_size: %.6f\n", step_size);
+        }
+        
+        // CRITICAL FIX: Skip advance_state if phases changed (match CPU behavior)
+        if (!phases_changed_iter) {
+            // Call advance_state (this should be safe, no large arrays)
+            advance_state(spec, state, eq_soln, eq_soln_len, step_size);
+        } else {
+            if (thread_id < 3 && iteration_count < 3) {
+                printf("[GPU] SKIPPING advance_state due to phase changes\n");
+            }
+        }
+        
+        // DEBUG: After advance_state (conditional) 
+        if (thread_id < 3 && iteration_count < 3) { 
+            printf("GPU DEBUG iter %d: After advance_state\n", iteration_count);
+            printf("  Chemical potentials: [%.6f, %.6f]\n", 
+                   state->chemical_potentials[0], state->chemical_potentials[1]);
+            printf("  Phase amounts: [%.6f, %.6f]\n",
+                   state->phase_amt[0], state->phase_amt[1]);
+            printf("  Actual phase changes: [%.6e, %.6e]\n",
+                   state->phase_amt[0] - 0.179268,  // hardcoded initial value for debugging
+                   state->phase_amt[1] - 0.820732); // hardcoded initial value for debugging
         }
         
         // Call post_solve_hook (this should be safe, no large arrays)
@@ -6017,9 +6081,12 @@ __device__ void solve_state_global_mem(
         state->system_amount += state->phase_amt[cs_idx];
     }
     
-    // CRITICAL FIX: Manually zero the RHS array before calling fill_equilibrium_system
-    // This appears to be needed because the RHS is accumulating across iterations
-    // BUG FIX: Use equilibrium_matrix_rows, not soln_length!
+    // CRITICAL FIX: Manually zero the equilibrium matrix AND RHS before calling fill_equilibrium_system
+    // This is needed because these arrays are in global memory and persist across iterations
+    // When matrix size changes (e.g., 4x4 to 3x3 after phase consolidation), old values remain!
+    for (int i = 0; i < equilibrium_matrix_rows * equilibrium_matrix_cols; ++i) {
+        equilibrium_matrix[i] = 0.0;
+    }
     for (int i = 0; i < equilibrium_matrix_rows; ++i) {
         equilibrium_rhs[i] = 0.0;
     }

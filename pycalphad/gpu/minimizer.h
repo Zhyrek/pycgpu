@@ -435,8 +435,17 @@ typedef struct SystemState {
                 phase_comp_sum += formulamoles[comp_idx];
             }
             
-            // CRITICAL FIX: Don't normalize here - let recompute() handle it
-            // The normalization should only happen in recompute() to match CPU exactly
+            // CRITICAL FIX: Convert phase amounts to formula units like CPU does
+            // CPU minimizer.pyx line 776: self.phase_amt[idx] /= phase_comp_sum
+            // This normalization must happen in __init__ to match CPU behavior!
+            if (phase_comp_sum > 1e-12) {
+                // DEBUG: Print normalization
+                printf("[GPU INIT] Phase %d: phase_amt before = %.15e, phase_comp_sum = %.15e\n", 
+                       idx, phase_amt[idx], phase_comp_sum);
+                phase_amt[idx] /= phase_comp_sum;
+                printf("[GPU INIT] Phase %d: phase_amt after = %.15e (formula units)\n", 
+                       idx, phase_amt[idx]);
+            }
         }
 
         num_free_stable_compsets = 0;
@@ -652,6 +661,8 @@ typedef struct SystemState {
                     printf("GPU: Phase %d composition[%d] = %.6f\n", idx, comp_idx, formulamoles[comp_idx]);
                 }
 
+                // CRITICAL FIX: phase_amt is already in formula units (normalized in constructor)
+                // So we use it directly like CPU does in recompute()
                 if (phase_amt[idx] > 1e-20) { // Avoid adding noise from zero phase_amt
                     mole_fractions[comp_idx] += phase_amt[idx] * csst->masses[comp_idx];
                     system_amount += phase_amt[idx] * csst->masses[comp_idx];
@@ -787,8 +798,17 @@ typedef struct SystemState {
 
             // Call compset update. NP is moles of formula units.
             // CRITICAL: Match CPU algorithm - multiply phase_amt by phase_sum_moles_atoms_per_formula
-            // This converts from mole fraction units to formula units, matching minimizer.pyx line 592
+            // This converts from formula units back to mole fractions, matching CPU minimizer.pyx line 885
             double update_amount = phase_amt[idx] * phase_sum_moles_atoms_per_formula;
+            
+            // DEBUG: Print update calculation
+            if (thread_id == 0 && iteration < 3) {
+                printf("[GPU UPDATE] Phase %d: phase_amt=%.15e (formula units), phase_comp_sum=%.15e\n",
+                       idx, phase_amt[idx], phase_sum_moles_atoms_per_formula);
+                printf("[GPU UPDATE] Phase %d: update_amount=%.15e (mole fractions for NP)\n",
+                       idx, update_amount);
+            }
+            
             // Additional safety check for update amount
             if (update_amount < 1e-15 || update_amount > 1e6) {
                 update_amount = phase_amt[idx]; // Fallback to original amount
@@ -2123,6 +2143,21 @@ __device__ void solve_state(SystemSpecification* spec, SystemState* state, doubl
             }
             printf("| RHS: %+.6e\n", equilibrium_rhs_static[i]);
         }
+        
+        // CRITICAL DEBUG: At iteration 1, show why solver produces tiny solution
+        if (state->iteration == 1) {
+            printf("\n[GPU SOLVER DEBUG] Iteration 1 analysis:\n");
+            printf("  Number of free stable phases: %d\n", state->num_free_stable_compsets);
+            if (state->num_free_stable_compsets == 1) {
+                int phase_idx = state->free_stable_compset_indices[0];
+                printf("  Single phase index: %d\n", phase_idx);
+                printf("  Phase amount: %.15e\n", state->phase_amt[phase_idx]);
+                printf("  Phase X(TI): %.15e\n", state->phase_compositions[phase_idx * MAX_COMPONENTS + 1]);
+                printf("  System X(TI): %.15e\n", state->mole_fractions[1]);
+                printf("  Target X(TI): %.15e\n", spec->prescribed_mole_fraction_rhs[0]);
+                printf("  Residual: %.15e\n", state->mole_fractions[1] - spec->prescribed_mole_fraction_rhs[0]);
+            }
+        }
     }
 
     // DEBUG: Print RHS values before solving
@@ -2204,6 +2239,24 @@ __device__ void solve_state(SystemSpecification* spec, SystemState* state, doubl
             printf("%.6e ", out_equilibrium_soln[offset + i]);
         }
         printf("\n");
+        
+        // CRITICAL: Show site fraction deltas at iteration 1
+        if (state->iteration == 1 && state->num_free_stable_compsets == 1) {
+            printf("  Site fraction deltas: ");
+            int sf_offset = spec->num_free_chemical_potentials + state->num_free_stable_compsets + spec->num_free_statevars;
+            int phase_idx = state->free_stable_compset_indices[0];
+            CompositionSet* cs = &state->compsets[phase_idx];
+            int phase_dof = cs->phase_record->phase_dof;
+            for (int i = 0; i < phase_dof - spec->num_statevars; ++i) {
+                if (sf_offset + i < soln_length) {
+                    printf("%.15e ", out_equilibrium_soln[sf_offset + i]);
+                }
+            }
+            printf("\n");
+            printf("  These deltas should adjust X(TI) from %.15e to %.15e\n",
+                   state->phase_compositions[phase_idx * MAX_COMPONENTS + 1], 
+                   spec->prescribed_mole_fraction_rhs[0]);
+        }
     }
 
     // SEGMENT 32: UPDATE CHEMICAL POTENTIALS (matching CPU minimizer.pyx)
@@ -2391,9 +2444,10 @@ __device__ void advance_state(SystemSpecification* spec, SystemState* state, con
             }
             for (int cp_idx = 0; cp_idx < spec->num_components; ++cp_idx) {
                  if (cp_idx < 0 || cp_idx >= spec->num_components) continue;
-                // CRITICAL FIX: Use delta chemical potentials like CPU (calculated as current - previous)
-                double delta_chempot = state->chemical_potentials[cp_idx] - state->previous_chemical_potentials[cp_idx];
-                csst->delta_y[i] += csst->c_component[cp_idx * csst->c_component_cols + i] * delta_chempot;
+                // CRITICAL FIX: Use absolute chemical potentials, NOT deltas!
+                // CPU code at minimizer.pyx line 1388 uses state.chemical_potentials[chempot_idx] directly
+                // This matches Eq. 43 in Sundman 2015
+                csst->delta_y[i] += csst->c_component[cp_idx * csst->c_component_cols + i] * state->chemical_potentials[cp_idx];
             }
             for (int cons_idx = 0; cons_idx < csst->internal_cons_length; ++cons_idx) {
                 csst->delta_y[i] -= csst->full_e_matrix[(num_site_fracs + cons_idx) * csst->full_e_matrix_dim + i] * csst->internal_cons[cons_idx];
@@ -2409,8 +2463,7 @@ __device__ void advance_state(SystemSpecification* spec, SystemState* state, con
                 printf("    Chemical potential contribution: ");
                 double cp_contrib = 0.0;
                 for (int cp_idx = 0; cp_idx < spec->num_components; ++cp_idx) {
-                    double delta_chempot = state->chemical_potentials[cp_idx] - state->previous_chemical_potentials[cp_idx];
-                    double contrib = csst->c_component[cp_idx * csst->c_component_cols + i] * delta_chempot;
+                    double contrib = csst->c_component[cp_idx * csst->c_component_cols + i] * state->chemical_potentials[cp_idx];
                     cp_contrib += contrib;
                     if (fabs(contrib) > 1e-15) {
                         printf("cp[%d]=%.6e ", cp_idx, contrib);

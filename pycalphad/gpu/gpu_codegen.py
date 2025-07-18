@@ -2437,7 +2437,7 @@ The function signature and basic structure is preserved for reference.
 #endif
 
 // Forward declarations for global memory functions
-__device__ void solve_state_global_mem(
+__device__ void solve_state(
     SystemSpecification* spec, SystemState* state, double* out_equilibrium_soln, int soln_length,
     double* equilibrium_matrix, double* equilibrium_rhs, double* A_lstsq_copy,
     double* U_lstsq, double* V_lstsq, double* singular_values_lstsq, double* superdiag_lstsq,
@@ -2605,10 +2605,10 @@ __device__ bool run_loop_global_mem(
         }}
         
         // Call solve_state with global memory arrays
-        solve_state_global_mem(spec, state, eq_soln, eq_soln_len, 
-                              equilibrium_matrix, equilibrium_rhs, 
-                              A_lstsq_copy, U_lstsq, V_lstsq, 
-                              singular_values_lstsq, superdiag_lstsq, thread_id);
+        solve_state(spec, state, eq_soln, eq_soln_len, 
+                   equilibrium_matrix, equilibrium_rhs, 
+                   A_lstsq_copy, U_lstsq, V_lstsq, 
+                   singular_values_lstsq, superdiag_lstsq, thread_id);
         
         // DEBUG: After solve_state
         if ((iteration_count < 3 || iteration_count % 50 == 0) && thread_id == 0) {{ 
@@ -2813,7 +2813,7 @@ __device__ bool run_loop_global_mem(
 
 // --- GLOBAL MEMORY VERSION OF SOLVE_STATE ---
 // This function implements solve_state using global memory arrays
-__device__ void solve_state_global_mem(
+__device__ void solve_state(
     SystemSpecification* spec, 
     SystemState* state, 
     double* out_equilibrium_soln, 
@@ -2852,10 +2852,10 @@ __device__ void solve_state_global_mem(
     
     // DEBUG: Verify spec pointer before calling recompute
     if (thread_id == 0) {{
-        printf("GPU DEBUG: solve_state_global_mem - spec=%p, spec->num_statevars=%d\\n", 
+        printf("GPU DEBUG: solve_state - spec=%p, spec->num_statevars=%d\\n", 
                spec, spec->num_statevars);
         if (spec->num_statevars < 0 || spec->num_statevars > 10) {{
-            printf("GPU ERROR: spec appears corrupted in solve_state_global_mem!\\n");
+            printf("GPU ERROR: spec appears corrupted in solve_state!\\n");
             printf("  spec->num_statevars=%d (0x%X)\\n", spec->num_statevars, spec->num_statevars);
             printf("  spec->num_components=%d\\n", spec->num_components);
             // Try to continue anyway
@@ -2947,15 +2947,28 @@ __device__ void solve_state_global_mem(
         out_equilibrium_soln[i] = equilibrium_rhs[i];
     }}
     
-    // CRITICAL FIX: The equilibrium solution contains DELTAS, not absolute values
-    // This should be handled in advance_state, not here
-    // Removing incorrect chemical potential update from solve_state
+    // CRITICAL FIX: Update chemical potentials from the solution
+    // The equilibrium solution contains NEW chemical potential values (not deltas)
+    // This matches CPU behavior at minimizer.pyx line 1250
+    for (int i = 0; i < spec->num_free_chemical_potentials; ++i) {{
+        int chempot_idx = spec->free_chemical_potential_indices[i];
+        state->chemical_potentials[chempot_idx] = out_equilibrium_soln[i];
+    }}
     
     // Force fixed chemical potentials to adopt their fixed values
     for (int i = 0; i < spec->num_fixed_chemical_potentials; ++i) {{
         int comp_idx = spec->fixed_chemical_potential_indices[i];
         if (comp_idx >= 0 && comp_idx < spec->num_components) {{
             state->chemical_potentials[comp_idx] = spec->initial_chemical_potentials[comp_idx];
+        }}
+    }}
+    
+    // Calculate largest chemical potential difference for convergence check
+    state->largest_chemical_potential_difference = -1e30;
+    for (int comp_idx = 0; comp_idx < spec->num_components; ++comp_idx) {{
+        double diff = fabs(state->chemical_potentials[comp_idx] - state->previous_chemical_potentials[comp_idx]);
+        if (diff > state->largest_chemical_potential_difference) {{
+            state->largest_chemical_potential_difference = diff;
         }}
     }}
 }}

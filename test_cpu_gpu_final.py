@@ -27,16 +27,15 @@ print(f"GPU X(TI):    {gpu_x_ti:.10f}")
 print(f"Difference:   {abs(gpu_x_ti - cpu_x_ti):.10e}")
 
 if abs(gpu_x_ti - cpu_x_ti) < 1e-6:
-    print("\n✅ SUCCESS: GPU and CPU agree within tolerance\!")
+    print("\n✅ SUCCESS: GPU and CPU agree within tolerance!")
 else:
     print(f"\n❌ FAILED: GPU and CPU differ by {abs(gpu_x_ti - cpu_x_ti):.10e}")
 
 # Also check that both are close to the target
 if abs(cpu_x_ti - 0.9) < 1e-6 and abs(gpu_x_ti - 0.9) < 1e-6:
-    print("✅ Both CPU and GPU converged to the correct value\!")
+    print("✅ Both CPU and GPU converged to the correct value!")
 else:
     if abs(cpu_x_ti - 0.9) >= 1e-6:
         print(f"❌ CPU error: {cpu_x_ti - 0.9:.10e}")
     if abs(gpu_x_ti - 0.9) >= 1e-6:
         print(f"❌ GPU error: {gpu_x_ti - 0.9:.10e}")
-EOF < /dev/null

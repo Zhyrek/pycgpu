@@ -38,6 +38,7 @@ typedef struct DevicePhaseData {
 
 // --- Forward Declarations ---
 __device__ int get_phase_record_index(const DevicePhaseData* phase_data, int grid_phase_id);
+__device__ bool run_loop(SystemSpecification* spec, SystemState* state, int max_iterations);
 
 // --- Device Helper Functions ---
 

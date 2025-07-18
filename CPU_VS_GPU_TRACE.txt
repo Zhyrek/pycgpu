@@ -1,5 +1,5 @@
 === INTERLEAVED CPU-GPU EQUILIBRIUM DEBUG TRACE ===
-Started: 2025-07-16T11:30:18.689436
+Started: 2025-07-17T10:27:05.283888
 
 
 ================================================================================
@@ -14,8 +14,8 @@ SEGMENT 01 COMPARISON
 [SEGMENT 01] [GPU] Entry point and parameter validation
   gpu_mode: True
   components: ['NB', 'TI', 'VA']
-  phases: ['LIQUID', 'BCC_A2']
-  conditions: {'T': 1000, 'P': 101325, 'X(TI)': 0.01}
+  phases: ['BCC_A2', 'LIQUID']
+  conditions: {X_TI: 0.9, T: 600, P: 101325}
   output_requested: None
   verbose: True
   force_cpu: False
@@ -32,8 +32,8 @@ SEGMENT 02 COMPARISON
 [SEGMENT 02] [GPU] Workspace initialization
   database: Elements: ['NB', 'TI', 'VA']
 Species: [Species('NB', 'NB1'), Species('TI', 'TI1'), Species('VA', 'VA1')]
-Phase({'name': 'BCC_A2', 'constituents': (frozenset({Species('TI', 'TI1'), Species('NB', 'NB1')}),), 'sublattices': (1.0,), 'model_hints': {}})
-Phase({'name': 'LIQUID', 'constituents': (frozenset({Species('TI', 'TI1'), Species('NB', 'NB1')}),), 'sublattices': (1.0,), 'model_hints': {'liquid': True}})
+Phase({'name': 'BCC_A2', 'constituents': (frozenset({Species('NB', 'NB1'), Species('TI', 'TI1')}),), 'sublattices': (1.0,), 'model_hints': {}})
+Phase({'name': 'LIQUID', 'constituents': (frozenset({Species('NB', 'NB1'), Species('TI', 'TI1')}),), 'sublattices': (1.0,), 'model_hints': {'liquid': True}})
 21 symbols in database
 6 parameters in database
 
@@ -59,7 +59,7 @@ SEGMENT 03 COMPARISON
 [SEGMENT 03] Workspace constructor complete
   components: [Component('NB', 'NB1'), Component('TI', 'TI1'), Component('VA', 'VA1')]
   phases: ['BCC_A2', 'LIQUID']
-  conditions: {N: array([1.]), P: array([101325.]), T: array([1000.]), X_TI: array([0.01])}
+  conditions: {N: array([1.]), P: array([101325.]), T: array([600.]), X_TI: array([0.9])}
 
 ================================================================================
 SEGMENT 05 COMPARISON
@@ -89,7 +89,7 @@ SEGMENT 08 COMPARISON
 --- GPU ---
 
 [SEGMENT 08] Starting point calculation
-  conditions: OrderedDict({N: array([1.]), P: array([101325.]), T: array([1000.]), X_TI: array([0.01])})
+  conditions: OrderedDict({N: array([1.]), P: array([101325.]), T: array([600.]), X_TI: array([0.9])})
   state_variables: [N, P, T]
   phase_records: ['BCC_A2', 'LIQUID']
   grid_shape: (1, 1, 1, 246)
@@ -146,10 +146,10 @@ SEGMENT 11 COMPARISON
   lincomb_rhs_shape: (2,)
 
 [SEGMENT 11] [CONDITION 0] Hyperplane result
-  GM: -4.965278974394861e+04
-  MU: [-49452.95049472784, -69436.87541680463]
-  NP: [0.5743033239254361, 0.4256966760745639, 0.0]
-  points: [103, 62, 0]
+  GM: -1.993006370508722e+04
+  MU: [-25739.21087291369, -19284.60290866206]
+  NP: [0.8155920362137834, 0.18440796378621657, 0.0]
+  points: [10, 102, 0]
 
 ================================================================================
 SEGMENT 12 COMPARISON
@@ -161,12 +161,12 @@ SEGMENT 12 COMPARISON
 --- GPU ---
 
 [SEGMENT 12] [CONDITION 0] Copy results from grid
-  points: [103, 62, 0]
+  points: [10, 102, 0]
 
 [SEGMENT 12] [CONDITION 0] Copy results complete
   phases: ['BCC_A2', 'BCC_A2', '']
-  X: [[0.9951509908015289, 0.004849009198471176], [0.9830508474576174, 0.016949152542382537]]
-  final_GM: -4.965278974394861e+04
+  X: [[0.10169491525424526, 0.8983050847457548], [0.09250379780223443, 0.9074962021977656]]
+  final_GM: -1.993006370508722e+04
 
 ================================================================================
 SEGMENT 13 COMPARISON
@@ -213,8 +213,8 @@ SEGMENT 40 COMPARISON
 [SEGMENT 40] [GPU] Equilibrium calculation complete
   converged: True
   properties_shape: (1, 1, 1, 1)
-  final_GM: -4.967303841766708e+04
+  final_GM: -1.991128110211000e+04
 
 ================================================================================
-TRACE COMPLETE - 2025-07-16T11:30:18.689504
+TRACE COMPLETE - 2025-07-17T10:27:05.283930
 ================================================================================

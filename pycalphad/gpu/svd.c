@@ -694,18 +694,38 @@ __device__ void Singular_Value_Decomposition_Solve(double* U, double* D, double*
    int i,j,k;
    double *pu, *pv;
    double dum;
+   double s_max, rcond;
+   int effective_rank;
 
+   // Set minimum tolerance based on machine precision
    dum = DBL_EPSILON * D[0] * (double) ncols;
    if (tolerance < dum) tolerance = dum;
+   
+   // Determine effective rank using relative condition number threshold
+   rcond = 1e-10;  // Relative condition number threshold
+   s_max = D[0];   // Largest singular value
+   effective_rank = 0;
+   
+   for (i = 0; i < ncols; i++) {
+       if (D[i] > rcond * s_max && D[i] > tolerance) {
+           effective_rank++;
+       }
+   }
 
+   // Solve using only the well-conditioned subspace
    for ( i = 0, pv = V; i < ncols; i++, pv += ncols) {
       x[i] = 0.0;
-      for (j = 0; j < ncols; j++)
-         if (D[j] > tolerance ) {
+      for (j = 0; j < effective_rank; j++) {
+         if (D[j] > tolerance && D[j] > rcond * s_max) {
+            // Compute U'*B for this singular value
             for (k = 0, dum = 0.0, pu = U; k < nrows; k++, pu += ncols)
                dum += *(pu + j) * B[k];
-            x[i] += dum * *(pv + j) / D[j];
+            
+            // Apply damping for better numerical stability
+            double damping = D[j] / (D[j] + tolerance);
+            x[i] += damping * dum * *(pv + j) / D[j];
          }
+      }
    } 
 }
 //Or, solve the transpose system, for underdetermined systems (m < n)
@@ -718,18 +738,38 @@ __device__ void Singular_Value_Decomposition_SolveT(double* U, double* D, double
    int i,j,k;
    double *pu, *pv;
    double dum;
+   double s_max, rcond;
+   int effective_rank;
 
+   // Set minimum tolerance based on machine precision
    dum = DBL_EPSILON * D[0] * (double) ncols;
    if (tolerance < dum) tolerance = dum;
+   
+   // Determine effective rank using relative condition number threshold
+   rcond = 1e-10;  // Relative condition number threshold
+   s_max = D[0];   // Largest singular value
+   effective_rank = 0;
+   
+   for (i = 0; i < ncols; i++) {
+       if (D[i] > rcond * s_max && D[i] > tolerance) {
+           effective_rank++;
+       }
+   }
 
+   // Solve using only the well-conditioned subspace
    for ( i = 0, pu = U; i < nrows; i++, pu += ncols) {
       x[i] = 0.0;
-      for (j = 0, pv = V; j < ncols; j++, pv += ncols)
-         if (D[j] > tolerance ) {
+      for (j = 0, pv = V; j < effective_rank; j++, pv += ncols) {
+         if (D[j] > tolerance && D[j] > rcond * s_max) {
+            // Compute V'*B for this singular value
             for (k = 0, dum = 0.0; k < ncols; k++)
                dum += *(pv + k) * B[k];
-            x[i] += dum * *(pu + j) / D[j];
+            
+            // Apply damping for better numerical stability
+            double damping = D[j] / (D[j] + tolerance);
+            x[i] += damping * dum * *(pu + j) / D[j];
          }
+      }
    } 
 }
 

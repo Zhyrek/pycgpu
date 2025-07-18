@@ -154,27 +154,10 @@ typedef struct SystemSpecification {
 
         max_num_free_stable_phases = num_components + num_free_statevars - num_fixed_stable_compsets;
 
-        if (num_prescribed_mole_fraction_conditions > 0) {
-            double min_abs_rhs = 1e30;
-            double sum_abs_rhs = 0.0;
-            bool all_rhs_zero = true;
-            for(int i=0; i < num_prescribed_mole_fraction_conditions; ++i) {
-                double abs_val = fabs(prescribed_mole_fraction_rhs[i]);
-                if (abs_val > 1e-15) all_rhs_zero = false;
-                if (abs_val < min_abs_rhs && abs_val > 1e-15) {
-                    min_abs_rhs = abs_val;
-                }
-                sum_abs_rhs += abs_val;
-            }
-            if (all_rhs_zero) {
-                 ALLOWED_MASS_RESIDUAL = 1e-12;
-            } else {
-                ALLOWED_MASS_RESIDUAL = fmax(1e-12, fmin(1e-8, min_abs_rhs / 10.0));
-            }
-            ALLOWED_MASS_RESIDUAL = fmin(ALLOWED_MASS_RESIDUAL, (1.0 - sum_abs_rhs) / 10.0);
-        } else {
-            ALLOWED_MASS_RESIDUAL = 1e-8;
-        }
+        // Match CPU behavior exactly: always use 1e-8
+        // The CPU code has complex logic but ultimately sets:
+        // self.ALLOWED_MASS_RESIDUAL = 1e-8
+        ALLOWED_MASS_RESIDUAL = 1e-8;
     }
     SystemSpecification(){}
 } SystemSpecification;
@@ -2259,7 +2242,7 @@ __device__ void advance_state(SystemSpecification* spec, SystemState* state, con
     gpu_debug_log_value("step_size", step_size_param);
     
     double current_step_size = step_size_param;
-    double MIN_PHASE_AMOUNT = 1e-16;
+    double MIN_PHASE_AMOUNT = 1e-10;  // Match CPU threshold for consistency with phase removal
 
     // Chemical potentials are now handled in solve_state (matching CPU approach)
     // Start with phase amount updates
@@ -2884,14 +2867,14 @@ __device__ bool run_loop(SystemSpecification* spec, SystemState* state, int max_
     }
 
     for (int iteration_count = 0; iteration_count < max_iterations; ++iteration_count) {
-        state->iteration = iteration_count;
+        state->iteration = iteration_count + 1;
         phases_changed_iter = false; // Reset for this iteration
         
         // SEGMENT 21: SOLVER ITERATION
         gpu_debug_log(21, "Solver iteration", iteration_count);
         
         if (thread_id == 0 && iteration_count < 3) {
-            printf("\n[GPU] --- Iteration %d (state->iteration=%d) ---\n", iteration_count, state->iteration);
+            printf("\n[GPU] --- Iteration %d ---\n", state->iteration);
         }
 
         if (!pre_solve_hook(spec, state)) break;

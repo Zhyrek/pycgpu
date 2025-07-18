@@ -1991,17 +1991,18 @@ def _nb_formulamole_grad_from_model(model_obj: Model, model_c_idx: int, wks_obj:
     
     for el in model_obj.nonvacant_elements:
         moles_expr = model_obj.moles(el, per_formula_unit=True)
-        # Apply dependent substitutions before adding to funcs
-        if dependent_subs:
-            # Convert to symengine expression and substitute
-            moles_expr = moles_expr.xreplace(dependent_subs)
+        # CRITICAL FIX: Do NOT apply dependent substitutions to match CPU behavior
+        # The CPU treats all site fractions as independent variables
+        # if dependent_subs:
+        #     # Convert to symengine expression and substitute
+        #     moles_expr = moles_expr.xreplace(dependent_subs)
         funcs.append(moles_expr)
     
     # Always print debug info for moles expressions
     print(f"[GPU CODEGEN] _nb_formulamole_grad_from_model for {model_obj.phase_name}:")
     print(f"  nonvacant_elements: {model_obj.nonvacant_elements}")
     print(f"  Number of functions: {len(funcs)}")
-    print(f"  Dependent substitutions: {dependent_subs}")
+    print(f"  Dependent substitutions IDENTIFIED but NOT APPLIED to match CPU: {dependent_subs}")
     for i, el in enumerate(model_obj.nonvacant_elements):
         print(f"  moles({el}) = {funcs[i]}")
     

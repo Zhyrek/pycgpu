@@ -1373,6 +1373,12 @@ cpdef advance_state(SystemSpecification spec, SystemState state, double[::1] equ
 
         # Construct delta_y from Eq. 43 in Sundman 2015
         csst.delta_y[:] = 0
+        
+        # DEBUG: Print delta_y calculation at iteration 1 for single phase
+        if state.iteration == 1 and len(state.free_stable_compset_indices) == 1 and idx == 0:
+            print(f"\n[CPU DELTA_Y DEBUG] Iteration 1, Phase {idx}:")
+            print(f"  c_G values: {np.asarray(csst.c_G)}")
+            print(f"  Chemical potentials: {np.asarray(state.chemical_potentials)}")
 
         for i in range(csst.delta_y.shape[0]):
             csst.delta_y[i] += csst.c_G[i]
@@ -1382,6 +1388,10 @@ cpdef advance_state(SystemSpecification spec, SystemState state, double[::1] equ
                 csst.delta_y[i] += csst.c_component[chempot_idx, i] * state.chemical_potentials[chempot_idx]
             for cons_idx in range(csst.internal_cons.shape[0]):
                 csst.delta_y[i] -= csst.full_e_matrix[csst.delta_y.shape[0] + cons_idx, i] * csst.internal_cons[cons_idx]
+        
+        # DEBUG: Print final delta_y at iteration 1
+        if state.iteration == 1 and len(state.free_stable_compset_indices) == 1 and idx == 0:
+            print(f"  Calculated delta_y: {np.asarray(csst.delta_y)}")
 
         new_y = np.array(x)
         minimum_step_size = 1e-20 * step_size
@@ -1407,6 +1417,14 @@ cpdef advance_state(SystemSpecification spec, SystemState state, double[::1] equ
         state.largest_y_change[0] = 0.0
         for i in range(spec.num_statevars, new_y.shape[0]):
             state.largest_y_change[0] = max(state.largest_y_change[0], abs(x[i] - new_y[i]))
+        
+        # DEBUG: Show site fraction update at iteration 1
+        if state.iteration == 1 and len(state.free_stable_compset_indices) == 1 and idx == 0:
+            print(f"  Step size used: {step_size}")
+            print(f"  Site fractions before update: {x[spec.num_statevars:]}")
+            print(f"  Site fractions after update: {new_y[spec.num_statevars:]}")
+            print(f"  Largest y change: {state.largest_y_change[0]}")
+            
         x[:] = new_y
         
         # DEBUG: Log site fraction changes

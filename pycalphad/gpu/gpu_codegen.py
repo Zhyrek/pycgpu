@@ -4057,110 +4057,25 @@ __device__ void solve_equilibrium_at_condition_global_mem(
         }}
     }}
 
-    // SEGMENT 39: FINAL PHASE CONSOLIDATION (MATCHING CPU BEHAVIOR)
-    if (thread_id == 0) {{
-        printf("[GPU] SEGMENT 39: Final phase consolidation\\n");
-        printf("[GPU]   num_compsets: %d\\n", current_sys_state.num_compsets);
-    }}
-    
-    // Perform final phase consolidation after convergence (matching CPU behavior)
-    // This is critical for getting the same GM value as CPU
-    double COMPSET_CONSOLIDATE_DISTANCE = 1e-4;
-    for (int i = 0; i < current_sys_state.num_compsets; ++i) {{
-        if (current_sys_state.phase_amt[i] < 1e-10) continue;
-        
-        for (int j = i + 1; j < current_sys_state.num_compsets; ++j) {{
-            if (current_sys_state.phase_amt[j] < 1e-10) continue;
-            if (current_sys_state.compsets[i].phase_record != current_sys_state.compsets[j].phase_record) continue;
-            
-            // Check if compositions are within consolidation distance
-            bool should_consolidate = true;
-            double max_diff = 0.0;
-            for (int comp_idx = 0; comp_idx < current_spec.num_components; ++comp_idx) {{
-                double diff = fabs(current_sys_state.phase_compositions[i * MAX_COMPONENTS + comp_idx] -
-                                  current_sys_state.phase_compositions[j * MAX_COMPONENTS + comp_idx]);
-                if (diff > max_diff) max_diff = diff;
-                if (diff > COMPSET_CONSOLIDATE_DISTANCE) {{
-                    should_consolidate = false;
-                    break;
-                }}
-            }}
-            
-            // Special case: For symmetric binary systems, check if phases are symmetric
-            // This handles cases where the solver converges to symmetric phases that should be consolidated
-            bool is_symmetric_case = false;
-            if (!should_consolidate && current_spec.num_components == 2) {{
-                // Check if phase amounts are equal (indicating symmetric phases)
-                double amt_diff = fabs(current_sys_state.phase_amt[i] - current_sys_state.phase_amt[j]);
-                if (amt_diff < 1e-6 && fabs(current_sys_state.phase_amt[i] - 0.5) < 1e-6) {{
-                    // Check if compositions are symmetric around 0.5
-                    bool symmetric = true;
-                    for (int c = 0; c < current_spec.num_components; ++c) {{
-                        double comp_i = current_sys_state.phase_compositions[i * MAX_COMPONENTS + c];
-                        double comp_j = current_sys_state.phase_compositions[j * MAX_COMPONENTS + c];
-                        double avg = (comp_i + comp_j) / 2.0;
-                        if (fabs(avg - 0.5) > 1e-2) {{  // Allow some tolerance for symmetric check
-                            symmetric = false;
-                            break;
-                        }}
-                    }}
-                    if (symmetric) {{
-                        is_symmetric_case = true;
-                        should_consolidate = true;
-                        if (thread_id == 0) {{
-                            printf("[GPU DEBUG] Detected symmetric binary case - forcing consolidation\\n");
-                        }}
-                    }}
-                }}
-            }}
-            
-            if (should_consolidate) {{
-                if (thread_id == 0) {{
-                    printf("[GPU DEBUG] CONSOLIDATING phases %d and %d: max_diff=%.6f%s\\n", 
-                           i, j, max_diff, is_symmetric_case ? " (symmetric case)" : "");
-                }}
-                
-                // Consolidate phase j into phase i
-                double total_amt = current_sys_state.phase_amt[i] + current_sys_state.phase_amt[j];
-                
-                // Update composition to weighted average
-                for (int c = 0; c < current_spec.num_components; ++c) {{
-                    double weighted_comp = (current_sys_state.phase_amt[i] * current_sys_state.phase_compositions[i * MAX_COMPONENTS + c] +
-                                           current_sys_state.phase_amt[j] * current_sys_state.phase_compositions[j * MAX_COMPONENTS + c]) / total_amt;
-                    current_sys_state.phase_compositions[i * MAX_COMPONENTS + c] = weighted_comp;
-                }}
-                
-                // Update site fractions to weighted average
-                for (int sf = 0; sf < current_sys_state.compsets[i].phase_record->phase_dof; ++sf) {{
-                    double weighted_sf = (current_sys_state.phase_amt[i] * current_sys_state.compsets[i].dof[current_spec.num_statevars + sf] +
-                                         current_sys_state.phase_amt[j] * current_sys_state.compsets[j].dof[current_spec.num_statevars + sf]) / total_amt;
-                    current_sys_state.compsets[i].dof[current_spec.num_statevars + sf] = weighted_sf;
-                }}
-                
-                // Update phase amounts
-                current_sys_state.phase_amt[i] = total_amt;
-                current_sys_state.compsets[i].NP = total_amt;
-                current_sys_state.phase_amt[j] = 0.0;
-                current_sys_state.compsets[j].NP = 0.0;
-                
-                // Recompute energies after consolidation
-                current_sys_state.compsets[i].update(
-                    &current_sys_state.compsets[i].dof[current_spec.num_statevars],
-                    current_sys_state.compsets[i].NP,
-                    current_sys_state.compsets[i].dof,
-                    current_spec.num_statevars
-                );
-                current_sys_state.recompute(&current_spec);
-            }}
-        }}
-    }}
+    // CRITICAL FIX: NO FINAL PHASE CONSOLIDATION!
+    // The CPU does NOT perform any phase consolidation after convergence.
+    // The GPU was incorrectly doing extra consolidation that changed the energies.
 
     double final_gm_calc = 0.0;
     int stable_phase_count = 0;
     
+    // CRITICAL FIX: Calculate sum of phase_amt to normalize to mole fractions
+    double sum_phase_amt = 0.0;
+    for (int i = 0; i < current_sys_state.num_compsets; ++i) {{
+        if (current_sys_state.phase_amt[i] > MIN_PHASE_FRACTION / 10.0) {{
+            sum_phase_amt += current_sys_state.phase_amt[i];
+        }}
+    }}
+    if (sum_phase_amt < 1e-15) sum_phase_amt = 1.0;  // Avoid division by zero
+    
     if (thread_id == 0) {{
-        printf("GPU DEBUG: final calc - num_compsets=%d, MIN_PHASE_FRACTION=%e\\n", 
-               current_sys_state.num_compsets, MIN_PHASE_FRACTION / 10.0);
+        printf("GPU DEBUG: final calc - num_compsets=%d, MIN_PHASE_FRACTION=%e, sum_phase_amt=%f\\n", 
+               current_sys_state.num_compsets, MIN_PHASE_FRACTION / 10.0, sum_phase_amt);
     }}
     
     for (int i = 0; i < current_sys_state.num_compsets; ++i) {{
@@ -4169,7 +4084,10 @@ __device__ void solve_equilibrium_at_condition_global_mem(
                    i, current_sys_state.phase_amt[i], current_sys_state.cs_states[i].energy, MIN_PHASE_FRACTION / 10.0);
         }}
         if (current_sys_state.phase_amt[i] > MIN_PHASE_FRACTION / 10.0) {{
-            final_gm_calc += current_sys_state.phase_amt[i] * current_sys_state.cs_states[i].energy;
+            // CRITICAL FIX: Normalize phase_amt to get mole fraction for GM calculation
+            double phase_mole_fraction = current_sys_state.phase_amt[i] / sum_phase_amt;
+            final_gm_calc += phase_mole_fraction * current_sys_state.cs_states[i].energy;
+            
             if (stable_phase_count < MAX_PHASES) {{
                 result->phase_ids[stable_phase_count] = -1;
                 const PhaseRecord* pr_stable = current_sys_state.compsets[i].phase_record;
@@ -4181,7 +4099,13 @@ __device__ void solve_equilibrium_at_condition_global_mem(
                         }}
                     }}
                 }}
-                result->NP[stable_phase_count] = current_sys_state.phase_amt[i];
+                // CRITICAL FIX: Store normalized mole fraction as NP, not raw phase_amt
+                result->NP[stable_phase_count] = phase_mole_fraction;
+                
+                if (thread_id == 0) {{
+                    printf("GPU DEBUG: Phase %d - phase_amt=%f, NP (normalized)=%f\\n", 
+                           stable_phase_count, current_sys_state.phase_amt[i], phase_mole_fraction);
+                }}
                 
                 // CRITICAL FIX: Store X_phases (mole fractions)
                 double sum_moles_in_phase_formula = 0.0;

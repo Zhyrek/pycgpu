@@ -578,24 +578,12 @@ typedef struct SystemState {
                             mass_jac_temp[i] = 0.0;
                         }
                         
-                        // CRITICAL FIX: formulamole_grad expects phase DOF ordering [P, T, site_fractions...]
-                        // but compset->dof is in workspace format [N, P, T, site_fractions...]
-                        // We need to pass the phase DOF subset starting from index 1 (skipping N)
-                        // However, the phase expects its state vars to be [P, T] not [N, P, T]
+                        // CRITICAL FIX: Match CPU behavior - pass workspace DOF directly
+                        // CPU minimizer.pyx line 898: compset.phase_record.formulamole_grad(csst.mass_jac[comp_idx, :], x, comp_idx)
+                        // The CPU passes the full workspace DOF array, not phase DOF
                         
-                        // Create phase DOF array in the expected format
-                        double phase_dof[MAX_STATEVARS + MAX_DOF_PER_PHASE];
-                        // Copy P, T (skip N which is at index 0)
-                        for (int i = 0; i < spec->num_statevars - 1; ++i) {
-                            phase_dof[i] = compset->dof[i + 1];  // Skip N
-                        }
-                        // Copy site fractions
-                        for (int i = 0; i < compset->phase_record->phase_dof; ++i) {
-                            phase_dof[spec->num_statevars - 1 + i] = compset->dof[spec->num_statevars + i];
-                        }
-                        
-                        // Call formulamole_grad with phase DOF
-                        compset->phase_record->formulamole_grad(mass_jac_temp, phase_dof);
+                        // Call formulamole_grad with workspace DOF (matching CPU)
+                        compset->phase_record->formulamole_grad(mass_jac_temp, compset->dof);
                         
                         // DEBUG: Print raw gradient values from formulamole_grad
                         if (idx == 0 && iteration < 2) {
@@ -1805,7 +1793,6 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
                     state->phase_amt, compset_original_idx, prefactor);
             }
         }
-        // System amount row is handled after all phase rows
     }
     
     // DEBUG: Check c_G values before calling write_row_fixed_mole_fraction
@@ -1956,20 +1943,18 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
         printf("[GPU SYSTEM AMOUNT] Total rows = %d\n", total_rows);
     }
     
-    // Initialize system amount row to zero before accumulating
-    for (int col = 0; col < equilibrium_matrix_cols; col++) {
-        equilibrium_matrix[system_amount_row_true_idx * equilibrium_matrix_cols + col] = 0.0;
-    }
-    equilibrium_rhs[system_amount_row_true_idx] = 0.0;
+    // CRITICAL FIX: Write system amount constraint ONCE with ALL phases contributing
+    // This matches CPU behavior where all phases contribute to a single system amount row
+    // CPU minimizer.pyx lines 369-376 and 400-407 show this pattern
     
-    // Accumulate contributions from ALL phases for system amount row
-    for (int phase_idx = 0; phase_idx < state->num_compsets; phase_idx++) {
-        CompositionSet* phase_compset = &state->compsets[phase_idx];
-        CompsetState* phase_cs_state = &state->cs_states[phase_idx];
+    // Loop over ALL active phases (both free and fixed) to build the system amount constraint
+    for (int stable_idx = 0; stable_idx < num_free_stable_phases; stable_idx++) {
+        int compset_original_idx = state->free_stable_compset_indices[stable_idx];
+        if (compset_original_idx < 0 || compset_original_idx >= state->num_compsets) continue;
+        CompositionSet* current_compset = &state->compsets[compset_original_idx];
+        CompsetState* current_cs_state = &state->cs_states[compset_original_idx];
+        if (current_compset->phase_record == nullptr) continue;
         
-        if (phase_compset->phase_record == nullptr) continue;
-        
-        // Contribute this phase to the system amount row
         for (current_component_idx = 0; current_component_idx < num_total_components; current_component_idx++) {
             write_row_fixed_mole_amount(
                 &equilibrium_matrix[system_amount_row_true_idx * equilibrium_matrix_cols],
@@ -1978,12 +1963,37 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
                 state->free_stable_compset_indices, state->num_free_stable_compsets,
                 spec->free_statevar_indices, spec->num_free_statevars,
                 spec->fixed_chemical_potential_indices, spec->num_fixed_chemical_potentials,
-                state->chemical_potentials, phase_cs_state->mass_jac, phase_cs_state->mass_jac_cols,
-                phase_cs_state->c_component, phase_cs_state->c_component_cols,
-                phase_cs_state->c_statevars, phase_cs_state->c_statevars_cols,
-                phase_cs_state->c_G, phase_cs_state->c_G_length, phase_cs_state->masses,
-                phase_cs_state->moles_normalization, phase_cs_state->moles_normalization_grad,
-                state->phase_amt, phase_idx);
+                state->chemical_potentials, current_cs_state->mass_jac, current_cs_state->mass_jac_cols,
+                current_cs_state->c_component, current_cs_state->c_component_cols,
+                current_cs_state->c_statevars, current_cs_state->c_statevars_cols,
+                current_cs_state->c_G, current_cs_state->c_G_length, current_cs_state->masses,
+                current_cs_state->moles_normalization, current_cs_state->moles_normalization_grad,
+                state->phase_amt, compset_original_idx);
+        }
+    }
+    
+    // Also add fixed stable phases
+    for (int fixed_idx = 0; fixed_idx < spec->num_fixed_stable_compsets; fixed_idx++) {
+        int compset_original_idx = spec->fixed_stable_compset_indices[fixed_idx];
+        if (compset_original_idx < 0 || compset_original_idx >= state->num_compsets) continue;
+        CompositionSet* current_compset = &state->compsets[compset_original_idx];
+        CompsetState* current_cs_state = &state->cs_states[compset_original_idx];
+        if (current_compset->phase_record == nullptr) continue;
+        
+        for (current_component_idx = 0; current_component_idx < num_total_components; current_component_idx++) {
+            write_row_fixed_mole_amount(
+                &equilibrium_matrix[system_amount_row_true_idx * equilibrium_matrix_cols],
+                &equilibrium_rhs[system_amount_row_true_idx], current_component_idx,
+                spec->free_chemical_potential_indices, spec->num_free_chemical_potentials,
+                state->free_stable_compset_indices, state->num_free_stable_compsets,
+                spec->free_statevar_indices, spec->num_free_statevars,
+                spec->fixed_chemical_potential_indices, spec->num_fixed_chemical_potentials,
+                state->chemical_potentials, current_cs_state->mass_jac, current_cs_state->mass_jac_cols,
+                current_cs_state->c_component, current_cs_state->c_component_cols,
+                current_cs_state->c_statevars, current_cs_state->c_statevars_cols,
+                current_cs_state->c_G, current_cs_state->c_G_length, current_cs_state->masses,
+                current_cs_state->moles_normalization, current_cs_state->moles_normalization_grad,
+                state->phase_amt, compset_original_idx);
         }
     }
     
@@ -2503,23 +2513,33 @@ __device__ bool remove_and_consolidate_phases(SystemSpecification* spec, SystemS
                 if (new_count < MAX_PHASES) new_free_stable_indices[new_count++] = current_idx;
             }
         }
-        // Fallback if all free phases were marked for removal
+        // CRITICAL FIX: Match CPU behavior when all phases would be removed
+        // CPU minimizer.pyx lines 1509-1517
         if (new_count == 0 && state->num_free_stable_compsets > 0 && num_to_remove == state->num_free_stable_compsets) {
-             int fallback_idx = -1;
-             // Try to keep the one that was least "removable" or first in list.
-             for(int i=0; i < state->num_free_stable_compsets; ++i) {
-                 int cand_idx = state->free_stable_compset_indices[i];
-                 if(!state->compsets[cand_idx].fixed) { // Prefer non-fixed
-                     fallback_idx = cand_idx;
-                     break;
-                 }
-             }
-             if (fallback_idx == -1 && state->num_free_stable_compsets > 0) fallback_idx = state->free_stable_compset_indices[0]; // default to first
-
-             if(fallback_idx != -1 && new_count < MAX_PHASES) {
-                new_free_stable_indices[new_count++] = fallback_idx;
-                state->phase_amt[fallback_idx] = fmax(state->phase_amt[fallback_idx], MIN_PHASE_FRACTION); // ensure it has some amount
-             }
+            // Do not allow all phases to leave the system
+            // Reset all phase amounts to 1 and chemical potentials to 0
+            for (int i = 0; i < state->num_free_stable_compsets; ++i) {
+                int phase_idx = state->free_stable_compset_indices[i];
+                state->phase_amt[phase_idx] = 1.0;
+                if (new_count < MAX_PHASES) {
+                    new_free_stable_indices[new_count++] = phase_idx;
+                }
+            }
+            
+            // Reset chemical potentials to 0
+            for (int i = 0; i < spec->num_components; ++i) {
+                state->chemical_potentials[i] = 0.0;
+            }
+            
+            // Force fixed chemical potentials to adopt their initial values
+            for (int cp_idx = 0; cp_idx < spec->num_fixed_chemical_potentials; ++cp_idx) {
+                int comp_idx = spec->fixed_chemical_potential_indices[cp_idx];
+                state->chemical_potentials[comp_idx] = spec->initial_chemical_potentials[comp_idx];
+            }
+            
+            if (thread_id == 0) {
+                printf("[GPU PHASE CONSOLIDATION] All phases would be removed - resetting phase amounts to 1.0 and chemical potentials\n");
+            }
         }
 
 

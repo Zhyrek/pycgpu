@@ -4049,8 +4049,12 @@ __device__ void solve_equilibrium_at_condition_global_mem(
     
     // CRITICAL FIX: Synchronize phase_amt with CompositionSet NP values after solver
     // The solver updates NP but phase_amt array might not be synchronized
+    // IMPORTANT: Only sync active phases (phase_amt > 0) to avoid overwriting consolidated phases
     for (int i = 0; i < current_sys_state.num_compsets; ++i) {{
-        current_sys_state.phase_amt[i] = current_sys_state.compsets[i].NP;
+        // Only sync if the phase is active (not removed/consolidated)
+        if (current_sys_state.phase_amt[i] > MIN_PHASE_FRACTION / 10.0) {{
+            current_sys_state.phase_amt[i] = current_sys_state.compsets[i].NP;
+        }}
         if (thread_id == 0 && i < 2) {{
             printf("GPU DEBUG: After solver sync - compset %d: NP=%f, phase_amt=%f\\n", 
                    i, current_sys_state.compsets[i].NP, current_sys_state.phase_amt[i]);

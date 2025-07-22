@@ -3396,7 +3396,7 @@ __device__ void advance_state(SystemSpecification* spec, SystemState* state, con
     gpu_debug_log_value("step_size", step_size_param);
     
     double current_step_size = step_size_param;
-    double MIN_PHASE_AMOUNT = 1e-10;  // Match CPU threshold for consistency with phase removal
+    double MIN_PHASE_AMOUNT = 1e-16;  // CRITICAL FIX: Match CPU's 1e-16 in advance_state, not 1e-10!
 
     // Chemical potentials are now handled in solve_state (matching CPU approach)
     // Start with phase amount updates
@@ -3731,10 +3731,10 @@ __device__ bool remove_and_consolidate_phases(SystemSpecification* spec, SystemS
                 if (thread_id == 0 && state->iteration < 2) {
                     CompositionSet* cs1 = &state->compsets[idx1];
                     CompositionSet* cs2 = &state->compsets[idx2];
-                    printf("[AT CONSOLIDATION] Phase %d Y=[%.15e, %.15e]\n",
-                           idx1, cs1->dof[3], cs1->dof[4]);
-                    printf("[AT CONSOLIDATION] Phase %d Y=[%.15e, %.15e]\n",
-                           idx2, cs2->dof[3], cs2->dof[4]);
+                    printf("[AT CONSOLIDATION] Phase %d Y=[%.15e, %.15e], amt=%.15e\n",
+                           idx1, cs1->dof[3], cs1->dof[4], state->phase_amt[idx1]);
+                    printf("[AT CONSOLIDATION] Phase %d Y=[%.15e, %.15e], amt=%.15e\n",
+                           idx2, cs2->dof[3], cs2->dof[4], state->phase_amt[idx2]);
                 }
                 if (num_to_remove < MAX_PHASES) compset_indices_to_remove_temp[num_to_remove++] = idx2;
                 
@@ -3994,7 +3994,7 @@ __device__ bool change_phases(SystemSpecification* spec, SystemState* state) {
     }
     
     for (int i = 0; i < final_free_count; ++i) {
-        int current_idx = state->free_stable_compset_indices[i];
+        int current_idx = final_free_stable_indices[i];  // CRITICAL FIX: Use NEW array, not old!
         if (current_idx >=0 && current_idx < state->num_compsets) { // boundary check
             if (state->phase_amt[current_idx] < 1e-10 && !state->compsets[current_idx].fixed) {
                  state->phase_amt[current_idx] = 1e-10;
@@ -5490,6 +5490,9 @@ __device__ bool run_loop_global_mem(
             }
         }
         
+        // NOTE: recompute is called inside solve_state, matching CPU behavior
+        // Do NOT call it here to avoid double recomputation
+        
         eq_soln_len = spec->num_free_chemical_potentials + state->num_free_stable_compsets + spec->num_free_statevars;
         
         // DEBUG: Store eq_soln_len calculation (removed debug_gm_history references)
@@ -5569,6 +5572,47 @@ __device__ bool run_loop_global_mem(
         // SEGMENT 33-34: PHASE REMOVAL AND ADDITION (moved before advance_state to match CPU)
         if (thread_id < 3 && iteration_count < 3) {
             printf("[GPU] SEGMENT 33: Remove and consolidate phases\n");
+        }
+        
+        // CRITICAL FIX: Update phase compositions after solve_state but before consolidation
+        // solve_state updates site fractions, but we need to recalculate phase_compositions
+        // to reflect the new equilibrium state before checking for consolidation
+        // Only update phase_compositions, not the full recompute
+        if (thread_id == 0 && iteration_count < 3) {
+            printf("GPU DEBUG: Updating phase compositions before consolidation check\n");
+        }
+        for (int idx = 0; idx < state->num_compsets; ++idx) {
+            CompositionSet* compset = &state->compsets[idx];
+            if (compset->phase_record == nullptr) continue;
+            
+            // DEBUG: Print site fractions before formulamole calculation
+            if (thread_id == 0 && iteration_count < 3 && idx < 2) {
+                printf("  Phase %d site fractions: [%.15f, %.15f]\n", idx,
+                       compset->dof[spec->num_statevars], 
+                       compset->dof[spec->num_statevars + 1]);
+            }
+            
+            // Calculate moles of each element per formula unit
+            double formulamoles[MAX_COMPONENTS];
+            for (int i = 0; i < MAX_COMPONENTS; ++i) {
+                formulamoles[i] = 0.0;
+            }
+            
+            if (compset->phase_record->formulamole_obj != nullptr) {
+                compset->phase_record->formulamole_obj(formulamoles, compset->dof);
+            }
+            
+            // Update phase_compositions array
+            for (int comp_idx = 0; comp_idx < spec->num_components; ++comp_idx) {
+                state->phase_compositions[idx * MAX_COMPONENTS + comp_idx] = formulamoles[comp_idx];
+            }
+            
+            // DEBUG: Print updated phase compositions
+            if (thread_id == 0 && iteration_count < 3 && idx < 2) {
+                printf("  Phase %d updated compositions: [%.15f, %.15f]\n", idx,
+                       state->phase_compositions[idx * MAX_COMPONENTS + 0],
+                       state->phase_compositions[idx * MAX_COMPONENTS + 1]);
+            }
         }
         
         // Phase change operations (these should be safe, no large arrays)

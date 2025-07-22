@@ -206,7 +206,7 @@ cdef void write_row_fixed_mole_fraction(double[:] out_row, double* out_rhs, int 
     # 3.
     # DEBUG: Print RHS calculation details
     if idx < 2 and component_idx == 1 and prefactor != 0.0:
-        print(f"[CPU MOLE FRAC RHS DEBUG] Phase {idx}, Component 1:")
+        # print(f"[CPU MOLE FRAC RHS DEBUG] Phase {idx}, Component 1:")
         print(f"  c_G.shape[0]={c_G.shape[0]}")
         if c_G.shape[0] > 0:
             print(f"  c_G values: {np.asarray(c_G)}")
@@ -228,7 +228,7 @@ cdef void write_row_fixed_mole_fraction(double[:] out_row, double* out_rhs, int 
             (-system_mole_fractions[component_idx] * moles_normalization_grad[num_statevars+j]) * c_G[j]
             
     if idx < 2 and component_idx == 1 and prefactor != 0.0:
-        print(f"  [CPU] Phase {idx} rhs_term1={rhs_term1}, rhs_term2={rhs_term2}")
+        # print(f"  [CPU] Phase {idx} rhs_term1={rhs_term1}, rhs_term2={rhs_term2}")
         print(f"  phase_amt={phase_amt[idx]}, system_amt={current_system_amount}, prefactor={prefactor}")
         print(f"  RHS contribution: {-prefactor * (phase_amt[idx]/current_system_amount) * (rhs_term1 + rhs_term2)}")
         print(f"  out_rhs[0] after this phase: {out_rhs[0]}")
@@ -316,10 +316,10 @@ cdef void fill_equilibrium_system(double[::1,:] equilibrium_matrix, double[::1] 
         
         # DEBUG: Print gradient details for first iteration
         if state.iteration < 3 and stable_idx < 2:
-            print(f"[CPU] Phase {stable_idx} gradient (iteration {state.iteration}): {np.asarray(csst.grad)}")
-            print(f"[CPU] Phase {stable_idx} energy: {csst.energy:.15e}")
-            print(f"[CPU] Phase {stable_idx} masses: {np.asarray(csst.masses)}")
-            print(f"[CPU] Phase {stable_idx} equilibrium_rhs before: {equilibrium_rhs[stable_idx]:.15e}")
+            # print(f"[CPU] Phase {stable_idx} gradient (iteration {state.iteration}): {np.asarray(csst.grad)}")
+            # print(f"[CPU] Phase {stable_idx} energy: {csst.energy:.15e}")
+            # print(f"[CPU] Phase {stable_idx} masses: {np.asarray(csst.masses)}")
+            # print(f"[CPU] Phase {stable_idx} equilibrium_rhs before: {equilibrium_rhs[stable_idx]:.15e}")
             
         debug_log(f"  phase_row_{stable_idx}_rhs: {equilibrium_rhs[stable_idx]:.15e}", debug_enabled)
 
@@ -422,9 +422,9 @@ cdef void fill_equilibrium_system(double[::1,:] equilibrium_matrix, double[::1] 
         debug_log(f"  constraint_{fixed_molefrac_cond_idx}_residual: {component_residual:.15e}", debug_enabled)
         # DEBUG: Print mole fraction constraint RHS
         if state.iteration < 3:
-            print(f"[CPU] Mole fraction constraint {fixed_molefrac_cond_idx} RHS before residual: {equilibrium_rhs[component_row_offset + fixed_molefrac_cond_idx] + component_residual:.6f}")
-            print(f"[CPU] Mole fraction constraint {fixed_molefrac_cond_idx} residual: {component_residual:.6f}")
-            print(f"[CPU] Mole fraction constraint {fixed_molefrac_cond_idx} RHS after residual: {equilibrium_rhs[component_row_offset + fixed_molefrac_cond_idx]:.6f}")
+            # print(f"[CPU] Mole fraction constraint {fixed_molefrac_cond_idx} RHS before residual: {equilibrium_rhs[component_row_offset + fixed_molefrac_cond_idx] + component_residual:.6f}")
+            # print(f"[CPU] Mole fraction constraint {fixed_molefrac_cond_idx} residual: {component_residual:.6f}")
+            # print(f"[CPU] Mole fraction constraint {fixed_molefrac_cond_idx} RHS after residual: {equilibrium_rhs[component_row_offset + fixed_molefrac_cond_idx]:.6f}")
     
     system_residual = state.system_amount - spec.prescribed_system_amount
     equilibrium_rhs[system_amount_index] -= system_residual
@@ -552,30 +552,30 @@ cdef class SystemSpecification:
             
             # DEBUG: Log iteration start  
             if False and iteration == 0:  # Detailed for first iteration - disabled
-                print(f"\n[CPU DEBUG] ===== ITERATION {iteration} (DETAILED) =====")
-                print(f"[CPU DEBUG] State before iteration:")
-                print(f"[CPU DEBUG]   Chemical potentials: {np.array(state.chemical_potentials)}")
-                print(f"[CPU DEBUG]   Number of phases: {len(state.free_stable_compset_indices)}")
-                print(f"[CPU DEBUG]   Free stable indices: {state.free_stable_compset_indices}")
-                print(f"[CPU DEBUG]   System amount: {state.system_amount}")
-                print(f"[CPU DEBUG]   Mole fractions: {state.mole_fractions}")
+                # print(f"\n[CPU DEBUG] ===== ITERATION {iteration} (DETAILED) =====")
+                # print(f"[CPU DEBUG] State before iteration:")
+                # print(f"[CPU DEBUG]   Chemical potentials: {np.array(state.chemical_potentials)}")
+                # print(f"[CPU DEBUG]   Number of phases: {len(state.free_stable_compset_indices)}")
+                # print(f"[CPU DEBUG]   Free stable indices: {state.free_stable_compset_indices}")
+                # print(f"[CPU DEBUG]   System amount: {state.system_amount}")
+                # print(f"[CPU DEBUG]   Mole fractions: {state.mole_fractions}")
                 for idx in state.free_stable_compset_indices:
                     compset = state.compsets[idx]
-                    print(f"[CPU DEBUG]   Phase {idx} ({compset.phase_record.phase_name}):")
-                    print(f"[CPU DEBUG]     NP={compset.NP:.6f}")
-                    print(f"[CPU DEBUG]     phase_amt={state.phase_amt[idx]:.6f} (formula units)")
-                    print(f"[CPU DEBUG]     energy={state.cs_states[idx].energy:.6f}")
-                    print(f"[CPU DEBUG]     dof={np.array(state.dof[idx])}")
-                    print(f"[CPU DEBUG]     phase_compositions={state.phase_compositions[idx]}")
+                    # print(f"[CPU DEBUG]   Phase {idx} ({compset.phase_record.phase_name}):")
+                    # print(f"[CPU DEBUG]     NP={compset.NP:.6f}")
+                    # print(f"[CPU DEBUG]     phase_amt={state.phase_amt[idx]:.6f} (formula units)")
+                    # print(f"[CPU DEBUG]     energy={state.cs_states[idx].energy:.6f}")
+                    # print(f"[CPU DEBUG]     dof={np.array(state.dof[idx])}")
+                    # print(f"[CPU DEBUG]     phase_compositions={state.phase_compositions[idx]}")
                     # Calculate phase_comp_sum for this phase
                     phase_comp_sum = np.sum(state.phase_compositions[idx])
-                    print(f"[CPU DEBUG]     phase_comp_sum={phase_comp_sum:.6f}")
-                    print(f"[CPU DEBUG]     phase_amt * phase_comp_sum={state.phase_amt[idx] * phase_comp_sum:.6f}")
+                    # print(f"[CPU DEBUG]     phase_comp_sum={phase_comp_sum:.6f}")
+                    # print(f"[CPU DEBUG]     phase_amt * phase_comp_sum={state.phase_amt[idx] * phase_comp_sum:.6f}")
             elif False:  # disabled
-                print(f"\n[CPU DEBUG] ===== ITERATION {iteration} =====")
-                print(f"[CPU DEBUG]   Chemical potentials: {np.array(state.chemical_potentials)}")
+                # print(f"\n[CPU DEBUG] ===== ITERATION {iteration} =====")
+                # print(f"[CPU DEBUG]   Chemical potentials: {np.array(state.chemical_potentials)}")
                 for idx in state.free_stable_compset_indices:
-                    print(f"[CPU DEBUG]   Phase {idx}: amount={state.phase_amt[idx]:.6f}, energy={state.cs_states[idx].energy:.6f}")
+                    # print(f"[CPU DEBUG]   Phase {idx}: amount={state.phase_amt[idx]:.6f}, energy={state.cs_states[idx].energy:.6f}")
             
             if not self.pre_solve_hook(state):
                 break
@@ -583,17 +583,17 @@ cdef class SystemSpecification:
             
             # DEBUG: Log equilibrium solution
             if False and iteration == 0:  # Detailed for first iteration - disabled
-                print(f"[CPU DEBUG] Equilibrium solution: {np.array(eq_soln)}")
-                print(f"[CPU DEBUG] After solve_state:")
-                print(f"[CPU DEBUG]   Chemical potentials: {np.array(state.chemical_potentials)}")
+                # print(f"[CPU DEBUG] Equilibrium solution: {np.array(eq_soln)}")
+                # print(f"[CPU DEBUG] After solve_state:")
+                # print(f"[CPU DEBUG]   Chemical potentials: {np.array(state.chemical_potentials)}")
                 for idx in state.free_stable_compset_indices:
                     compset = state.compsets[idx]
-                    print(f"[CPU DEBUG]   Phase {idx} ({compset.phase_record.phase_name}):")
-                    print(f"[CPU DEBUG]     phase_amt={state.phase_amt[idx]:.6f} (formula units)")
-                    print(f"[CPU DEBUG]     NP={compset.NP:.6f}")
-                    print(f"[CPU DEBUG]     dof={np.array(state.dof[idx])}")
+                    # print(f"[CPU DEBUG]   Phase {idx} ({compset.phase_record.phase_name}):")
+                    # print(f"[CPU DEBUG]     phase_amt={state.phase_amt[idx]:.6f} (formula units)")
+                    # print(f"[CPU DEBUG]     NP={compset.NP:.6f}")
+                    # print(f"[CPU DEBUG]     dof={np.array(state.dof[idx])}")
             elif False:  # disabled
-                print(f"[CPU DEBUG] Equilibrium solution: {np.array(eq_soln)}")
+                # print(f"[CPU DEBUG] Equilibrium solution: {np.array(eq_soln)}")
             
             # SEGMENT 33: POST SOLVE HOOK
             debug_log(33, f"Post solve hook (iteration {state.iteration})")
@@ -613,7 +613,7 @@ cdef class SystemSpecification:
             if converged:
                 phases_changed = phases_changed or change_phases(self, state)
                 if phases_changed:
-                    print(f"[CPU DEBUG] Phases changed at iteration {iteration}: num_phases={len(state.free_stable_compset_indices)}")
+                    # print(f"[CPU DEBUG] Phases changed at iteration {iteration}: num_phases={len(state.free_stable_compset_indices)}")
                 if phases_changed:
                     # TODO: this preserves old logic about phase changes, but should we
                     # reset the counter `if phases_changed and not converged` -
@@ -628,17 +628,17 @@ cdef class SystemSpecification:
             
             # DEBUG: Add detailed output after first iteration
             if iteration == 0:
-                print(f"\n[CPU TRACE] ===== AFTER ITERATION 0 =====")
-                print(f"[CPU TRACE] Chemical potentials: {np.array(state.chemical_potentials)}")
-                print(f"[CPU TRACE] System amount: {state.system_amount:.15e}")
-                print(f"[CPU TRACE] Mole fractions: {np.array(state.mole_fractions)}")
-                print(f"[CPU TRACE] Mass residual: {state.mass_residual:.15e}")
-                print(f"[CPU TRACE] Number of active phases: {len(state.free_stable_compset_indices)}")
-                print(f"[CPU TRACE] Free stable indices: {state.free_stable_compset_indices}")
+                # print(f"\n[CPU TRACE] ===== AFTER ITERATION 0 =====")
+                # print(f"[CPU TRACE] Chemical potentials: {np.array(state.chemical_potentials)}")
+                # print(f"[CPU TRACE] System amount: {state.system_amount:.15e}")
+                # print(f"[CPU TRACE] Mole fractions: {np.array(state.mole_fractions)}")
+                # print(f"[CPU TRACE] Mass residual: {state.mass_residual:.15e}")
+                # print(f"[CPU TRACE] Number of active phases: {len(state.free_stable_compset_indices)}")
+                # print(f"[CPU TRACE] Free stable indices: {state.free_stable_compset_indices}")
                 
                 for idx in state.free_stable_compset_indices:
                     compset = state.compsets[idx]
-                    print(f"\n[CPU TRACE] Phase {idx} ({compset.phase_record.phase_name}):")
+                    # print(f"\n[CPU TRACE] Phase {idx} ({compset.phase_record.phase_name}):")
                     print(f"  NP (mole fraction): {compset.NP:.15e}")
                     print(f"  phase_amt (formula units): {state.phase_amt[idx]:.15e}")
                     print(f"  energy: {compset.energy:.15e}")
@@ -649,13 +649,13 @@ cdef class SystemSpecification:
                     print(f"  Site fractions: {np.array(state.dof[idx][num_sv:])}")
                     print(f"  State variables: {np.array(state.dof[idx][:num_sv])}")
                     
-                print(f"\n[CPU TRACE] Convergence status:")
+                # print(f"\n[CPU TRACE] Convergence status:")
                 print(f"  converged: {converged}")
                 print(f"  phases_changed: {phases_changed}")
                 print(f"  largest_phase_amt_change: {state.largest_phase_amt_change[0]:.15e}")
                 print(f"  largest_y_change: {state.largest_y_change[0]:.15e}")
                 print(f"  largest_statevar_change: {state.largest_statevar_change[0]:.15e}")
-                print(f"[CPU TRACE] ===== END ITERATION 0 =====\n")
+                # print(f"[CPU TRACE] ===== END ITERATION 0 =====\n")
                 
         if state.free_stable_compset_indices.shape[0] > self.max_num_free_stable_phases:
             # Gibbs phase rule violation in solution
@@ -816,7 +816,7 @@ cdef class SystemState:
         cdef double phase_amt_sum = 0.0
         for idx in range(len(self.compsets)):
             phase_amt_sum += self.phase_amt[idx]
-        print(f"[CPU MASS BALANCE] recompute() - iteration {self.iteration}: sum(phase_amt) = {phase_amt_sum:.15e}")
+        # print(f"[CPU MASS BALANCE] recompute() - iteration {self.iteration}: sum(phase_amt) = {phase_amt_sum:.15e}")
         
         # Compute normalized global quantities
         for idx in range(len(self.compsets)):
@@ -852,7 +852,7 @@ cdef class SystemState:
                 coef = spec.prescribed_mole_fraction_coefficients[fixed_molefrac_cond_idx,:]
                 dot_product = np.dot(coef, self.mole_fractions)
                 rhs = spec.prescribed_mole_fraction_rhs[fixed_molefrac_cond_idx]
-                print(f"[CPU] Mass residual calc (iteration {self.iteration}):")
+                # print(f"[CPU] Mass residual calc (iteration {self.iteration}):")
                 print(f"  Coefficients: {coef}")
                 print(f"  Mole fractions: {self.mole_fractions}")
                 print(f"  Dot product: {dot_product:.15e}")
@@ -906,7 +906,7 @@ cdef class SystemState:
             
             # DEBUG: Print CPU Hessian values after calculation
             if True:  # Always print for debugging
-                print(f"[CPU HESSIAN] Phase {idx} ({compset.phase_record.phase_name}) Hessian after formulahess:")
+                # print(f"[CPU HESSIAN] Phase {idx} ({compset.phase_record.phase_name}) Hessian after formulahess:")
                 for i in range(spec.num_statevars, min(spec.num_statevars + 2, csst.hess.shape[0])):
                     print(f"  Row {i}: ", end="")
                     for j in range(spec.num_statevars, min(spec.num_statevars + 2, csst.hess.shape[1])):
@@ -946,7 +946,7 @@ cdef class SystemState:
             # Calculate c_G
             # DEBUG: Print c_G calculation details
             if idx < 2 and self.iteration < 2:
-                print(f"[CPU c_G DEBUG] Phase {idx} calculation:")
+                # print(f"[CPU c_G DEBUG] Phase {idx} calculation:")
                 print(f"  gradient values: {np.asarray(csst.grad[spec.num_statevars:spec.num_statevars+num_phase_dof])}")
                 print(f"  full_e_matrix diagonal: {[csst.full_e_matrix[i,i] for i in range(num_phase_dof)]}")
                 print(f"  Before c_G calc, c_G = {np.asarray(csst.c_G)}")
@@ -1056,7 +1056,7 @@ cpdef construct_equilibrium_system(SystemSpecification spec, SystemState state, 
     
     # DEBUG: Print equilibrium matrix for first few iterations
     if state.iteration < 3:
-        print(f"\n[CPU MATRIX DEBUG] Equilibrium matrix at iteration {state.iteration} (rows={equilibrium_matrix.shape[0]}, cols={equilibrium_matrix.shape[1]}):")
+        # print(f"\n[CPU MATRIX DEBUG] Equilibrium matrix at iteration {state.iteration} (rows={equilibrium_matrix.shape[0]}, cols={equilibrium_matrix.shape[1]}):")
         for i in range(min(equilibrium_matrix.shape[0], 5)):
             row_str = f"  Row {i}: "
             for j in range(min(equilibrium_matrix.shape[1], 5)):
@@ -1214,7 +1214,7 @@ cpdef solve_state(SystemSpecification spec, SystemState state):
     # DEBUG: Log state before recompute (CPU minimizer)
     # Note: verbose flag not directly available here, but we can check if state has debug attributes
     cdef bint debug_enabled = False  # Debug controlled globally via debug_output.py
-    if debug_enabled:
+    # if debug_enabled:
         print(f"\n--- CPU Minimizer solve_state start ---")
         print(f"Previous chemical potentials: {np.array(state.previous_chemical_potentials)}")
         print(f"Current chemical potentials: {np.array(state.chemical_potentials)}")
@@ -1231,7 +1231,7 @@ cpdef solve_state(SystemSpecification spec, SystemState state):
     # System constructed
     
     # DEBUG: Log equilibrium system details
-    if debug_enabled:
+    # if debug_enabled:
         print(f"Equilibrium matrix shape: {equilibrium_matrix.shape}")
         print(f"Matrix condition number estimate: {np.linalg.cond(np.array(equilibrium_matrix)) if equilibrium_matrix.shape[0] < 100 else 'skipped (large matrix)'}")
 
@@ -1264,7 +1264,7 @@ cpdef solve_state(SystemSpecification spec, SystemState state):
     debug_log(f"  final_chemical_potentials: {np.array(state.chemical_potentials)}", debug_enabled)
     
     # DEBUG: Log updated chemical potentials
-    if debug_enabled:
+    # if debug_enabled:
         print(f"Updated chemical potentials: {np.array(state.chemical_potentials)}")
 
     state.largest_chemical_potential_difference = -np.inf
@@ -1272,7 +1272,7 @@ cpdef solve_state(SystemSpecification spec, SystemState state):
         state.largest_chemical_potential_difference = max(state.largest_chemical_potential_difference, abs(state.chemical_potentials[comp_idx] - state.previous_chemical_potentials[comp_idx]))
 
     # DEBUG: Log convergence metrics
-    if debug_enabled:
+    # if debug_enabled:
         print(f"Largest chemical potential change: {state.largest_chemical_potential_difference:.6e}")
         print(f"Mass residual: {state.mass_residual:.6e}")
         print(f"--- CPU Minimizer solve_state end ---\n")
@@ -1303,7 +1303,7 @@ cpdef advance_state(SystemSpecification spec, SystemState state, double[::1] equ
     debug_log(f"  initial_step_size: {step_size:.15e}", True)
     debug_log(f"  equilibrium_soln_norm: {np.linalg.norm(np.array(equilibrium_soln)):.15e}", True)
     
-    if debug_enabled:
+    # if debug_enabled:
         print(f"\n--- CPU Minimizer advance_state start ---")
         print(f"Initial step size: {step_size:.6e}")
         for i, compset in enumerate(state.compsets):
@@ -1330,12 +1330,12 @@ cpdef advance_state(SystemSpecification spec, SystemState state, double[::1] equ
         compset_idx = state.free_stable_compset_indices[i]
         old_amt = state.phase_amt[compset_idx]
         delta = equilibrium_soln[soln_index_offset + i]
-        print(f"[CPU ADVANCE] Phase {compset_idx}: old={old_amt:.6e}, delta={delta:.6e}, step_size={phase_amt_step_size:.6e}, actual_change={phase_amt_step_size * delta:.6e}")
+        # print(f"[CPU ADVANCE] Phase {compset_idx}: old={old_amt:.6e}, delta={delta:.6e}, step_size={phase_amt_step_size:.6e}, actual_change={phase_amt_step_size * delta:.6e}")
         state.phase_amt[compset_idx] += phase_amt_step_size * equilibrium_soln[soln_index_offset + i]
         state.largest_phase_amt_change[0] = max(state.largest_phase_amt_change[0], abs(phase_amt_step_size * equilibrium_soln[soln_index_offset + i]))
         
         # DEBUG: Log phase amount changes
-        if debug_enabled and abs(old_amt - state.phase_amt[compset_idx]) > 1e-12:
+        # if debug_enabled and abs(old_amt - state.phase_amt[compset_idx]) > 1e-12:
             print(f"Phase amount change {compset_idx}: {old_amt:.6e} -> {state.phase_amt[compset_idx]:.6e} (delta: {state.phase_amt[compset_idx] - old_amt:.6e})")
     soln_index_offset += state.free_stable_compset_indices.shape[0]
     
@@ -1343,7 +1343,7 @@ cpdef advance_state(SystemSpecification spec, SystemState state, double[::1] equ
     cdef double phase_amt_sum_after = 0.0
     for idx in range(len(state.compsets)):
         phase_amt_sum_after += state.phase_amt[idx]
-    print(f"[CPU MASS BALANCE] advance_state() - after phase update: sum(phase_amt) = {phase_amt_sum_after:.15e}")
+    # print(f"[CPU MASS BALANCE] advance_state() - after phase update: sum(phase_amt) = {phase_amt_sum_after:.15e}")
 
     # 2. Step in state variables
     debug_log(f"  largest_phase_amt_change: {state.largest_phase_amt_change[0]:.15e}", True)
@@ -1376,7 +1376,7 @@ cpdef advance_state(SystemSpecification spec, SystemState state, double[::1] equ
         
         # DEBUG: Print delta_y calculation at iteration 1 for single phase
         if state.iteration == 1 and len(state.free_stable_compset_indices) == 1 and idx == 0:
-            print(f"\n[CPU DELTA_Y DEBUG] Iteration 1, Phase {idx}:")
+            # print(f"\n[CPU DELTA_Y DEBUG] Iteration 1, Phase {idx}:")
             print(f"  c_G values: {np.asarray(csst.c_G)}")
             print(f"  Chemical potentials: {np.asarray(state.chemical_potentials)}")
 
@@ -1428,7 +1428,7 @@ cpdef advance_state(SystemSpecification spec, SystemState state, double[::1] equ
         x[:] = new_y
         
         # DEBUG: Log site fraction changes
-        if debug_enabled and state.largest_y_change[0] > 1e-12:
+        # if debug_enabled and state.largest_y_change[0] > 1e-12:
             print(f"Phase {idx} largest site fraction change: {state.largest_y_change[0]:.6e}")
     
     # DEBUG: Log advance_state end
@@ -1436,7 +1436,7 @@ cpdef advance_state(SystemSpecification spec, SystemState state, double[::1] equ
     debug_log(f"  final_largest_y_change: {state.largest_y_change[0]:.15e}", True)  
     debug_log(f"  final_largest_statevar_change: {state.largest_statevar_change[0]:.15e}", True)
     
-    if debug_enabled:
+    # if debug_enabled:
         print(f"Final largest phase amount change: {state.largest_phase_amt_change[0]:.6e}")
         print(f"Final largest y change: {state.largest_y_change[0]:.6e}")
         print(f"Final largest statevar change: {state.largest_statevar_change[0]:.6e}")
@@ -1497,12 +1497,12 @@ cdef bint remove_and_consolidate_phases(SystemSpecification spec, SystemState st
             if compsets_should_be_consolidated:
                 compset_indices_to_remove.add(idx2)
                 debug_log(f"  consolidating_phases_{idx}_{idx2}: {compset.phase_record.phase_name}", True)
-                print(f"[CPU DEBUG] CONSOLIDATING phases {idx} and {idx2}: max_diff={max(abs(state.phase_compositions[idx, comp_idx] - state.phase_compositions[idx2, comp_idx]) for comp_idx in range(spec.num_components)):.6f}")
-                print(f"[CPU DEBUG] Before consolidation: phase {idx} amt={state.phase_amt[idx]:.15e}, phase {idx2} amt={state.phase_amt[idx2]:.15e}")
+                # print(f"[CPU DEBUG] CONSOLIDATING phases {idx} and {idx2}: max_diff={max(abs(state.phase_compositions[idx, comp_idx] - state.phase_compositions[idx2, comp_idx]) for comp_idx in range(spec.num_components)):.6f}")
+                # print(f"[CPU DEBUG] Before consolidation: phase {idx} amt={state.phase_amt[idx]:.15e}, phase {idx2} amt={state.phase_amt[idx2]:.15e}")
                 if idx not in spec.fixed_stable_compset_indices:
                     # ensure that the consolidated phase is stable
                     state.phase_amt[idx] = max(state.phase_amt[idx] + state.phase_amt[idx2], 1e-8)
-                print(f"[CPU DEBUG] After consolidation: phase {idx} amt={state.phase_amt[idx]:.15e}")
+                # print(f"[CPU DEBUG] After consolidation: phase {idx} amt={state.phase_amt[idx]:.15e}")
                 state.phase_amt[idx2] = 0
     
     debug_log(f"  phases_to_remove: {len(compset_indices_to_remove)}", True)
@@ -1556,7 +1556,7 @@ cdef bint change_phases(SystemSpecification spec, SystemState state):
         if phase_amt[cs_idx] < MIN_PHASE_AMOUNT:
             compsets_to_remove.add(cs_idx)
             debug_log(f"  removing_phase_{cs_idx}: amount={phase_amt[cs_idx]:.15e}, driving_force={driving_forces[cs_idx]:.15e}", True)
-            print(f"[CPU DEBUG] REMOVING phase {cs_idx}: amount={phase_amt[cs_idx]:.6e} < {MIN_PHASE_AMOUNT:.6e}")
+            # print(f"[CPU DEBUG] REMOVING phase {cs_idx}: amount={phase_amt[cs_idx]:.6e} < {MIN_PHASE_AMOUNT:.6e}")
 
     # Only add phases with positive driving force which have been metastable for at least 5 iterations, which have been removed fewer than 4 times
     compsets_to_add = set()

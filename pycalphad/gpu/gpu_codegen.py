@@ -2572,6 +2572,9 @@ __device__ bool run_loop_global_mem(
             }}
         }}
         
+        // NOTE: recompute is called inside solve_state, matching CPU behavior
+        // Do NOT call it here to avoid double recomputation
+        
         eq_soln_len = spec->num_free_chemical_potentials + state->num_free_stable_compsets + spec->num_free_statevars;
         
         // DEBUG: Store eq_soln_len calculation (removed debug_gm_history references)
@@ -2652,6 +2655,9 @@ __device__ bool run_loop_global_mem(
         if (thread_id < 3 && iteration_count < 3) {{
             printf("[GPU] SEGMENT 33: Remove and consolidate phases\\n");
         }}
+        
+        // NOTE: Phase compositions are calculated in solve_state->recompute()
+        // We use those compositions for consolidation checks to match CPU behavior
         
         // Phase change operations (these should be safe, no large arrays)
         if (remove_and_consolidate_phases(spec, state)) {{

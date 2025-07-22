@@ -4,6 +4,20 @@
 import numpy as np
 from pycalphad import Database, equilibrium, variables as v
 from pycalphad.core.utils import filter_phases
+import cupy as cp
+import os
+import shutil
+
+# Clear CuPy kernel cache to ensure code changes take effect
+cache_dir = os.path.expanduser("~/.cupy/kernel_cache")
+if os.path.exists(cache_dir):
+    shutil.rmtree(cache_dir)
+    print(f"Cleared CuPy kernel cache: {cache_dir}")
+
+# Clear CuPy memory cache
+cp.cuda.runtime.memGetInfo()
+cp.get_default_memory_pool().free_all_blocks()
+cp.get_default_pinned_memory_pool().free_all_blocks()
 
 dbf = Database('NbTi.tdb')
 comps = ['NB', 'TI', 'VA']

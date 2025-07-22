@@ -1498,9 +1498,11 @@ cdef bint remove_and_consolidate_phases(SystemSpecification spec, SystemState st
                 compset_indices_to_remove.add(idx2)
                 debug_log(f"  consolidating_phases_{idx}_{idx2}: {compset.phase_record.phase_name}", True)
                 print(f"[CPU DEBUG] CONSOLIDATING phases {idx} and {idx2}: max_diff={max(abs(state.phase_compositions[idx, comp_idx] - state.phase_compositions[idx2, comp_idx]) for comp_idx in range(spec.num_components)):.6f}")
+                print(f"[CPU DEBUG] Before consolidation: phase {idx} amt={state.phase_amt[idx]:.15e}, phase {idx2} amt={state.phase_amt[idx2]:.15e}")
                 if idx not in spec.fixed_stable_compset_indices:
                     # ensure that the consolidated phase is stable
                     state.phase_amt[idx] = max(state.phase_amt[idx] + state.phase_amt[idx2], 1e-8)
+                print(f"[CPU DEBUG] After consolidation: phase {idx} amt={state.phase_amt[idx]:.15e}")
                 state.phase_amt[idx2] = 0
     
     debug_log(f"  phases_to_remove: {len(compset_indices_to_remove)}", True)

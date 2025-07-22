@@ -3678,6 +3678,11 @@ __device__ bool remove_and_consolidate_phases(SystemSpecification* spec, SystemS
             if (i == j) continue;
             int idx2 = state->free_stable_compset_indices[j];
             if (idx2 < 0 || idx2 >= state->num_compsets) continue;
+            
+            // CRITICAL FIX: Skip phases with amount < 1e-10 to match CPU behavior
+            // CPU removes these phases before consolidation checks
+            if (state->phase_amt[idx2] < 1e-10) continue;
+            
             CompositionSet* compset2 = &state->compsets[idx2];
             if (compset2->fixed || compset2->phase_record == nullptr) continue;
             if (compset1->phase_record != compset2->phase_record) continue; // Different phase types

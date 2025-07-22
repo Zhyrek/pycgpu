@@ -2411,6 +2411,11 @@ __device__ bool remove_and_consolidate_phases(SystemSpecification* spec, SystemS
             if (i == j) continue;
             int idx2 = state->free_stable_compset_indices[j];
             if (idx2 < 0 || idx2 >= state->num_compsets) continue;
+            
+            // CRITICAL FIX: Skip phases with amount < 1e-10 to match CPU behavior
+            // CPU removes these phases before consolidation checks
+            if (state->phase_amt[idx2] < 1e-10) continue;
+            
             CompositionSet* compset2 = &state->compsets[idx2];
             if (compset2->fixed || compset2->phase_record == nullptr) continue;
             if (compset1->phase_record != compset2->phase_record) continue; // Different phase types
@@ -2459,10 +2464,10 @@ __device__ bool remove_and_consolidate_phases(SystemSpecification* spec, SystemS
                 if (thread_id == 0 && state->iteration < 2) {
                     CompositionSet* cs1 = &state->compsets[idx1];
                     CompositionSet* cs2 = &state->compsets[idx2];
-                    printf("[AT CONSOLIDATION] Phase %d Y=[%.15e, %.15e]\n",
-                           idx1, cs1->dof[3], cs1->dof[4]);
-                    printf("[AT CONSOLIDATION] Phase %d Y=[%.15e, %.15e]\n",
-                           idx2, cs2->dof[3], cs2->dof[4]);
+                    printf("[AT CONSOLIDATION] Phase %d Y=[%.15e, %.15e], amt=%.15e\n",
+                           idx1, cs1->dof[3], cs1->dof[4], state->phase_amt[idx1]);
+                    printf("[AT CONSOLIDATION] Phase %d Y=[%.15e, %.15e], amt=%.15e\n",
+                           idx2, cs2->dof[3], cs2->dof[4], state->phase_amt[idx2]);
                 }
                 if (num_to_remove < MAX_PHASES) compset_indices_to_remove_temp[num_to_remove++] = idx2;
                 

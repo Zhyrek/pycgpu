@@ -2651,6 +2651,39 @@ __device__ bool run_loop_global_mem(
             }}
         }}
         
+        // SEGMENT 33: POST SOLVE HOOK (matching CPU order)
+        if (thread_id < 3 && iteration_count < 3) {{
+            printf("[GPU] SEGMENT 33: Post solve hook\\n");
+        }}
+        
+        // Call post_solve_hook first (matching CPU behavior)
+        if (!post_solve_hook(spec, state)) {{
+            if (thread_id < 3 && iteration_count < 3) {{
+                printf("[GPU]   post_solve_hook_returned_false\\n");
+            }}
+            break;
+        }}
+        
+        if (thread_id < 3 && iteration_count < 3) {{
+            printf("[GPU]   post_solve_hook_returned_true\\n");
+        }}
+        
+        // SEGMENT 34: REMOVE AND CONSOLIDATE PHASES (before advance_state to match CPU)
+        if (thread_id < 3 && iteration_count < 3) {{
+            printf("[GPU] SEGMENT 34: Remove and consolidate phases\\n");
+        }}
+        
+        // NOTE: Phase compositions are calculated in solve_state->recompute()
+        // We use those compositions for consolidation checks to match CPU behavior
+        
+        // Phase change operations (these should be safe, no large arrays)
+        if (remove_and_consolidate_phases(spec, state)) {{
+            phases_changed_iter = true;
+            if (thread_id < 3 && iteration_count < 3) {{
+                printf("[GPU]   phases_removed: true\\n");
+            }}
+        }}
+        
         // SEGMENT 32: CHECK CONVERGENCE
         if (thread_id < 3 && iteration_count < 3) {{
             printf("[GPU] SEGMENT 32: Check convergence\\n");
@@ -2664,47 +2697,6 @@ __device__ bool run_loop_global_mem(
             printf("  mass_residual=%.2e (limit %.2e)\\n", state->mass_residual, spec->ALLOWED_MASS_RESIDUAL);
             printf("  iterations_since_last_phase_change=%d (need >=5)\\n", state->iterations_since_last_phase_change);
             printf("  Converged: %s\\n", convergence_result ? "YES" : "NO");
-        }}
-        
-        // DEBUG: Before advance_state
-        if (thread_id < 3 && iteration_count < 3) {{ 
-            printf("GPU DEBUG iter %d: Before advance_state\\n", iteration_count);
-            printf("  Phase amounts: [%.6f, %.6f]\\n", state->phase_amt[0], state->phase_amt[1]);
-            printf("  eq_soln phase deltas: [%.6e, %.6e]\\n", 
-                   eq_soln[spec->num_free_chemical_potentials], 
-                   eq_soln[spec->num_free_chemical_potentials + 1]);
-        }}
-        
-        // SEGMENT 31: ADVANCE STATE
-        if (thread_id < 3 && iteration_count < 3) {{
-            printf("[GPU] SEGMENT 31: Advance state\\n");
-            printf("[GPU]   step_size: %.6f\\n", step_size);
-        }}
-        
-        // CRITICAL FIX: Skip advance_state if phases changed (match CPU behavior)
-        if (!phases_changed_iter) {{
-            // Call advance_state (this should be safe, no large arrays)
-            advance_state(spec, state, eq_soln, eq_soln_len, step_size);
-        }} else {{
-            if (thread_id < 3 && iteration_count < 3) {{
-                printf("[GPU] SKIPPING advance_state due to phase changes\\n");
-            }}
-        }}
-        
-        // SEGMENT 33-34: PHASE REMOVAL AND ADDITION (AFTER advance_state to match CPU)
-        if (thread_id < 3 && iteration_count < 3) {{
-            printf("[GPU] SEGMENT 33: Remove and consolidate phases\\n");
-        }}
-        
-        // NOTE: Phase compositions are calculated in solve_state->recompute()
-        // We use those compositions for consolidation checks to match CPU behavior
-        
-        // Phase change operations (these should be safe, no large arrays)
-        if (remove_and_consolidate_phases(spec, state)) {{
-            phases_changed_iter = true;
-            if (thread_id < 3 && iteration_count < 3) {{
-                printf("[GPU]   phases_removed: true\\n");
-            }}
         }}
         
         if (convergence_result) {{
@@ -2730,20 +2722,30 @@ __device__ bool run_loop_global_mem(
             state->iterations_since_last_phase_change++;
         }}
         
-        // DEBUG: After advance_state (conditional) 
+        // DEBUG: Before advance_state
         if (thread_id < 3 && iteration_count < 3) {{ 
-            printf("GPU DEBUG iter %d: After advance_state\\n", iteration_count);
-            printf("  Chemical potentials: [%.6f, %.6f]\\n", 
-                   state->chemical_potentials[0], state->chemical_potentials[1]);
-            printf("  Phase amounts: [%.6f, %.6f]\\n",
-                   state->phase_amt[0], state->phase_amt[1]);
-            printf("  Actual phase changes: [%.6e, %.6e]\\n",
-                   state->phase_amt[0] - 0.179268,  // hardcoded initial value for debugging
-                   state->phase_amt[1] - 0.820732); // hardcoded initial value for debugging
+            printf("GPU DEBUG iter %d: Before advance_state\\n", iteration_count);
+            printf("  Phase amounts: [%.6f, %.6f]\\n", state->phase_amt[0], state->phase_amt[1]);
+            printf("  eq_soln phase deltas: [%.6e, %.6e]\\n", 
+                   eq_soln[spec->num_free_chemical_potentials], 
+                   eq_soln[spec->num_free_chemical_potentials + 1]);
         }}
         
-        // Call post_solve_hook (this should be safe, no large arrays)
-        post_solve_hook(spec, state);
+        // SEGMENT 31: ADVANCE STATE (only if phases weren't changed)
+        if (thread_id < 3 && iteration_count < 3) {{
+            printf("[GPU] SEGMENT 31: Advance state\\n");
+            printf("[GPU]   step_size: %.6f\\n", step_size);
+        }}
+        
+        // CRITICAL FIX: Skip advance_state if phases changed (match CPU behavior)
+        if (!phases_changed_iter) {{
+            // Call advance_state (this should be safe, no large arrays)
+            advance_state(spec, state, eq_soln, eq_soln_len, step_size);
+        }} else {{
+            if (thread_id < 3 && iteration_count < 3) {{
+                printf("[GPU] SKIPPING advance_state due to phase changes\\n");
+            }}
+        }}
         
         // DEBUG: Add detailed output after first iteration
         if (iteration_count == 0 && thread_id == 0) {{

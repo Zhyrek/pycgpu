@@ -2129,7 +2129,7 @@ __device__ void advance_state(SystemSpecification* spec, SystemState* state, con
     gpu_debug_log_value("step_size", step_size_param);
     
     double current_step_size = step_size_param;
-    double MIN_PHASE_AMOUNT = 1e-10;  // Match CPU threshold for consistency with phase removal
+    double MIN_PHASE_AMOUNT = 1e-16;  // CRITICAL FIX: Match CPU's 1e-16 in advance_state, not 1e-10!
 
     // Chemical potentials are now handled in solve_state (matching CPU approach)
     // Start with phase amount updates
@@ -2727,7 +2727,7 @@ __device__ bool change_phases(SystemSpecification* spec, SystemState* state) {
     }
     
     for (int i = 0; i < final_free_count; ++i) {
-        int current_idx = state->free_stable_compset_indices[i];
+        int current_idx = final_free_stable_indices[i];  // CRITICAL FIX: Use NEW array, not old!
         if (current_idx >=0 && current_idx < state->num_compsets) { // boundary check
             if (state->phase_amt[current_idx] < 1e-10 && !state->compsets[current_idx].fixed) {
                  state->phase_amt[current_idx] = 1e-10;

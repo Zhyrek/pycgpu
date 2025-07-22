@@ -17,7 +17,7 @@ phases = filter_phases(dbf, comps)
 
 # Define test conditions
 x_ti_values = np.arange(0.1, 1.0, 0.1)  # 0.1 to 0.9 in 0.1 increments
-temperatures = np.arange(500, 2401, 100)  # 500 to 1000 in 100 increments
+temperatures = np.arange(500, 1001, 100)  # 500 to 1000 in 100 increments
 pressure = 101325
 
 print(f"Testing {len(x_ti_values)} compositions x {len(temperatures)} temperatures = {len(x_ti_values)*len(temperatures)} total conditions")
@@ -69,9 +69,9 @@ with open('gpu_cpu_comparison_results.txt', 'w') as f:
                     failed_conditions.append((x_ti, temp))
                 
                 # Write results
-                f.write(f"{x_ti:.1f}\t{temp}\t{cpu_gm:.6f}\t{gpu_gm:.6f}\t{gm_diff:.6f}\t")
-                f.write(f"{cpu_mu_nb:.6f}\t{cpu_mu_ti:.6f}\t{gpu_mu_nb:.6f}\t{gpu_mu_ti:.6f}\t")
-                f.write(f"{mu_nb_diff:.6f}\t{mu_ti_diff:.6f}\t{status}\n")
+                f.write(f"{x_ti:.1f}\t{temp}\t{cpu_gm:.12f}\t{gpu_gm:.12f}\t{gm_diff:.12f}\t")
+                f.write(f"{cpu_mu_nb:.12f}\t{cpu_mu_ti:.12f}\t{gpu_mu_nb:.12f}\t{gpu_mu_ti:.12f}\t")
+                f.write(f"{mu_nb_diff:.12f}\t{mu_ti_diff:.12f}\t{status}\n")
                 
                 # Progress indicator
                 if total_conditions % 10 == 0:

@@ -12,9 +12,9 @@ phases = ['BCC_A2', 'LIQUID']
 
 # Test with just 3 conditions
 conditions = {
-    v.T: 600,
+    v.T: (500, 2500, 10),
     v.P: 101325,
-    v.X('TI'): [0.1, 0.5, 0.9],  # 3 specific compositions
+    v.X('TI'): (0.1, 1, 0.4),  # 3 specific compositions
     v.N: 1
 }
 
@@ -24,7 +24,7 @@ print("=" * 60)
 
 # GPU calculation
 try:
-    gpu_result = equilibrium(db, components, phases, conditions, calc_opts={'pdens': 50}, gpu=True)
+    gpu_result = equilibrium(db, components, phases, conditions, calc_opts={'pdens': 50}, gpu=True, verbose=False)
     print(f"GPU calculation successful!")
     print(f"Result shape: {gpu_result.GM.shape}")
     print(f"GM values shape: {gpu_result.GM.values.shape}")
@@ -59,6 +59,7 @@ except Exception as e:
     import traceback
     traceback.print_exc()
 
+"""
 # Also test CPU for comparison
 print("\n" + "=" * 60)
 print("Testing CPU with same 3 conditions...")
@@ -78,3 +79,4 @@ except Exception as e:
     print(f"CPU calculation FAILED: {e}")
     import traceback
     traceback.print_exc()
+"""

@@ -4172,7 +4172,7 @@ __device__ void solve_equilibrium_at_condition_global_mem(
 
 // --- Back to Basics: Simple GPU kernel that mirrors successful CPU logic ---
 __global__ void top_level_equilibrium_kernel(
-    const void* global_spec_ptr_raw, // Single global spec for all threads (passed as raw memory)
+    const void* global_spec_ptr_raw, // CRITICAL FIX: Array of SystemSpecifications, one per condition
     const void* condition_args_list_ptr_raw, // Array of conditions, one per condition (passed as raw memory)
     void* results_list_ptr_raw, // Array for results (passed as raw memory)
     int num_conditions_total,
@@ -4212,7 +4212,7 @@ __global__ void top_level_equilibrium_kernel(
 ) {{
     int tid = blockDim.x * blockIdx.x + threadIdx.x;
     
-    if (tid == 0) {{
+    if (tid < 3) {{
         printf("GPU DEBUG: top_level_equilibrium_kernel STARTED with tid=%d, num_conditions=%d\\n", tid, num_conditions_total);
     }}
     
@@ -4271,9 +4271,9 @@ __global__ void top_level_equilibrium_kernel(
         double* results_array = (double*)results_list_ptr_raw;
         
         // Use direct indexing - must match Python side calculation exactly
-        // Layout: GM, chemical_potentials[MAX_COMPONENTS], phase_amounts[MAX_PHASES], converged, num_stable_phases, temp, pressure, success_marker, Y_phases[MAX_PHASES * MAX_DOF_PER_PHASE]
+        // Layout: GM, chemical_potentials[MAX_COMPONENTS], phase_amounts[MAX_PHASES], converged, num_stable_phases, temp, pressure, success_marker, Y_phases[MAX_PHASES * MAX_DOF_PER_PHASE], X_phases[MAX_PHASES * MAX_COMPONENTS]
         int condition_idx = tid;
-        int results_per_condition = 7 + MAX_COMPONENTS + MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE);  // Match Python: 7 base + chemical potentials + phase amounts + Y_phases
+        int results_per_condition = 7 + MAX_COMPONENTS + MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * MAX_COMPONENTS);  // CRITICAL FIX: Include X_phases to match Python
         int base_offset = condition_idx * results_per_condition;
         
         // Initialize all results to zero (safe default)
@@ -4476,7 +4476,7 @@ __global__ void top_level_equilibrium_kernel(
             
             // CRITICAL FIX: Use SystemSpecification->initial_chemical_potentials instead of extracting from grid data  
             // The correct initial chemical potentials are in the SystemSpecification, not in grid_data
-            const SystemSpecification* global_spec = (const SystemSpecification*)global_spec_ptr_raw;
+            // NOTE: global_spec_ptr_raw is now an array of SystemSpecs, we'll access the appropriate one later
             
             // CRITICAL FIX: Read per-condition chemical potentials from initial_data array
             // Chemical potentials are stored after: phase_indices + phase_amounts + site_fractions + compositions
@@ -4820,6 +4820,23 @@ __global__ void top_level_equilibrium_kernel(
             thread_spec.num_prescribed_mole_fraction_conditions = (int)my_spec_doubles[py_offset++];
             thread_spec.num_prescribed_mole_fraction_coefficients_cols = (int)my_spec_doubles[py_offset++];
             
+            // DEBUG: Print what we just copied
+            if (condition_idx <= 2) {{
+                printf("GPU DEBUG: Thread %d - Copied from my_spec_doubles at offset %d:\\n", 
+                       condition_idx, condition_idx * spec_size_doubles);
+                printf("  First 10 doubles: ");
+                for (int i = 0; i < 10; ++i) {{
+                    printf("%.3f ", my_spec_doubles[i]);
+                }}
+                printf("\\n");
+                printf("  Resulting thread_spec: num_statevars=%d, num_components=%d\\n",
+                       thread_spec.num_statevars, thread_spec.num_components);
+                
+                // Print prescribed_mole_fraction_rhs values
+                printf("GPU DEBUG: Thread %d using prescribed_mole_fraction_rhs[0] = %f (should be X(TI) for this condition)\\n",
+                       condition_idx, thread_spec.prescribed_mole_fraction_rhs[0]);
+            }}
+            
             // Index arrays with their counts
             for (int i = 0; i < MAX_COMPONENTS; ++i) {{
                 thread_spec.free_chemical_potential_indices[i] = (int)my_spec_doubles[py_offset++];
@@ -4954,14 +4971,19 @@ __global__ void top_level_equilibrium_kernel(
             
             // REFACTORED: Call sophisticated solver with global memory arrays
             // This is the full equilibrium solver using global memory to avoid stack overflow
-            if (condition_idx == 0 || condition_idx == 1) {{
+            if (condition_idx == 0 || condition_idx == 1 || condition_idx == 2) {{
                 printf("GPU DEBUG: CALLING solve_equilibrium_at_condition_global_mem for condition %d\\n", condition_idx);
                 printf("GPU DEBUG: global_spec_ptr_raw=%p, thread_spec address=%p\\n", global_spec_ptr_raw, &thread_spec);
-                printf("GPU DEBUG: Thread %d thread_spec.num_statevars=%d, thread_spec.num_components=%d\\n",
-                       condition_idx, thread_spec.num_statevars, thread_spec.num_components);
+                printf("GPU DEBUG: Thread %d thread_spec fields after copy:\\n", condition_idx);
+                printf("  num_statevars=%d (should be 3)\\n", thread_spec.num_statevars);
+                printf("  num_components=%d (should be 3)\\n", thread_spec.num_components);
+                printf("  prescribed_system_amount=%f\\n", thread_spec.prescribed_system_amount);
+                printf("  num_prescribed_mole_fraction_conditions=%d\\n", thread_spec.num_prescribed_mole_fraction_conditions);
+                printf("  initial_chemical_potentials[0]=%f\\n", thread_spec.initial_chemical_potentials[0]);
+                printf("  initial_chemical_potentials[1]=%f\\n", thread_spec.initial_chemical_potentials[1]);
                 if (thread_spec.num_prescribed_mole_fraction_conditions > 0) {{
-                    printf("GPU DEBUG: Thread %d thread_spec.prescribed_mole_fraction_rhs[0]=%f\\n",
-                           condition_idx, thread_spec.prescribed_mole_fraction_rhs[0]);
+                    printf("  prescribed_mole_fraction_rhs[0]=%f (should be X(TI) for this condition)\\n",
+                           thread_spec.prescribed_mole_fraction_rhs[0]);
                 }}
             }}
             solve_equilibrium_at_condition_global_mem(
@@ -5029,8 +5051,9 @@ __global__ void top_level_equilibrium_kernel(
             }}
             
             // Store final results from the REAL solver
-            if (tid == 0) {{
-                printf("GPU DEBUG: Storing final result - equilibrium_result.final_system_gm=%f\\n", equilibrium_result.final_system_gm);
+            if (tid <= 2) {{
+                printf("GPU DEBUG: Thread %d storing final result - equilibrium_result.final_system_gm=%f\\n", 
+                       tid, equilibrium_result.final_system_gm);
             }}
             results_array[base_offset + 0] = equilibrium_result.final_system_gm;       // Final GM from solver
             for (int i = 0; i < MAX_COMPONENTS; ++i) {{

@@ -704,6 +704,8 @@ def _populate_system_specification(global_spec_np, global_spec_arrays, wks_obj, 
         
         if wks_obj.verbose:
             print(f"[GPU] DEBUG: Basic fields set - num_statevars={global_spec_np[0]}, num_components={global_spec_np[1]}")
+            print(f"[GPU] DEBUG: phase_record_factory.state_variables = {wks_obj.phase_record_factory.state_variables}")
+            print(f"[GPU] DEBUG: components = {wks_obj.components}")
             
     except Exception as e:
         if wks_obj.verbose:
@@ -2160,7 +2162,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     
     try:
         # CRITICAL FIX: Create one SystemSpecification per condition instead of sharing
-        from .gpu_systemspec_per_condition import create_system_specifications_array
+        from .gpu_systemspec_array import create_system_specifications_array
         system_specs_array = create_system_specifications_array(
             wks_obj, num_total_conditions_pts, dynamic_sizes, properties, verbose
         )
@@ -2168,7 +2170,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         # For backward compatibility, keep old single spec creation commented
         # system_spec_struct = _create_system_specification_struct(global_spec_scalars, global_spec_arrays, dynamic_sizes)
         if verbose:
-            print("[GPU] DEBUG: SystemSpecification struct created")
+            print("[GPU] DEBUG: SystemSpecification array created")
         
         # Create ConditionArgsSingle struct array
         condition_args_struct = _create_condition_args_struct_array(condition_args_np)
@@ -2195,6 +2197,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         results_struct = _create_equilibrium_results_struct_array(num_total_conditions_pts, dynamic_sizes)
         if verbose:
             print(f"[GPU] DEBUG: Results flat array created with {len(results_flat)} doubles ({num_total_conditions_pts} conditions * {results_per_condition} per condition)")
+            print(f"[GPU] DEBUG: results_per_condition = {results_per_condition}")
             print(f"[GPU] DEBUG: EquilibriumResultSingle struct array created for post-processing")
     
     except Exception as e:
@@ -2735,10 +2738,15 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     try:
         # Process results from GPU execution
         # Transfer flat array back from GPU (updated approach)
-        results_flat_gpu = cp.asnumpy(results_gpu)
+        # The results_gpu is stored as uint8 bytes, but contains double data
+        results_bytes = cp.asnumpy(results_gpu)
         
-        # Convert bytes back to doubles (results_gpu now contains flat double array)
-        raw_doubles = np.frombuffer(results_flat_gpu, dtype=np.float64)
+        # Convert bytes to doubles (results are stored as doubles in GPU memory)
+        raw_doubles = results_bytes.view(np.float64)
+        
+        if verbose:
+            print(f"[GPU] Results bytes shape: {results_bytes.shape}, doubles shape: {raw_doubles.shape}")
+            print(f"[GPU] First 20 raw doubles: {raw_doubles[:20]}")
         
         # Process the flat array results (results_per_condition doubles per condition)
         expected_array_size = num_total_conditions_pts * results_per_condition
@@ -2757,6 +2765,14 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             gm_values = results_array[:, 0]  # First column is final_system_gm
             # Chemical potentials are now stored in indices 1 to MAX_COMPONENTS
             chem_pot_values = results_array[:, 1:1+MAX_COMPONENTS]  # All chemical potentials
+            
+            if verbose:
+                print(f"[GPU] GM values extracted: {gm_values}")
+                print(f"[GPU] Chemical potential values shape: {chem_pot_values.shape}")
+                print(f"[GPU] Chemical potentials: {chem_pot_values}")
+                print(f"[GPU] Results array shape: {results_array.shape}")
+                for i in range(num_total_conditions_pts):
+                    print(f"[GPU] Condition {i} raw results (first 10): {results_array[i, :10]}")
             phase_amounts = results_array[:, 1+MAX_COMPONENTS:1+MAX_COMPONENTS+MAX_PHASES]  # All phase amounts
             converged_values = results_array[:, 1+MAX_COMPONENTS+MAX_PHASES]  # Converged flag (1.0 = true, 0.0 = false)
             num_phases = results_array[:, 2+MAX_COMPONENTS+MAX_PHASES]  # Number of stable phases

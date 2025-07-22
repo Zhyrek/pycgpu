@@ -2266,11 +2266,8 @@ __device__ void advance_state(SystemSpecification* spec, SystemState* state, con
         CompositionSet* compset = &state->compsets[idx];
         if (compset->phase_record == nullptr) continue;
         
-        // CRITICAL FIX: Skip phases with zero amount
-        // Removed phases shouldn't have their site fractions updated
-        if (state->phase_amt[idx] < 1e-10) {
-            continue;
-        }
+        // NOTE: Do NOT skip phases with small amounts - they need to converge
+        // before removal/consolidation. This matches CPU behavior.
         
         const PhaseRecord* pr = compset->phase_record;
         int num_site_fracs = pr->phase_dof;

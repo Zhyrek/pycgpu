@@ -2651,22 +2651,6 @@ __device__ bool run_loop_global_mem(
             }}
         }}
         
-        // SEGMENT 33-34: PHASE REMOVAL AND ADDITION (moved before advance_state to match CPU)
-        if (thread_id < 3 && iteration_count < 3) {{
-            printf("[GPU] SEGMENT 33: Remove and consolidate phases\\n");
-        }}
-        
-        // NOTE: Phase compositions are calculated in solve_state->recompute()
-        // We use those compositions for consolidation checks to match CPU behavior
-        
-        // Phase change operations (these should be safe, no large arrays)
-        if (remove_and_consolidate_phases(spec, state)) {{
-            phases_changed_iter = true;
-            if (thread_id < 3 && iteration_count < 3) {{
-                printf("[GPU]   phases_removed: true\\n");
-            }}
-        }}
-        
         // SEGMENT 32: CHECK CONVERGENCE
         if (thread_id < 3 && iteration_count < 3) {{
             printf("[GPU] SEGMENT 32: Check convergence\\n");
@@ -2680,29 +2664,6 @@ __device__ bool run_loop_global_mem(
             printf("  mass_residual=%.2e (limit %.2e)\\n", state->mass_residual, spec->ALLOWED_MASS_RESIDUAL);
             printf("  iterations_since_last_phase_change=%d (need >=5)\\n", state->iterations_since_last_phase_change);
             printf("  Converged: %s\\n", convergence_result ? "YES" : "NO");
-        }}
-        
-        if (convergence_result) {{
-            // Try to add phases if converged
-            if (change_phases(spec, state)) {{
-                phases_changed_iter = true;
-                if (thread_id < 3 && iteration_count < 3) {{
-                    printf("[GPU]   phases_added: true\\n");
-                }}
-            }}
-            
-            if (!phases_changed_iter) {{
-                // Truly converged with no phase changes
-                converged = true;
-                break;
-            }}
-        }}
-        
-        // Update phase change tracking
-        if (phases_changed_iter) {{
-            state->iterations_since_last_phase_change = 0;
-        }} else {{
-            state->iterations_since_last_phase_change++;
         }}
         
         // DEBUG: Before advance_state
@@ -2728,6 +2689,45 @@ __device__ bool run_loop_global_mem(
             if (thread_id < 3 && iteration_count < 3) {{
                 printf("[GPU] SKIPPING advance_state due to phase changes\\n");
             }}
+        }}
+        
+        // SEGMENT 33-34: PHASE REMOVAL AND ADDITION (AFTER advance_state to match CPU)
+        if (thread_id < 3 && iteration_count < 3) {{
+            printf("[GPU] SEGMENT 33: Remove and consolidate phases\\n");
+        }}
+        
+        // NOTE: Phase compositions are calculated in solve_state->recompute()
+        // We use those compositions for consolidation checks to match CPU behavior
+        
+        // Phase change operations (these should be safe, no large arrays)
+        if (remove_and_consolidate_phases(spec, state)) {{
+            phases_changed_iter = true;
+            if (thread_id < 3 && iteration_count < 3) {{
+                printf("[GPU]   phases_removed: true\\n");
+            }}
+        }}
+        
+        if (convergence_result) {{
+            // Try to add phases if converged
+            if (change_phases(spec, state)) {{
+                phases_changed_iter = true;
+                if (thread_id < 3 && iteration_count < 3) {{
+                    printf("[GPU]   phases_added: true\\n");
+                }}
+            }}
+            
+            if (!phases_changed_iter) {{
+                // Truly converged with no phase changes
+                converged = true;
+                break;
+            }}
+        }}
+        
+        // Update phase change tracking
+        if (phases_changed_iter) {{
+            state->iterations_since_last_phase_change = 0;
+        }} else {{
+            state->iterations_since_last_phase_change++;
         }}
         
         // DEBUG: After advance_state (conditional) 

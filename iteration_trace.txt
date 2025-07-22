@@ -1,0 +1,21 @@
+/mnt/c/users/scott/Documents/pycalphad/pycalphad/io/tdb.py:995: UserWarning: The type definition character `%` was defined in the following phases: ['LIQUID', 'BCC_A2'], but no corresponding TYPE_DEFINITION line was found in the TDB.
+  warnings.warn(f"The type definition character `{typechar}` was defined in the following phases: "
+/mnt/c/users/scott/Documents/pycalphad/pycalphad/io/tdb.py:995: UserWarning: The type definition character `B` was defined in the following phases: ['BCC_A2'], but no corresponding TYPE_DEFINITION line was found in the TDB.
+  warnings.warn(f"The type definition character `{typechar}` was defined in the following phases: "
+Tracing iterations for 600K, X(TI)=0.1 case...
+Looking for divergence > 0.000001 J
+================================================================================
+
+=== CPU CALCULATION ===
+
+=== GPU CALCULATION ===
+
+=== ITERATION COMPARISON ===
+Threshold: 0.000001 J
+
+=== FINAL RESULTS ===
+CPU GM: -24602.651695100
+GPU GM: -24602.651605158
+Difference: 8.994268137e-05
+
+No divergence > 0.000001 J found in iteration data

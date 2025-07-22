@@ -1,5 +1,5 @@
 === INTERLEAVED CPU-GPU EQUILIBRIUM DEBUG TRACE ===
-Started: 2025-07-22T11:19:31.195683
+Started: 2025-07-22T13:41:19.601773
 
 
 ================================================================================
@@ -12,7 +12,7 @@ SEGMENT 01 COMPARISON
   gpu_mode: False
   components: ['NB', 'TI', 'VA']
   phases: ['BCC_A2', 'LIQUID']
-  conditions: {X_TI: 0.1, T: 600, P: 101325}
+  conditions: {P: 101325, T: 600, X_TI: 0.1}
   output_requested: None
   verbose: True
   force_cpu: False
@@ -23,7 +23,7 @@ SEGMENT 01 COMPARISON
   gpu_mode: True
   components: ['NB', 'TI', 'VA']
   phases: ['BCC_A2', 'LIQUID']
-  conditions: {X_TI: 0.1, T: 600, P: 101325}
+  conditions: {P: 101325, T: 600, X_TI: 0.1}
   output_requested: None
   verbose: True
   force_cpu: False
@@ -37,8 +37,8 @@ SEGMENT 02 COMPARISON
 [SEGMENT 02] Workspace initialization
   database: Elements: ['NB', 'TI', 'VA']
 Species: [Species('NB', 'NB1'), Species('TI', 'TI1'), Species('VA', 'VA1')]
-Phase({'name': 'BCC_A2', 'constituents': (frozenset({Species('TI', 'TI1'), Species('NB', 'NB1')}),), 'sublattices': (1.0,), 'model_hints': {}})
-Phase({'name': 'LIQUID', 'constituents': (frozenset({Species('TI', 'TI1'), Species('NB', 'NB1')}),), 'sublattices': (1.0,), 'model_hints': {'liquid': True}})
+Phase({'name': 'BCC_A2', 'constituents': (frozenset({Species('NB', 'NB1'), Species('TI', 'TI1')}),), 'sublattices': (1.0,), 'model_hints': {}})
+Phase({'name': 'LIQUID', 'constituents': (frozenset({Species('NB', 'NB1'), Species('TI', 'TI1')}),), 'sublattices': (1.0,), 'model_hints': {'liquid': True}})
 21 symbols in database
 6 parameters in database
 
@@ -53,8 +53,8 @@ Phase({'name': 'LIQUID', 'constituents': (frozenset({Species('TI', 'TI1'), Speci
 [SEGMENT 02] [GPU] Workspace initialization
   database: Elements: ['NB', 'TI', 'VA']
 Species: [Species('NB', 'NB1'), Species('TI', 'TI1'), Species('VA', 'VA1')]
-Phase({'name': 'BCC_A2', 'constituents': (frozenset({Species('TI', 'TI1'), Species('NB', 'NB1')}),), 'sublattices': (1.0,), 'model_hints': {}})
-Phase({'name': 'LIQUID', 'constituents': (frozenset({Species('TI', 'TI1'), Species('NB', 'NB1')}),), 'sublattices': (1.0,), 'model_hints': {'liquid': True}})
+Phase({'name': 'BCC_A2', 'constituents': (frozenset({Species('NB', 'NB1'), Species('TI', 'TI1')}),), 'sublattices': (1.0,), 'model_hints': {}})
+Phase({'name': 'LIQUID', 'constituents': (frozenset({Species('NB', 'NB1'), Species('TI', 'TI1')}),), 'sublattices': (1.0,), 'model_hints': {'liquid': True}})
 21 symbols in database
 6 parameters in database
 
@@ -124,7 +124,7 @@ SEGMENT 06 COMPARISON
 
 [SEGMENT 06] Workspace recompute setup
   conditions: {N: array([1.]), P: array([101325.]), T: array([600.]), X_TI: array([0.1])}
-  phase_record_factory: <pycalphad.codegen.phase_record_factory.PhaseRecordFactory object at 0x7429a912b260>
+  phase_record_factory: <pycalphad.codegen.phase_record_factory.PhaseRecordFactory object at 0x741fab2d9040>
   parameters: OrderedDict()
 
 [SEGMENT 06] Workspace recompute setup complete
@@ -146,8 +146,8 @@ SEGMENT 07 COMPARISON
 [SEGMENT 07] Calculate grid start
   database: Elements: ['NB', 'TI', 'VA']
 Species: [Species('NB', 'NB1'), Species('TI', 'TI1'), Species('VA', 'VA1')]
-Phase({'name': 'BCC_A2', 'constituents': (frozenset({Species('TI', 'TI1'), Species('NB', 'NB1')}),), 'sublattices': (1.0,), 'model_hints': {}})
-Phase({'name': 'LIQUID', 'constituents': (frozenset({Species('TI', 'TI1'), Species('NB', 'NB1')}),), 'sublattices': (1.0,), 'model_hints': {'liquid': True}})
+Phase({'name': 'BCC_A2', 'constituents': (frozenset({Species('NB', 'NB1'), Species('TI', 'TI1')}),), 'sublattices': (1.0,), 'model_hints': {}})
+Phase({'name': 'LIQUID', 'constituents': (frozenset({Species('NB', 'NB1'), Species('TI', 'TI1')}),), 'sublattices': (1.0,), 'model_hints': {'liquid': True}})
 21 symbols in database
 6 parameters in database
 
@@ -689,14 +689,14 @@ SEGMENT 40 COMPARISON
 [SEGMENT 40] Equilibrium calculation complete
   converged: True
   properties_shape: (1, 1, 1, 1)
-  final_GM: -2.460265169510026e+04
+  final_GM: -2.460265169510025e+04
 
 --- GPU ---
 
 [SEGMENT 40] [GPU] Equilibrium calculation complete
   converged: True
   properties_shape: (1, 1, 1, 1)
-  final_GM: -2.460265160515756e+04
+  final_GM: -2.460265160515757e+04
 
 ================================================================================
 SEGMENT 41 COMPARISON
@@ -721,5 +721,5 @@ SEGMENT 42 COMPARISON
 (No GPU data for this segment)
 
 ================================================================================
-TRACE COMPLETE - 2025-07-22T11:19:31.196222
+TRACE COMPLETE - 2025-07-22T13:41:19.602226
 ================================================================================

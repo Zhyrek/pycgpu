@@ -1,0 +1,7 @@
+/mnt/c/users/scott/Documents/pycalphad/pycalphad/io/tdb.py:995: UserWarning: The type definition character `%` was defined in the following phases: ['LIQUID', 'BCC_A2'], but no corresponding TYPE_DEFINITION line was found in the TDB.
+  warnings.warn(f"The type definition character `{typechar}` was defined in the following phases: "
+/mnt/c/users/scott/Documents/pycalphad/pycalphad/io/tdb.py:995: UserWarning: The type definition character `B` was defined in the following phases: ['BCC_A2'], but no corresponding TYPE_DEFINITION line was found in the TDB.
+  warnings.warn(f"The type definition character `{typechar}` was defined in the following phases: "
+/mnt/c/users/scott/Documents/pycalphad/pycalphad/gpu/gpu_equilibrium.py:1043: FutureWarning: Passing (type, 1) or '1type' as a synonym of type is deprecated; in a future version of numpy, it will be understood as (type, (1,)) / '(1,)type'.
+  grid_data_np = np.zeros(1, dtype=device_grid_dtype)[0]
+<string>:14: DeprecationWarning: Conversion of an array with ndim > 0 to a scalar is deprecated, and will error in future. Ensure you extract a single element from your array before performing this operation. (Deprecated NumPy 1.25.)

@@ -17,7 +17,7 @@ phases = filter_phases(dbf, comps)
 
 # Define test conditions
 x_ti_values = np.arange(0.1, 1.0, 0.1)  # 0.1 to 0.9 in 0.1 increments
-temperatures = np.arange(500, 1001, 100)  # 500 to 1000 in 100 increments
+temperatures = np.arange(500, 2401, 100)  # 500 to 1000 in 100 increments
 pressure = 101325
 
 print(f"Testing {len(x_ti_values)} compositions x {len(temperatures)} temperatures = {len(x_ti_values)*len(temperatures)} total conditions")

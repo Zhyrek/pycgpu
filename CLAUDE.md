@@ -5,7 +5,7 @@ This uses cupy to run C/C++ CUDA/HIP codes from python, using the rawmodule func
 Pycalphad code should be rewritten as device functions, so that the high level kernel can run many pycalphad calls, one per thread.
 
 Your goal is to trace through the logic at a line-by-line level, comparing the exact numerical output of the CPU code against the GPU code. 
-You should find the first instance where the CPU and GPU codes do not agree to precisely numerical precision (absolute error of less than 0.001), and fix the GPU code to match the CPU code.
+You should find the first instance where the CPU and GPU codes do not agree to precisely numerical precision (absolute error of less than 0.000001), and fix the GPU code to match the CPU code.
 
 Avoid writing "placeholder" code in the main gpu code. If it is required to test a particular code feature, remove the placeholder code immediately once the test is complete.
 

@@ -1,0 +1,25 @@
+--- a/pycalphad/gpu/minimizer.h
++++ b/pycalphad/gpu/minimizer.h
+@@ -2321,10 +2321,11 @@
+         if(already_marked_for_removal1) continue;
+ 
+         // Remove unstable phases (matching CPU minimizer.pyx line 1328)
++        // CRITICAL FIX: If phase is unstable, mark for removal and CONTINUE
++        // Don't check for consolidation - this matches CPU behavior at line 1476
+         if (state->phase_amt[idx1] < 1e-10) {
+             // CRITICAL FIX: Check if removing this phase would leave us unable to satisfy mass balance
+             // Count how many phases would remain after removal
+             int phases_remaining = 0;
+             for (int j = 0; j < state->num_free_stable_compsets; ++j) {
+                 int idx_check = state->free_stable_compset_indices[j];
+@@ -2344,6 +2345,10 @@
+             
+             if (num_to_remove < MAX_PHASES) compset_indices_to_remove_temp[num_to_remove++] = idx1;
+             state->phase_amt[idx1] = 0.0;  // CPU sets to 0 at line 1330
++            // CRITICAL: Continue to next phase without checking consolidation
++            // This prevents unstable phases from being "rescued" by consolidation
++            // Matches CPU behavior at line 1476
++            continue;
+         }
+         
+         // Check for consolidation with other phases

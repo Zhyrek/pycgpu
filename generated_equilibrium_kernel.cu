@@ -4677,6 +4677,8 @@ __device__ void solve_equilibrium_at_condition(
     }
     
     // Normalize phase amounts after adding nearly stable phases (matching CPU logic lines 231-235)
+    // CRITICAL FIX: Only normalize if phase amounts sum is significantly different from 1.0
+    // This prevents re-normalization after consolidation where sum might be < 1.0
     double phase_amt_sum = 0.0;
     for (int i = 0; i < current_sys_state.num_compsets; ++i) {
         phase_amt_sum += current_sys_state.compsets[i].NP;
@@ -4686,9 +4688,16 @@ __device__ void solve_equilibrium_at_condition(
         printf("[GPU]   phase_amount_sum_before_normalization: %.15e\n", phase_amt_sum);
     }
     
-    if (phase_amt_sum > 1e-12) { // Avoid division by zero
+    // Only normalize if the sum is significantly different from 1.0
+    // This preserves the phase amounts from consolidation scenarios
+    if (phase_amt_sum > 1e-12 && fabs(phase_amt_sum - 1.0) > 1e-10) { // Avoid division by zero and preserve consolidation results
         for (int i = 0; i < current_sys_state.num_compsets; ++i) {
             current_sys_state.compsets[i].NP /= phase_amt_sum;
+            current_sys_state.phase_amt[i] = current_sys_state.compsets[i].NP;
+        }
+    } else {
+        // Just sync phase_amt with NP without normalization
+        for (int i = 0; i < current_sys_state.num_compsets; ++i) {
             current_sys_state.phase_amt[i] = current_sys_state.compsets[i].NP;
         }
     }

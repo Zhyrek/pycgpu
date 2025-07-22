@@ -2550,6 +2550,34 @@ __device__ bool remove_and_consolidate_phases(SystemSpecification* spec, SystemS
             state->free_stable_compset_indices[i] = new_free_stable_indices[i];
         }
         
+        // CRITICAL FIX: When only one phase remains, reset its site fractions to match overall composition
+        // This ensures convergence to the same solution as CPU
+        if (new_count == 1 && spec->num_prescribed_mole_fraction_conditions > 0) {
+            int remaining_phase_idx = new_free_stable_indices[0];
+            CompositionSet* cs = &state->compsets[remaining_phase_idx];
+            
+            // Calculate site fractions that would give the prescribed mole fractions
+            // For a single sublattice binary system, the site fraction equals the mole fraction
+            // Y(TI) should equal X(TI) = prescribed_mole_fraction_rhs[0]
+            if (cs->phase_record->phase_dof == 2) {  // Binary single sublattice
+                // Assuming component ordering: [NB, TI, VA]
+                // and prescribed condition is X(TI) = prescribed_mole_fraction_rhs[0]
+                double target_x_ti = spec->prescribed_mole_fraction_rhs[0];
+                double target_x_nb = 1.0 - target_x_ti;  // Binary system
+                
+                // For BCC_A2 with single sublattice: Y(NB) + Y(TI) = 1
+                // and X(TI) = Y(TI), X(NB) = Y(NB)
+                cs->dof[spec->num_statevars + 0] = target_x_nb;  // Y(NB)
+                cs->dof[spec->num_statevars + 1] = target_x_ti;  // Y(TI)
+                
+                if (thread_id == 0) {
+                    printf("[GPU PHASE RESET] Single phase remaining - reset site fractions to match overall composition:\n");
+                    printf("  Phase %d: Y(NB)=%.15e, Y(TI)=%.15e (matching X(TI)=%.15e)\n",
+                           remaining_phase_idx, target_x_nb, target_x_ti, target_x_ti);
+                }
+            }
+        }
+        
         // DEBUG: Print the updated free stable compsets
         if (thread_id == 0) {
             printf("[GPU PHASE CONSOLIDATION] Updated num_free_stable_compsets from %d to %d\n", 

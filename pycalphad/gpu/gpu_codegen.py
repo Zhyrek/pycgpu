@@ -5251,14 +5251,18 @@ __global__ void top_level_equilibrium_kernel(
             
             // thread_spec already created above - no need to recreate
             
-            // DO NOT update the prescribed mole fraction RHS - it should remain constant!
-            // The RHS values are the target mole fractions we're trying to achieve.
-            // They are set from the Python side and should not be modified during solving.
-            if (thread_spec.num_prescribed_mole_fraction_conditions > 0 && tid < 5) {{
-                printf("GPU DEBUG: Thread %d using prescribed_mole_fraction_rhs[0] = %f (should be X(TI) for this condition)\\n", 
-                       tid, thread_spec.prescribed_mole_fraction_rhs[0]);
-                printf("GPU DEBUG: Thread %d SystemSpec: num_statevars=%d, num_components=%d\\n",
-                       tid, thread_spec.num_statevars, thread_spec.num_components);
+            // CRITICAL FIX: Update prescribed_mole_fraction_rhs to match this thread's condition
+            // Each thread needs its own X(TI) target value from the condition data
+            if (thread_spec.num_prescribed_mole_fraction_conditions > 0) {{
+                // For X(TI) constraint (component index 1), update the RHS to match this thread's condition
+                thread_spec.prescribed_mole_fraction_rhs[0] = thread_mole_fractions[1];  // X(TI) for this thread
+                
+                if (tid < 5) {{
+                    printf("GPU DEBUG: Thread %d UPDATED prescribed_mole_fraction_rhs[0] = %f (X(TI) for this condition)\\n", 
+                           tid, thread_spec.prescribed_mole_fraction_rhs[0]);
+                    printf("GPU DEBUG: Thread %d SystemSpec: num_statevars=%d, num_components=%d\\n",
+                           tid, thread_spec.num_statevars, thread_spec.num_components);
+                }}
             }}
             
             // Set up device phase data  

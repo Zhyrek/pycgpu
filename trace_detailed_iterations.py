@@ -1,215 +1,146 @@
-#!/usr/bin/env python
-"""Detailed trace of every iteration to find exact divergence point."""
+#\!/usr/bin/env python
+"""Detailed trace of GPU solver iterations to find divergence."""
 
-import numpy as np
-from pycalphad import Database, equilibrium
-import pycalphad.variables as v
 import re
 
-# Load database
-dbf = Database('NbTi.tdb')
-comps = ['NB', 'TI', 'VA']
-phases = ['BCC_A2']
-conds = {v.T: 600, v.P: 101325, v.X('TI'): 0.1, v.N: 1}
-
-print("Tracing iterations for 600K, X(TI)=0.1 case...")
-print("Looking for divergence > 0.000001 J")
-print("=" * 80)
-
-# CPU calculation with full output
-print("\n=== CPU CALCULATION ===")
-import subprocess
-import os
-# Set debug environment variable
-env = os.environ.copy()
-env['PYCALPHAD_DEBUG_EQSOLVER'] = '1'
-cpu_proc = subprocess.Popen(
-    ['python', '-c', '''
-import numpy as np
-from pycalphad import Database, equilibrium
-import pycalphad.variables as v
-import os
-os.environ['PYCALPHAD_DEBUG_EQSOLVER'] = '1'
-
-dbf = Database("NbTi.tdb")
-comps = ["NB", "TI", "VA"]
-phases = ["BCC_A2"]
-conds = {v.T: 600, v.P: 101325, v.X("TI"): 0.1, v.N: 1}
-
-cpu_result = equilibrium(dbf, comps, phases, conds, calc_opts={"pdens": 50})
-print(f"CPU_FINAL_GM: {float(cpu_result.GM.values)}")
-'''],
-    stdout=subprocess.PIPE,
-    stderr=subprocess.PIPE,
-    text=True,
-    env=env
-)
-cpu_output, cpu_err = cpu_proc.communicate()
-
-# Save CPU debug output
-with open('cpu_debug_output.txt', 'w') as f:
-    f.write(cpu_err)
-
-# GPU calculation with full output  
-print("\n=== GPU CALCULATION ===")
-gpu_proc = subprocess.Popen(
-    ['python', '-c', '''
-import numpy as np
-from pycalphad import Database, equilibrium
-import pycalphad.variables as v
-import os
-os.environ['PYCALPHAD_DEBUG_EQSOLVER'] = '1'
-
-dbf = Database("NbTi.tdb")
-comps = ["NB", "TI", "VA"]
-phases = ["BCC_A2"]
-conds = {v.T: 600, v.P: 101325, v.X("TI"): 0.1, v.N: 1}
-
-gpu_result = equilibrium(dbf, comps, phases, conds, calc_opts={"pdens": 50}, gpu=True)
-print(f"GPU_FINAL_GM: {float(gpu_result.GM.values)}")
-'''],
-    stdout=subprocess.PIPE,
-    stderr=subprocess.PIPE,
-    text=True,
-    env=env
-)
-gpu_output, gpu_err = gpu_proc.communicate()
-
-# Save GPU debug output
-with open('gpu_debug_output.txt', 'w') as f:
-    f.write(gpu_err)
-
-# Parse iteration data from debug output
-def parse_iterations(output_text):
-    """Extract iteration data from debug output."""
-    iterations = {}
-    current_iter = None
+def analyze_gpu_iteration_0():
+    """Analyze GPU iteration 0 in detail."""
+    with open('med_t_debug.txt', 'r') as f:
+        content = f.read()
     
-    # Patterns to match
-    iter_pattern = r'\[(?:CPU|GPU).*?\] ===== (?:AFTER )?ITERATION (\d+)'
-    energy_pattern = r'energy[:\s=]+(-?\d+\.?\d*(?:e[+-]?\d+)?)'
-    phase_amt_pattern = r'phase_amt.*?formula units.*?[:\s=]+(\d+\.?\d*(?:e[+-]?\d+)?)'
-    chem_pot_pattern = r'Chemical potentials.*?\[([-\d.e+, ]+)\]'
-    site_frac_pattern = r'Site fractions.*?\[([\d.e+, -]+)\]'
-    gm_pattern = r'GM[:\s=]+(-?\d+\.?\d*(?:e[+-]?\d+)?)'
+    print("="*80)
+    print("GPU ITERATION 0 DETAILED ANALYSIS")
+    print("="*80)
     
-    lines = output_text.split('\n')
-    for i, line in enumerate(lines):
-        # Check for iteration marker
-        iter_match = re.search(iter_pattern, line)
-        if iter_match:
-            current_iter = int(iter_match.group(1))
-            iterations[current_iter] = {
-                'phases': [],
-                'chemical_potentials': None,
-                'gm': None
-            }
-        
-        if current_iter is not None:
-            # Extract energy
-            energy_match = re.search(energy_pattern, line)
-            if energy_match and 'phase' in line.lower():
-                energy = float(energy_match.group(1))
-                
-                # Extract phase amount
-                amt_match = re.search(phase_amt_pattern, line)
-                if amt_match:
-                    amt = float(amt_match.group(1))
-                    
-                    # Extract site fractions
-                    sf_match = re.search(site_frac_pattern, lines[i+5] if i+5 < len(lines) else "")
-                    if sf_match:
-                        site_fracs = [float(x) for x in sf_match.group(1).split(',')]
-                    else:
-                        site_fracs = []
-                    
-                    iterations[current_iter]['phases'].append({
-                        'energy': energy,
-                        'amount': amt,
-                        'site_fractions': site_fracs
-                    })
-            
-            # Extract chemical potentials
-            cp_match = re.search(chem_pot_pattern, line)
-            if cp_match:
-                iterations[current_iter]['chemical_potentials'] = [
-                    float(x.strip()) for x in cp_match.group(1).split(',') if x.strip()
-                ]
-            
-            # Extract GM
-            gm_match = re.search(gm_pattern, line)
-            if gm_match and 'energy' not in line:
-                iterations[current_iter]['gm'] = float(gm_match.group(1))
+    # Find the GPU iteration 0 section
+    gpu_iter0_start = content.find("[GPU EQUILIBRIUM MATRIX] Complete matrix at iteration 0")
+    if gpu_iter0_start == -1:
+        print("Could not find GPU iteration 0")
+        return
     
-    return iterations
+    # Extract section up to next iteration or 5000 chars
+    gpu_iter0_end = content.find("[GPU EQUILIBRIUM MATRIX] Filling equilibrium system at iteration 1", gpu_iter0_start)
+    if gpu_iter0_end == -1:
+        gpu_iter0_end = gpu_iter0_start + 5000
+    
+    gpu_section = content[gpu_iter0_start:gpu_iter0_end]
+    
+    # Extract key information
+    print("\n1. EQUILIBRIUM MATRIX:")
+    matrix_match = re.search(r"Complete matrix at iteration 0.*?\n((?:.*?Row \d+:.*?\n){6})", gpu_section, re.DOTALL)
+    if matrix_match:
+        print(matrix_match.group(1).strip())
+    
+    # Extract solution
+    print("\n2. SOLUTION VECTOR:")
+    sol_match = re.search(r"RHS after lstsq \(solution\): \[(.*?)\]", gpu_section)
+    if sol_match:
+        sol_values = sol_match.group(1).split()
+        print(f"   Solution: {sol_values}")
+        print(f"   Chemical potentials: μ₀={sol_values[0]}, μ₁={sol_values[1]}")
+        print(f"   Phase amount changes: Δφ₀={sol_values[2]}, Δφ₁={sol_values[3]}, Δφ₂={sol_values[4]}")
+    
+    # Extract phase updates
+    print("\n3. PHASE AMOUNT UPDATES:")
+    phase_updates = re.findall(r"Phase (\d+): old=([\d\.e\+\-]+).*?delta=([\d\.e\+\-]+).*?new=([\d\.e\+\-]+)", gpu_section)
+    for phase_idx, old, delta, new in phase_updates:
+        old_f = float(old)
+        delta_f = float(delta)
+        new_f = float(new)
+        print(f"   Phase {phase_idx}:")
+        print(f"     Old amount: {old_f:.6e}")
+        print(f"     Delta (from solution): {delta_f:.6e}")
+        print(f"     New amount: {new_f:.6e}")
+        if new_f < 1e-10:
+            print(f"     *** REMOVED (below threshold) ***")
+    
+    # Extract step size info
+    print("\n4. STEP SIZE LIMITING:")
+    step_match = re.search(r"Step size limited to ([\d\.e\+\-]+)", gpu_section)
+    if step_match:
+        step_size = float(step_match.group(1))
+        print(f"   Step size: {step_size:.6e}")
+        print(f"   This means actual changes are: delta * step_size")
+    
+    # Show the phase removal
+    print("\n5. KEY FINDING - PHASE REMOVAL:")
+    removal_match = re.search(r"Phase 2 amount became very small.*?at iteration 0", gpu_section)
+    if removal_match:
+        print(f"   {removal_match.group(0)}")
+        print(f"   This is where GPU diverges from CPU\!")
+    
+    # Extract the mass balance info
+    print("\n6. MASS BALANCE:")
+    mass_match = re.search(r"sum\(phase_amt\) = ([\d\.e\+\-]+)", gpu_section)
+    if mass_match:
+        total = float(mass_match.group(1))
+        print(f"   Total phase amounts after update: {total:.6f}")
+        if abs(total - 1.0) > 0.01:
+            print(f"   *** WARNING: Mass not conserved\! Should be 1.0 ***")
 
-# Parse both outputs
-cpu_iterations = parse_iterations(cpu_err)
-gpu_iterations = parse_iterations(gpu_err)
+def analyze_cpu_iteration_0():
+    """Analyze CPU iteration 0 for comparison."""
+    with open('med_t_debug.txt', 'r') as f:
+        content = f.read()
+    
+    print("\n" + "="*80)
+    print("CPU ITERATION 0 ANALYSIS")
+    print("="*80)
+    
+    # Find CPU iteration 0
+    cpu_iter0_start = content.find("[CPU MATRIX DEBUG] construct_equilibrium_system called, state.iteration=0")
+    if cpu_iter0_start == -1:
+        print("Could not find CPU iteration 0")
+        return
+    
+    # Look for matrix rows
+    cpu_section = content[cpu_iter0_start:cpu_iter0_start+3000]
+    
+    # Extract phase information
+    print("\n1. CPU PHASE SETUP:")
+    stable_phases_match = re.search(r"num_stable_phases = (\d+)", cpu_section)
+    if stable_phases_match:
+        print(f"   Number of stable phases: {stable_phases_match.group(1)}")
+    
+    # Look for matrix rows  
+    print("\n2. CPU MATRIX ROWS (if available):")
+    cpu_rows = re.findall(r"Row (\d+): ([\+\-\d\.e\s]+) \ < /dev/null |  RHS: ([\+\-\d\.e]+)", cpu_section)
+    for row_num, coeffs, rhs in cpu_rows[:6]:
+        print(f"   Row {row_num}: {coeffs[:50]}... | RHS: {rhs}")
 
-print("\n=== ITERATION COMPARISON ===")
-print("Threshold: 0.000001 J")
+def trace_divergence_cause():
+    """Analyze why the equilibrium solution causes phase 2 removal."""
+    print("\n" + "="*80)
+    print("DIVERGENCE ROOT CAUSE ANALYSIS")
+    print("="*80)
+    
+    print("\nThe GPU removes Phase 2 (LIQUID) because:")
+    print("1. The equilibrium matrix solution gives Δφ₂ = -8.753686")
+    print("2. With old amount = 0.0536594, this would give new = 0.0536594 - 8.753686 < 0")
+    print("3. Step size limiting reduces this to 6.13e-3, giving:")
+    print("   actual_change = -8.753686 * 0.00613 = -0.0536594")
+    print("   new = 0.0536594 - 0.0536594 ≈ 0")
+    print("\n4. The large negative delta for phase 2 comes from the equilibrium solution")
+    print("   where the system amount constraint (Row 5) has coefficient 20.0 for ALCU_ZETA")
+    print("\n5. This large coefficient (20x larger than LIQUID phases) affects the linear system")
+    print("   solution, making the solver favor removing small LIQUID phases")
 
-# Compare iterations
-max_iter = max(max(cpu_iterations.keys(), default=0), max(gpu_iterations.keys(), default=0))
+def main():
+    """Main analysis."""
+    print("Tracing GPU/CPU divergence in Al-Cu-Fe system with ALCU_ZETA phase\n")
+    
+    analyze_gpu_iteration_0()
+    analyze_cpu_iteration_0()
+    trace_divergence_cause()
+    
+    print("\n" + "="*80)
+    print("SUMMARY")
+    print("="*80)
+    print("The divergence occurs at iteration 0 when:")
+    print("- GPU calculates large negative Δφ₂ = -8.75 for the second LIQUID phase")
+    print("- This removes the phase (sets amount to ~0)")
+    print("- CPU likely handles the large coefficient (20.0) differently")
+    print("- The issue is numerical, related to solving systems with very different scales")
 
-first_divergence = None
-for i in range(max_iter + 1):
-    if i in cpu_iterations and i in gpu_iterations:
-        cpu_data = cpu_iterations[i]
-        gpu_data = gpu_iterations[i]
-        
-        print(f"\nIteration {i}:")
-        
-        # Compare number of phases
-        cpu_phases = len([p for p in cpu_data['phases'] if p['amount'] > 1e-10])
-        gpu_phases = len([p for p in gpu_data['phases'] if p['amount'] > 1e-10])
-        print(f"  Active phases: CPU={cpu_phases}, GPU={gpu_phases}")
-        
-        # Compare phase energies and amounts
-        for j, (cpu_phase, gpu_phase) in enumerate(zip(cpu_data['phases'], gpu_data['phases'])):
-            if cpu_phase['amount'] > 1e-10 or gpu_phase['amount'] > 1e-10:
-                energy_diff = abs(cpu_phase['energy'] - gpu_phase['energy'])
-                amt_diff = abs(cpu_phase['amount'] - gpu_phase['amount'])
-                
-                print(f"  Phase {j}:")
-                print(f"    Energy: CPU={cpu_phase['energy']:.9f}, GPU={gpu_phase['energy']:.9f}, diff={energy_diff:.9e}")
-                print(f"    Amount: CPU={cpu_phase['amount']:.9e}, GPU={gpu_phase['amount']:.9e}, diff={amt_diff:.9e}")
-                
-                if cpu_phase['site_fractions'] and gpu_phase['site_fractions']:
-                    sf_diff = max(abs(c - g) for c, g in zip(cpu_phase['site_fractions'], gpu_phase['site_fractions']))
-                    print(f"    Max site fraction diff: {sf_diff:.9e}")
-                
-                if energy_diff > 0.000001 and first_divergence is None:
-                    first_divergence = (i, j, 'energy', energy_diff)
-                    print(f"    *** FIRST DIVERGENCE > 0.000001 J ***")
-        
-        # Compare chemical potentials
-        if cpu_data['chemical_potentials'] and gpu_data['chemical_potentials']:
-            cp_diffs = [abs(c - g) for c, g in zip(cpu_data['chemical_potentials'], gpu_data['chemical_potentials'])]
-            max_cp_diff = max(cp_diffs)
-            print(f"  Max chemical potential diff: {max_cp_diff:.9e}")
-            
-            if max_cp_diff > 0.000001 and first_divergence is None:
-                first_divergence = (i, -1, 'chemical_potential', max_cp_diff)
-                print(f"    *** FIRST DIVERGENCE > 0.000001 J ***")
-
-# Extract final values
-cpu_final_gm = float(re.search(r'CPU_FINAL_GM: ([-\d.]+)', cpu_output).group(1))
-gpu_final_gm = float(re.search(r'GPU_FINAL_GM: ([-\d.]+)', gpu_output).group(1))
-
-print(f"\n=== FINAL RESULTS ===")
-print(f"CPU GM: {cpu_final_gm:.9f}")
-print(f"GPU GM: {gpu_final_gm:.9f}")
-print(f"Difference: {abs(cpu_final_gm - gpu_final_gm):.9e}")
-
-if first_divergence:
-    iter_num, phase_num, var_type, diff = first_divergence
-    print(f"\n*** FIRST DIVERGENCE FOUND ***")
-    print(f"Iteration: {iter_num}")
-    if phase_num >= 0:
-        print(f"Phase: {phase_num}")
-    print(f"Variable: {var_type}")
-    print(f"Difference: {diff:.9e} J")
-else:
-    print(f"\nNo divergence > 0.000001 J found in iteration data")
+if __name__ == "__main__":
+    main()

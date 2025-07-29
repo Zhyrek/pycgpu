@@ -1,65 +1,69 @@
-#!/usr/bin/env python
-"""Verify the GPU fix for single phase site fraction reset."""
+#\!/usr/bin/env python
+"""Quick test to verify the GPU phase normalization fix."""
 
-import numpy as np
-from pycalphad import Database, equilibrium
-import pycalphad.variables as v
+import os
+os.environ['PYCALPHAD_DEBUG_EQSOLVER'] = ''  # Disable all debug output
 
-# Load database
-dbf = Database('NbTi.tdb')
-comps = ['NB', 'TI', 'VA']
-phases = ['BCC_A2']
+from pycalphad import Database, equilibrium, variables as v
+import warnings
+warnings.filterwarnings('ignore')
 
-# Test cases that require phase removal/consolidation
-test_cases = [
-    {'T': 600, 'X_TI': 0.1},   # Original failing case
-    {'T': 600, 'X_TI': 0.2},   # Another composition
-    {'T': 700, 'X_TI': 0.15},  # Different temperature
-]
+# Load AlCuFe database
+dbf = Database('Al-Cu-Fe.tdb')
+comps = ['AL', 'CU', 'FE', 'VA']
+phases = ['LIQUID', 'ALCU_ZETA']
 
-print("Testing GPU fix for single phase site fraction reset...")
-print("=" * 70)
+# Test condition that previously showed 806 J/mol error
+conditions = {
+    v.T: 900,  
+    v.P: 101325, 
+    v.N: 1, 
+    v.X('AL'): 0.6,
+    v.X('CU'): 0.3
+}
 
-all_passed = True
+print(f"Testing AlCu system with phase normalization fix")
+print(f"Condition: T=900K, X(AL)=0.6, X(CU)=0.3")
+print(f"Expected result: GPU should now match CPU closely")
+print("-" * 60)
 
-for i, case in enumerate(test_cases):
-    print(f"\nTest {i+1}: T={case['T']}K, X(TI)={case['X_TI']}")
-    
-    conds = {v.T: case['T'], v.P: 101325, v.X('TI'): case['X_TI'], v.N: 1}
-    
-    # CPU calculation
-    cpu_result = equilibrium(dbf, comps, phases, conds, calc_opts={'pdens': 50}, verbose=False)
-    cpu_gm = float(cpu_result.GM.values)
-    cpu_mu_nb = float(cpu_result.MU.sel(component='NB').values)
-    cpu_mu_ti = float(cpu_result.MU.sel(component='TI').values)
-    
-    # GPU calculation
-    gpu_result = equilibrium(dbf, comps, phases, conds, calc_opts={'pdens': 50}, gpu=True, verbose=False)
-    gpu_gm = float(gpu_result.GM.values)
-    gpu_mu_nb = float(gpu_result.MU.sel(component='NB').values)
-    gpu_mu_ti = float(gpu_result.MU.sel(component='TI').values)
-    
-    # Calculate differences
-    gm_diff = abs(cpu_gm - gpu_gm)
-    mu_nb_diff = abs(cpu_mu_nb - gpu_mu_nb)
-    mu_ti_diff = abs(cpu_mu_ti - gpu_mu_ti)
-    
-    # Check if differences are within tolerance
-    tolerance = 1e-6
-    passed = gm_diff < tolerance and mu_nb_diff < tolerance and mu_ti_diff < tolerance
-    
-    print(f"  CPU: GM={cpu_gm:.6f}, MU(NB)={cpu_mu_nb:.6f}, MU(TI)={cpu_mu_ti:.6f}")
-    print(f"  GPU: GM={gpu_gm:.6f}, MU(NB)={gpu_mu_nb:.6f}, MU(TI)={gpu_mu_ti:.6f}")
-    print(f"  Differences: GM={gm_diff:.9f}, MU(NB)={mu_nb_diff:.9f}, MU(TI)={mu_ti_diff:.9f}")
-    
-    if passed:
-        print("  ✓ PASS")
-    else:
-        print("  ✗ FAIL")
-        all_passed = False
+# CPU calculation (silent)
+cpu_result = equilibrium(dbf, comps, phases, conditions, 
+                       calc_opts={'pdens': 100}, verbose=False)
+cpu_gm = float(cpu_result.GM.values.item())
 
-print("\n" + "=" * 70)
-if all_passed:
-    print("✓ All tests PASSED! GPU fix is working correctly.")
+# GPU calculation (silent)
+gpu_result = equilibrium(dbf, comps, phases, conditions, 
+                       calc_opts={'pdens': 100}, verbose=False, gpu=True)
+gpu_gm = float(gpu_result.GM.values.item())
+
+# Compare
+diff = abs(cpu_gm - gpu_gm)
+
+print(f"CPU GM: {cpu_gm:.6f} J/mol")
+print(f"GPU GM: {gpu_gm:.6f} J/mol")
+print(f"Difference: {diff:.2f} J/mol")
+
+if diff < 10:
+    print(f"✓ EXCELLENT\! Fix successful - GPU matches CPU within 10 J/mol")
+    print(f"  (Previous error was 806 J/mol)")
+elif diff < 100:
+    print(f"✓ Good improvement - error reduced to under 100 J/mol")
 else:
-    print("✗ Some tests FAILED. Further investigation needed.")
+    print(f"⚠️  Large error still remains")
+
+# Check phase counts
+cpu_phase_count = len([p for p, amt in zip(cpu_result.Phase.values.squeeze(), 
+                                         cpu_result.NP.values.squeeze()) if amt > 0.01])
+gpu_phase_count = len([p for p, amt in zip(gpu_result.Phase.values.squeeze(), 
+                                         gpu_result.NP.values.squeeze()) if amt > 0.01])
+
+print(f"\nPhase analysis:")
+print(f"CPU phases with >1% amount: {cpu_phase_count}")
+print(f"GPU phases with >1% amount: {gpu_phase_count}")
+
+if cpu_phase_count == gpu_phase_count:
+    print(f"✓ Both CPU and GPU predict same number of stable phases")
+else:
+    print(f"⚠️  Phase count mismatch - may indicate remaining issues")
+EOF < /dev/null

@@ -1,0 +1,55 @@
+Traceback (most recent call last):
+  File "<string>", line 14, in <module>
+  File "/mnt/c/users/scott/Documents/pycalphad/pycalphad/core/equilibrium.py", line 114, in equilibrium
+    properties = wks.eq
+                 ^^^^^^
+  File "/mnt/c/users/scott/Documents/pycalphad/pycalphad/core/workspace.py", line 307, in __get__
+    default_value = obj.recompute()
+                    ^^^^^^^^^^^^^^^
+  File "/mnt/c/users/scott/Documents/pycalphad/pycalphad/core/workspace.py", line 482, in recompute
+    properties = starting_point(unitless_conds, state_variables, self.phase_record_factory, grid, verbose=self.verbose)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/c/users/scott/Documents/pycalphad/pycalphad/core/starting_point.py", line 110, in starting_point
+    raise ValueError('Number of degrees of freedom is not zero')
+ValueError: Number of degrees of freedom is not zero
+=== CPU DEBUG OUTPUT ===
+
+=== CPU EQUILIBRIUM FUNCTION START ===
+Components: ['AL', 'CU', 'VA']
+Phases: ['LIQUID', 'FCC_A1', 'ALCU_ZETA']
+Conditions: {X_AL: 0.7, T: 600, P: 101325}
+
+
+[WORKSPACE DEBUG] recompute() called
+Stack trace:
+  File "<string>", line 14, in <module>
+  File "/mnt/c/users/scott/Documents/pycalphad/pycalphad/core/equilibrium.py", line 114, in equilibrium
+    properties = wks.eq
+  File "/mnt/c/users/scott/Documents/pycalphad/pycalphad/core/workspace.py", line 307, in __get__
+    default_value = obj.recompute()
+  File "/mnt/c/users/scott/Documents/pycalphad/pycalphad/core/workspace.py", line 389, in recompute
+    for line in traceback.format_stack():
+
+=== CPU WORKSPACE DEBUG START ===
+Conditions: OrderedDict({N: array([1.]), P: array([101325.]), T: array([600.]), X_AL: array([0.7])})
+Phases: ['FCC_A1', 'LIQUID']
+Components: [Component('AL', 'AL1'), Component('CU', 'CU1.0'), Component('VA', 'VA1')]
+Grid calculation complete - grid shape: (1, 1, 1, 3)
+Grid GM range: [-20002.975654, 10000000000.000000]
+[CPU] GRID DETAILED ANALYSIS:
+[CPU]   Unique phases in grid: ['FCC_A1' 'LIQUID' '_FAKE_']
+[CPU]   Phase counts: [1 1 1]
+[CPU] STARTING_POINT CALL DEBUG:
+[CPU]   unitless_conds type: <class 'collections.OrderedDict'>
+[CPU]   unitless_conds: OrderedDict({N: array([1.]), P: array([101325.]), T: array([600.]), X_AL: array([0.7])})
+[CPU]   state_variables type: <class 'list'>
+[CPU]   state_variables: [N, P, T]
+[CPU]   phase_record_factory type: <class 'pycalphad.codegen.phase_record_factory.PhaseRecordFactory'>
+[CPU]   grid type: <class 'pycalphad.core.light_dataset.LightDataset'>
+[CPU]   grid coords: ['component', 'N', 'P', 'T']
+
+--- CPU Starting Point Calculation ---
+Conditions: OrderedDict({N: array([1.]), P: array([101325.]), T: array([600.]), X_AL: array([0.7])})
+Global min enabled: True
+Active phases: ['FCC_A1', 'LIQUID']
+Input grid GM range: [-20002.975654, 10000000000.000000]

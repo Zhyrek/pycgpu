@@ -1,0 +1,59 @@
+DETAILED COMPARISON OF SELECTED PHASES
+================================================================================
+
+
+LIQUID:
+----------------------------------------
+  Total lines: 38
+  Max line length: 16,419 chars
+  Max line at: line 25
+
+  Structure of longest line:
+    Additions (+): 27
+    Multiplications (*): 26
+    pow() calls: 8
+    log() calls: 0
+    Ternary operators (?): 62
+    Parentheses pairs: 188
+
+ALCU_ZETA:
+----------------------------------------
+  Total lines: 38
+  Max line length: 14,256 chars
+  Max line at: line 29
+
+  Structure of longest line:
+    Additions (+): 287
+    Multiplications (*): 530
+    pow() calls: 164
+    log() calls: 78
+    Ternary operators (?): 154
+    Parentheses pairs: 844
+
+BCC_B2:
+----------------------------------------
+  Total lines: 146
+  Max line length: 122,083 chars
+  Max line at: line 47
+
+  Structure of longest line:
+    Additions (+): 3232
+    Multiplications (*): 8555
+    pow() calls: 440
+    log() calls: 70
+    Ternary operators (?): 238
+    Parentheses pairs: 4586
+
+AL5FE4:
+----------------------------------------
+  Total lines: 27
+  Max line length: 5,568 chars
+  Max line at: line 21
+
+  Structure of longest line:
+    Additions (+): 43
+    Multiplications (*): 80
+    pow() calls: 37
+    log() calls: 17
+    Ternary operators (?): 29
+    Parentheses pairs: 187

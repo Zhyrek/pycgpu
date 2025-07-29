@@ -1,0 +1,100 @@
+=== GPU DEBUG OUTPUT ===
+[GPU] Starting GPU-accelerated equilibrium calculation...
+[GPU] Creating workspace with same parameters as CPU path...
+[GPU] Starting GPU equilibrium calculation...
+[GPU DEBUG] Input conditions: N=[1.0] mole
+P=[101325.0] pascal
+T=[1000.0] kelvin
+X_AL=[0.3] fraction
+
+[GPU DEBUG] Components: [Component('AL', 'AL1'), Component('VA', 'VA1'), Component('ZN', 'ZN1')]
+[GPU DEBUG] Phases: ['FCC_A1', 'LIQUID']
+[GPU DEBUG] Preparing to calculate starting point...
+[GPU DEBUG] unitless_conds: OrderedDict({N: array([1.]), P: array([101325.]), T: array([1000.]), X_AL: array([0.3])})
+[GPU DEBUG] state_variables: [N, P, T]
+[GPU DEBUG] Running calculate()...
+[GPU DEBUG] Grid calculated with shape: (1, 1, 1, 246)
+[GPU DEBUG] Running starting_point()...
+
+--- CPU Starting Point Calculation ---
+Conditions: OrderedDict({N: array([1.]), P: array([101325.]), T: array([1000.]), X_AL: array([0.3])})
+Global min enabled: True
+Active phases: ['FCC_A1', 'LIQUID']
+Input grid GM range: [-59301.720236, 10000000000.000000]
+Calculating lower convex hull...
+Lower convex hull calculation complete
+Result GM: -57545.849016
+Result chemical potentials: [-49299.70953837 -61079.90879228]
+--- CPU Starting Point Complete ---
+
+[GPU DEBUG] Starting point calculated
+[GPU DEBUG] Starting NP shape: (1, 1, 1, 1, 3)
+[GPU] Generating C code for phase models...
+[GPU] Phase name to unique index mapping: {'FCC_A1': 0, 'LIQUID': 1}
+[GPU] Generating functions for model 0: FCC_A1
+[CSE CODEGEN] Processing func with 1 expressions
+[CSE CODEGEN] Applying CSE to 1 function expressions...
+[CSE CODEGEN] CSE found 9 common subexpressions in 0.000s
+[GPU CODEGEN] Variable mapping for FCC_A1: {'N': 'x[0]', 'P': 'x[1]', 'T': 'x[2]', 'FCC_A10AL': 'x[3]', 'FCC_A10ZN': 'x[4]'}
+[CSE CODEGEN] Generated func function in 0.001s
+[CSE CODEGEN] Processing func with 1 expressions
+[CSE CODEGEN] Applying CSE to 1 function expressions...
+[CSE CODEGEN] CSE found 10 common subexpressions in 0.000s
+[CSE CODEGEN] Generated func function in 0.000s
+[CSE CODEGEN] Processing grad with 1 expressions
+[CSE CODEGEN] Processing gradient expressions...
+[CSE GRADIENT] Ordered symbols for FCC_A1: ['T', 'Y(FCC_A1,0,AL)', 'Y(FCC_A1,0,ZN)']
+[CSE CODEGEN] Gradient CSE found 54 subexpressions in 0.000s
+[CSE CODEGEN] Generated grad function in 0.001s
+[GPU DEBUG] Generating Hessian for model 0, verbose=True
+[GPU] _nb_formulahess_from_model called for model 0, verbose=True
+[CSE CODEGEN] Processing hess with 1 expressions
+[CSE CODEGEN] Processing Hessian expressions...
+[CSE GRADIENT] Ordered symbols for FCC_A1: ['T', 'Y(FCC_A1,0,AL)', 'Y(FCC_A1,0,ZN)']
+[CSE CODEGEN] Hessian CSE found 103 subexpressions in 0.001s
+[CSE CODEGEN] Generated hess function in 0.003s
+[GPU] Hessian post-processed: fixed 0 of 0 all-zero patterns
+[CSE CODEGEN] Processing func with 1 expressions
+[CSE CODEGEN] Applying CSE to 1 function expressions...
+[CSE CODEGEN] CSE found 0 common subexpressions in 0.000s
+[CSE CODEGEN] Generated func function in 0.000s
+[CSE CODEGEN] Processing grad with 1 expressions
+[CSE CODEGEN] Processing gradient expressions...
+[CSE GRADIENT] Ordered symbols for FCC_A1: ['T', 'Y(FCC_A1,0,AL)', 'Y(FCC_A1,0,ZN)']
+[CSE CODEGEN] Gradient CSE found 0 subexpressions in 0.000s
+[CSE CODEGEN] Generated grad function in 0.000s
+[CSE CODEGEN] Processing func with 3 expressions
+[CSE CODEGEN] Applying CSE to 3 function expressions...
+[CSE CODEGEN] CSE found 1 common subexpressions in 0.000s
+[CSE CODEGEN] Generated func function in 0.000s
+[CSE CODEGEN] Processing func with 3 expressions
+[CSE CODEGEN] Applying CSE to 3 function expressions...
+[CSE CODEGEN] CSE found 0 common subexpressions in 0.000s
+[CSE CODEGEN] Generated func function in 0.000s
+[GPU CODEGEN] Sublattice 0: dependent Y(FCC_A1,0,ZN) = 1 - sum([Y(FCC_A1,0,AL)])
+[GPU CODEGEN] _nb_formulamole_grad_from_model for FCC_A1:
+  nonvacant_elements: ['AL', 'ZN']
+  Number of functions: 2
+  Dependent substitutions IDENTIFIED but NOT APPLIED to match CPU: {Y(FCC_A1,0,ZN): 1 - FCC_A10AL}
+  moles(AL) = 1.0*FCC_A10AL
+  moles(ZN) = 1.0*FCC_A10ZN
+  WARNING: formulamole_grad expects phase DOF ordering [P, T, site_fractions...]
+           but GPU minimizer may pass workspace DOF [N, P, T, site_fractions...]
+[CSE CODEGEN] Processing grad with 2 expressions
+[CSE CODEGEN] Processing gradient expressions...
+[CSE GRADIENT] Ordered symbols for FCC_A1: ['T', 'Y(FCC_A1,0,AL)', 'Y(FCC_A1,0,ZN)']
+[CSE CODEGEN] Gradient CSE found 0 subexpressions in 0.000s
+[CSE CODEGEN] Generated grad function in 0.000s
+[GPU] Generating functions for model 1: LIQUID
+[CSE CODEGEN] Processing func with 1 expressions
+[CSE CODEGEN] Applying CSE to 1 function expressions...
+[CSE CODEGEN] CSE found 11 common subexpressions in 0.000s
+[GPU CODEGEN] Variable mapping for LIQUID: {'N': 'x[0]', 'P': 'x[1]', 'T': 'x[2]', 'LIQUID0AL': 'x[3]', 'LIQUID0ZN': 'x[4]'}
+[CSE CODEGEN] Generated func function in 0.001s
+[CSE CODEGEN] Processing func with 1 expressions
+[CSE CODEGEN] Applying CSE to 1 function expressions...
+[CSE CODEGEN] CSE found 12 common subexpressions in 0.000s
+[CSE CODEGEN] Generated func function in 0.000s
+[CSE CODEGEN] Processing grad with 1 expressions
+[CSE CODEGEN] Processing gradient expressions...
+[CSE GRADIENT] Ordered symbols for LIQUID: ['T', 'Y(LIQUID,0,AL)', 'Y(LIQUID,0,ZN)']

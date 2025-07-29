@@ -1,0 +1,422 @@
+Gradient and Hessian Code Generation Test Results
+================================================================================
+
+DATABASE: Al-Cu-Fe.tdb
+PHASE: LIQUID
+Free energy expression: 2850 chars
+
+GRADIENT ANALYSIS:
+----------------------------------------
+Number of gradient expressions: 4
+Gradient lengths: [5084, 5395, 4753, 2586]
+Longest gradient: 5395 chars
+Total gradient complexity: 17818 chars
+
+HESSIAN ANALYSIS:
+----------------------------------------
+Hessian matrix size: 4x4
+Unique Hessian elements: 10
+Hessian lengths: min=1817, max=9529, avg=6218
+Longest Hessian element: 9529 chars
+Total Hessian complexity: 62177 chars
+
+IMPROVED METHOD RESULTS:
+----------------------------------------
+Gradient CSE: 49 subexpressions, reduced to 1366 chars
+Hessian CSE: 80 subexpressions, reduced to 1254 chars
+
+LONGEST GRADIENT C CODE:
+----------------------------------------
+__device__ double grad_Y(LIQUID,0,AL)_liquid(double T, double P, double N, double* site_fractions) {
+    double x0 = pow(T, 7.0);
+    double x1 = pow(T, 3.0);
+    double x2 = pow(T, -1.0);
+    double x3 = 74092.0*x2;
+    double x4 = T*log(T);
+    double x5 = pow(T, 2.0);
+    double x6 = T < 700.0;
+    double x7 = And(T < 933.47, 700.0 <= T);
+    double x8 = pow(T, -9.0);
+    double x9 = 933.47 <= T;
+    double x10 = ((x6 == True) ? (
+   -7976.15 + 137.093038*T - 8.77664e-07*x1 + x3 - 24.3671976*x4 - 0.001884662*x5
+)
+: ((x7 == True) ? (
+   -11276.24 + 223.048446*T - 5.764227e-06*x1 + x3 - 38.5844296*x4 + 0.018531982*x5
+)
+: ((x9 == True) ? (
+   -11278.378 + 188.684153*T - 31.748192*x4 - 1.230524e+28*x8
+)
+: (
+   0
+))));
+    double x11 = T < 933.47;
+    double x12 = ((x11 == True) ? (
+   11005.029 - 11.841867*T + 7.934e-20*x0 + x10
+)
+: ((x9 == True) ? (
+   10482.382 - 11.253974*T + x10 + 1.231e+28*x8
+)
+: (
+   0
+)));
+    double x13 = T < 1357.77;
+    double x14 = 1357.77 <= T;
+    double x15 = T < 1811.0;
+    double x16 = 2.29603e+31*x8;
+    double x17 = 1811.0 <= T;
+    double x18 = ((x15 == True) ? (
+   1225.7 + 124.134*T - 5.8927e-08*x1 + 77359.0*x2 - 23.5143*x4 - 0.00439752*x5
+)
+: ((x17 == True) ? (
+   -25383.581 + 299.31255*T + x16 - 46.0*x4
+)
+: (
+   0
+)));
+    double x19 = LIQUID0AL + LIQUID0CU + LIQUID0FE;
+    double x20 = pow(x19, -2);
+    double x21 = 1.0*x20;
+    double x22 = ((x15 == True) ? (
+   0
+)
+: ((x17 == True) ? (
+   0
+)
+: (
+   0
+)));
+    double x23 = ((x6 == True) ? (
+   0
+)
+: ((x7 == True) ? (
+   0
+)
+: ((x9 == True) ? (
+   0
+)
+: (
+   0
+))));
+    double x24 = pow(x19, -1);
+    double x25 = 1.0*x24;
+    double x26 = 1e-15 < LIQUID0FE;
+    double x27 = 1e-15 < LIQUID0CU;
+    double x28 = log(LIQUID0AL);
+    double x29 = 1e-15 < LIQUID0AL;
+    double x30 = 8.3145*T;
+    double x31 = (1.0/3.0)*(1 - x19);
+    double x32 = LIQUID0CU*LIQUID0FE;
+    double x33 = x32*(-47262.3591 + 11.3118607*T);
+    double x34 = x33*(LIQUID0CU + x31);
+    double x35 = LIQUID0CU*(-66622.0 + 8.1*T);
+    double x36 = -LIQUID0FE;
+    double x37 = LIQUID0AL + x36;
+    double x38 = LIQUID0FE*(-5672.58 + 4.8728*T);
+    double x39 = x38*x37;
+    double x40 = LIQUID0AL - LIQUID0CU;
+    double x41 = 2812.0*pow(x40, 2)*LIQUID0CU;
+    double x42 = x32*(-24637.8886 + 9.12034153*T);
+    double x43 = x42*(LIQUID0AL + x31);
+    double x44 = LIQUID0CU*(46800.0 - 90.8*T + 10.0*x4);
+    double x45 = x40*x44;
+    double x46 = LIQUID0FE*(-91976.5 + 22.1314*T);
+    double x47 = 121.9*pow(x37, 2)*LIQUID0FE;
+    double x48 = LIQUID0CU + x36;
+    return -x21*(LIQUID0CU*((x13 == True) ? (
+   5194.277 + 120.973331*T - 5.8489e-21*x0 + 1.29223e-07*x1 + 52478.0*x2 - 24.112392*x4 - 0.00265684*x5
+)
+: ((x14 == True) ? (
+   -46.545 + 173.881484*T - 31.38*x4
+)
+: (
+   0
+))) + LIQUID0FE*((x15 == True) ? (
+   12040.17 - 6.55843*T - 3.67516e-21*x0 + x18
+)
+: ((x17 == True) ? (
+   14544.751 - 8.01055*T - x16 + x18
+)
+: (
+   0
+))) + x12*LIQUID0AL) - x21*(x32*(36088.0 - 2.32968*T) + x34*LIQUID0AL + x35*LIQUID0AL + x39*LIQUID0AL - x41*LIQUID0AL + x43*LIQUID0AL + x45*LIQUID0AL + x46*LIQUID0AL + x47*LIQUID0AL + x48*x32*(324.53 - 0.0327*T) + pow(x48, 2)*x32*(10355.4 - 3.60297*T)) + x25*(x12 + LIQUID0AL*((x11 == True) ? (
+   x23
+)
+: ((x9 == True) ? (
+   x23
+)
+: (
+   0
+))) + LIQUID0CU*((x13 == True) ? (
+   0
+)
+: ((x14 == True) ? (
+   0
+)
+: (
+   0
+))) + LIQUID0FE*((x15 == True) ? (
+   x22
+)
+: ((x17 == True) ? (
+   x22
+)
+: (
+   0
+)))) + x25*(x34 + x35 + x39 - x41 + x43 + x45 + x46 + x47 + (-1.0/3.0)*x33*LIQUID0AL + x38*LIQUID0AL + (2.0/3.0)*x42*LIQUID0AL + x44*LIQUID0AL + 243.8*x37*LIQUID0AL*LIQUID0FE - 5624.0*x40*LIQUID0CU*LIQUID0AL) - x30*x20*(1.0*((x27 == True) ? (
+   LIQUID0CU*log(LIQUID0CU)
+)
+: (
+   0
+)) + 1.0*((x26 == True) ? (
+   LIQUID0FE*log(LIQUID0FE)
+)
+: (
+   0
+)) + 1.0*((x29 == True) ? (
+   x28*LIQUID0AL
+)
+: (
+   0
+))) + x30*x24*(1.0*((x26 == True) ? (
+   0
+)
+: (
+   0
+)) + 1.0*((x27 == True) ? (
+   0
+)
+: (
+   0
+)) + 1.0*((x29 == True) ? (
+   1 + x28
+)
+: (
+   0
+)));
+}
+
+LONGEST HESSIAN C CODE:
+----------------------------------------
+__device__ double hess_Y(LIQUID,0,FE)_Y(LIQUID,0,AL)_liquid(double T, double P, double N, double* site_fractions) {
+    double x0 = LIQUID0AL + LIQUID0CU + LIQUID0FE;
+    double x1 = (1.0/3.0)*(1 - x0);
+    double x2 = LIQUID0CU*(-47262.3591 + 11.3118607*T);
+    double x3 = x2*(LIQUID0CU + x1);
+    double x4 = LIQUID0CU*(-66622.0 + 8.1*T);
+    double x5 = -LIQUID0FE;
+    double x6 = LIQUID0AL + x5;
+    double x7 = -5672.58 + 4.8728*T;
+    double x8 = x6*x7;
+    double x9 = x8*LIQUID0FE;
+    double x10 = LIQUID0AL - LIQUID0CU;
+    double x11 = 2812.0*pow(x10, 2)*LIQUID0CU;
+    double x12 = LIQUID0CU*(-24637.8886 + 9.12034153*T);
+    double x13 = x12*(LIQUID0AL + x1);
+    double x14 = (1.0/3.0)*x2;
+    double x15 = x14*LIQUID0FE;
+    double x16 = -x15*LIQUID0AL;
+    double x17 = T*log(T);
+    double x18 = LIQUID0CU*(46800.0 - 90.8*T + 10.0*x17);
+    double x19 = x18*LIQUID0AL;
+    double x20 = x7*LIQUID0AL;
+    double x21 = x20*LIQUID0FE;
+    double x22 = -91976.5 + 22.1314*T;
+    double x23 = 243.8*LIQUID0AL;
+    double x24 = x23*LIQUID0FE;
+    double x25 = x6*x24;
+    double x26 = 121.9*pow(x6, 2);
+    double x27 = x12*LIQUID0FE;
+    double x28 = (2.0/3.0)*LIQUID0AL;
+    double x29 = pow(x0, -2);
+    double x30 = 1.0*x29;
+    double x31 = LIQUID0CU + x5;
+    double x32 = LIQUID0CU*(324.53 - 0.0327*T);
+    double x33 = x32*x31;
+    double x34 = x22*LIQUID0AL;
+    double x35 = x26*LIQUID0AL;
+    double x36 = LIQUID0CU*(36088.0 - 2.32968*T);
+    double x37 = LIQUID0CU*(10355.4 - 3.60297*T);
+    double x38 = pow(x31, 2)*x37;
+    double x39 = x13*LIQUID0AL;
+    double x40 = x3*LIQUID0AL;
+    double x41 = pow(x0, -3);
+    double x42 = 2.0*x41;
+    double x43 = log(LIQUID0AL);
+    double x44 = 1e-15 < LIQUID0AL;
+    double x45 = 1e-15 < LIQUID0CU;
+    double x46 = log(LIQUID0FE);
+    double x47 = 1e-15 < LIQUID0FE;
+    double x48 = (1.0/3.0)*x27;
+    double x49 = pow(x0, -1);
+    double x50 = 1.0*x49;
+    double x51 = 1.0*((x47 == True) ? (
+   0
+)
+: (
+   0
+));
+    double x52 = 1.0*((x45 == True) ? (
+   0
+)
+: (
+   0
+));
+    double x53 = x52 + 1.0*((x44 == True) ? (
+   0
+)
+: (
+   0
+));
+    double x54 = 8.3145*T;
+    double x55 = x54*x29;
+    double x56 = T < 700.0;
+    double x57 = And(T < 933.47, 700.0 <= T);
+    double x58 = 933.47 <= T;
+    double x59 = ((x56 == True) ? (
+   0
+)
+: ((x57 == True) ? (
+   0
+)
+: ((x58 == True) ? (
+   0
+)
+: (
+   0
+))));
+    double x60 = T < 933.47;
+    double x61 = ((x60 == True) ? (
+   x59
+)
+: ((x58 == True) ? (
+   x59
+)
+: (
+   0
+)));
+    double x62 = T < 1811.0;
+    double x63 = 1811.0 <= T;
+    double x64 = ((x62 == True) ? (
+   0
+)
+: ((x63 == True) ? (
+   0
+)
+: (
+   0
+)));
+    double x65 = ((x62 == True) ? (
+   x64
+)
+: ((x63 == True) ? (
+   x64
+)
+: (
+   0
+)));
+    double x66 = T < 1357.77;
+    double x67 = 1357.77 <= T;
+    double x68 = LIQUID0CU*((x66 == True) ? (
+   0
+)
+: ((x67 == True) ? (
+   0
+)
+: (
+   0
+))) + x61*LIQUID0AL + x65*LIQUID0FE;
+    double x69 = pow(T, 7.0);
+    double x70 = pow(T, 3.0);
+    double x71 = pow(T, -1.0);
+    double x72 = 74092.0*x71;
+    double x73 = pow(T, 2.0);
+    double x74 = pow(T, -9.0);
+    double x75 = ((x56 == True) ? (
+   -7976.15 + 137.093038*T - 24.3671976*x17 - 8.77664e-07*x70 + x72 - 0.001884662*x73
+)
+: ((x57 == True) ? (
+   -11276.24 + 223.048446*T - 38.5844296*x17 - 5.764227e-06*x70 + x72 + 0.018531982*x73
+)
+: ((x58 == True) ? (
+   -11278.378 + 188.684153*T - 31.748192*x17 - 1.230524e+28*x74
+)
+: (
+   0
+))));
+    double x76 = ((x60 == True) ? (
+   11005.029 - 11.841867*T + 7.934e-20*x69 + x75
+)
+: ((x58 == True) ? (
+   10482.382 - 11.253974*T + 1.231e+28*x74 + x75
+)
+: (
+   0
+)));
+    double x77 = 2.29603e+31*x74;
+    double x78 = ((x62 == True) ? (
+   1225.7 + 124.134*T - 23.5143*x17 - 5.8927e-08*x70 + 77359.0*x71 - 0.00439752*x73
+)
+: ((x63 == True) ? (
+   -25383.581 + 299.31255*T - 46.0*x17 + x77
+)
+: (
+   0
+)));
+    double x79 = ((x62 == True) ? (
+   12040.17 - 6.55843*T - 3.67516e-21*x69 + x78
+)
+: ((x63 == True) ? (
+   14544.751 - 8.01055*T - x77 + x78
+)
+: (
+   0
+)));
+    return -x30*(-x11 + x16 + x19 + x21 + x25 + x4 + x9 + x10*x18 + x13*LIQUID0FE + x22*LIQUID0FE + x26*LIQUID0FE + x28*x27 + x3*LIQUID0FE - 5624.0*x10*LIQUID0CU*LIQUID0AL) - x30*(x16 - x21 - x25 + x33 + x34 + x35 + x36 + x38 + x39 + x40 - x32*LIQUID0FE - x48*LIQUID0AL + x8*LIQUID0AL - 2*x31*x37*LIQUID0FE) + x42*(LIQUID0CU*((x66 == True) ? (
+   5194.277 + 120.973331*T - 24.112392*x17 - 5.8489e-21*x69 + 1.29223e-07*x70 + 52478.0*x71 - 0.00265684*x73
+)
+: ((x67 == True) ? (
+   -46.545 + 173.881484*T - 31.38*x17
+)
+: (
+   0
+))) + x76*LIQUID0AL + x79*LIQUID0FE) + x42*(x10*x19 - x11*LIQUID0AL + x33*LIQUID0FE + x34*LIQUID0FE + x35*LIQUID0FE + x36*LIQUID0FE + x38*LIQUID0FE + x39*LIQUID0FE + x4*LIQUID0AL + x40*LIQUID0FE + x9*LIQUID0AL) + x50*(x61 + x65 + x68) + x50*(x13 - x15 + x20 + x22 - x24 + x26 + x3 - x48 + x8 - x14*LIQUID0AL + x28*x12 - 243.8*x6*LIQUID0FE + x6*x23 - x7*LIQUID0FE) - x55*(x53 + 1.0*((x47 == True) ? (
+   1 + x46
+)
+: (
+   0
+))) - x55*(x51 + x52 + 1.0*((x44 == True) ? (
+   1 + x43
+)
+: (
+   0
+))) - (x68 + x76)*x30 - (x68 + x79)*x30 + 16.629*T*x41*(1.0*((x45 == True) ? (
+   LIQUID0CU*log(LIQUID0CU)
+)
+: (
+   0
+)) + 1.0*((x44 == True) ? (
+   x43*LIQUID0AL
+)
+: (
+   0
+)) + 1.0*((x47 == True) ? (
+   x46*LIQUID0FE
+)
+: (
+   0
+))) + (x51 + x53)*x54*x49;
+}
+
+PERFORMANCE COMPARISON:
+----------------------------------------
+If we had used the current string method:
+• Gradient: One 5395-char expression
+• Hessian: One 9529-char expression
+• Would likely cause nvcc compilation issues
+
+With improved CSE method:
+• Gradient: 49 subexpressions + 1366-char main expr
+• Hessian: 80 subexpressions + 1254-char main expr
+• Much more manageable for nvcc compilation
+• Better GPU optimization potential

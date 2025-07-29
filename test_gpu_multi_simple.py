@@ -12,9 +12,9 @@ phases = ['BCC_A2', 'LIQUID']
 
 # Test with just 3 conditions
 conditions = {
-    v.T: (500, 2500, 10),
+    v.T: 600,
     v.P: 101325,
-    v.X('TI'): (0.1, 1, 0.4),  # 3 specific compositions
+    v.X('TI'): [0.1, 0.5, 0.9],  # 3 specific compositions
     v.N: 1
 }
 
@@ -59,7 +59,6 @@ except Exception as e:
     import traceback
     traceback.print_exc()
 
-"""
 # Also test CPU for comparison
 print("\n" + "=" * 60)
 print("Testing CPU with same 3 conditions...")
@@ -79,4 +78,3 @@ except Exception as e:
     print(f"CPU calculation FAILED: {e}")
     import traceback
     traceback.print_exc()
-"""

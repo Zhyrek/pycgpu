@@ -849,3 +849,170 @@ __device__ void Singular_Value_Decomposition_Inverse(double* U, double* D, doubl
         for (k = 0, *pa = 0.0; k < ncols; k++, pu++)
            if (D[k] > tolerance) *pa += *(pv + k) * *pu / D[k];
 }
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Device function version of LAPACK's dgelsd with automatic scaling         //
+// This provides better numerical stability for poorly conditioned matrices   //
+////////////////////////////////////////////////////////////////////////////////
+
+// Helper function to compute infinity norm of a matrix
+__device__ static double matrix_inf_norm(double* A, int m, int n) {
+    double max_row_sum = 0.0;
+    for (int i = 0; i < m; i++) {
+        double row_sum = 0.0;
+        for (int j = 0; j < n; j++) {
+            row_sum += fabs(A[i * n + j]);
+        }
+        if (row_sum > max_row_sum) {
+            max_row_sum = row_sum;
+        }
+    }
+    return max_row_sum;
+}
+
+// Helper function to compute column norms
+__device__ static void compute_column_norms(double* A, int m, int n, double* col_norms) {
+    for (int j = 0; j < n; j++) {
+        double sum = 0.0;
+        for (int i = 0; i < m; i++) {
+            double val = A[i * n + j];
+            sum += val * val;
+        }
+        col_norms[j] = sqrt(sum);
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+//  int dgelsd_device(double* A, int m, int n, double* B, int nrhs,          //
+//                    double* work_svd, double rcond)                         //
+//                                                                            //
+//  Description:                                                              //
+//     Device function that mimics LAPACK's dgelsd behavior with automatic    //
+//     matrix scaling for better numerical stability. Solves overdetermined   //
+//     or underdetermined linear systems using SVD with equilibration.       //
+//                                                                            //
+//  Arguments:                                                                //
+//     double* A                                                              //
+//        On input, the m x n matrix. DESTROYED on output.                    //
+//     int m                                                                  //
+//        The number of rows of the matrix A.                                 //
+//     int n                                                                  //
+//        The number of columns of the matrix A.                              //
+//     double* B                                                              //
+//        On input, the m x nrhs right hand side matrix.                     //
+//        On output, the n x nrhs solution matrix X.                         //
+//     int nrhs                                                               //
+//        The number of right hand sides.                                     //
+//     double* work_svd                                                       //
+//        Workspace array of size at least m*n + n*n + n + max(m,n)*nrhs     //
+//     double rcond                                                           //
+//        Reciprocal condition number threshold for singular values.          //
+//                                                                            //
+//  Return Values:                                                            //
+//     0  Success                                                             //
+//    -1  Failure - SVD did not converge                                      //
+//                                                                            //
+////////////////////////////////////////////////////////////////////////////////
+__device__ int dgelsd_device(double* A, int m, int n, double* B, int nrhs,
+                            double* work_svd, double rcond) {
+    
+    // Allocate workspace from work_svd
+    double* U = work_svd;                    // m x n
+    double* V = work_svd + m * n;            // n x n  
+    double* singular_values = V + n * n;     // n
+    double* superdiagonal = singular_values + n;  // n
+    double* row_scale = superdiagonal + n;   // m
+    double* col_scale = row_scale + m;       // n
+    double* B_copy = col_scale + n;          // max(m,n) x nrhs
+    
+    // Step 1: Compute row and column scaling factors for equilibration
+    // This is crucial for handling matrices with widely varying scales
+    
+    // Initialize scaling factors
+    for (int i = 0; i < m; i++) {
+        row_scale[i] = 0.0;
+    }
+    for (int j = 0; j < n; j++) {
+        col_scale[j] = 0.0;
+    }
+    
+    // Compute row scales (max absolute value in each row)
+    for (int i = 0; i < m; i++) {
+        for (int j = 0; j < n; j++) {
+            double abs_val = fabs(A[i * n + j]);
+            if (abs_val > row_scale[i]) {
+                row_scale[i] = abs_val;
+            }
+        }
+        // Avoid division by zero
+        if (row_scale[i] == 0.0) {
+            row_scale[i] = 1.0;
+        }
+    }
+    
+    // Scale A by row scales and compute column scales
+    for (int i = 0; i < m; i++) {
+        for (int j = 0; j < n; j++) {
+            A[i * n + j] /= row_scale[i];
+            double abs_val = fabs(A[i * n + j]);
+            if (abs_val > col_scale[j]) {
+                col_scale[j] = abs_val;
+            }
+        }
+    }
+    
+    // Avoid division by zero for column scales
+    for (int j = 0; j < n; j++) {
+        if (col_scale[j] == 0.0) {
+            col_scale[j] = 1.0;
+        }
+    }
+    
+    // Apply column scaling to A
+    for (int i = 0; i < m; i++) {
+        for (int j = 0; j < n; j++) {
+            A[i * n + j] /= col_scale[j];
+        }
+    }
+    
+    // Scale B by row scales
+    for (int i = 0; i < m; i++) {
+        for (int j = 0; j < nrhs; j++) {
+            B[i * nrhs + j] /= row_scale[i];
+        }
+    }
+    
+    // Step 2: Perform SVD on the scaled matrix
+    int svd_result = Singular_Value_Decomposition(A, m, n, U, singular_values, V, superdiagonal);
+    if (svd_result != 0) {
+        return -1;  // SVD failed
+    }
+    
+    // Step 3: Solve the system using the SVD
+    // Copy B to B_copy for the solve operation
+    for (int i = 0; i < m * nrhs; i++) {
+        B_copy[i] = B[i];
+    }
+    
+    // Use existing SVD solve function
+    // B_copy contains the RHS, output goes to a temporary location first
+    double x_temp[200];  // Temporary solution storage (max size)
+    Singular_Value_Decomposition_Solve(U, singular_values, V, rcond, m, n, B_copy, x_temp);
+    
+    // Step 4: Unscale the solution by column scales and copy to B
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < nrhs; j++) {
+            B[i * nrhs + j] = x_temp[i * nrhs + j] / col_scale[i];
+        }
+    }
+    
+    // Zero out the remaining rows if m > n
+    for (int i = n; i < m; i++) {
+        for (int j = 0; j < nrhs; j++) {
+            B[i * nrhs + j] = 0.0;
+        }
+    }
+    
+    return 0;
+}

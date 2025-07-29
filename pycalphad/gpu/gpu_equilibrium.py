@@ -62,6 +62,7 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
     Args:
         properties: Pre-computed properties from starting_point() (to avoid calling full equilibrium)
     """
+    print("[GPU DEBUG] _prepare_gpu_data function called - this is where phase normalization should happen")
     # SEGMENT 13: SOLVER INPUT VALIDATION
     debug_log(13, "Solver input validation")
     if properties is not None and hasattr(properties, 'NP'):
@@ -612,6 +613,7 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
         
         # FIX: For immiscibility gaps, we need to store which phase model to use,
         # but phases should be stored contiguously, not by model index
+        print(f"[GPU DEBUG] About to process {len(active_phases[:max_phases_per_condition])} active phases for condition {cond_idx}")
         for i, (orig_phase_idx, phase_name, model_idx) in enumerate(active_phases[:max_phases_per_condition]):
             # Store the model index for this phase instance (can be duplicated for miscibility gaps)
             initial_phase_data_arrays['phase_indices'][cond_idx, i] = model_idx
@@ -623,6 +625,55 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
             
             # Match CPU behavior: set minimum phase fraction like CPU does in eqsolver.pyx line 265
             np_amount = max(np_amount, MIN_PHASE_FRACTION)
+            
+            # CRITICAL FIX: Normalize phase amounts for multi-sublattice phases by site ratio sum
+            # This matches the CPU normalization in eqsolver.pyx lines 534-536
+            if cond_idx < 2:
+                print(f"[GPU DEBUG] Processing phase {phase_name} (cond_idx={cond_idx}, i={i}): np_amount={np_amount:.6f}")
+            try:
+                phase_record = wks_obj.phase_record_factory[phase_name]
+                if cond_idx < 2:
+                    print(f"[GPU DEBUG] Found phase record for {phase_name}, has site_ratios: {hasattr(phase_record, 'site_ratios')}")
+                    if phase_name == 'ALCU_ZETA':
+                        print(f"[GPU DEBUG] ALCU_ZETA phase_dof: {phase_record.phase_dof}")
+                        # Try to get site ratios from workspace models
+                        try:
+                            model = wks_obj.models[phase_name]
+                            print(f"[GPU DEBUG] ALCU_ZETA model found, has site_ratios: {hasattr(model, 'site_ratios')}")
+                            if hasattr(model, 'site_ratios'):
+                                site_ratios = model.site_ratios
+                                print(f"[GPU DEBUG] ALCU_ZETA model site_ratios: {site_ratios}")
+                            # Try to get from dbf phase
+                            if hasattr(model, '_phase') and hasattr(model._phase, 'sublattices'):
+                                sublattices = model._phase.sublattices
+                                site_ratios = [float(subl.site_ratio) for subl in sublattices]
+                                print(f"[GPU DEBUG] ALCU_ZETA sublattice site_ratios: {site_ratios}, sum: {sum(site_ratios)}")
+                        except Exception as e:
+                            print(f"[GPU DEBUG] Error getting ALCU_ZETA model info: {e}")
+                # Try to get site ratios - first from phase record, then from model
+                site_ratios = None
+                if hasattr(phase_record, 'site_ratios') and len(phase_record.site_ratios) > 1:
+                    site_ratios = phase_record.site_ratios
+                else:
+                    # Try to get from workspace models
+                    try:
+                        model = wks_obj.models[phase_name]
+                        if hasattr(model, 'site_ratios') and len(model.site_ratios) > 1:
+                            site_ratios = model.site_ratios
+                    except (KeyError, AttributeError):
+                        pass
+                
+                # DO NOT normalize NP by site ratios here - the solver handles this internally
+                # The CPU keeps NP as mole fractions and converts to formula units (phase_amt) internally
+                if site_ratios is not None and cond_idx < 2 and wks_obj.verbose:
+                    site_ratio_sum = sum(site_ratios)
+                    print(f"[GPU] Phase {phase_name} has site_ratios={site_ratios}, sum={site_ratio_sum}, keeping NP={np_amount:.6f} as mole fraction")
+            except (KeyError, AttributeError) as e:
+                # Phase record not found or no site ratio information - use original amount
+                if cond_idx < 2:
+                    print(f"[GPU] Warning: Could not get site ratios for phase {phase_name}: {e}")
+                pass
+                    
             initial_phase_data_arrays['phase_amounts'][cond_idx, i] = np_amount
             
             # DEBUG: Log what we're storing for first few conditions
@@ -780,10 +831,20 @@ def _populate_system_specification(global_spec_np, global_spec_arrays, wks_obj, 
                 if hasattr(properties, 'MU') and comp_idx < len(wks_obj.components):
                     # Check if this component has a chemical potential in the workspace starting point
                     mu_shape = properties.MU.shape
+                    if wks_obj.verbose:
+                        print(f"[GPU] DEBUG: properties.MU.shape = {mu_shape}, comp_idx = {comp_idx}")
                     num_mu_components = mu_shape[-1] if len(mu_shape) > 0 else 0
                     if comp_idx < num_mu_components:
                         # Extract initial chemical potential from workspace starting point
-                        mu_initial = properties.MU[0,0,0,0,comp_idx] if properties.MU.ndim >= 5 else properties.MU.flatten()[comp_idx]
+                        if properties.MU.ndim == 6:
+                            mu_initial = properties.MU[0,0,0,0,0,comp_idx]
+                        elif properties.MU.ndim >= 5:
+                            mu_initial = properties.MU[0,0,0,0,comp_idx]
+                        else:
+                            mu_initial = properties.MU.flatten()[comp_idx]
+                        # Handle case where mu_initial might be an array
+                        if hasattr(mu_initial, '__len__'):
+                            mu_initial = mu_initial.item() if mu_initial.size == 1 else mu_initial[0]
                         global_spec_arrays['initial_chemical_potentials'][comp_idx] = float(mu_initial)
                         if wks_obj.verbose:
                             print(f"[GPU] CRITICAL FIX: Set initial_chemical_potentials[{comp_idx}] = {mu_initial:.6f} from workspace")
@@ -873,13 +934,13 @@ def _populate_system_specification(global_spec_np, global_spec_arrays, wks_obj, 
     for i, idx in enumerate(free_chemical_potential_indices[:max_components]):
         global_spec_arrays['free_chemical_potential_indices'][i] = idx
     
-    # CRITICAL FIX: Account for mole fraction constraints
-    # With mole fraction constraints, the Gibbs-Duhem relation reduces the degrees of freedom
-    # num_free_chemical_potentials = num_components - num_fixed_chemical_potentials - num_prescribed_mole_fraction_conditions
+    # CRITICAL FIX: Account for mole fraction constraints  
+    # The CPU reduces by constraint_count due to Gibbs-Duhem relation
     num_free_chempot = len(free_chemical_potential_indices) - constraint_count
     if wks_obj.verbose:
-        print(f"[GPU] CRITICAL FIX: Adjusting num_free_chemical_potentials from {len(free_chemical_potential_indices)} to {num_free_chempot}")
-        print(f"[GPU]   Components: {global_spec_np[1]}, Fixed chempot: {len(fixed_chemical_potential_indices)}, Mole fraction constraints: {constraint_count}")
+        print(f"[GPU] Using num_free_chemical_potentials = {num_free_chempot}")
+        print(f"[GPU]   Components: {global_spec_np[1]}, Free chempot indices: {len(free_chemical_potential_indices)}, Constraints: {constraint_count}")
+        print(f"[GPU]   Fixed chempot: {len(fixed_chemical_potential_indices)}, Free statevars: {len(free_statevar_indices)}")
     global_spec_np[5] = num_free_chempot  # num_free_chemical_potentials
     
     for i, idx in enumerate(fixed_chemical_potential_indices[:max_components]):
@@ -907,9 +968,12 @@ def _populate_system_specification(global_spec_np, global_spec_arrays, wks_obj, 
     # No fixed stable composition sets (phases) by default
     global_spec_np[9] = 0  # num_fixed_stable_compsets
     
-    # Calculate maximum free stable phases (total phases minus any fixed ones)
-    max_phases = _get_c_define("MAX_PHASES")
-    global_spec_np[10] = max_phases - global_spec_np[9]  # max_num_free_stable_phases
+    # Calculate maximum free stable phases using Gibbs phase rule (CPU compatibility)
+    # CPU formula: num_components + len(free_statevar_indices) - len(fixed_stable_compset_indices)
+    num_components = global_spec_np[1]
+    num_free_statevars = len(free_statevar_indices)
+    num_fixed_stable_compsets = global_spec_np[9]
+    global_spec_np[10] = num_components + num_free_statevars - num_fixed_stable_compsets  # max_num_free_stable_phases
     
     global_spec_np[11] = 1e-12  # ALLOWED_MASS_RESIDUAL
 

@@ -885,6 +885,173 @@ __device__ void Singular_Value_Decomposition_Inverse(double* U, double* D, doubl
 }
 
 
+////////////////////////////////////////////////////////////////////////////////
+// Device function version of LAPACK's dgelsd with automatic scaling         //
+// This provides better numerical stability for poorly conditioned matrices   //
+////////////////////////////////////////////////////////////////////////////////
+
+// Helper function to compute infinity norm of a matrix
+__device__ static double matrix_inf_norm(double* A, int m, int n) {
+    double max_row_sum = 0.0;
+    for (int i = 0; i < m; i++) {
+        double row_sum = 0.0;
+        for (int j = 0; j < n; j++) {
+            row_sum += fabs(A[i * n + j]);
+        }
+        if (row_sum > max_row_sum) {
+            max_row_sum = row_sum;
+        }
+    }
+    return max_row_sum;
+}
+
+// Helper function to compute column norms
+__device__ static void compute_column_norms(double* A, int m, int n, double* col_norms) {
+    for (int j = 0; j < n; j++) {
+        double sum = 0.0;
+        for (int i = 0; i < m; i++) {
+            double val = A[i * n + j];
+            sum += val * val;
+        }
+        col_norms[j] = sqrt(sum);
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+//  int dgelsd_device(double* A, int m, int n, double* B, int nrhs,          //
+//                    double* work_svd, double rcond)                         //
+//                                                                            //
+//  Description:                                                              //
+//     Device function that mimics LAPACK's dgelsd behavior with automatic    //
+//     matrix scaling for better numerical stability. Solves overdetermined   //
+//     or underdetermined linear systems using SVD with equilibration.       //
+//                                                                            //
+//  Arguments:                                                                //
+//     double* A                                                              //
+//        On input, the m x n matrix. DESTROYED on output.                    //
+//     int m                                                                  //
+//        The number of rows of the matrix A.                                 //
+//     int n                                                                  //
+//        The number of columns of the matrix A.                              //
+//     double* B                                                              //
+//        On input, the m x nrhs right hand side matrix.                     //
+//        On output, the n x nrhs solution matrix X.                         //
+//     int nrhs                                                               //
+//        The number of right hand sides.                                     //
+//     double* work_svd                                                       //
+//        Workspace array of size at least m*n + n*n + n + max(m,n)*nrhs     //
+//     double rcond                                                           //
+//        Reciprocal condition number threshold for singular values.          //
+//                                                                            //
+//  Return Values:                                                            //
+//     0  Success                                                             //
+//    -1  Failure - SVD did not converge                                      //
+//                                                                            //
+////////////////////////////////////////////////////////////////////////////////
+__device__ int dgelsd_device(double* A, int m, int n, double* B, int nrhs,
+                            double* work_svd, double rcond) {
+    
+    // Allocate workspace from work_svd
+    double* U = work_svd;                    // m x n
+    double* V = work_svd + m * n;            // n x n  
+    double* singular_values = V + n * n;     // n
+    double* superdiagonal = singular_values + n;  // n
+    double* row_scale = superdiagonal + n;   // m
+    double* col_scale = row_scale + m;       // n
+    double* B_copy = col_scale + n;          // max(m,n) x nrhs
+    
+    // Step 1: Compute row and column scaling factors for equilibration
+    // This is crucial for handling matrices with widely varying scales
+    
+    // Initialize scaling factors
+    for (int i = 0; i < m; i++) {
+        row_scale[i] = 0.0;
+    }
+    for (int j = 0; j < n; j++) {
+        col_scale[j] = 0.0;
+    }
+    
+    // Compute row scales (max absolute value in each row)
+    for (int i = 0; i < m; i++) {
+        for (int j = 0; j < n; j++) {
+            double abs_val = fabs(A[i * n + j]);
+            if (abs_val > row_scale[i]) {
+                row_scale[i] = abs_val;
+            }
+        }
+        // Avoid division by zero
+        if (row_scale[i] == 0.0) {
+            row_scale[i] = 1.0;
+        }
+    }
+    
+    // Scale A by row scales and compute column scales
+    for (int i = 0; i < m; i++) {
+        for (int j = 0; j < n; j++) {
+            A[i * n + j] /= row_scale[i];
+            double abs_val = fabs(A[i * n + j]);
+            if (abs_val > col_scale[j]) {
+                col_scale[j] = abs_val;
+            }
+        }
+    }
+    
+    // Avoid division by zero for column scales
+    for (int j = 0; j < n; j++) {
+        if (col_scale[j] == 0.0) {
+            col_scale[j] = 1.0;
+        }
+    }
+    
+    // Apply column scaling to A
+    for (int i = 0; i < m; i++) {
+        for (int j = 0; j < n; j++) {
+            A[i * n + j] /= col_scale[j];
+        }
+    }
+    
+    // Scale B by row scales
+    for (int i = 0; i < m; i++) {
+        for (int j = 0; j < nrhs; j++) {
+            B[i * nrhs + j] /= row_scale[i];
+        }
+    }
+    
+    // Step 2: Perform SVD on the scaled matrix
+    int svd_result = Singular_Value_Decomposition(A, m, n, U, singular_values, V, superdiagonal);
+    if (svd_result != 0) {
+        return -1;  // SVD failed
+    }
+    
+    // Step 3: Solve the system using the SVD
+    // Copy B to B_copy for the solve operation
+    for (int i = 0; i < m * nrhs; i++) {
+        B_copy[i] = B[i];
+    }
+    
+    // Use existing SVD solve function
+    // B_copy contains the RHS, output goes to a temporary location first
+    double x_temp[200];  // Temporary solution storage (max size)
+    Singular_Value_Decomposition_Solve(U, singular_values, V, rcond, m, n, B_copy, x_temp);
+    
+    // Step 4: Unscale the solution by column scales and copy to B
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < nrhs; j++) {
+            B[i * nrhs + j] = x_temp[i * nrhs + j] / col_scale[i];
+        }
+    }
+    
+    // Zero out the remaining rows if m > n
+    for (int i = n; i < m; i++) {
+        for (int j = 0; j < nrhs; j++) {
+            B[i * nrhs + j] = 0.0;
+        }
+    }
+    
+    return 0;
+}
+
+
 // Content of phase_rec.h
 #ifndef PHASE_REC_H
 #define PHASE_REC_H
@@ -1352,6 +1519,7 @@ typedef struct SystemSpecification {
     int num_fixed_stable_compsets;
     int max_num_free_stable_phases;
     double ALLOWED_MASS_RESIDUAL;
+    double initial_phase_comp_sum[MAX_PHASES];  // Store initial sum of site ratios for each phase
 
     #define MAX_SVD_DIM (MAX_PHASES + MAX_FIXED_MOLE_FRACTION_CONDITIONS + MAX_COMPONENTS + MAX_STATEVARS + 2)
     #define MAX_SVD_M MAX_SVD_DIM
@@ -1705,6 +1873,10 @@ typedef struct SystemState {
             // CRITICAL FIX: Convert phase amounts to formula units like CPU does
             // CPU minimizer.pyx line 776: self.phase_amt[idx] /= phase_comp_sum
             // This normalization must happen in __init__ to match CPU behavior!
+            
+            // Store the initial phase_comp_sum for use in recompute
+            spec->initial_phase_comp_sum[idx] = phase_comp_sum;
+            
             if (phase_comp_sum > 1e-12) {
                 // DEBUG: Print normalization
                 printf("[GPU INIT] Phase %d: phase_amt before = %.15e, phase_comp_sum = %.15e\n", 
@@ -1712,6 +1884,8 @@ typedef struct SystemState {
                 phase_amt[idx] /= phase_comp_sum;
                 printf("[GPU INIT] Phase %d: phase_amt after = %.15e (formula units)\n", 
                        idx, phase_amt[idx]);
+                printf("[GPU INIT] Phase %d: stored initial_phase_comp_sum = %.15e\n", 
+                       idx, spec->initial_phase_comp_sum[idx]);
             }
         }
 
@@ -1838,49 +2012,48 @@ typedef struct SystemState {
                     }
                     
                     if (compset->phase_record->formulamole_grad != nullptr) {
-                        // For now, calculate mass jacobian for all components together
-                        // The GPU version seems to use a different interface than CPU
-                        double mass_jac_temp[MAX_COMPONENTS * (MAX_STATEVARS + MAX_DOF_PER_PHASE)];
-                        for (int i = 0; i < MAX_COMPONENTS * (MAX_STATEVARS + MAX_DOF_PER_PHASE); ++i) {
-                            mass_jac_temp[i] = 0.0;
+                        // CSE formulamole_grad functions output reduced format
+                        // Output format: [comp0_dT, comp0_dY1, comp0_dY2, ..., comp1_dT, comp1_dY1, comp1_dY2, ...]
+                        double temp_mass_jac[MAX_COMPONENTS * (1 + MAX_DOF_PER_PHASE)];
+                        for (int i = 0; i < MAX_COMPONENTS * (1 + MAX_DOF_PER_PHASE); ++i) {
+                            temp_mass_jac[i] = 0.0;
                         }
                         
-                        // CRITICAL FIX: Match CPU behavior - pass workspace DOF directly
-                        // CPU minimizer.pyx line 898: compset.phase_record.formulamole_grad(csst.mass_jac[comp_idx, :], x, comp_idx)
-                        // The CPU passes the full workspace DOF array, not phase DOF
+                        // Call formulamole_grad with workspace DOF
+                        compset->phase_record->formulamole_grad(temp_mass_jac, compset->dof);
                         
-                        // Call formulamole_grad with workspace DOF (matching CPU)
-                        compset->phase_record->formulamole_grad(mass_jac_temp, compset->dof);
+                        // Zero out the full mass_jac array
+                        for (int i = 0; i < csst->mass_jac_rows * csst->mass_jac_cols; ++i) {
+                            csst->mass_jac[i] = 0.0;
+                        }
+                        
+                        // Map the reduced gradient to full workspace format
+                        // CSE outputs: [comp0_dT, comp0_dY1, comp0_dY2, ..., comp1_dT, comp1_dY1, comp1_dY2, ...]
+                        // Full format expects: [comp0_dN, comp0_dP, comp0_dT, comp0_dY1, comp0_dY2, ..., comp1_dN, comp1_dP, comp1_dT, ...]
+                        int reduced_cols = 1 + compset->phase_record->phase_dof; // T + site fractions
+                        int full_cols = spec->num_statevars + compset->phase_record->phase_dof;
+                        
+                        for (int comp_idx = 0; comp_idx < spec->num_components; ++comp_idx) {
+                            // Temperature derivative (index 0 in reduced -> index 2 in full)
+                            csst->mass_jac[comp_idx * full_cols + 2] = temp_mass_jac[comp_idx * reduced_cols + 0];
+                            
+                            // Site fraction derivatives (indices 1..n in reduced -> indices num_statevars..num_statevars+n-1 in full)
+                            for (int j = 0; j < compset->phase_record->phase_dof; ++j) {
+                                csst->mass_jac[comp_idx * full_cols + spec->num_statevars + j] = 
+                                    temp_mass_jac[comp_idx * reduced_cols + 1 + j];
+                            }
+                        }
                         
                         // DEBUG: Print raw gradient values from formulamole_grad
                         if (idx == 0 && iteration < 2) {
                             printf("GPU DEBUG: Raw formulamole_grad output (phase %d):\n", idx);
-                            // CRITICAL: The gradient function outputs workspace DOF gradients [dN, dP, dT, dY_NB, dY_TI]
-                            // but we passed phase DOF [P, T, Y_NB, Y_TI]
-                            // The function still generates all workspace gradients, so we need to read accordingly
-                            int workspace_dof_count = spec->num_statevars + compset->phase_record->phase_dof;
+                            int reduced_cols = 1 + compset->phase_record->phase_dof;
                             for (int comp_idx = 0; comp_idx < spec->num_components && comp_idx < 2; ++comp_idx) {
-                                printf("  Component %d gradients (workspace DOF): ", comp_idx);
-                                for (int j = 0; j < workspace_dof_count && j < 5; ++j) {
-                                    printf("d/dx[%d]=%e ", j, mass_jac_temp[comp_idx * workspace_dof_count + j]);
+                                printf("  Component %d gradients (reduced format): ", comp_idx);
+                                for (int j = 0; j < reduced_cols; ++j) {
+                                    printf("d/d[T,Y1,Y2][%d]=%e ", j, temp_mass_jac[comp_idx * reduced_cols + j]);
                                 }
                                 printf("\n");
-                            }
-                        }
-                        
-                        // Copy to csst mass_jac array
-                        // CRITICAL FIX: The gradient function outputs workspace DOF gradients
-                        // even though we passed phase DOF. The output is still [dN, dP, dT, dY_NB, dY_TI]
-                        int workspace_dof_count = spec->num_statevars + compset->phase_record->phase_dof;
-                        for (int comp_idx = 0; comp_idx < spec->num_components; ++comp_idx) {
-                            // The gradients are already in workspace DOF format, just copy directly
-                            for (int j = 0; j < csst->mass_jac_cols; ++j) {
-                                if (j < workspace_dof_count) {
-                                    csst->mass_jac[comp_idx * csst->mass_jac_cols + j] = 
-                                        mass_jac_temp[comp_idx * workspace_dof_count + j];
-                                } else {
-                                    csst->mass_jac[comp_idx * csst->mass_jac_cols + j] = 0.0;
-                                }
                             }
                         }
                         
@@ -2045,17 +2218,16 @@ typedef struct SystemState {
             // REMOVED: Old code that created current_dof_for_phase incorrectly
             // Now we create model_dof_for_calcs properly from workspace DOF when needed
 
-            double phase_sum_moles_atoms_per_formula = 0.0;
-            for(int c=0; c < spec->num_components; ++c) {
-                double comp_val = phase_compositions[idx * MAX_COMPONENTS + c];
-                // Safety check: ensure composition values are reasonable
-                if (comp_val >= 0.0 && comp_val <= 10.0) { // Reasonable range for moles per formula unit
-                    phase_sum_moles_atoms_per_formula += comp_val;
-                }
-            }
-            // More robust fallback for phase_sum_moles_atoms_per_formula
+            // CRITICAL FIX: Use the initial phase_comp_sum stored during construction
+            // This matches CPU behavior where the site ratio sum is constant for multi-sublattice phases
+            // DO NOT recalculate from current compositions as this gives wrong values!
+            double phase_sum_moles_atoms_per_formula = spec->initial_phase_comp_sum[idx];
+            
+            // Fallback if not initialized properly
             if (phase_sum_moles_atoms_per_formula < 1e-12 || phase_sum_moles_atoms_per_formula > 100.0) {
                 phase_sum_moles_atoms_per_formula = 1.0; // Safe fallback
+                printf("[GPU WARNING] Phase %d: initial_phase_comp_sum invalid (%.15e), using fallback 1.0\n", 
+                       idx, spec->initial_phase_comp_sum[idx]);
             }
 
             // Call compset update. NP is moles of formula units.
@@ -2079,11 +2251,12 @@ typedef struct SystemState {
             // The update function expects workspace state variables, not model state variables
             compset->update(&compset->dof[spec->num_statevars], update_amount, compset->dof, spec->num_statevars);
             
-            // csst->energy will be G (from pr->obj)
+            // csst->energy will be G per formula unit (from pr->formulaobj)
             // Pass full workspace DOF to energy calculation, matching CPU behavior
             // The generated functions now expect workspace DOF format [N, P, T, Y1, Y2...]
-            // CRITICAL FIX: Use pr->obj() not pr->formulaobj() to match CompositionSet
-            csst->energy = pr->obj(compset->dof);
+            // CRITICAL FIX: Use pr->formulaobj() for equilibrium matrix (per formula unit, not per mole atoms)
+            // This matches the CPU behavior where equilibrium matrix uses unnormalized energy values
+            csst->energy = pr->formulaobj(compset->dof);
             
             // Add numerical debug output for phase energy
             printf("[GPU]   phase_%d_comp_sum: %.15e\n", idx, phase_sum_moles_atoms_per_formula);
@@ -2134,41 +2307,59 @@ typedef struct SystemState {
                         printf("%e ", compset->dof[k]);
                     }
                     printf("\n");
+                    printf("[GPU MASS_JAC DEBUG] pr->num_statevars=%d, spec->num_statevars=%d, pr->phase_dof=%d\n",
+                           pr->num_statevars, spec->num_statevars, pr->phase_dof);
                 }
                 pr->formulamole_grad(temp_mass_jac, compset->dof);
+                
+                // DEBUG: Print raw formulamole_grad output
+                if (iteration < 2) {
+                    printf("GPU DEBUG: Raw formulamole_grad output (phase %d):\n", idx);
+                    // CRITICAL FIX: CSE functions output in reduced format [T, Y1, Y2, ...]
+                    // So the gradient matrix is nonvacant_elements x (1 + phase_dof)
+                    int reduced_cols = 1 + pr->phase_dof; // T + site fractions
+                    for (int i = 0; i < pr->nonvacant_elements && i < 3; i++) {
+                        printf("  Component %d gradients (CSE format [T,Y1,Y2]): ", i);
+                        for (int j = 0; j < reduced_cols && j < 5; j++) {
+                            printf("[%d]=%e ", j, temp_mass_jac[i * reduced_cols + j]);
+                        }
+                        printf("\n");
+                    }
+                }
             } else {
                 printf("GPU ERROR: formulamole_grad is null for phase %d\\n", idx);
             }
             
             // Now copy the gradients to the correct positions in csst->mass_jac
-            // We need to map from nonvacant element indices to component indices
+            // CRITICAL FIX: CSE functions output in reduced format [T, Y1, Y2, ...]
+            // We need to map this to workspace format [N, P, T, Y1, Y2, ...]
             int nonvacant_idx = 0;
+            int reduced_cols = 1 + pr->phase_dof; // CSE output columns: T + site fractions
+            
             for (int comp_idx = 0; comp_idx < spec->num_components; comp_idx++) {
                 // Check if this component is a nonvacant element
                 // For now, assume components are ordered as [NB, TI, VA] and nonvacant are [NB, TI]
                 if (comp_idx < pr->nonvacant_elements) {
                     // This is a nonvacant element - copy its gradients
-                    // Map from Model DOF to Workspace DOF
-                    for (int model_col = 0; model_col < pr->num_statevars + pr->phase_dof; model_col++) {
+                    // First, zero out the entire row
+                    for (int col = 0; col < csst->mass_jac_cols; col++) {
+                        csst->mass_jac[comp_idx * csst->mass_jac_cols + col] = 0.0;
+                    }
+                    
+                    // Map from CSE reduced format to Workspace DOF
+                    for (int cse_col = 0; cse_col < reduced_cols; cse_col++) {
                         int workspace_col;
-                        if (model_col < pr->num_statevars) {
-                            // State variable column - need to map from Model to Workspace format
-                            // Model has [T, ...] while Workspace has [N, P, T, ...]
-                            if (pr->num_statevars == 1 && spec->num_statevars >= 3) {
-                                // Model has only T, map to workspace T position
-                                workspace_col = 2; // T is at position 2 in [N, P, T]
-                            } else {
-                                // Direct mapping for other cases
-                                workspace_col = model_col;
-                            }
+                        if (cse_col == 0) {
+                            // Temperature column in CSE -> position 2 in workspace [N, P, T]
+                            workspace_col = 2;
                         } else {
-                            // Site fraction column - offset by workspace num_statevars
-                            workspace_col = spec->num_statevars + (model_col - pr->num_statevars);
+                            // Site fraction columns: cse_col 1,2,... -> workspace cols 3,4,...
+                            workspace_col = spec->num_statevars + (cse_col - 1);
                         }
                         
                         if (workspace_col < csst->mass_jac_cols) {
                             csst->mass_jac[comp_idx * csst->mass_jac_cols + workspace_col] = 
-                                temp_mass_jac[nonvacant_idx * (pr->num_statevars + pr->phase_dof) + model_col];
+                                temp_mass_jac[nonvacant_idx * reduced_cols + cse_col];
                         }
                     }
                     nonvacant_idx++;
@@ -2184,10 +2375,11 @@ typedef struct SystemState {
             // So d(moles_i)/d(Y_j) = 0 for i != j
             // The generated formulamole_grad function already handles this correctly
             
-            // DEBUG: Print mass_jac matrix for phase 0
-            if (idx == 0 && iteration < 2) {
-                printf("GPU DEBUG: Phase %d mass_jac matrix:\\n", idx);
-                for (int comp_idx = 0; comp_idx < spec->num_components; comp_idx++) {
+            // DEBUG: Print mass_jac matrix
+            if (iteration < 2) {
+                printf("GPU DEBUG: Phase %d mass_jac matrix (workspace DOF format):\\n", idx);
+                printf("  Columns: [N, P, T, Y_NB, Y_TI, ...]\\n");
+                for (int comp_idx = 0; comp_idx < spec->num_components && comp_idx < 3; comp_idx++) {
                     printf("  Component %d: ", comp_idx);
                     for (int col = 0; col < csst->mass_jac_cols && col < 5; col++) {
                         printf("%e ", csst->mass_jac[comp_idx * csst->mass_jac_cols + col]);
@@ -2206,11 +2398,44 @@ typedef struct SystemState {
                     }
                     printf("\n");
                 }
-                pr->formulahess(csst->hess, compset->dof);
+                // Temporary array to hold the reduced Hessian output from CSE functions
+                double temp_hess[(MAX_DOF_PER_PHASE + 1) * (MAX_DOF_PER_PHASE + 1)];
+                pr->formulahess(temp_hess, compset->dof);
                 
-                // NOTE: GPU hessian has spurious terms from /(Y_NB + Y_TI) divisor
-                // but fixing it here doesn't improve convergence significantly.
-                // The issue might be elsewhere in the solver.
+                // Map the reduced Hessian (T + site fractions) to the full matrix (N, P, T + site fractions)
+                // The CSE Hessian functions output a (1 + phase_dof) x (1 + phase_dof) matrix:
+                // - temp_hess[0] corresponds to d²G/dT² (T,T element) 
+                // - temp_hess[i] corresponds to d²G/dTdY_i (T,site_fraction elements)
+                // - temp_hess[j*(1+phase_dof)+i] corresponds to d²G/dY_i dY_j (site_fraction block)
+                
+                int reduced_dim = 1 + pr->phase_dof; // T + site fractions
+                
+                // Zero out the full Hessian matrix first
+                for (int i = 0; i < csst->hess_rows * csst->hess_cols; ++i) {
+                    csst->hess[i] = 0.0;
+                }
+                
+                // Map T,T element: temp_hess[0] -> csst->hess[2,2] (T is at index 2)
+                csst->hess[2 * csst->hess_cols + 2] = temp_hess[0];
+                
+                // Map T,site_fraction elements: temp_hess[i] -> csst->hess[2, 3+i-1] and csst->hess[3+i-1, 2]
+                for (int i = 1; i < reduced_dim; i++) {
+                    int site_idx = spec->num_statevars + (i - 1); // Convert to full matrix site fraction index
+                    // T,site_fraction element
+                    csst->hess[2 * csst->hess_cols + site_idx] = temp_hess[i];
+                    // site_fraction,T element (symmetric)
+                    csst->hess[site_idx * csst->hess_cols + 2] = temp_hess[i];
+                }
+                
+                // Map site_fraction,site_fraction block
+                for (int i = 1; i < reduced_dim; i++) {
+                    for (int j = 1; j < reduced_dim; j++) {
+                        int reduced_idx = i * reduced_dim + j;
+                        int full_row = spec->num_statevars + (i - 1);
+                        int full_col = spec->num_statevars + (j - 1);
+                        csst->hess[full_row * csst->hess_cols + full_col] = temp_hess[reduced_idx];
+                    }
+                }
                 
         // DEBUG: Print Hessian values
         // DEBUG: Print Hessian values
@@ -2260,7 +2485,29 @@ typedef struct SystemState {
                 printf("GPU ERROR: formulagrad pointer is null, skipping\n");
                 // Set gradient to zero (already initialized)
             } else {
-                pr->formulagrad(csst->grad, compset->dof);
+                // CSE gradient functions output reduced gradient in the correct order
+                // Expected order: [dG/dT, dG/dY1, dG/dY2, ...]
+                double temp_grad[1 + MAX_DOF_PER_PHASE];  // Temporary array for reduced gradient
+                pr->formulagrad(temp_grad, compset->dof);
+                
+                // Zero out the full gradient array first
+                for (int i = 0; i < csst->grad_length; ++i) {
+                    csst->grad[i] = 0.0;
+                }
+                
+                // Map the reduced gradient to full gradient:
+                // temp_grad[0] -> temperature derivative (index 2 in full gradient)
+                // temp_grad[1..n] -> site fraction derivatives (indices num_statevars+0..num_statevars+n-1)
+                
+                // Temperature derivative
+                csst->grad[2] = temp_grad[0];
+                
+                // Site fraction derivatives
+                for (int i = 0; i < pr->phase_dof; i++) {
+                    csst->grad[spec->num_statevars + i] = temp_grad[1 + i];
+                }
+                
+                // N and P derivatives (indices 0, 1) remain zero as CSE doesn't compute them
             }
             // Completed formulagrad
             
@@ -2283,12 +2530,40 @@ typedef struct SystemState {
             }
             
             pr->internal_cons_func(csst->internal_cons, compset->dof);
-            pr->internal_cons_jac(csst->cons_jac_tmp, compset->dof);
+            
+            // CSE constraint Jacobian functions output reduced format
+            if (pr->internal_cons_jac != nullptr) {
+                // Temporary array for reduced constraint Jacobian
+                // CSE outputs flat array: [dC1/dT, dC1/dY1, dC1/dY2, ..., dC2/dT, dC2/dY1, ...]
+                double temp_cons_jac[(1 + MAX_DOF_PER_PHASE) * MAX_INTERNAL_CONSTRAINTS];
+                pr->internal_cons_jac(temp_cons_jac, compset->dof);
+                
+                // Zero out the full constraint Jacobian first
+                for (int i = 0; i < pr->num_internal_cons * (spec->num_statevars + pr->phase_dof); ++i) {
+                    csst->cons_jac_tmp[i] = 0.0;
+                }
+                
+                // Map the reduced constraint Jacobian to full format
+                // CSE outputs: [dC/dT, dC/dY1, dC/dY2, ...] in flat array
+                // Full format expects: [dC/dN, dC/dP, dC/dT, dC/dY1, dC/dY2, ...] per constraint
+                int reduced_size = 1 + pr->phase_dof; // T + site fractions
+                int full_cols = spec->num_statevars + pr->phase_dof;
+                
+                for (int i = 0; i < pr->num_internal_cons; ++i) {
+                    // Temperature derivative (index 0 in reduced -> index 2 in full)
+                    csst->cons_jac_tmp[i * full_cols + 2] = temp_cons_jac[i * reduced_size + 0];
+                    
+                    // Site fraction derivatives (indices 1..n in reduced -> indices num_statevars..num_statevars+n-1 in full)
+                    for (int j = 0; j < pr->phase_dof; ++j) {
+                        csst->cons_jac_tmp[i * full_cols + spec->num_statevars + j] = temp_cons_jac[i * reduced_size + 1 + j];
+                    }
+                }
+            }
             
             // DEBUG: Print constraint Jacobian values
             if (idx == 0 && iteration < 2 && pr->num_internal_cons > 0) {
                 printf("GPU DEBUG: Constraint Jacobian for phase %d (num_cons=%d):\n", idx, pr->num_internal_cons);
-                int cons_jac_dim = pr->num_statevars + pr->phase_dof;
+                int cons_jac_dim = spec->num_statevars + pr->phase_dof;
                 for (int i = 0; i < pr->num_internal_cons; ++i) {
                     printf("  Constraint %d: ", i);
                     for (int j = 0; j < cons_jac_dim; ++j) {
@@ -2404,10 +2679,30 @@ typedef struct SystemState {
             for (int i = 0; i < num_phase_dof_for_csst; ++i) {
                 for (int j = 0; j < num_phase_dof_for_csst; ++j) {
                     for (int sv_idx = 0; sv_idx < spec->num_statevars; ++sv_idx) {
-                        csst->c_statevars[i * csst->c_statevars_cols + sv_idx] -=
-                            csst->full_e_matrix[i * csst->full_e_matrix_dim + j] *
-                            csst->hess[(spec->num_statevars + j) * csst->hess_cols + sv_idx];
+                        // With CSE Hessian functions, only T derivatives (sv_idx=2) are non-zero
+                        // N and P derivatives (sv_idx=0,1) are always zero
+                        if (sv_idx == 2) { // Temperature index
+                            csst->c_statevars[i * csst->c_statevars_cols + sv_idx] -=
+                                csst->full_e_matrix[i * csst->full_e_matrix_dim + j] *
+                                csst->hess[(spec->num_statevars + j) * csst->hess_cols + sv_idx];
+                        }
+                        // For N and P (sv_idx=0,1), the derivative is zero, so no contribution
                     }
+                }
+            }
+            
+            // CRITICAL FIX: Calculate c_component IMMEDIATELY after phase matrix inversion
+            // This must be done before fill_equilibrium_system uses c_component
+            // DEBUG: Print mass_jac values before c_component calculation
+            if (thread_id == 0 && iteration < 2) {
+                printf("[GPU DEBUG] Phase %d mass_jac BEFORE c_component calc (phase_dof=%d, num_elements=%d):\n", 
+                       idx, pr->phase_dof, pr->num_elements);
+                for (int cidx = 0; cidx < spec->num_components && cidx < 3; cidx++) {
+                    printf("  Component %d: ", cidx);
+                    for (int col = spec->num_statevars; col < spec->num_statevars + pr->phase_dof && col < spec->num_statevars + 3; col++) {
+                        printf("mass_jac[%d,%d]=%e ", cidx, col, csst->mass_jac[cidx * csst->mass_jac_cols + col]);
+                    }
+                    printf("\n");
                 }
             }
             
@@ -2422,7 +2717,7 @@ typedef struct SystemState {
                             csst->c_component[cidx * csst->c_component_cols + i] += mass_jac_val * e_matrix_val;
                             
                             // DEBUG: Print calculation for BOTH phases
-                            if (thread_id == 0 && iteration == 0 && cidx < 2 && i == 0 && j < 2) {
+                            if (thread_id == 0 && iteration < 2 && cidx < 2 && i < 2 && j < 2) {
                                 printf("  Phase %d: c_component[%d,%d] += mass_jac[%d,%d]=%e * e_matrix[%d,%d]=%e = %e\n",
                                        idx, cidx, i, cidx, spec->num_statevars + j, mass_jac_val, i, j, e_matrix_val,
                                        mass_jac_val * e_matrix_val);
@@ -2436,12 +2731,27 @@ typedef struct SystemState {
             if (thread_id == 0 && iteration < 5) {
                 printf("[GPU C_COMPONENT] Phase %d matrix (iter %d):\n", idx, iteration);
                 printf("  phase_amt = %.15e\n", phase_amt[idx]);
+                printf("  phase_dof = %d, num_elements = %d\n", pr->phase_dof, pr->num_elements);
                 for (int cidx = 0; cidx < 2; cidx++) {
                     printf("  Component %d: ", cidx);
                     for (int i = 0; i < 2; i++) {
                         printf("%e ", csst->c_component[cidx * csst->c_component_cols + i]);
                     }
                     printf("\n");
+                }
+                
+                // Check if c_component is all zeros
+                bool all_zeros = true;
+                for (int cidx = 0; cidx < spec->num_components && cidx < pr->num_elements; cidx++) {
+                    for (int i = 0; i < pr->phase_dof; i++) {
+                        if (fabs(csst->c_component[cidx * csst->c_component_cols + i]) > 1e-15) {
+                            all_zeros = false;
+                            break;
+                        }
+                    }
+                }
+                if (all_zeros) {
+                    printf("  WARNING: c_component is all zeros!\n");
                 }
             }
             for (int cidx = 0; cidx < spec->num_components; ++cidx) {
@@ -2466,6 +2776,14 @@ typedef struct SystemState {
                         csst->moles_normalization_grad[i_dof] += csst->mass_jac[cidx * csst->mass_jac_cols + i_dof];
                     }
                  }
+            }
+            
+            // DEBUG: Print moles_normalization for each phase
+            if (thread_id == 0 && iteration < 2) {
+                printf("[GPU MOLES_NORM] Phase %d: moles_normalization = %e (should be ~%e for %d sublattices)\n", 
+                       idx, csst->moles_normalization, 
+                       pr->phase_dof > 2 ? 20.0 : 1.0,  // Rough estimate
+                       pr->phase_dof > 2 ? 2 : 1);
             }
         }
         delta_ms_rows = num_compsets; // Update after loop in case num_compsets changed (though not in recompute)
@@ -2872,13 +3190,23 @@ __device__ void write_row_fixed_mole_amount(double* out_row, double* out_rhs,
     int free_variable_column_offset = 0;
     int num_system_statevars = c_statevars_cols_cs;
     
+    // CRITICAL FIX: Normalize by moles_normalization to handle multi-sublattice phases correctly
+    // This ensures all phases contribute equally to the system amount constraint regardless of site ratios
+    double normalization_factor = (moles_normalization_cs > 1e-12) ? moles_normalization_cs : 1.0;
+    
+    // DEBUG: Print normalization factor for each phase
+    if (component_idx == 0 && phase_amt_sys[compset_original_idx_sys] > 1e-10) {
+        printf("[GPU SYSTEM AMOUNT] Phase %d: moles_norm=%e, using factor=%e\n", 
+               compset_original_idx_sys, moles_normalization_cs, normalization_factor);
+    }
+    
     // 2a. This component row: free chemical potentials
     for (int i = 0; i < num_free_chemical_potentials; ++i) {
         int chempot_idx = free_chemical_potential_indices[i];
         for (int j = 0; j < c_component_cols_cs; ++j) {  // j is phase_dof index
-            // out_row[offset + i] += phase_amt * mass_jac[comp_idx, num_sv+j] * c_component[chempot_idx, j]
+            // out_row[offset + i] += phase_amt * mass_jac[comp_idx, num_sv+j] * c_component[chempot_idx, j] / moles_norm
             out_row[free_variable_column_offset + i] += 
-                phase_amt_sys[compset_original_idx_sys] * 
+                (phase_amt_sys[compset_original_idx_sys] / normalization_factor) * 
                 mass_jac_cs[component_idx * mass_jac_cols_cs + num_system_statevars + j] * 
                 c_component_cs[chempot_idx * c_component_cols_cs + j];
         }
@@ -2890,8 +3218,8 @@ __device__ void write_row_fixed_mole_amount(double* out_row, double* out_rhs,
         int compset_idx = free_stable_compset_indices[i];
         // Only fill this out if the current idx is equal to a free composition set
         if (compset_idx == compset_original_idx_sys) {
-            // For fixed_mole_amount, the coefficient is just the mass of this component
-            out_row[free_variable_column_offset + i] += masses_cs[component_idx];
+            // For fixed_mole_amount, the coefficient is the mass of this component normalized by moles_normalization
+            out_row[free_variable_column_offset + i] += masses_cs[component_idx] / normalization_factor;
         }
     }
     free_variable_column_offset += num_free_stable_compsets;
@@ -2900,17 +3228,17 @@ __device__ void write_row_fixed_mole_amount(double* out_row, double* out_rhs,
     for (int i = 0; i < num_free_statevars; ++i) {
         int statevar_idx = free_statevar_indices[i];
         for (int j = 0; j < c_statevars_cols_cs; ++j) {  // j is phase_dof index
-            // out_row[offset + i] += phase_amt * mass_jac[comp_idx, num_sv+j] * c_statevars[j, statevar_idx]
+            // out_row[offset + i] += phase_amt * mass_jac[comp_idx, num_sv+j] * c_statevars[j, statevar_idx] / moles_norm
             out_row[free_variable_column_offset + i] += 
-                phase_amt_sys[compset_original_idx_sys] * 
+                (phase_amt_sys[compset_original_idx_sys] / normalization_factor) * 
                 mass_jac_cs[component_idx * mass_jac_cols_cs + num_system_statevars + j] * 
                 c_statevars_cs[j * c_statevars_cols_cs + statevar_idx];
         }
     }
     
-    // 3. RHS contribution from c_G
+    // 3. RHS contribution from c_G (also needs normalization)
     for (int j = 0; j < c_G_length_cs; ++j) {
-        *out_rhs += -phase_amt_sys[compset_original_idx_sys] * 
+        *out_rhs += -(phase_amt_sys[compset_original_idx_sys] / normalization_factor) * 
                     mass_jac_cs[component_idx * mass_jac_cols_cs + num_system_statevars + j] * 
                     c_G_cs[j];
     }
@@ -2920,7 +3248,7 @@ __device__ void write_row_fixed_mole_amount(double* out_row, double* out_rhs,
         int chempot_idx = fixed_chemical_potential_indices[i];
         // 6. Subtract fixed chemical potentials from the N=1 row
         for (int j = 0; j < c_component_cols_cs; ++j) {
-            *out_rhs -= phase_amt_sys[compset_original_idx_sys] * 
+            *out_rhs -= (phase_amt_sys[compset_original_idx_sys] / normalization_factor) * 
                         current_chemical_potentials_sys[chempot_idx] * 
                         mass_jac_cs[component_idx * mass_jac_cols_cs + num_system_statevars + j] * 
                         c_component_cs[chempot_idx * c_component_cols_cs + j];
@@ -3735,20 +4063,65 @@ __device__ bool remove_and_consolidate_phases(SystemSpecification* spec, SystemS
                 }
                 if (num_to_remove < MAX_PHASES) compset_indices_to_remove_temp[num_to_remove++] = idx2;
                 
-                // CRITICAL FIX: Match CPU behavior - just add phase amounts, don't average site fractions
-                // CPU code at line 1480: state.phase_amt[idx] = max(state.phase_amt[idx] + state.phase_amt[idx2], 1e-8)
-                // CPU keeps the site fractions of idx1 unchanged and just adds the amounts
-                double total_amt = state->phase_amt[idx1] + state->phase_amt[idx2];
-                state->phase_amt[idx1] = fmax(total_amt, 1e-8);
+                // CRITICAL FIX: Match CPU behavior - add phase amounts but account for normalization
+                // Phase amounts are stored in formula units (normalized by moles_normalization)
+                // When consolidating, we need to convert to moles, add, then re-normalize
                 
-                // DEBUG: What happens after consolidation
-                if (thread_id == 0 && state->iteration < 2) {
-                    printf("[CONSOLIDATION] Consolidated phases %d and %d:\n", idx1, idx2);
-                    printf("  Phase %d: amount=%.15e, X=[%.15e, %.15e]\n", 
-                           idx1, state->phase_amt[idx1],
+                // Get moles_normalization for both phases (sum of moles per formula unit)
+                double moles_norm1 = state->cs_states[idx1].moles_normalization;
+                double moles_norm2 = state->cs_states[idx2].moles_normalization;
+                
+                // DEBUG: Print moles_normalization values
+                if (thread_id == 0) {
+                    printf("[GPU CONSOLIDATION DEBUG] Phase %d moles_norm=%e, phase %d moles_norm=%e\n",
+                           idx1, moles_norm1, idx2, moles_norm2);
+                }
+                
+                // For single sublattice phases, moles_normalization should be 1.0
+                // since there's only one site and site fractions sum to 1
+                // If moles_normalization is not calculated yet, fall back to simple addition
+                double old_amt1 = state->phase_amt[idx1];
+                double old_amt2 = state->phase_amt[idx2];
+                
+                if (moles_norm1 < 1e-12 || moles_norm2 < 1e-12) {
+                    // Fallback - just add the phase amounts directly
+                    state->phase_amt[idx1] = fmax(state->phase_amt[idx1] + state->phase_amt[idx2], 1e-8);
+                    if (thread_id == 0) {
+                        printf("[GPU CONSOLIDATION] Using direct addition due to zero moles_norm\n");
+                        printf("  Phase amounts: phase %d = %.15e + phase %d = %.15e -> %.15e\n",
+                               idx1, old_amt1, idx2, old_amt2, state->phase_amt[idx1]);
+                    }
+                } else {
+                    // Convert phase amounts from formula units to moles
+                    double moles1 = state->phase_amt[idx1] * moles_norm1;
+                    double moles2 = state->phase_amt[idx2] * moles_norm2;
+                    
+                    // Add the moles
+                    double total_moles = moles1 + moles2;
+                    
+                    // Convert back to formula units using the normalization of the target phase
+                    state->phase_amt[idx1] = fmax(total_moles / moles_norm1, 1e-8);
+                    
+                    // DEBUG: What happens after consolidation
+                    if (thread_id == 0) {
+                        printf("[CONSOLIDATION] Consolidated phases %d and %d:\n", idx1, idx2);
+                        printf("  Moles normalization: phase %d = %.15e, phase %d = %.15e\n",
+                               idx1, moles_norm1, idx2, moles_norm2);
+                        printf("  Phase amounts before: phase %d = %.15e, phase %d = %.15e\n",
+                               idx1, old_amt1, idx2, old_amt2);
+                        printf("  Moles: phase %d = %.15e, phase %d = %.15e, total = %.15e\n",
+                               idx1, moles1, idx2, moles2, total_moles);
+                        printf("  Phase %d: new amount=%.15e (formula units)\n", 
+                               idx1, state->phase_amt[idx1]);
+                    }
+                }
+                
+                if (thread_id == 0) {
+                    // Show compositions
+                    printf("  Phase %d: X=[%.15e, %.15e]\n", 
+                           idx1,
                            state->phase_compositions[idx1 * MAX_COMPONENTS + 0],
                            state->phase_compositions[idx1 * MAX_COMPONENTS + 1]);
-                    printf("  Phase %d: amount=%.15e (removed)\n", idx2, state->phase_amt[idx2]);
                     
                     // Also show site fractions
                     CompositionSet* cs1 = &state->compsets[idx1];
@@ -5112,77 +5485,1965 @@ __device__ void solve_equilibrium_at_condition(
 
 // --- Dynamically Generated __device__ Model Functions ---
 __device__ double pycgpu_model_0_obj(const double* x) {
-    return 1.0*(x[3]*((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : (0))) + x[4]*((x[2] < 1155.0) ? (-1272.064 + 134.71418*x[2] - 25.5768*x[2]*log(x[2]) + 7208.0*pow(x[2], (-1.0)) - 0.000663845*pow(x[2], 2.0) - 2.78803e-07*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (6667.385 + 105.366379*x[2] - 22.3771*x[2]*log(x[2]) - 2002750.0*pow(x[2], (-1.0)) + 0.00121707*pow(x[2], 2.0) - 8.4534e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (26483.26 - 182.426471*x[2] + 19.0900905*x[2]*log(x[2]) + 1400501.0*pow(x[2], (-1.0)) - 0.02200832*pow(x[2], 2.0) + 1.228863e-06*pow(x[2], 3.0)) : (0)))))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : (0)) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : (0)))/(x[3] + x[4]) + 13045.3*x[3]*x[4]/(x[3] + x[4]);
+    double x0 = pow(9.0*x[3] + 11.0*(x[4] + x[5]), -1);
+    double x1 = pow(x[2], 3.0);
+    double x2 = pow(x[2], -1.0);
+    double x3 = x[2]*log(x[2]);
+    double x4 = pow(x[2], 2.0);
+    double x5 = pow(x[2], -9.0);
+    double x6 = 74092.0*x2;
+    double x7 = 9.0*((x[2] < 700.0) ? (
+   -7976.15 + 137.093038*x[2] - 8.77664e-07*x1 - 24.3671976*x3 - 0.001884662*x4 + x6
+)
+: (((x[2] < 933.47 && 700.0 <= x[2])) ? (
+   -11276.24 + 223.048446*x[2] - 5.764227e-06*x1 - 38.5844296*x3 + 0.018531982*x4 + x6
+)
+: ((933.47 <= x[2]) ? (
+   -11278.378 + 188.684153*x[2] - 31.748192*x3 - 1.230524e+28*x5
+)
+: (
+   0
+))));
+    return x0*(x[5]*x[3]*(x7 + 11.0*((x[2] < 1811.0) ? (
+   1225.7 + 124.134*x[2] - 5.8927e-08*x1 + 77359.0*x2 - 23.5143*x3 - 0.00439752*x4
+)
+: ((1811.0 <= x[2]) ? (
+   -25383.581 + 299.31255*x[2] - 46.0*x3 + 2.29603e+31*x5
+)
+: (
+   0
+)))) + (-420000.0 + 18.0*x[2] + x7 + 11.0*((x[2] < 1357.77) ? (
+   -7770.458 + 130.485235*x[2] + 1.29223e-07*x1 + 52478.0*x2 - 24.112392*x3 - 0.00265684*x4
+)
+: ((1357.77 <= x[2]) ? (
+   -13542.026 + 183.803828*x[2] - 31.38*x3 + 3.64167e+29*x5
+)
+: (
+   0
+))))*x[4]*x[3]) + 8.3145*x[2]*x0*(9.0*((1e-15 < x[3]) ? (
+   x[3]*log(x[3])
+)
+: (
+   0
+)) + 11.0*((1e-15 < x[4]) ? (
+   x[4]*log(x[4])
+)
+: (
+   0
+)) + 11.0*((1e-15 < x[5]) ? (
+   x[5]*log(x[5])
+)
+: (
+   0
+)));
 }
 
 __device__ double pycgpu_model_0_formulaobj(const double* x) {
-    return 1.0*(x[3] + x[4])*(1.0*(x[3]*((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : (0))) + x[4]*((x[2] < 1155.0) ? (-1272.064 + 134.71418*x[2] - 25.5768*x[2]*log(x[2]) + 7208.0*pow(x[2], (-1.0)) - 0.000663845*pow(x[2], 2.0) - 2.78803e-07*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (6667.385 + 105.366379*x[2] - 22.3771*x[2]*log(x[2]) - 2002750.0*pow(x[2], (-1.0)) + 0.00121707*pow(x[2], 2.0) - 8.4534e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (26483.26 - 182.426471*x[2] + 19.0900905*x[2]*log(x[2]) + 1400501.0*pow(x[2], (-1.0)) - 0.02200832*pow(x[2], 2.0) + 1.228863e-06*pow(x[2], 3.0)) : (0)))))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : (0)) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : (0)))/(x[3] + x[4]) + 13045.3*x[3]*x[4]/(x[3] + x[4]));
+    double x0 = 9.0*x[3] + 11.0*(x[4] + x[5]);
+    double x1 = pow(x0, -1);
+    double x2 = pow(x[2], 3.0);
+    double x3 = pow(x[2], -1.0);
+    double x4 = x[2]*log(x[2]);
+    double x5 = pow(x[2], 2.0);
+    double x6 = pow(x[2], -9.0);
+    double x7 = 74092.0*x3;
+    double x8 = 9.0*((x[2] < 700.0) ? (
+   -7976.15 + 137.093038*x[2] - 8.77664e-07*x2 - 24.3671976*x4 - 0.001884662*x5 + x7
+)
+: (((x[2] < 933.47 && 700.0 <= x[2])) ? (
+   -11276.24 + 223.048446*x[2] - 5.764227e-06*x2 - 38.5844296*x4 + 0.018531982*x5 + x7
+)
+: ((933.47 <= x[2]) ? (
+   -11278.378 + 188.684153*x[2] - 31.748192*x4 - 1.230524e+28*x6
+)
+: (
+   0
+))));
+    return x0*(x1*(x[5]*x[3]*(x8 + 11.0*((x[2] < 1811.0) ? (
+   1225.7 + 124.134*x[2] - 5.8927e-08*x2 + 77359.0*x3 - 23.5143*x4 - 0.00439752*x5
+)
+: ((1811.0 <= x[2]) ? (
+   -25383.581 + 299.31255*x[2] - 46.0*x4 + 2.29603e+31*x6
+)
+: (
+   0
+)))) + (-420000.0 + 18.0*x[2] + x8 + 11.0*((x[2] < 1357.77) ? (
+   -7770.458 + 130.485235*x[2] + 1.29223e-07*x2 + 52478.0*x3 - 24.112392*x4 - 0.00265684*x5
+)
+: ((1357.77 <= x[2]) ? (
+   -13542.026 + 183.803828*x[2] - 31.38*x4 + 3.64167e+29*x6
+)
+: (
+   0
+))))*x[4]*x[3]) + 8.3145*x[2]*x1*(9.0*((1e-15 < x[3]) ? (
+   x[3]*log(x[3])
+)
+: (
+   0
+)) + 11.0*((1e-15 < x[4]) ? (
+   x[4]*log(x[4])
+)
+: (
+   0
+)) + 11.0*((1e-15 < x[5]) ? (
+   x[5]*log(x[5])
+)
+: (
+   0
+))));
 }
 
 __device__ void pycgpu_model_0_formulagrad(double* out, const double* x) {
-    out[0] = 1.0*(x[3] + x[4])*(1.0*(x[3]*((x[2] < 2750.0) ? (0) : ((2750.0 <= x[2]) ? (0) : (0))) + x[4]*((x[2] < 1155.0) ? (0) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (0) : ((1941.0 <= x[2]) ? (0) : (0)))))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (0) : (0)) + 1.0*((1e-15 < x[4]) ? (0) : (0)))/(x[3] + x[4]));
-    out[1] = 1.0*(x[3] + x[4])*(1.0*(x[3]*((x[2] < 2750.0) ? (0) : ((2750.0 <= x[2]) ? (0) : (0))) + x[4]*((x[2] < 1155.0) ? (0) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (0) : ((1941.0 <= x[2]) ? (0) : (0)))))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (0) : (0)) + 1.0*((1e-15 < x[4]) ? (0) : (0)))/(x[3] + x[4]));
-    out[2] = 1.0*(x[3] + x[4])*(1.0*(x[3]*((x[2] < 2750.0) ? (115.574375 - 93399.0*pow(x[2], (-2.0)) + 0.00040695*pow(x[2], 1.0) - 1.05036e-06*pow(x[2], 2.0) - 26.4711*log(x[2])) : ((2750.0 <= x[2]) ? (229.950843 - 1.3754142e+33*pow(x[2], (-10.0)) - 41.77*log(x[2])) : (0))) + x[4]*((x[2] < 1155.0) ? (109.13738 - 7208.0*pow(x[2], (-2.0)) - 0.00132769*pow(x[2], 1.0) - 8.36409e-07*pow(x[2], 2.0) - 25.5768*log(x[2])) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (82.989279 + 2002750.0*pow(x[2], (-2.0)) + 0.00243414*pow(x[2], 1.0) - 2.53602e-06*pow(x[2], 2.0) - 22.3771*log(x[2])) : ((1941.0 <= x[2]) ? (-163.3363805 - 1400501.0*pow(x[2], (-2.0)) - 0.04401664*pow(x[2], 1.0) + 3.686589e-06*pow(x[2], 2.0) + 19.0900905*log(x[2])) : (0)))))/(x[3] + x[4]) + 8.3145*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : (0)) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : (0)))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (0) : (0)) + 1.0*((1e-15 < x[4]) ? (0) : (0)))/(x[3] + x[4]));
-    out[3] = 1.0*(x[3] + x[4])*(-1.0*(x[3]*((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : (0))) + x[4]*((x[2] < 1155.0) ? (-1272.064 + 134.71418*x[2] - 25.5768*x[2]*log(x[2]) + 7208.0*pow(x[2], (-1.0)) - 0.000663845*pow(x[2], 2.0) - 2.78803e-07*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (6667.385 + 105.366379*x[2] - 22.3771*x[2]*log(x[2]) - 2002750.0*pow(x[2], (-1.0)) + 0.00121707*pow(x[2], 2.0) - 8.4534e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (26483.26 - 182.426471*x[2] + 19.0900905*x[2]*log(x[2]) + 1400501.0*pow(x[2], (-1.0)) - 0.02200832*pow(x[2], 2.0) + 1.228863e-06*pow(x[2], 3.0)) : (0)))))/pow((x[3] + x[4]), 2) + 13045.3*x[4]/(x[3] + x[4]) + 1.0*(x[3]*((x[2] < 2750.0) ? (0) : ((2750.0 <= x[2]) ? (0) : (0))) + x[4]*((x[2] < 1155.0) ? (0) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (0) : ((1941.0 <= x[2]) ? (0) : (0)))) + ((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : (0))))/(x[3] + x[4]) - 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : (0)) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : (0)))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*(1.0*((1e-15 < x[4]) ? (0) : (0)) + 1.0*((1e-15 < x[3]) ? (1 + log(x[3])) : (0)))/(x[3] + x[4]) - 13045.3*x[3]*x[4]/pow((x[3] + x[4]), 2)) + 1.0*(1.0*(x[3]*((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : (0))) + x[4]*((x[2] < 1155.0) ? (-1272.064 + 134.71418*x[2] - 25.5768*x[2]*log(x[2]) + 7208.0*pow(x[2], (-1.0)) - 0.000663845*pow(x[2], 2.0) - 2.78803e-07*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (6667.385 + 105.366379*x[2] - 22.3771*x[2]*log(x[2]) - 2002750.0*pow(x[2], (-1.0)) + 0.00121707*pow(x[2], 2.0) - 8.4534e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (26483.26 - 182.426471*x[2] + 19.0900905*x[2]*log(x[2]) + 1400501.0*pow(x[2], (-1.0)) - 0.02200832*pow(x[2], 2.0) + 1.228863e-06*pow(x[2], 3.0)) : (0)))))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : (0)) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : (0)))/(x[3] + x[4]) + 13045.3*x[3]*x[4]/(x[3] + x[4]));
-    out[4] = 1.0*(x[3] + x[4])*(-1.0*(x[3]*((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : (0))) + x[4]*((x[2] < 1155.0) ? (-1272.064 + 134.71418*x[2] - 25.5768*x[2]*log(x[2]) + 7208.0*pow(x[2], (-1.0)) - 0.000663845*pow(x[2], 2.0) - 2.78803e-07*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (6667.385 + 105.366379*x[2] - 22.3771*x[2]*log(x[2]) - 2002750.0*pow(x[2], (-1.0)) + 0.00121707*pow(x[2], 2.0) - 8.4534e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (26483.26 - 182.426471*x[2] + 19.0900905*x[2]*log(x[2]) + 1400501.0*pow(x[2], (-1.0)) - 0.02200832*pow(x[2], 2.0) + 1.228863e-06*pow(x[2], 3.0)) : (0)))))/pow((x[3] + x[4]), 2) + 13045.3*x[3]/(x[3] + x[4]) + 1.0*(x[3]*((x[2] < 2750.0) ? (0) : ((2750.0 <= x[2]) ? (0) : (0))) + x[4]*((x[2] < 1155.0) ? (0) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (0) : ((1941.0 <= x[2]) ? (0) : (0)))) + ((x[2] < 1155.0) ? (-1272.064 + 134.71418*x[2] - 25.5768*x[2]*log(x[2]) + 7208.0*pow(x[2], (-1.0)) - 0.000663845*pow(x[2], 2.0) - 2.78803e-07*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (6667.385 + 105.366379*x[2] - 22.3771*x[2]*log(x[2]) - 2002750.0*pow(x[2], (-1.0)) + 0.00121707*pow(x[2], 2.0) - 8.4534e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (26483.26 - 182.426471*x[2] + 19.0900905*x[2]*log(x[2]) + 1400501.0*pow(x[2], (-1.0)) - 0.02200832*pow(x[2], 2.0) + 1.228863e-06*pow(x[2], 3.0)) : (0)))))/(x[3] + x[4]) - 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : (0)) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : (0)))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (0) : (0)) + 1.0*((1e-15 < x[4]) ? (1 + log(x[4])) : (0)))/(x[3] + x[4]) - 13045.3*x[3]*x[4]/pow((x[3] + x[4]), 2)) + 1.0*(1.0*(x[3]*((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : (0))) + x[4]*((x[2] < 1155.0) ? (-1272.064 + 134.71418*x[2] - 25.5768*x[2]*log(x[2]) + 7208.0*pow(x[2], (-1.0)) - 0.000663845*pow(x[2], 2.0) - 2.78803e-07*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (6667.385 + 105.366379*x[2] - 22.3771*x[2]*log(x[2]) - 2002750.0*pow(x[2], (-1.0)) + 0.00121707*pow(x[2], 2.0) - 8.4534e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (26483.26 - 182.426471*x[2] + 19.0900905*x[2]*log(x[2]) + 1400501.0*pow(x[2], (-1.0)) - 0.02200832*pow(x[2], 2.0) + 1.228863e-06*pow(x[2], 3.0)) : (0)))))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : (0)) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : (0)))/(x[3] + x[4]) + 13045.3*x[3]*x[4]/(x[3] + x[4]));
+    double x0 = pow(x[2], 1.0);
+    double x1 = log(x[2]);
+    double x2 = 23.5143*x1;
+    double x3 = pow(x[2], 2.0);
+    double x4 = pow(x3, -1);
+    double x5 = x[2] < 1811.0;
+    double x6 = pow(x[2], -10.0);
+    double x7 = 46.0*x1;
+    double x8 = 1811.0 <= x[2];
+    double x9 = 24.3671976*x1;
+    double x10 = -74092.0*x4;
+    double x11 = x[2] < 700.0;
+    double x12 = 38.5844296*x1;
+    double x13 = (x[2] < 933.47 && 700.0 <= x[2]);
+    double x14 = 31.748192*x1;
+    double x15 = 933.47 <= x[2];
+    double x16 = 9.0*((x11 == 1) ? (
+   112.7258404 - 0.003769324*x0 + x10 - 2.632992e-06*x3 - x9
+)
+: ((x13 == 1) ? (
+   184.4640164 + 0.037063964*x0 + x10 - x12 - 1.7292681e-05*x3
+)
+: ((x15 == 1) ? (
+   156.935961 - x14 + 1.1074716e+29*x6
+)
+: (
+   0
+))));
+    double x17 = x[5]*x[3];
+    double x18 = 24.112392*x1;
+    double x19 = x[2] < 1357.77;
+    double x20 = 31.38*x1;
+    double x21 = 1357.77 <= x[2];
+    double x22 = x[4]*x[3];
+    double x23 = 9.0*x[3] + 11.0*(x[4] + x[5]);
+    double x24 = pow(x23, -1);
+    double x25 = log(x[3]);
+    double x26 = 1e-15 < x[3];
+    double x27 = log(x[4]);
+    double x28 = 1e-15 < x[4];
+    double x29 = log(x[5]);
+    double x30 = 1e-15 < x[5];
+    double x31 = 9.0*((x26 == 1) ? (
+   x25*x[3]
+)
+: (
+   0
+)) + 11.0*((x28 == 1) ? (
+   x27*x[4]
+)
+: (
+   0
+)) + 11.0*((x30 == 1) ? (
+   x29*x[5]
+)
+: (
+   0
+));
+    double x32 = 8.3145*x24;
+    double x33 = x32*x31;
+    double x34 = 11.0*((x28 == 1) ? (
+   0
+)
+: (
+   0
+));
+    double x35 = 11.0*((x30 == 1) ? (
+   0
+)
+: (
+   0
+));
+    double x36 = 9.0*((x26 == 1) ? (
+   0
+)
+: (
+   0
+));
+    double x37 = x35 + x36;
+    double x38 = x[2]*x32;
+    double x39 = pow(x[2], 3.0);
+    double x40 = pow(x0, -1);
+    double x41 = pow(x[2], -9.0);
+    double x42 = 74092.0*x40;
+    double x43 = 9.0*((x11 == 1) ? (
+   -7976.15 + 137.093038*x[2] - 0.001884662*x3 - 8.77664e-07*x39 + x42 - x[2]*x9
+)
+: ((x13 == 1) ? (
+   -11276.24 + 223.048446*x[2] + 0.018531982*x3 - 5.764227e-06*x39 + x42 - x[2]*x12
+)
+: ((x15 == 1) ? (
+   -11278.378 + 188.684153*x[2] - 1.230524e+28*x41 - x[2]*x14
+)
+: (
+   0
+))));
+    double x44 = -420000.0 + 18.0*x[2] + x43 + 11.0*((x19 == 1) ? (
+   -7770.458 + 130.485235*x[2] - 0.00265684*x3 + 1.29223e-07*x39 + 52478.0*x40 - x[2]*x18
+)
+: ((x21 == 1) ? (
+   -13542.026 + 183.803828*x[2] + 3.64167e+29*x41 - x[2]*x20
+)
+: (
+   0
+)));
+    double x45 = x44*x[3];
+    double x46 = x43 + 11.0*((x5 == 1) ? (
+   1225.7 + 124.134*x[2] - 0.00439752*x3 - 5.8927e-08*x39 + 77359.0*x40 - x[2]*x2
+)
+: ((x8 == 1) ? (
+   -25383.581 + 299.31255*x[2] + 2.29603e+31*x41 - x[2]*x7
+)
+: (
+   0
+)));
+    double x47 = x46*x[3];
+    double x48 = x45*x[4] + x47*x[5];
+    double x49 = x[2]*x33 + x48*x24;
+    double x50 = 9.0*((x11 == 1) ? (
+   0
+)
+: ((x13 == 1) ? (
+   0
+)
+: ((x15 == 1) ? (
+   0
+)
+: (
+   0
+))));
+    double x51 = x17*(x50 + 11.0*((x5 == 1) ? (
+   0
+)
+: ((x8 == 1) ? (
+   0
+)
+: (
+   0
+)))) + x22*(x50 + 11.0*((x19 == 1) ? (
+   0
+)
+: ((x21 == 1) ? (
+   0
+)
+: (
+   0
+))));
+    double x52 = pow(x23, -2);
+    double x53 = x52*x48;
+    double x54 = x[2]*x52*x31;
+    double x55 = 11.0*x49;
+    double x56 = -11.0*x53 - 91.4595*x54;
+    out[0] = x23*(x33 + x24*(x17*(x16 + 11.0*((x5 == 1) ? (
+   100.6197 - 0.00879504*x0 - x2 - 1.76781e-07*x3 - 77359.0*x4
+)
+: ((x8 == 1) ? (
+   253.31255 - 2.066427e+32*x6 - x7
+)
+: (
+   0
+)))) + x22*(18.0 + x16 + 11.0*((x19 == 1) ? (
+   106.372843 - 0.00531368*x0 - x18 + 3.87669e-07*x3 - 52478.0*x4
+)
+: ((x21 == 1) ? (
+   152.423828 - x20 - 3.277503e+30*x6
+)
+: (
+   0
+))))) + (x34 + x37)*x38);
+    out[1] = 9.0*x49 + x23*(-9.0*x53 - 74.8305*x54 + x24*(x51 + x44*x[4] + x46*x[5]) + x38*(x34 + x35 + 9.0*((x26 == 1) ? (
+   1 + x25
+)
+: (
+   0
+))));
+    out[2] = x55 + x23*(x56 + x38*(x37 + 11.0*((x28 == 1) ? (
+   1 + x27
+)
+: (
+   0
+))) + (x45 + x51)*x24);
+    out[3] = x55 + x23*(x56 + x38*(x34 + x36 + 11.0*((x30 == 1) ? (
+   1 + x29
+)
+: (
+   0
+))) + (x47 + x51)*x24);
 }
 
 __device__ void pycgpu_model_0_formulahess(double* out, const double* x) {
-    out[0] = 1.0*(x[3] + x[4])*(1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]));
-    out[1] = 1.0*(x[3] + x[4])*(1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]));
-    out[2] = 1.0*(x[3] + x[4])*(1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 8.3145*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]));
-    out[3] = 1.0*(x[3] + x[4])*(-1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/pow((x[3] + x[4]), 2) + 1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)))/(x[3] + x[4]) - 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4])) + 1.0*(1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]));
-    out[4] = 1.0*(x[3] + x[4])*(-1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/pow((x[3] + x[4]), 2) + 1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) - 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4])) + 1.0*(1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]));
-    out[5] = 1.0*(x[3] + x[4])*(1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]));
-    out[6] = 1.0*(x[3] + x[4])*(1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]));
-    out[7] = 1.0*(x[3] + x[4])*(1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 8.3145*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]));
-    out[8] = 1.0*(x[3] + x[4])*(-1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/pow((x[3] + x[4]), 2) + 1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)))/(x[3] + x[4]) - 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4])) + 1.0*(1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]));
-    out[9] = 1.0*(x[3] + x[4])*(-1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/pow((x[3] + x[4]), 2) + 1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) - 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4])) + 1.0*(1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]));
-    out[10] = 1.0*(x[3] + x[4])*(1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 8.3145*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]));
-    out[11] = 1.0*(x[3] + x[4])*(1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 8.3145*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]));
-    out[12] = 1.0*(x[3] + x[4])*(1.0*(x[3]*((x[2] < 2750.0) ? (0.00040695 - 26.4711*pow(x[2], (-1)) + 186798.0*pow(x[2], (-3.0)) - 2.10072e-06*pow(x[2], 1.0)) : ((2750.0 <= x[2]) ? (-41.77*pow(x[2], (-1)) + 1.3754142e+34*pow(x[2], (-11.0))) : 0)) + x[4]*((x[2] < 1155.0) ? (-0.00132769 - 25.5768*pow(x[2], (-1)) + 14416.0*pow(x[2], (-3.0)) - 1.672818e-06*pow(x[2], 1.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (0.00243414 - 22.3771*pow(x[2], (-1)) - 4005500.0*pow(x[2], (-3.0)) - 5.07204e-06*pow(x[2], 1.0)) : ((1941.0 <= x[2]) ? (-0.04401664 + 19.0900905*pow(x[2], (-1)) + 2801002.0*pow(x[2], (-3.0)) + 7.373178e-06*pow(x[2], 1.0)) : 0))))/(x[3] + x[4]) + 16.629*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]));
-    out[13] = 1.0*(x[3] + x[4])*(-1.0*(x[3]*((x[2] < 2750.0) ? (115.574375 - 93399.0*pow(x[2], (-2.0)) + 0.00040695*pow(x[2], 1.0) - 1.05036e-06*pow(x[2], 2.0) - 26.4711*log(x[2])) : ((2750.0 <= x[2]) ? (229.950843 - 1.3754142e+33*pow(x[2], (-10.0)) - 41.77*log(x[2])) : 0)) + x[4]*((x[2] < 1155.0) ? (109.13738 - 7208.0*pow(x[2], (-2.0)) - 0.00132769*pow(x[2], 1.0) - 8.36409e-07*pow(x[2], 2.0) - 25.5768*log(x[2])) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (82.989279 + 2002750.0*pow(x[2], (-2.0)) + 0.00243414*pow(x[2], 1.0) - 2.53602e-06*pow(x[2], 2.0) - 22.3771*log(x[2])) : ((1941.0 <= x[2]) ? (-163.3363805 - 1400501.0*pow(x[2], (-2.0)) - 0.04401664*pow(x[2], 1.0) + 3.686589e-06*pow(x[2], 2.0) + 19.0900905*log(x[2])) : 0))))/pow((x[3] + x[4]), 2) - 8.3145*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : 0) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : 0))/pow((x[3] + x[4]), 2) + 8.3145*(1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0) + 1.0*((1e-15 < x[3]) ? (1 + log(x[3])) : 0))/(x[3] + x[4]) + 1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 2750.0) ? (115.574375 - 93399.0*pow(x[2], (-2.0)) + 0.00040695*pow(x[2], 1.0) - 1.05036e-06*pow(x[2], 2.0) - 26.4711*log(x[2])) : ((2750.0 <= x[2]) ? (229.950843 - 1.3754142e+33*pow(x[2], (-10.0)) - 41.77*log(x[2])) : 0)))/(x[3] + x[4]) - 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4])) + 1.0*(1.0*(x[3]*((x[2] < 2750.0) ? (115.574375 - 93399.0*pow(x[2], (-2.0)) + 0.00040695*pow(x[2], 1.0) - 1.05036e-06*pow(x[2], 2.0) - 26.4711*log(x[2])) : ((2750.0 <= x[2]) ? (229.950843 - 1.3754142e+33*pow(x[2], (-10.0)) - 41.77*log(x[2])) : 0)) + x[4]*((x[2] < 1155.0) ? (109.13738 - 7208.0*pow(x[2], (-2.0)) - 0.00132769*pow(x[2], 1.0) - 8.36409e-07*pow(x[2], 2.0) - 25.5768*log(x[2])) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (82.989279 + 2002750.0*pow(x[2], (-2.0)) + 0.00243414*pow(x[2], 1.0) - 2.53602e-06*pow(x[2], 2.0) - 22.3771*log(x[2])) : ((1941.0 <= x[2]) ? (-163.3363805 - 1400501.0*pow(x[2], (-2.0)) - 0.04401664*pow(x[2], 1.0) + 3.686589e-06*pow(x[2], 2.0) + 19.0900905*log(x[2])) : 0))))/(x[3] + x[4]) + 8.3145*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : 0) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : 0))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]));
-    out[14] = 1.0*(x[3] + x[4])*(-1.0*(x[3]*((x[2] < 2750.0) ? (115.574375 - 93399.0*pow(x[2], (-2.0)) + 0.00040695*pow(x[2], 1.0) - 1.05036e-06*pow(x[2], 2.0) - 26.4711*log(x[2])) : ((2750.0 <= x[2]) ? (229.950843 - 1.3754142e+33*pow(x[2], (-10.0)) - 41.77*log(x[2])) : 0)) + x[4]*((x[2] < 1155.0) ? (109.13738 - 7208.0*pow(x[2], (-2.0)) - 0.00132769*pow(x[2], 1.0) - 8.36409e-07*pow(x[2], 2.0) - 25.5768*log(x[2])) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (82.989279 + 2002750.0*pow(x[2], (-2.0)) + 0.00243414*pow(x[2], 1.0) - 2.53602e-06*pow(x[2], 2.0) - 22.3771*log(x[2])) : ((1941.0 <= x[2]) ? (-163.3363805 - 1400501.0*pow(x[2], (-2.0)) - 0.04401664*pow(x[2], 1.0) + 3.686589e-06*pow(x[2], 2.0) + 19.0900905*log(x[2])) : 0))))/pow((x[3] + x[4]), 2) - 8.3145*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : 0) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : 0))/pow((x[3] + x[4]), 2) + 8.3145*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (1 + log(x[4])) : 0))/(x[3] + x[4]) + 1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 1155.0) ? (109.13738 - 7208.0*pow(x[2], (-2.0)) - 0.00132769*pow(x[2], 1.0) - 8.36409e-07*pow(x[2], 2.0) - 25.5768*log(x[2])) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (82.989279 + 2002750.0*pow(x[2], (-2.0)) + 0.00243414*pow(x[2], 1.0) - 2.53602e-06*pow(x[2], 2.0) - 22.3771*log(x[2])) : ((1941.0 <= x[2]) ? (-163.3363805 - 1400501.0*pow(x[2], (-2.0)) - 0.04401664*pow(x[2], 1.0) + 3.686589e-06*pow(x[2], 2.0) + 19.0900905*log(x[2])) : 0))))/(x[3] + x[4]) - 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4])) + 1.0*(1.0*(x[3]*((x[2] < 2750.0) ? (115.574375 - 93399.0*pow(x[2], (-2.0)) + 0.00040695*pow(x[2], 1.0) - 1.05036e-06*pow(x[2], 2.0) - 26.4711*log(x[2])) : ((2750.0 <= x[2]) ? (229.950843 - 1.3754142e+33*pow(x[2], (-10.0)) - 41.77*log(x[2])) : 0)) + x[4]*((x[2] < 1155.0) ? (109.13738 - 7208.0*pow(x[2], (-2.0)) - 0.00132769*pow(x[2], 1.0) - 8.36409e-07*pow(x[2], 2.0) - 25.5768*log(x[2])) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (82.989279 + 2002750.0*pow(x[2], (-2.0)) + 0.00243414*pow(x[2], 1.0) - 2.53602e-06*pow(x[2], 2.0) - 22.3771*log(x[2])) : ((1941.0 <= x[2]) ? (-163.3363805 - 1400501.0*pow(x[2], (-2.0)) - 0.04401664*pow(x[2], 1.0) + 3.686589e-06*pow(x[2], 2.0) + 19.0900905*log(x[2])) : 0))))/(x[3] + x[4]) + 8.3145*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : 0) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : 0))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]));
-    out[15] = 1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 1.0*(x[3] + x[4])*(-1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/pow((x[3] + x[4]), 2) + 1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)))/(x[3] + x[4]) - 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4])) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]);
-    out[16] = 1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 1.0*(x[3] + x[4])*(-1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/pow((x[3] + x[4]), 2) + 1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)))/(x[3] + x[4]) - 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4])) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]);
-    out[17] = 1.0*(x[3]*((x[2] < 2750.0) ? (115.574375 - 93399.0*pow(x[2], (-2.0)) + 0.00040695*pow(x[2], 1.0) - 1.05036e-06*pow(x[2], 2.0) - 26.4711*log(x[2])) : ((2750.0 <= x[2]) ? (229.950843 - 1.3754142e+33*pow(x[2], (-10.0)) - 41.77*log(x[2])) : 0)) + x[4]*((x[2] < 1155.0) ? (109.13738 - 7208.0*pow(x[2], (-2.0)) - 0.00132769*pow(x[2], 1.0) - 8.36409e-07*pow(x[2], 2.0) - 25.5768*log(x[2])) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (82.989279 + 2002750.0*pow(x[2], (-2.0)) + 0.00243414*pow(x[2], 1.0) - 2.53602e-06*pow(x[2], 2.0) - 22.3771*log(x[2])) : ((1941.0 <= x[2]) ? (-163.3363805 - 1400501.0*pow(x[2], (-2.0)) - 0.04401664*pow(x[2], 1.0) + 3.686589e-06*pow(x[2], 2.0) + 19.0900905*log(x[2])) : 0))))/(x[3] + x[4]) + 8.3145*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : 0) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : 0))/(x[3] + x[4]) + 1.0*(x[3] + x[4])*(-1.0*(x[3]*((x[2] < 2750.0) ? (115.574375 - 93399.0*pow(x[2], (-2.0)) + 0.00040695*pow(x[2], 1.0) - 1.05036e-06*pow(x[2], 2.0) - 26.4711*log(x[2])) : ((2750.0 <= x[2]) ? (229.950843 - 1.3754142e+33*pow(x[2], (-10.0)) - 41.77*log(x[2])) : 0)) + x[4]*((x[2] < 1155.0) ? (109.13738 - 7208.0*pow(x[2], (-2.0)) - 0.00132769*pow(x[2], 1.0) - 8.36409e-07*pow(x[2], 2.0) - 25.5768*log(x[2])) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (82.989279 + 2002750.0*pow(x[2], (-2.0)) + 0.00243414*pow(x[2], 1.0) - 2.53602e-06*pow(x[2], 2.0) - 22.3771*log(x[2])) : ((1941.0 <= x[2]) ? (-163.3363805 - 1400501.0*pow(x[2], (-2.0)) - 0.04401664*pow(x[2], 1.0) + 3.686589e-06*pow(x[2], 2.0) + 19.0900905*log(x[2])) : 0))))/pow((x[3] + x[4]), 2) - 8.3145*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : 0) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : 0))/pow((x[3] + x[4]), 2) + 8.3145*(1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0) + 1.0*((1e-15 < x[3]) ? (1 + log(x[3])) : 0))/(x[3] + x[4]) + 1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 2750.0) ? (115.574375 - 93399.0*pow(x[2], (-2.0)) + 0.00040695*pow(x[2], 1.0) - 1.05036e-06*pow(x[2], 2.0) - 26.4711*log(x[2])) : ((2750.0 <= x[2]) ? (229.950843 - 1.3754142e+33*pow(x[2], (-10.0)) - 41.77*log(x[2])) : 0)))/(x[3] + x[4]) - 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4])) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]);
-    out[18] = -2.0*(x[3]*((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : 0)) + x[4]*((x[2] < 1155.0) ? (-1272.064 + 134.71418*x[2] - 25.5768*x[2]*log(x[2]) + 7208.0*pow(x[2], (-1.0)) - 0.000663845*pow(x[2], 2.0) - 2.78803e-07*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (6667.385 + 105.366379*x[2] - 22.3771*x[2]*log(x[2]) - 2002750.0*pow(x[2], (-1.0)) + 0.00121707*pow(x[2], 2.0) - 8.4534e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (26483.26 - 182.426471*x[2] + 19.0900905*x[2]*log(x[2]) + 1400501.0*pow(x[2], (-1.0)) - 0.02200832*pow(x[2], 2.0) + 1.228863e-06*pow(x[2], 3.0)) : 0))))/pow((x[3] + x[4]), 2) + 26090.6*x[4]/(x[3] + x[4]) + 2.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : 0)))/(x[3] + x[4]) + 1.0*(x[3] + x[4])*(2.0*(x[3]*((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : 0)) + x[4]*((x[2] < 1155.0) ? (-1272.064 + 134.71418*x[2] - 25.5768*x[2]*log(x[2]) + 7208.0*pow(x[2], (-1.0)) - 0.000663845*pow(x[2], 2.0) - 2.78803e-07*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (6667.385 + 105.366379*x[2] - 22.3771*x[2]*log(x[2]) - 2002750.0*pow(x[2], (-1.0)) + 0.00121707*pow(x[2], 2.0) - 8.4534e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (26483.26 - 182.426471*x[2] + 19.0900905*x[2]*log(x[2]) + 1400501.0*pow(x[2], (-1.0)) - 0.02200832*pow(x[2], 2.0) + 1.228863e-06*pow(x[2], 3.0)) : 0))))/pow((x[3] + x[4]), 3) - 26090.6*x[4]/pow((x[3] + x[4]), 2) - 2.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : 0)))/pow((x[3] + x[4]), 2) + 1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + 2*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)))/(x[3] + x[4]) + 16.629*x[2]*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : 0) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : 0))/pow((x[3] + x[4]), 3) - 16.629*x[2]*( 1.0*((1e-15 < x[3]) ? (1 + log(x[3])) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*( 1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0))/(x[3] + x[4]) + 26090.6*x[3]*x[4]/pow((x[3] + x[4]), 3)) - 16.629*x[2]*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : 0) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : 0))/pow((x[3] + x[4]), 2) + 16.629*x[2]*( 1.0*((1e-15 < x[3]) ? (1 + log(x[3])) : 0))/(x[3] + x[4]) - 26090.6*x[3]*x[4]/pow((x[3] + x[4]), 2);
-    out[19] = -2.0*(x[3]*((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : 0)) + x[4]*((x[2] < 1155.0) ? (-1272.064 + 134.71418*x[2] - 25.5768*x[2]*log(x[2]) + 7208.0*pow(x[2], (-1.0)) - 0.000663845*pow(x[2], 2.0) - 2.78803e-07*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (6667.385 + 105.366379*x[2] - 22.3771*x[2]*log(x[2]) - 2002750.0*pow(x[2], (-1.0)) + 0.00121707*pow(x[2], 2.0) - 8.4534e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (26483.26 - 182.426471*x[2] + 19.0900905*x[2]*log(x[2]) + 1400501.0*pow(x[2], (-1.0)) - 0.02200832*pow(x[2], 2.0) + 1.228863e-06*pow(x[2], 3.0)) : 0))))/pow((x[3] + x[4]), 2) + 13045.3*x[3]/(x[3] + x[4]) + 13045.3*x[4]/(x[3] + x[4]) + 1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : 0)))/(x[3] + x[4]) + 1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 1155.0) ? (-1272.064 + 134.71418*x[2] - 25.5768*x[2]*log(x[2]) + 7208.0*pow(x[2], (-1.0)) - 0.000663845*pow(x[2], 2.0) - 2.78803e-07*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (6667.385 + 105.366379*x[2] - 22.3771*x[2]*log(x[2]) - 2002750.0*pow(x[2], (-1.0)) + 0.00121707*pow(x[2], 2.0) - 8.4534e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (26483.26 - 182.426471*x[2] + 19.0900905*x[2]*log(x[2]) + 1400501.0*pow(x[2], (-1.0)) - 0.02200832*pow(x[2], 2.0) + 1.228863e-06*pow(x[2], 3.0)) : 0))))/(x[3] + x[4]) + 1.0*(x[3] + x[4])*(2.0*(x[3]*((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : 0)) + x[4]*((x[2] < 1155.0) ? (-1272.064 + 134.71418*x[2] - 25.5768*x[2]*log(x[2]) + 7208.0*pow(x[2], (-1.0)) - 0.000663845*pow(x[2], 2.0) - 2.78803e-07*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (6667.385 + 105.366379*x[2] - 22.3771*x[2]*log(x[2]) - 2002750.0*pow(x[2], (-1.0)) + 0.00121707*pow(x[2], 2.0) - 8.4534e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (26483.26 - 182.426471*x[2] + 19.0900905*x[2]*log(x[2]) + 1400501.0*pow(x[2], (-1.0)) - 0.02200832*pow(x[2], 2.0) + 1.228863e-06*pow(x[2], 3.0)) : 0))))/pow((x[3] + x[4]), 3) - 13045.3*x[3]/pow((x[3] + x[4]), 2) - 13045.3*x[4]/pow((x[3] + x[4]), 2) - 1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : 0)))/pow((x[3] + x[4]), 2) - 1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 1155.0) ? (-1272.064 + 134.71418*x[2] - 25.5768*x[2]*log(x[2]) + 7208.0*pow(x[2], (-1.0)) - 0.000663845*pow(x[2], 2.0) - 2.78803e-07*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (6667.385 + 105.366379*x[2] - 22.3771*x[2]*log(x[2]) - 2002750.0*pow(x[2], (-1.0)) + 0.00121707*pow(x[2], 2.0) - 8.4534e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (26483.26 - 182.426471*x[2] + 19.0900905*x[2]*log(x[2]) + 1400501.0*pow(x[2], (-1.0)) - 0.02200832*pow(x[2], 2.0) + 1.228863e-06*pow(x[2], 3.0)) : 0))))/pow((x[3] + x[4]), 2) + 1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + ((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 16.629*x[2]*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : 0) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : 0))/pow((x[3] + x[4]), 3) - 8.3145*x[2]*( 1.0*((1e-15 < x[3]) ? (1 + log(x[3])) : 0))/pow((x[3] + x[4]), 2) - 8.3145*x[2]*( 1.0*((1e-15 < x[4]) ? (1 + log(x[4])) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*(0)/(x[3] + x[4]) + 26090.6*x[3]*x[4]/pow((x[3] + x[4]), 3) + 13045.3*pow((x[3] + x[4]), (-1))) - 16.629*x[2]*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : 0) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*( 1.0*((1e-15 < x[3]) ? (1 + log(x[3])) : 0))/(x[3] + x[4]) + 8.3145*x[2]*( 1.0*((1e-15 < x[4]) ? (1 + log(x[4])) : 0))/(x[3] + x[4]) - 26090.6*x[3]*x[4]/pow((x[3] + x[4]), 2);
-    out[20] = 1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 1.0*(x[3] + x[4])*(-1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/pow((x[3] + x[4]), 2) + 1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) - 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4])) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]);
-    out[21] = 1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 1.0*(x[3] + x[4])*(-1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/pow((x[3] + x[4]), 2) + 1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) - 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4])) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]);
-    out[22] = 1.0*(x[3]*((x[2] < 2750.0) ? (115.574375 - 93399.0*pow(x[2], (-2.0)) + 0.00040695*pow(x[2], 1.0) - 1.05036e-06*pow(x[2], 2.0) - 26.4711*log(x[2])) : ((2750.0 <= x[2]) ? (229.950843 - 1.3754142e+33*pow(x[2], (-10.0)) - 41.77*log(x[2])) : 0)) + x[4]*((x[2] < 1155.0) ? (109.13738 - 7208.0*pow(x[2], (-2.0)) - 0.00132769*pow(x[2], 1.0) - 8.36409e-07*pow(x[2], 2.0) - 25.5768*log(x[2])) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (82.989279 + 2002750.0*pow(x[2], (-2.0)) + 0.00243414*pow(x[2], 1.0) - 2.53602e-06*pow(x[2], 2.0) - 22.3771*log(x[2])) : ((1941.0 <= x[2]) ? (-163.3363805 - 1400501.0*pow(x[2], (-2.0)) - 0.04401664*pow(x[2], 1.0) + 3.686589e-06*pow(x[2], 2.0) + 19.0900905*log(x[2])) : 0))))/(x[3] + x[4]) + 8.3145*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : 0) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : 0))/(x[3] + x[4]) + 1.0*(x[3] + x[4])*(-1.0*(x[3]*((x[2] < 2750.0) ? (115.574375 - 93399.0*pow(x[2], (-2.0)) + 0.00040695*pow(x[2], 1.0) - 1.05036e-06*pow(x[2], 2.0) - 26.4711*log(x[2])) : ((2750.0 <= x[2]) ? (229.950843 - 1.3754142e+33*pow(x[2], (-10.0)) - 41.77*log(x[2])) : 0)) + x[4]*((x[2] < 1155.0) ? (109.13738 - 7208.0*pow(x[2], (-2.0)) - 0.00132769*pow(x[2], 1.0) - 8.36409e-07*pow(x[2], 2.0) - 25.5768*log(x[2])) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (82.989279 + 2002750.0*pow(x[2], (-2.0)) + 0.00243414*pow(x[2], 1.0) - 2.53602e-06*pow(x[2], 2.0) - 22.3771*log(x[2])) : ((1941.0 <= x[2]) ? (-163.3363805 - 1400501.0*pow(x[2], (-2.0)) - 0.04401664*pow(x[2], 1.0) + 3.686589e-06*pow(x[2], 2.0) + 19.0900905*log(x[2])) : 0))))/pow((x[3] + x[4]), 2) - 8.3145*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : 0) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : 0))/pow((x[3] + x[4]), 2) + 8.3145*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (1 + log(x[4])) : 0))/(x[3] + x[4]) + 1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 1155.0) ? (109.13738 - 7208.0*pow(x[2], (-2.0)) - 0.00132769*pow(x[2], 1.0) - 8.36409e-07*pow(x[2], 2.0) - 25.5768*log(x[2])) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (82.989279 + 2002750.0*pow(x[2], (-2.0)) + 0.00243414*pow(x[2], 1.0) - 2.53602e-06*pow(x[2], 2.0) - 22.3771*log(x[2])) : ((1941.0 <= x[2]) ? (-163.3363805 - 1400501.0*pow(x[2], (-2.0)) - 0.04401664*pow(x[2], 1.0) + 3.686589e-06*pow(x[2], 2.0) + 19.0900905*log(x[2])) : 0))))/(x[3] + x[4]) - 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4])) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]);
-    out[23] = -2.0*(x[3]*((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : 0)) + x[4]*((x[2] < 1155.0) ? (-1272.064 + 134.71418*x[2] - 25.5768*x[2]*log(x[2]) + 7208.0*pow(x[2], (-1.0)) - 0.000663845*pow(x[2], 2.0) - 2.78803e-07*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (6667.385 + 105.366379*x[2] - 22.3771*x[2]*log(x[2]) - 2002750.0*pow(x[2], (-1.0)) + 0.00121707*pow(x[2], 2.0) - 8.4534e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (26483.26 - 182.426471*x[2] + 19.0900905*x[2]*log(x[2]) + 1400501.0*pow(x[2], (-1.0)) - 0.02200832*pow(x[2], 2.0) + 1.228863e-06*pow(x[2], 3.0)) : 0))))/pow((x[3] + x[4]), 2) + 13045.3*x[3]/(x[3] + x[4]) + 13045.3*x[4]/(x[3] + x[4]) + 1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : 0)))/(x[3] + x[4]) + 1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 1155.0) ? (-1272.064 + 134.71418*x[2] - 25.5768*x[2]*log(x[2]) + 7208.0*pow(x[2], (-1.0)) - 0.000663845*pow(x[2], 2.0) - 2.78803e-07*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (6667.385 + 105.366379*x[2] - 22.3771*x[2]*log(x[2]) - 2002750.0*pow(x[2], (-1.0)) + 0.00121707*pow(x[2], 2.0) - 8.4534e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (26483.26 - 182.426471*x[2] + 19.0900905*x[2]*log(x[2]) + 1400501.0*pow(x[2], (-1.0)) - 0.02200832*pow(x[2], 2.0) + 1.228863e-06*pow(x[2], 3.0)) : 0))))/(x[3] + x[4]) + 1.0*(x[3] + x[4])*(2.0*(x[3]*((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : 0)) + x[4]*((x[2] < 1155.0) ? (-1272.064 + 134.71418*x[2] - 25.5768*x[2]*log(x[2]) + 7208.0*pow(x[2], (-1.0)) - 0.000663845*pow(x[2], 2.0) - 2.78803e-07*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (6667.385 + 105.366379*x[2] - 22.3771*x[2]*log(x[2]) - 2002750.0*pow(x[2], (-1.0)) + 0.00121707*pow(x[2], 2.0) - 8.4534e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (26483.26 - 182.426471*x[2] + 19.0900905*x[2]*log(x[2]) + 1400501.0*pow(x[2], (-1.0)) - 0.02200832*pow(x[2], 2.0) + 1.228863e-06*pow(x[2], 3.0)) : 0))))/pow((x[3] + x[4]), 3) - 13045.3*x[3]/pow((x[3] + x[4]), 2) - 13045.3*x[4]/pow((x[3] + x[4]), 2) - 1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : 0)))/pow((x[3] + x[4]), 2) - 1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 1155.0) ? (-1272.064 + 134.71418*x[2] - 25.5768*x[2]*log(x[2]) + 7208.0*pow(x[2], (-1.0)) - 0.000663845*pow(x[2], 2.0) - 2.78803e-07*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (6667.385 + 105.366379*x[2] - 22.3771*x[2]*log(x[2]) - 2002750.0*pow(x[2], (-1.0)) + 0.00121707*pow(x[2], 2.0) - 8.4534e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (26483.26 - 182.426471*x[2] + 19.0900905*x[2]*log(x[2]) + 1400501.0*pow(x[2], (-1.0)) - 0.02200832*pow(x[2], 2.0) + 1.228863e-06*pow(x[2], 3.0)) : 0))))/pow((x[3] + x[4]), 2) + 1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + ((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 16.629*x[2]*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : 0) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : 0))/pow((x[3] + x[4]), 3) - 8.3145*x[2]*( 1.0*((1e-15 < x[3]) ? (1 + log(x[3])) : 0))/pow((x[3] + x[4]), 2) - 8.3145*x[2]*( 1.0*((1e-15 < x[4]) ? (1 + log(x[4])) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*(0)/(x[3] + x[4]) + 26090.6*x[3]*x[4]/pow((x[3] + x[4]), 3) + 13045.3*pow((x[3] + x[4]), (-1))) - 16.629*x[2]*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : 0) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*( 1.0*((1e-15 < x[3]) ? (1 + log(x[3])) : 0))/(x[3] + x[4]) + 8.3145*x[2]*( 1.0*((1e-15 < x[4]) ? (1 + log(x[4])) : 0))/(x[3] + x[4]) - 26090.6*x[3]*x[4]/pow((x[3] + x[4]), 2);
-    out[24] = -2.0*(x[3]*((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : 0)) + x[4]*((x[2] < 1155.0) ? (-1272.064 + 134.71418*x[2] - 25.5768*x[2]*log(x[2]) + 7208.0*pow(x[2], (-1.0)) - 0.000663845*pow(x[2], 2.0) - 2.78803e-07*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (6667.385 + 105.366379*x[2] - 22.3771*x[2]*log(x[2]) - 2002750.0*pow(x[2], (-1.0)) + 0.00121707*pow(x[2], 2.0) - 8.4534e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (26483.26 - 182.426471*x[2] + 19.0900905*x[2]*log(x[2]) + 1400501.0*pow(x[2], (-1.0)) - 0.02200832*pow(x[2], 2.0) + 1.228863e-06*pow(x[2], 3.0)) : 0))))/pow((x[3] + x[4]), 2) + 26090.6*x[3]/(x[3] + x[4]) + 2.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 1155.0) ? (-1272.064 + 134.71418*x[2] - 25.5768*x[2]*log(x[2]) + 7208.0*pow(x[2], (-1.0)) - 0.000663845*pow(x[2], 2.0) - 2.78803e-07*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (6667.385 + 105.366379*x[2] - 22.3771*x[2]*log(x[2]) - 2002750.0*pow(x[2], (-1.0)) + 0.00121707*pow(x[2], 2.0) - 8.4534e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (26483.26 - 182.426471*x[2] + 19.0900905*x[2]*log(x[2]) + 1400501.0*pow(x[2], (-1.0)) - 0.02200832*pow(x[2], 2.0) + 1.228863e-06*pow(x[2], 3.0)) : 0))))/(x[3] + x[4]) + 1.0*(x[3] + x[4])*(2.0*(x[3]*((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : 0)) + x[4]*((x[2] < 1155.0) ? (-1272.064 + 134.71418*x[2] - 25.5768*x[2]*log(x[2]) + 7208.0*pow(x[2], (-1.0)) - 0.000663845*pow(x[2], 2.0) - 2.78803e-07*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (6667.385 + 105.366379*x[2] - 22.3771*x[2]*log(x[2]) - 2002750.0*pow(x[2], (-1.0)) + 0.00121707*pow(x[2], 2.0) - 8.4534e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (26483.26 - 182.426471*x[2] + 19.0900905*x[2]*log(x[2]) + 1400501.0*pow(x[2], (-1.0)) - 0.02200832*pow(x[2], 2.0) + 1.228863e-06*pow(x[2], 3.0)) : 0))))/pow((x[3] + x[4]), 3) - 26090.6*x[3]/pow((x[3] + x[4]), 2) - 2.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 1155.0) ? (-1272.064 + 134.71418*x[2] - 25.5768*x[2]*log(x[2]) + 7208.0*pow(x[2], (-1.0)) - 0.000663845*pow(x[2], 2.0) - 2.78803e-07*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (6667.385 + 105.366379*x[2] - 22.3771*x[2]*log(x[2]) - 2002750.0*pow(x[2], (-1.0)) + 0.00121707*pow(x[2], 2.0) - 8.4534e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (26483.26 - 182.426471*x[2] + 19.0900905*x[2]*log(x[2]) + 1400501.0*pow(x[2], (-1.0)) - 0.02200832*pow(x[2], 2.0) + 1.228863e-06*pow(x[2], 3.0)) : 0))))/pow((x[3] + x[4]), 2) + 1.0*(x[3]*((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + 2*((x[2] < 1155.0) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 16.629*x[2]*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : 0) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : 0))/pow((x[3] + x[4]), 3) - 16.629*x[2]*( 1.0*((1e-15 < x[4]) ? (1 + log(x[4])) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*( 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]) + 26090.6*x[3]*x[4]/pow((x[3] + x[4]), 3)) - 16.629*x[2]*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : 0) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : 0))/pow((x[3] + x[4]), 2) + 16.629*x[2]*( 1.0*((1e-15 < x[4]) ? (1 + log(x[4])) : 0))/(x[3] + x[4]) - 26090.6*x[3]*x[4]/pow((x[3] + x[4]), 2);
+    double x0 = 9.0*x[3] + 11.0*(x[4] + x[5]);
+    double x1 = pow(x0, -1);
+    double x2 = 1e-15 < x[3];
+    double x3 = 9.0*((x2 == 1) ? 0
+: 0);
+    double x4 = 1e-15 < x[4];
+    double x5 = 11.0*((x4 == 1) ? 0
+: 0);
+    double x6 = 1e-15 < x[5];
+    double x7 = 11.0*((x6 == 1) ? 0
+: 0);
+    double x8 = x5 + x7;
+    double x9 = x3 + x8;
+    double x10 = x1*x9;
+    double x11 = x[2]*x10;
+    double x12 = 8.3145*x11;
+    double x13 = pow(x[2], 1.0);
+    double x14 = pow(x[2], 3.0);
+    double x15 = pow(x14, -1);
+    double x16 = pow(x[2], -1);
+    double x17 = x[2] < 1357.77;
+    double x18 = pow(x[2], -11.0);
+    double x19 = 1357.77 <= x[2];
+    double x20 = 148184.0*x15;
+    double x21 = x[2] < 700.0;
+    double x22 = (x[2] < 933.47 && 700.0 <= x[2]);
+    double x23 = 933.47 <= x[2];
+    double x24 = 9.0*((x21 == 1) ? (
+   -0.003769324 - 5.265984e-06*x13 - 24.3671976*x16 + x20
+)
+: ((x22 == 1) ? (
+   0.037063964 - 3.4585362e-05*x13 - 38.5844296*x16 + x20
+)
+: ((x23 == 1) ? (
+   -31.748192*x16 - 1.1074716e+30*x18
+)
+: 0)));
+    double x25 = x[2] < 1811.0;
+    double x26 = 1811.0 <= x[2];
+    double x27 = log(x[2]);
+    double x28 = 23.5143*x27;
+    double x29 = pow(x[2], 2.0);
+    double x30 = pow(x29, -1);
+    double x31 = pow(x[2], -10.0);
+    double x32 = 46.0*x27;
+    double x33 = 24.3671976*x27;
+    double x34 = -74092.0*x30;
+    double x35 = 38.5844296*x27;
+    double x36 = 31.748192*x27;
+    double x37 = 9.0*((x21 == 1) ? (
+   112.7258404 - 0.003769324*x13 - 2.632992e-06*x29 - x33 + x34
+)
+: ((x22 == 1) ? (
+   184.4640164 + 0.037063964*x13 - 1.7292681e-05*x29 + x34 - x35
+)
+: ((x23 == 1) ? (
+   156.935961 + 1.1074716e+29*x31 - x36
+)
+: 0)));
+    double x38 = x37 + 11.0*((x25 == 1) ? (
+   100.6197 - 0.00879504*x13 - x28 - 1.76781e-07*x29 - 77359.0*x30
+)
+: ((x26 == 1) ? (
+   253.31255 - 2.066427e+32*x31 - x32
+)
+: 0));
+    double x39 = x38*x[3];
+    double x40 = 24.112392*x27;
+    double x41 = 31.38*x27;
+    double x42 = 18.0 + x37 + 11.0*((x17 == 1) ? (
+   106.372843 - 0.00531368*x13 + 3.87669e-07*x29 - 52478.0*x30 - x40
+)
+: ((x19 == 1) ? (
+   152.423828 - 3.277503e+30*x31 - x41
+)
+: 0));
+    double x43 = x42*x[3];
+    double x44 = x39*x[5] + x43*x[4];
+    double x45 = x1*x44;
+    double x46 = log(x[3]);
+    double x47 = log(x[4]);
+    double x48 = log(x[5]);
+    double x49 = 9.0*((x2 == 1) ? (
+   x46*x[3]
+)
+: 0) + 11.0*((x4 == 1) ? (
+   x47*x[4]
+)
+: 0) + 11.0*((x6 == 1) ? (
+   x48*x[5]
+)
+: 0);
+    double x50 = x1*x49;
+    double x51 = x12 + x45 + 8.3145*x50;
+    double x52 = pow(x0, -2);
+    double x53 = x9*x52;
+    double x54 = 74.8305*x[2];
+    double x55 = x8 + 9.0*((x2 == 1) ? (
+   1 + x46
+)
+: 0);
+    double x56 = 8.3145*x1;
+    double x57 = x56*x55;
+    double x58 = x52*x49;
+    double x59 = 74.8305*x58;
+    double x60 = 9.0*((x21 == 1) ? 0
+: ((x22 == 1) ? 0
+: ((x23 == 1) ? 0
+: 0)));
+    double x61 = x60 + 11.0*((x17 == 1) ? 0
+: ((x19 == 1) ? 0
+: 0));
+    double x62 = x61*x[3];
+    double x63 = x60 + 11.0*((x25 == 1) ? 0
+: ((x26 == 1) ? 0
+: 0));
+    double x64 = x63*x[5];
+    double x65 = x62*x[4] + x64*x[3];
+    double x66 = x52*x44;
+    double x67 = x0*(x12 + x57 - x59 - 9.0*x66 + x1*(x65 + x38*x[5] + x42*x[4]) - x54*x53);
+    double x68 = 11.0*x51;
+    double x69 = x3 + x7;
+    double x70 = x69 + 11.0*((x4 == 1) ? (
+   1 + x47
+)
+: 0);
+    double x71 = x70*x56;
+    double x72 = 91.4595*x[2];
+    double x73 = 91.4595*x58;
+    double x74 = x12 - 11.0*x66 - x73 - x72*x53;
+    double x75 = x0*(x71 + x74 + (x43 + x65)*x1);
+    double x76 = x3 + x5;
+    double x77 = x76 + 11.0*((x6 == 1) ? (
+   1 + x48
+)
+: 0);
+    double x78 = x77*x56;
+    double x79 = x0*(x74 + x78 + (x39 + x65)*x1);
+    double x80 = pow(x13, -1);
+    double x81 = 74092.0*x80;
+    double x82 = pow(x[2], -9.0);
+    double x83 = 9.0*((x21 == 1) ? (
+   -7976.15 + 137.093038*x[2] - 8.77664e-07*x14 - 0.001884662*x29 + x81 - x[2]*x33
+)
+: ((x22 == 1) ? (
+   -11276.24 + 223.048446*x[2] - 5.764227e-06*x14 + 0.018531982*x29 + x81 - x[2]*x35
+)
+: ((x23 == 1) ? (
+   -11278.378 + 188.684153*x[2] - 1.230524e+28*x82 - x[2]*x36
+)
+: 0)));
+    double x84 = x83 + 11.0*((x25 == 1) ? (
+   1225.7 + 124.134*x[2] - 5.8927e-08*x14 - 0.00439752*x29 + 77359.0*x80 - x[2]*x28
+)
+: ((x26 == 1) ? (
+   -25383.581 + 299.31255*x[2] + 2.29603e+31*x82 - x[2]*x32
+)
+: 0));
+    double x85 = -420000.0 + 18.0*x[2] + x83 + 11.0*((x17 == 1) ? (
+   -7770.458 + 130.485235*x[2] + 1.29223e-07*x14 - 0.00265684*x29 + 52478.0*x80 - x[2]*x40
+)
+: ((x19 == 1) ? (
+   -13542.026 + 183.803828*x[2] + 3.64167e+29*x82 - x[2]*x41
+)
+: 0));
+    double x86 = x65 + x84*x[5] + x85*x[4];
+    double x87 = x1*x86;
+    double x88 = x85*x[3];
+    double x89 = x84*x[3];
+    double x90 = x88*x[4] + x89*x[5];
+    double x91 = x52*x90;
+    double x92 = x87 - 9.0*x91 + x[2]*x57 - x[2]*x59;
+    double x93 = x[2]*x58;
+    double x94 = x1*x54;
+    double x95 = pow(x0, -3);
+    double x96 = x[2]*x95*x49;
+    double x97 = x[2]*x52;
+    double x98 = x90*x95;
+    double x99 = x[2]*x56;
+    double x100 = x61*x[4];
+    double x101 = x86*x52;
+    double x102 = x72*x52;
+    double x103 = -11.0*x101 + x12 + 198.0*x98 - x55*x102;
+    double x104 = x103 + 1646.271*x96;
+    double x105 = x70*x52;
+    double x106 = x100 + x64;
+    double x107 = x65 + x88;
+    double x108 = x52*x107;
+    double x109 = -9.0*x108 + x1*(x106 + x62 + x65 + x85) - x54*x105;
+    double x110 = x1*x107;
+    double x111 = -99.0*x91;
+    double x112 = x111 + 11.0*x92 - 823.1355*x93;
+    double x113 = x77*x54;
+    double x114 = x65 + x89;
+    double x115 = x52*x114;
+    double x116 = x63*x[3];
+    double x117 = x116 + x65;
+    double x118 = -9.0*x115 + x1*(x106 + x117 + x84) - x52*x113;
+    double x119 = x1*x114;
+    double x120 = 11.0*x45 + 91.4595*x50 + x72*x10;
+    double x121 = x103 + 1646.271*x96;
+    double x122 = -11.0*x91 - x[2]*x73;
+    double x123 = x110 + x122 + x[2]*x71;
+    double x124 = x1*x72;
+    double x125 = x111 + 11.0*x87 - 823.1355*x93 + x55*x124;
+    double x126 = 182.919*x97;
+    double x127 = 2012.109*x96 + 242.0*x98;
+    double x128 = 11.0*x110 + x70*x124;
+    double x129 = -1006.0545*x93;
+    double x130 = -121.0*x91;
+    double x131 = 11.0*x123 + x129 + x130;
+    double x132 = x0*(-11.0*x108 - 11.0*x115 + x12 + x127 + x1*(x117 + x62) - x72*x105 - x77*x102);
+    double x133 = 11.0*x119 + x77*x124;
+    double x134 = x119 + x122 + x[2]*x78;
+    double x135 = x129 + x130 + 11.0*x134;
+    out[0] = x0*(16.629*x10 + x12 + x1*(x[5]*x[3]*(x24 + 11.0*((x25 == 1) ? (
+   -0.00879504 - 3.53562e-07*x13 + 154718.0*x15 - 23.5143*x16
+)
+: ((x26 == 1) ? (
+   -46.0*x16 + 2.066427e+33*x18
+)
+: 0))) + (x24 + 11.0*((x17 == 1) ? (
+   -0.00531368 + 7.75338e-07*x13 + 104956.0*x15 - 24.112392*x16
+)
+: ((x19 == 1) ? (
+   -31.38*x16 + 3.277503e+31*x18
+)
+: 0)))*x[4]*x[3]));
+    out[1] = 9.0*x51 + x67;
+    out[2] = x68 + x75;
+    out[3] = x68 + x79;
+    out[4] = 74.8305*x11 + 9.0*x45 + 74.8305*x50 + x67;
+    out[5] = 9.0*x87 - 81.0*x91 + 9.0*x92 - 673.4745*x93 + x0*(-18.0*x101 + 1346.949*x96 + 162.0*x98 + x1*(2*x100 + 2*x64 + x65) - 149.661*x55*x97 + x99*(x8 + 9.0*((x2 == 1) ? (
+   pow(x[3], -1)
+)
+: 0))) + x55*x94;
+    out[6] = 9.0*x110 + x112 + x70*x94 + (x104 + x109)*x0;
+    out[7] = x112 + 9.0*x119 + x1*x113 + (x104 + x118)*x0;
+    out[8] = x120 + x75;
+    out[9] = 9.0*x123 + x125 + (x109 + x121)*x0;
+    out[10] = x128 + x131 + x0*(-22.0*x108 + x127 - x70*x126 + x99*(x69 + 11.0*((x4 == 1) ? (
+   pow(x[4], -1)
+)
+: 0)) + (2*x62 + x65)*x1);
+    out[11] = x131 + x132 + x133;
+    out[12] = x120 + x79;
+    out[13] = x125 + 9.0*x134 + (x118 + x121)*x0;
+    out[14] = x128 + x132 + x135;
+    out[15] = x133 + x135 + x0*(-22.0*x115 + x127 + x1*(2*x116 + x65) - x77*x126 + x99*(x76 + 11.0*((x6 == 1) ? (
+   pow(x[5], -1)
+)
+: 0)));
 }
 
 __device__ void pycgpu_model_0_internal_cons_func(double* out, const double* x) {
-    out[0] = 1.0*(-1 + x[3] + x[4]);
+    out[0] = 1.0*(-1 + x[3]);
+    out[1] = 1.0*(-1 + x[4] + x[5]);
 }
 
 __device__ void pycgpu_model_0_internal_cons_jac(double* out, const double* x) {
     out[0] = 0;
-    out[1] = 0;
+    out[1] = 1.0;
     out[2] = 0;
-    out[3] = 1.0;
-    out[4] = 1.0;
+    out[3] = 0;
+    out[4] = 0;
+    out[5] = 0;
+    out[6] = 1.0;
+    out[7] = 1.0;
 }
 
 __device__ void pycgpu_model_0_mass_obj(double* out, const double* x) {
-    out[0] = 1.0*x[3]/(x[3] + x[4]);
-    out[1] = 1.0*x[4]/(x[3] + x[4]);
-    out[2] = 0;
+    double x0 = 9.0*x[3];
+    double x1 = pow(x0 + 11.0*(x[4] + x[5]), -1);
+    double x2 = 11.0*x1;
+    out[0] = x0*x1;
+    out[1] = x2*x[4];
+    out[2] = x2*x[5];
+    out[3] = 0;
 }
 
 __device__ void pycgpu_model_0_formulamole_obj(double* out, const double* x) {
-    out[0] = 1.0*x[3];
-    out[1] = 1.0*x[4];
-    out[2] = 0.0;
+    out[0] = 9.0*x[3];
+    out[1] = 11.0*x[4];
+    out[2] = 11.0*x[5];
+    out[3] = 0.0;
 }
 
 __device__ void pycgpu_model_0_formulamole_grad(double* out, const double* x) {
     out[0] = 0;
-    out[1] = 0;
+    out[1] = 9.0;
     out[2] = 0;
+    out[3] = 0;
+    out[4] = 0;
+    out[5] = 0;
+    out[6] = 11.0;
+    out[7] = 0;
+    out[8] = 0;
+    out[9] = 0;
+    out[10] = 0;
+    out[11] = 11.0;
+}
+
+__device__ double pycgpu_model_1_obj(const double* x) {
+    double x0 = x[6]*x[5];
+    double x1 = 67.0*x0;
+    double x2 = 1e-09 + x1;
+    double x3 = 2.01530612244898/x[2];
+    double x4 = (1.0/6.0)*pow(x[2], 3);
+    double x5 = (1.0/135.0)*pow(x[2], 9);
+    double x6 = pow(x2, 15);
+    double x7 = pow(x[2], 15);
+    double x8 = (1.0/600.0)*x7;
+    double x9 = -201.0*x0;
+    double x10 = 1e-09 + x9;
+    double x11 = pow(x10, 15);
+    double x12 = (1.0/10.0)/pow(x[2], 5);
+    double x13 = (1.0/1500.0)/pow(x[2], 25);
+    double x14 = (1.0/315.0)/x7;
+    double x15 = 2.1*x0;
+    double x16 = pow(x[3] + x[4] + x[5], -1);
+    double x17 = 8.3145*x[2]*x16;
+    double x18 = 2.0*x[2];
+    double x19 = x[6]*x[3];
+    double x20 = x19*x[4];
+    double x21 = x0*x[3];
+    double x22 = x[3] - x[4];
+    double x23 = -x[5];
+    double x24 = x0*x[4];
+    double x25 = 1.0*x16;
+    double x26 = pow(x[2], 3.0);
+    double x27 = pow(x[2], -1.0);
+    double x28 = 74092.0*x27;
+    double x29 = x[2]*log(x[2]);
+    double x30 = pow(x[2], 2.0);
+    double x31 = pow(x[2], -9.0);
+    return x17*(1.0*((1e-15 < x[3]) ? (
+   x[3]*log(x[3])
+)
+: (
+   0
+)) + 1.0*((1e-15 < x[4]) ? (
+   x[4]*log(x[4])
+)
+: (
+   0
+)) + 1.0*((1e-15 < x[5]) ? (
+   x[5]*log(x[5])
+)
+: (
+   0
+)) + 1.0*((1e-15 < x[6]) ? (
+   x[6]*log(x[6])
+)
+: (
+   0
+))) + x25*(x0*((x[2] < 1811.0) ? (
+   -236.7 + 132.416*x[2] - 5.8927e-08*x26 + 77359.0*x27 - 24.6643*x29 - 0.00375752*x30
+)
+: ((1811.0 <= x[2]) ? (
+   -27097.396 + 300.25256*x[2] - 46.0*x29 + 2.78854e+31*x31
+)
+: (
+   0
+))) + x19*((x[2] < 700.0) ? (
+   -7976.15 + 137.093038*x[2] - 8.77664e-07*x26 + x28 - 24.3671976*x29 - 0.001884662*x30
+)
+: (((x[2] < 933.47 && 700.0 <= x[2])) ? (
+   -11276.24 + 223.048446*x[2] - 5.764227e-06*x26 + x28 - 38.5844296*x29 + 0.018531982*x30
+)
+: ((933.47 <= x[2]) ? (
+   -11278.378 + 188.684153*x[2] - 31.748192*x29 - 1.230524e+28*x31
+)
+: (
+   0
+)))) + x[6]*x[4]*((x[2] < 1357.77) ? (
+   -7770.458 + 130.485235*x[2] + 1.29223e-07*x26 + 52478.0*x27 - 24.112392*x29 - 0.00265684*x30
+)
+: ((1357.77 <= x[2]) ? (
+   -13542.026 + 183.803828*x[2] - 31.38*x29 + 3.64167e+29*x31
+)
+: (
+   0
+)))) + x25*(x20*(-53520.0 + x18) + x21*(-76066.1 + 18.6758*x[2]) + 1170.0*pow(x22, 2)*x20 + x24*(48232.5 - 8.60954*x[2]) + x21*(x[3] + x23)*(21167.4 + 1.3398*x[2]) + x22*x20*(38590.0 - x18) + x24*(x[4] + x23)*(8861.88 - 5.28975*x[2])) + x17*((x[2] < x1) ? (
+   1 - 0.426902268107986*(x2*x3 + 2.45242885886749*(x5/pow(x2, 9) + x4/pow(x2, 3) + x8/x6))
+)
+: ((x[2] < x9) ? (
+   1 - 0.426902268107986*(x3*x10 + 2.45242885886749*(x4/pow(x10, 3) + x5/pow(x10, 9) + x8/x11))
+)
+: (((0 < -201.0*x[6]*x[5] && -201.0*x[6]*x[5] < x[2])) ? (
+   -0.426902268107986*(x12*pow(x10, 5) + x13*pow(x10, 25) + x14*x11)
+)
+: (((67.0*x[6]*x[5] < x[2] && -201.0*x[6]*x[5] < 0)) ? (
+   -0.426902268107986*(pow(x2, 5)*x12 + pow(x2, 25)*x13 + x6*x14)
+)
+: (
+   0
+)))))*log(1 - x15/((-x15 <= 0) ? (
+   -3.0
+)
+: (
+   1.0
+)));
+}
+
+__device__ double pycgpu_model_1_formulaobj(const double* x) {
+    double x0 = x[3] + x[4] + x[5];
+    double x1 = x[6]*x[5];
+    double x2 = 67.0*x1;
+    double x3 = 1e-09 + x2;
+    double x4 = 2.01530612244898/x[2];
+    double x5 = (1.0/6.0)*pow(x[2], 3);
+    double x6 = (1.0/135.0)*pow(x[2], 9);
+    double x7 = pow(x3, 15);
+    double x8 = pow(x[2], 15);
+    double x9 = (1.0/600.0)*x8;
+    double x10 = -201.0*x1;
+    double x11 = 1e-09 + x10;
+    double x12 = pow(x11, 15);
+    double x13 = (1.0/10.0)/pow(x[2], 5);
+    double x14 = (1.0/1500.0)/pow(x[2], 25);
+    double x15 = (1.0/315.0)/x8;
+    double x16 = 2.1*x1;
+    double x17 = pow(x0, -1);
+    double x18 = 8.3145*x[2]*x17;
+    double x19 = 2.0*x[2];
+    double x20 = x[6]*x[3];
+    double x21 = x20*x[4];
+    double x22 = x1*x[3];
+    double x23 = x[3] - x[4];
+    double x24 = -x[5];
+    double x25 = x1*x[4];
+    double x26 = 1.0*x17;
+    double x27 = pow(x[2], 3.0);
+    double x28 = pow(x[2], -1.0);
+    double x29 = 74092.0*x28;
+    double x30 = x[2]*log(x[2]);
+    double x31 = pow(x[2], 2.0);
+    double x32 = pow(x[2], -9.0);
+    return 1.0*x0*(x18*(1.0*((1e-15 < x[3]) ? (
+   x[3]*log(x[3])
+)
+: (
+   0
+)) + 1.0*((1e-15 < x[4]) ? (
+   x[4]*log(x[4])
+)
+: (
+   0
+)) + 1.0*((1e-15 < x[5]) ? (
+   x[5]*log(x[5])
+)
+: (
+   0
+)) + 1.0*((1e-15 < x[6]) ? (
+   x[6]*log(x[6])
+)
+: (
+   0
+))) + x26*(x1*((x[2] < 1811.0) ? (
+   -236.7 + 132.416*x[2] - 5.8927e-08*x27 + 77359.0*x28 - 24.6643*x30 - 0.00375752*x31
+)
+: ((1811.0 <= x[2]) ? (
+   -27097.396 + 300.25256*x[2] - 46.0*x30 + 2.78854e+31*x32
+)
+: (
+   0
+))) + x20*((x[2] < 700.0) ? (
+   -7976.15 + 137.093038*x[2] - 8.77664e-07*x27 + x29 - 24.3671976*x30 - 0.001884662*x31
+)
+: (((x[2] < 933.47 && 700.0 <= x[2])) ? (
+   -11276.24 + 223.048446*x[2] - 5.764227e-06*x27 + x29 - 38.5844296*x30 + 0.018531982*x31
+)
+: ((933.47 <= x[2]) ? (
+   -11278.378 + 188.684153*x[2] - 31.748192*x30 - 1.230524e+28*x32
+)
+: (
+   0
+)))) + x[6]*x[4]*((x[2] < 1357.77) ? (
+   -7770.458 + 130.485235*x[2] + 1.29223e-07*x27 + 52478.0*x28 - 24.112392*x30 - 0.00265684*x31
+)
+: ((1357.77 <= x[2]) ? (
+   -13542.026 + 183.803828*x[2] - 31.38*x30 + 3.64167e+29*x32
+)
+: (
+   0
+)))) + x26*(x21*(-53520.0 + x19) + x22*(-76066.1 + 18.6758*x[2]) + 1170.0*pow(x23, 2)*x21 + x25*(48232.5 - 8.60954*x[2]) + x22*(x[3] + x24)*(21167.4 + 1.3398*x[2]) + x23*x21*(38590.0 - x19) + x25*(x[4] + x24)*(8861.88 - 5.28975*x[2])) + x18*((x[2] < x2) ? (
+   1 - 0.426902268107986*(x4*x3 + 2.45242885886749*(x6/pow(x3, 9) + x5/pow(x3, 3) + x9/x7))
+)
+: ((x[2] < x10) ? (
+   1 - 0.426902268107986*(x4*x11 + 2.45242885886749*(x5/pow(x11, 3) + x6/pow(x11, 9) + x9/x12))
+)
+: (((0 < -201.0*x[6]*x[5] && -201.0*x[6]*x[5] < x[2])) ? (
+   -0.426902268107986*(x13*pow(x11, 5) + x14*pow(x11, 25) + x15*x12)
+)
+: (((67.0*x[6]*x[5] < x[2] && -201.0*x[6]*x[5] < 0)) ? (
+   -0.426902268107986*(pow(x3, 5)*x13 + pow(x3, 25)*x14 + x7*x15)
+)
+: (
+   0
+)))))*log(1 - x16/((-x16 <= 0) ? (
+   -3.0
+)
+: (
+   1.0
+))));
+}
+
+__device__ void pycgpu_model_1_formulagrad(double* out, const double* x) {
+    double x0 = pow(x[2], 2.0);
+    double x1 = pow(x0, -1);
+    double x2 = log(x[2]);
+    double x3 = 24.6643*x2;
+    double x4 = pow(x[2], 1.0);
+    double x5 = x[2] < 1811.0;
+    double x6 = 46.0*x2;
+    double x7 = pow(x[2], -10.0);
+    double x8 = 1811.0 <= x[2];
+    double x9 = x[6]*x[5];
+    double x10 = 24.112392*x2;
+    double x11 = x[2] < 1357.77;
+    double x12 = 31.38*x2;
+    double x13 = 1357.77 <= x[2];
+    double x14 = x[6]*x[4];
+    double x15 = 24.3671976*x2;
+    double x16 = -74092.0*x1;
+    double x17 = x[2] < 700.0;
+    double x18 = 38.5844296*x2;
+    double x19 = (x[2] < 933.47 && 700.0 <= x[2]);
+    double x20 = 31.748192*x2;
+    double x21 = 933.47 <= x[2];
+    double x22 = x[6]*x[3];
+    double x23 = x[3] + x[4] + x[5];
+    double x24 = pow(x23, -1);
+    double x25 = 1.0*x24;
+    double x26 = 1e-15 < x[6];
+    double x27 = 1.0*((x26 == 1) ? (
+   0
+)
+: (
+   0
+));
+    double x28 = 1e-15 < x[4];
+    double x29 = 1.0*((x28 == 1) ? (
+   0
+)
+: (
+   0
+));
+    double x30 = 1e-15 < x[5];
+    double x31 = 1.0*((x30 == 1) ? (
+   0
+)
+: (
+   0
+));
+    double x32 = 1e-15 < x[3];
+    double x33 = 1.0*((x32 == 1) ? (
+   0
+)
+: (
+   0
+));
+    double x34 = x31 + x33;
+    double x35 = x29 + x34;
+    double x36 = 8.3145*x24;
+    double x37 = x[2]*x36;
+    double x38 = -x[5];
+    double x39 = x[4] + x38;
+    double x40 = x9*x[4];
+    double x41 = x[3] + x38;
+    double x42 = x9*x[3];
+    double x43 = x[3] - x[4];
+    double x44 = x22*x[4];
+    double x45 = 2.0*x44;
+    double x46 = 67.0*x9;
+    double x47 = 1e-09 + x46;
+    double x48 = pow(x[2], -1);
+    double x49 = 2.01530612244898*x48;
+    double x50 = pow(x47, -3);
+    double x51 = pow(x[2], 3);
+    double x52 = (1.0/6.0)*x51;
+    double x53 = pow(x47, -9);
+    double x54 = pow(x[2], 9);
+    double x55 = (1.0/135.0)*x54;
+    double x56 = pow(x47, 15);
+    double x57 = pow(x56, -1);
+    double x58 = pow(x[2], 15);
+    double x59 = (1.0/600.0)*x58;
+    double x60 = x[2] < x46;
+    double x61 = -201.0*x9;
+    double x62 = 1e-09 + x61;
+    double x63 = pow(x62, -3);
+    double x64 = pow(x62, -9);
+    double x65 = pow(x62, 15);
+    double x66 = pow(x65, -1);
+    double x67 = x[2] < x61;
+    double x68 = pow(x62, 5);
+    double x69 = pow(x[2], -5);
+    double x70 = (1.0/10.0)*x69;
+    double x71 = pow(x62, 25);
+    double x72 = pow(x[2], -25);
+    double x73 = (1.0/1500.0)*x72;
+    double x74 = pow(x58, -1);
+    double x75 = (1.0/315.0)*x74;
+    double x76 = (0 < -201.0*x[6]*x[5] && -201.0*x[6]*x[5] < x[2]);
+    double x77 = pow(x47, 5);
+    double x78 = pow(x47, 25);
+    double x79 = (67.0*x[6]*x[5] < x[2] && -201.0*x[6]*x[5] < 0);
+    double x80 = ((x60 == 1) ? (
+   1 - 0.426902268107986*(x47*x49 + 2.45242885886749*(x50*x52 + x53*x55 + x57*x59))
+)
+: ((x67 == 1) ? (
+   1 - 0.426902268107986*(x62*x49 + 2.45242885886749*(x63*x52 + x64*x55 + x66*x59))
+)
+: ((x76 == 1) ? (
+   -0.426902268107986*(x70*x68 + x71*x73 + x75*x65)
+)
+: ((x79 == 1) ? (
+   -0.426902268107986*(x70*x77 + x73*x78 + x75*x56)
+)
+: (
+   0
+)))));
+    double x81 = 2.1*x9;
+    double x82 = -x81 <= 0;
+    double x83 = ((x82 == 1) ? (
+   -3.0
+)
+: (
+   1.0
+));
+    double x84 = 2.1/x83;
+    double x85 = 1 - x9*x84;
+    double x86 = log(x85);
+    double x87 = x80*x86;
+    double x88 = pow(x[2], 2);
+    double x89 = 0.86033875460538/x88;
+    double x90 = 0.0261736860556003*pow(x[2], 14);
+    double x91 = 0.0697964961482674*pow(x[2], 8);
+    double x92 = 0.523473721112006*x88;
+    double x93 = (1.0/21.0)/pow(x[2], 16);
+    double x94 = (1.0/60.0)/pow(x[2], 26);
+    double x95 = (1.0/2.0)/pow(x[2], 6);
+    double x96 = x86*x37;
+    double x97 = log(x[4]);
+    double x98 = log(x[3]);
+    double x99 = log(x[5]);
+    double x100 = log(x[6]);
+    double x101 = 1.0*((x26 == 1) ? (
+   x100*x[6]
+)
+: (
+   0
+)) + 1.0*((x28 == 1) ? (
+   x97*x[4]
+)
+: (
+   0
+)) + 1.0*((x32 == 1) ? (
+   x98*x[3]
+)
+: (
+   0
+)) + 1.0*((x30 == 1) ? (
+   x99*x[5]
+)
+: (
+   0
+));
+    double x102 = x36*x101;
+    double x103 = ((x82 == 1) ? (
+   0
+)
+: (
+   0
+))/pow(x83, 2);
+    double x104 = x80/x85;
+    double x105 = 17.46045*x[2]*x9*x24*x103*x104;
+    double x106 = 1.0*x23;
+    double x107 = x27 + x29;
+    double x108 = pow(x[2], 3.0);
+    double x109 = pow(x4, -1);
+    double x110 = 74092.0*x109;
+    double x111 = pow(x[2], -9.0);
+    double x112 = ((x17 == 1) ? (
+   -7976.15 + 137.093038*x[2] - 0.001884662*x0 - 8.77664e-07*x108 + x110 - x[2]*x15
+)
+: ((x19 == 1) ? (
+   -11276.24 + 223.048446*x[2] + 0.018531982*x0 - 5.764227e-06*x108 + x110 - x[2]*x18
+)
+: ((x21 == 1) ? (
+   -11278.378 + 188.684153*x[2] - 1.230524e+28*x111 - x[2]*x20
+)
+: (
+   0
+))));
+    double x113 = x14*((x11 == 1) ? (
+   0
+)
+: ((x13 == 1) ? (
+   0
+)
+: (
+   0
+))) + x22*((x17 == 1) ? (
+   0
+)
+: ((x19 == 1) ? (
+   0
+)
+: ((x21 == 1) ? (
+   0
+)
+: (
+   0
+)))) + x9*((x5 == 1) ? (
+   0
+)
+: ((x8 == 1) ? (
+   0
+)
+: (
+   0
+)));
+    double x114 = 21167.4 + 1.3398*x[2];
+    double x115 = x42*x114;
+    double x116 = x41*x114;
+    double x117 = 2340.0*x43*x44;
+    double x118 = 1170.0*pow(x43, 2);
+    double x119 = 2.0*x[2];
+    double x120 = 38590.0 - x119;
+    double x121 = x43*x120;
+    double x122 = -76066.1 + 18.6758*x[2];
+    double x123 = x44*x120;
+    double x124 = -53520.0 + x119;
+    double x125 = x112*x[3];
+    double x126 = ((x11 == 1) ? (
+   -7770.458 + 130.485235*x[2] - 0.00265684*x0 + 1.29223e-07*x108 + 52478.0*x109 - x[2]*x10
+)
+: ((x13 == 1) ? (
+   -13542.026 + 183.803828*x[2] + 3.64167e+29*x111 - x[2]*x12
+)
+: (
+   0
+)));
+    double x127 = x126*x[6];
+    double x128 = ((x5 == 1) ? (
+   -236.7 + 132.416*x[2] - 0.00375752*x0 - 5.8927e-08*x108 + 77359.0*x109 - x[2]*x3
+)
+: ((x8 == 1) ? (
+   -27097.396 + 300.25256*x[2] + 2.78854e+31*x111 - x[2]*x6
+)
+: (
+   0
+)));
+    double x129 = x128*x[5];
+    double x130 = x125*x[6] + x127*x[4] + x129*x[6];
+    double x131 = pow(x23, -2);
+    double x132 = 1.0*x131;
+    double x133 = 8.3145*x[2]*x131;
+    double x134 = x22*x124;
+    double x135 = x122*x[3];
+    double x136 = x22*x118;
+    double x137 = 48232.5 - 8.60954*x[2];
+    double x138 = x137*x[4];
+    double x139 = 8861.88 - 5.28975*x[2];
+    double x140 = x39*x139;
+    double x141 = x140*x[4];
+    double x142 = x134*x[4] + x136*x[4] + x41*x115 + x44*x121 + x9*x135 + x9*x138 + x9*x141;
+    double x143 = -x101*x133 - x130*x132 - x132*x142 - x87*x133;
+    double x144 = x105 + x143 + x96*((x60 == 1) ? (
+   0
+)
+: ((x67 == 1) ? (
+   0
+)
+: ((x76 == 1) ? (
+   0
+)
+: ((x79 == 1) ? (
+   0
+)
+: (
+   0
+)))));
+    double x145 = 1.0*(x[2]*x102 + x25*x130 + x25*x142 + x87*x37);
+    double x146 = x40*x139;
+    double x147 = 57.6426965585605*x48;
+    double x148 = x58*x[6];
+    double x149 = 1.75363696572522/pow(x47, 16);
+    double x150 = x54*x[6];
+    double x151 = 4.67636524193392/pow(x47, 10);
+    double x152 = x51*x[6];
+    double x153 = pow(x47, 4);
+    double x154 = 35.0727393145044/x153;
+    double x155 = 172.928089675681*x48;
+    double x156 = 14.0290957258018/pow(x62, 10);
+    double x157 = 5.26091089717566/pow(x62, 16);
+    double x158 = pow(x62, 4);
+    double x159 = 105.218217943513/x158;
+    double x160 = x74*x[6];
+    double x161 = 9.57142857142857*pow(x62, 14);
+    double x162 = 3.35*pow(x62, 24);
+    double x163 = x72*x[6];
+    double x164 = 100.5*x158;
+    double x165 = x69*x[6];
+    double x166 = 3.19047619047619*pow(x47, 14);
+    double x167 = 1.11666666666667*pow(x47, 24);
+    double x168 = 33.5*x153;
+    double x169 = x81*x103;
+    double x170 = x37*x104;
+    double x171 = x[3]*x[4];
+    double x172 = x58*x[5];
+    double x173 = x54*x[5];
+    double x174 = x51*x[5];
+    double x175 = x74*x[5];
+    double x176 = x72*x[5];
+    double x177 = x69*x[5];
+    out[0] = x106*(x102 + x105 + x25*(x14*((x11 == 1) ? (
+   106.372843 + 3.87669e-07*x0 - 52478.0*x1 - x10 - 0.00531368*x4
+)
+: ((x13 == 1) ? (
+   152.423828 - x12 - 3.277503e+30*x7
+)
+: (
+   0
+))) + x22*((x17 == 1) ? (
+   112.7258404 - 2.632992e-06*x0 - x15 + x16 - 0.003769324*x4
+)
+: ((x19 == 1) ? (
+   184.4640164 - 1.7292681e-05*x0 + x16 - x18 + 0.037063964*x4
+)
+: ((x21 == 1) ? (
+   156.935961 - x20 + 1.1074716e+29*x7
+)
+: (
+   0
+)))) + x9*((x5 == 1) ? (
+   107.7517 - 1.76781e-07*x0 - 77359.0*x1 - x3 - 0.00751504*x4
+)
+: ((x8 == 1) ? (
+   254.25256 - x6 - 2.509686e+32*x7
+)
+: (
+   0
+)))) + x25*(-8.60954*x40 + 18.6758*x42 + x45 - 5.28975*x40*x39 + 1.3398*x41*x42 - x43*x45) + x87*x36 + x96*((x60 == 1) ? (
+   -x50*x92 - x53*x91 - x57*x90 + x89*x47
+)
+: ((x67 == 1) ? (
+   -x63*x92 - x64*x91 - x66*x90 + x89*x62
+)
+: ((x76 == 1) ? (
+   -0.426902268107986*(-x65*x93 - x68*x95 - x71*x94)
+)
+: ((x79 == 1) ? (
+   -0.426902268107986*(-x56*x93 - x77*x95 - x78*x94)
+)
+: (
+   0
+))))) + (x27 + x35)*x37);
+    out[1] = x145 + x106*(x144 + x25*(x113 + x112*x[6]) + x25*(x115 + x117 + x123 + x14*x118 + x14*x121 + x14*x124 + x9*x116 + x9*x122) + x37*(x107 + x31 + 1.0*((x32 == 1) ? (
+   1 + x98
+)
+: (
+   0
+))));
+    out[2] = x145 + x106*(x144 + x25*(-x117 - x123 + x134 + x136 + x146 + x22*x121 + x9*x137 + x9*x140) + x37*(x27 + x34 + 1.0*((x28 == 1) ? (
+   1 + x97
+)
+: (
+   0
+))) + (x113 + x127)*x25);
+    out[3] = x145 + x106*(x143 + x170*(x169 - x84*x[6]) + x25*(x113 + x128*x[6]) + x37*(x107 + x33 + 1.0*((x30 == 1) ? (
+   1 + x99
+)
+: (
+   0
+))) + x96*((x60 == 1) ? (
+   -x147*x[6] + x148*x149 + x150*x151 + x152*x154
+)
+: ((x67 == 1) ? (
+   -x148*x157 - x150*x156 - x152*x159 + x155*x[6]
+)
+: ((x76 == 1) ? (
+   -0.426902268107986*(-x161*x160 - x163*x162 - x165*x164)
+)
+: ((x79 == 1) ? (
+   -0.426902268107986*(x160*x166 + x167*x163 + x168*x165)
+)
+: (
+   0
+))))) + (-x115 - x146 + x135*x[6] + x138*x[6] + x14*x140 + x22*x116)*x25);
+    out[4] = x106*(x170*(x169 - x84*x[5]) + x25*(x113 + x125 + x129 + x126*x[4]) + x25*(x118*x171 + x121*x171 + x124*x171 + x135*x[5] + x138*x[5] + x141*x[5] + x116*x[3]*x[5]) + x37*(x35 + 1.0*((x26 == 1) ? (
+   1 + x100
+)
+: (
+   0
+))) + x96*((x60 == 1) ? (
+   -x147*x[5] + x172*x149 + x173*x151 + x174*x154
+)
+: ((x67 == 1) ? (
+   x155*x[5] - x172*x157 - x173*x156 - x174*x159
+)
+: ((x76 == 1) ? (
+   -0.426902268107986*(-x161*x175 - x162*x176 - x164*x177)
+)
+: ((x79 == 1) ? (
+   -0.426902268107986*(x166*x175 + x167*x176 + x168*x177)
+)
+: (
+   0
+))))));
+}
+
+__device__ void pycgpu_model_1_formulahess(double* out, const double* x) {
+    double x0 = x[6]*x[5];
+    double x1 = 67.0*x0;
+    double x2 = 1e-09 + x1;
+    double x3 = pow(x[2], 2);
+    double x4 = pow(x3, -1);
+    double x5 = 0.86033875460538*x4;
+    double x6 = pow(x2, 15);
+    double x7 = pow(x6, -1);
+    double x8 = pow(x[2], 14);
+    double x9 = 0.0261736860556003*x8;
+    double x10 = pow(x2, -9);
+    double x11 = pow(x[2], 8);
+    double x12 = 0.0697964961482674*x11;
+    double x13 = pow(x2, 3);
+    double x14 = pow(x13, -1);
+    double x15 = 0.523473721112006*x3;
+    double x16 = x[2] < x1;
+    double x17 = -201.0*x0;
+    double x18 = 1e-09 + x17;
+    double x19 = pow(x18, 15);
+    double x20 = pow(x19, -1);
+    double x21 = pow(x18, -9);
+    double x22 = pow(x18, 3);
+    double x23 = pow(x22, -1);
+    double x24 = x[2] < x17;
+    double x25 = pow(x[2], -16);
+    double x26 = (1.0/21.0)*x25;
+    double x27 = pow(x18, 25);
+    double x28 = pow(x[2], -26);
+    double x29 = (1.0/60.0)*x28;
+    double x30 = pow(x18, 5);
+    double x31 = pow(x[2], -6);
+    double x32 = (1.0/2.0)*x31;
+    double x33 = (0 < -201.0*x[6]*x[5] && -201.0*x[6]*x[5] < x[2]);
+    double x34 = pow(x2, 25);
+    double x35 = pow(x2, 5);
+    double x36 = (67.0*x[6]*x[5] < x[2] && -201.0*x[6]*x[5] < 0);
+    double x37 = ((x16 == 1) ? (
+   -x12*x10 - x15*x14 + x2*x5 - x7*x9
+)
+: ((x24 == 1) ? (
+   -x21*x12 - x23*x15 + x5*x18 - x9*x20
+)
+: ((x33 == 1) ? (
+   -0.426902268107986*(-x26*x19 - x29*x27 - x30*x32)
+)
+: ((x36 == 1) ? (
+   -0.426902268107986*(-x32*x35 - x34*x29 - x6*x26)
+)
+: 0))));
+    double x38 = 2.1*x0;
+    double x39 = -x38 <= 0;
+    double x40 = ((x39 == 1) ? 0
+: 0);
+    double x41 = ((x39 == 1) ? (
+   -3.0
+)
+: (
+   1.0
+));
+    double x42 = x40/pow(x41, 2);
+    double x43 = x0*x42;
+    double x44 = 34.9209*x43;
+    double x45 = 2.1/x41;
+    double x46 = x45*x[5];
+    double x47 = 1 - x46*x[6];
+    double x48 = pow(x47, -1);
+    double x49 = x[3] + x[4] + x[5];
+    double x50 = pow(x49, -1);
+    double x51 = x[2]*x50;
+    double x52 = x51*x48;
+    double x53 = x52*x44;
+    double x54 = 1.04694744222401*x[2];
+    double x55 = pow(x[2], 7);
+    double x56 = 0.558371969186139*x55;
+    double x57 = 0.366431604778404*pow(x[2], 13);
+    double x58 = pow(x[2], 3);
+    double x59 = 1.72067750921076/x58;
+    double x60 = 3/x55;
+    double x61 = (13.0/30.0)/pow(x[2], 27);
+    double x62 = (16.0/21.0)/pow(x[2], 17);
+    double x63 = log(x47);
+    double x64 = 8.3145*x50;
+    double x65 = x[2]*x64;
+    double x66 = x63*x65;
+    double x67 = 16.629*x50;
+    double x68 = x63*x37;
+    double x69 = pow(x[2], -1);
+    double x70 = 2.01530612244898*x69;
+    double x71 = (1.0/6.0)*x58;
+    double x72 = pow(x[2], 9);
+    double x73 = (1.0/135.0)*x72;
+    double x74 = pow(x[2], 15);
+    double x75 = (1.0/600.0)*x74;
+    double x76 = pow(x[2], -5);
+    double x77 = (1.0/10.0)*x76;
+    double x78 = pow(x[2], -25);
+    double x79 = (1.0/1500.0)*x78;
+    double x80 = pow(x74, -1);
+    double x81 = (1.0/315.0)*x80;
+    double x82 = ((x16 == 1) ? (
+   1 - 0.426902268107986*(x2*x70 + 2.45242885886749*(x7*x75 + x71*x14 + x73*x10))
+)
+: ((x24 == 1) ? (
+   1 - 0.426902268107986*(x70*x18 + 2.45242885886749*(x71*x23 + x73*x21 + x75*x20))
+)
+: ((x33 == 1) ? (
+   -0.426902268107986*(x77*x30 + x79*x27 + x81*x19)
+)
+: ((x36 == 1) ? (
+   -0.426902268107986*(x6*x81 + x77*x35 + x79*x34)
+)
+: 0))));
+    double x83 = x82*x48;
+    double x84 = x83*x50;
+    double x85 = x84*x44;
+    double x86 = 1e-15 < x[3];
+    double x87 = 1.0*((x86 == 1) ? 0
+: 0);
+    double x88 = 1e-15 < x[6];
+    double x89 = 1.0*((x88 == 1) ? 0
+: 0);
+    double x90 = 1e-15 < x[5];
+    double x91 = 1.0*((x90 == 1) ? 0
+: 0);
+    double x92 = 1e-15 < x[4];
+    double x93 = 1.0*((x92 == 1) ? 0
+: 0);
+    double x94 = x91 + x93;
+    double x95 = x89 + x94;
+    double x96 = x87 + x95;
+    double x97 = pow(x[2], 1.0);
+    double x98 = pow(x[2], 3.0);
+    double x99 = pow(x98, -1);
+    double x100 = 148184.0*x99;
+    double x101 = x[2] < 700.0;
+    double x102 = (x[2] < 933.47 && 700.0 <= x[2]);
+    double x103 = pow(x[2], -11.0);
+    double x104 = 933.47 <= x[2];
+    double x105 = x[6]*x[3];
+    double x106 = x[2] < 1357.77;
+    double x107 = 1357.77 <= x[2];
+    double x108 = x[6]*x[4];
+    double x109 = x[2] < 1811.0;
+    double x110 = 1811.0 <= x[2];
+    double x111 = 1.0*x50;
+    double x112 = pow(x[6], 2);
+    double x113 = pow(x[5], 2);
+    double x114 = pow(x40, 2);
+    double x115 = x82/pow(x47, 2);
+    double x116 = x51*x115;
+    double x117 = -36.666945*x112*x113*x114*x116/pow(x41, 4);
+    double x118 = x0*x114/pow(x41, 3);
+    double x119 = -34.9209*x[2]*x84*x118;
+    double x120 = x65*x96;
+    double x121 = 17.46045*x84;
+    double x122 = x43*x121;
+    double x123 = x[2]*x122;
+    double x124 = x120 + x123;
+    double x125 = x119 + x124;
+    double x126 = x117 + x125;
+    double x127 = 1.0*x49;
+    double x128 = log(x[3]);
+    double x129 = x95 + 1.0*((x86 == 1) ? (
+   1 + x128
+)
+: 0);
+    double x130 = x64*x129;
+    double x131 = log(x[2]);
+    double x132 = 24.3671976*x131;
+    double x133 = pow(x[2], 2.0);
+    double x134 = pow(x133, -1);
+    double x135 = -74092.0*x134;
+    double x136 = 38.5844296*x131;
+    double x137 = pow(x[2], -10.0);
+    double x138 = 31.748192*x131;
+    double x139 = ((x101 == 1) ? (
+   112.7258404 - x132 - 2.632992e-06*x133 + x135 - 0.003769324*x97
+)
+: ((x102 == 1) ? (
+   184.4640164 - 1.7292681e-05*x133 + x135 - x136 + 0.037063964*x97
+)
+: ((x104 == 1) ? (
+   156.935961 + 1.1074716e+29*x137 - x138
+)
+: 0)));
+    double x140 = ((x109 == 1) ? 0
+: ((x110 == 1) ? 0
+: 0));
+    double x141 = x140*x[6];
+    double x142 = ((x106 == 1) ? 0
+: ((x107 == 1) ? 0
+: 0));
+    double x143 = x142*x[6];
+    double x144 = ((x101 == 1) ? 0
+: ((x102 == 1) ? 0
+: ((x104 == 1) ? 0
+: 0)));
+    double x145 = x144*x[3];
+    double x146 = x141*x[5] + x143*x[4] + x145*x[6];
+    double x147 = 2.0*x[4];
+    double x148 = x147*x[6];
+    double x149 = x147*x[3];
+    double x150 = x149*x[6];
+    double x151 = x[3] - x[4];
+    double x152 = 1.3398*x[3];
+    double x153 = x0*x152;
+    double x154 = -x[5];
+    double x155 = x[3] + x154;
+    double x156 = 1.3398*x155;
+    double x157 = 17.46045*x43;
+    double x158 = pow(x49, -2);
+    double x159 = x[2]*x83*x158;
+    double x160 = -x157*x159;
+    double x161 = ((x16 == 1) ? 0
+: ((x24 == 1) ? 0
+: ((x33 == 1) ? 0
+: ((x36 == 1) ? 0
+: 0))));
+    double x162 = x52*x157;
+    double x163 = x63*x64;
+    double x164 = 24.6643*x131;
+    double x165 = 46.0*x131;
+    double x166 = ((x109 == 1) ? (
+   107.7517 - 1.76781e-07*x133 - 77359.0*x134 - x164 - 0.00751504*x97
+)
+: ((x110 == 1) ? (
+   254.25256 - 2.509686e+32*x137 - x165
+)
+: 0));
+    double x167 = x166*x[5];
+    double x168 = 24.112392*x131;
+    double x169 = 31.38*x131;
+    double x170 = ((x106 == 1) ? (
+   106.372843 + 3.87669e-07*x133 - 52478.0*x134 - x168 - 0.00531368*x97
+)
+: ((x107 == 1) ? (
+   152.423828 - 3.277503e+30*x137 - x169
+)
+: 0));
+    double x171 = x170*x[6];
+    double x172 = x139*x[3];
+    double x173 = x167*x[6] + x171*x[4] + x172*x[6];
+    double x174 = 1.0*x158;
+    double x175 = x[4] + x154;
+    double x176 = 5.28975*x175;
+    double x177 = x0*x176;
+    double x178 = 8.60954*x0;
+    double x179 = x149*x151;
+    double x180 = 18.6758*x[3];
+    double x181 = x150 + x0*x180 + x153*x155 - x177*x[4] - x178*x[4] - x179*x[6];
+    double x182 = 8.3145*x[2];
+    double x183 = x182*x158;
+    double x184 = log(x[4]);
+    double x185 = log(x[5]);
+    double x186 = log(x[6]);
+    double x187 = 1.0*((x86 == 1) ? (
+   x128*x[3]
+)
+: 0) + 1.0*((x92 == 1) ? (
+   x184*x[4]
+)
+: 0) + 1.0*((x90 == 1) ? (
+   x185*x[5]
+)
+: 0) + 1.0*((x88 == 1) ? (
+   x186*x[6]
+)
+: 0);
+    double x188 = x187*x158;
+    double x189 = x82*x63;
+    double x190 = -8.3145*x188 - x174*x173 - x174*x181 - 8.3145*x189*x158 - x68*x183 - x96*x183;
+    double x191 = x66*x161;
+    double x192 = x126 + x191;
+    double x193 = x122 + x160 + x190 + x192 + x161*x162 + x161*x163 + x37*x162;
+    double x194 = x127*(x130 + x193 + x111*(x146 + x139*x[6]) + x111*(18.6758*x0 + x148 - x150 + x153 + x0*x156 - x148*x151));
+    double x195 = x124 + x111*x173 + x111*x181 + x64*x187 + x68*x65 + x82*x163;
+    double x196 = 1.0*x195;
+    double x197 = x87 + x89;
+    double x198 = x197 + x91;
+    double x199 = x198 + 1.0*((x92 == 1) ? (
+   1 + x184
+)
+: 0);
+    double x200 = x64*x199;
+    double x201 = 2.0*x105;
+    double x202 = 5.28975*x0*x[4];
+    double x203 = x127*(x193 + x200 + x111*(x150 - x177 - x178 + x201 - x202 - x201*x151) + (x146 + x171)*x111);
+    double x204 = pow(x2, 4);
+    double x205 = pow(x204, -1);
+    double x206 = x3*x205;
+    double x207 = x206*x[6];
+    double x208 = pow(x2, -16);
+    double x209 = x8*x[6];
+    double x210 = x208*x209;
+    double x211 = pow(x2, -10);
+    double x212 = 42.0872871774053*x211;
+    double x213 = x11*x[6];
+    double x214 = 57.6426965585605*x4;
+    double x215 = x213*x212 + x214*x[6];
+    double x216 = pow(x18, 4);
+    double x217 = pow(x216, -1);
+    double x218 = x3*x217;
+    double x219 = 315.654653830539*x218;
+    double x220 = x4*x[6];
+    double x221 = pow(x18, -16);
+    double x222 = 78.9136634576349*x221;
+    double x223 = pow(x18, -10);
+    double x224 = 126.261861532216*x223;
+    double x225 = -x209*x222 - x213*x224;
+    double x226 = x31*x[6];
+    double x227 = 502.5*x216;
+    double x228 = pow(x18, 24);
+    double x229 = 83.75*x228;
+    double x230 = x28*x[6];
+    double x231 = pow(x18, 14);
+    double x232 = 143.571428571429*x231;
+    double x233 = x25*x[6];
+    double x234 = -0.426902268107986*(x227*x226 + x230*x229 + x233*x232);
+    double x235 = pow(x2, 14);
+    double x236 = x233*x235;
+    double x237 = 167.5*x204;
+    double x238 = pow(x2, 24);
+    double x239 = 27.9166666666667*x238;
+    double x240 = -x230*x239 - x237*x226;
+    double x241 = x42*x38;
+    double x242 = x241 - x45*x[6];
+    double x243 = x83*x64;
+    double x244 = x48*x242;
+    double x245 = x65*x244;
+    double x246 = x197 + x93;
+    double x247 = x246 + 1.0*((x90 == 1) ? (
+   1 + x185
+)
+: 0);
+    double x248 = x64*x247;
+    double x249 = 57.6426965585605*x69;
+    double x250 = 1.75363696572522*x74*x208;
+    double x251 = 4.67636524193392*x72*x211;
+    double x252 = 35.0727393145044*x58*x205;
+    double x253 = 172.928089675681*x69;
+    double x254 = 14.0290957258018*x72*x223;
+    double x255 = 5.26091089717566*x74*x221;
+    double x256 = 105.218217943513*x58*x217;
+    double x257 = 9.57142857142857*x80*x231;
+    double x258 = 3.35*x78*x228;
+    double x259 = 100.5*x76*x216;
+    double x260 = 3.19047619047619*x80*x235;
+    double x261 = 1.11666666666667*x78*x238;
+    double x262 = 33.5*x76*x204;
+    double x263 = ((x16 == 1) ? (
+   -x249*x[6] + x250*x[6] + x251*x[6] + x252*x[6]
+)
+: ((x24 == 1) ? (
+   x253*x[6] - x254*x[6] - x255*x[6] - x256*x[6]
+)
+: ((x33 == 1) ? (
+   -0.426902268107986*(-x257*x[6] - x258*x[6] - x259*x[6])
+)
+: ((x36 == 1) ? (
+   -0.426902268107986*(x260*x[6] + x261*x[6] + x262*x[6])
+)
+: 0))));
+    double x264 = x190 + x248 + x111*(x146 + x166*x[6]) + x111*(18.6758*x105 - 8.60954*x108 - x153 + x202 + x105*x156 - x108*x176) + x242*x243 + x263*x163 + x37*x245;
+    double x265 = x[2]*x42*x121;
+    double x266 = x116*x157;
+    double x267 = x160 + x263*x162 - x266*x242;
+    double x268 = x125 + x267 + x265*x[6];
+    double x269 = x206*x[5];
+    double x270 = x8*x[5];
+    double x271 = x208*x270;
+    double x272 = x11*x[5];
+    double x273 = x212*x272 + x214*x[5];
+    double x274 = x4*x[5];
+    double x275 = -x270*x222 - x272*x224;
+    double x276 = x28*x[5];
+    double x277 = x31*x[5];
+    double x278 = x25*x[5];
+    double x279 = -0.426902268107986*(x232*x278 + x276*x229 + x277*x227);
+    double x280 = x235*x278;
+    double x281 = -x237*x277 - x239*x276;
+    double x282 = x241 - x46;
+    double x283 = x48*x282;
+    double x284 = x65*x283;
+    double x285 = x155*x[5];
+    double x286 = x[5]*x[4];
+    double x287 = x87 + x94;
+    double x288 = x287 + 1.0*((x88 == 1) ? (
+   1 + x186
+)
+: 0);
+    double x289 = x64*x288;
+    double x290 = ((x16 == 1) ? (
+   -x249*x[5] + x250*x[5] + x251*x[5] + x252*x[5]
+)
+: ((x24 == 1) ? (
+   x253*x[5] - x254*x[5] - x255*x[5] - x256*x[5]
+)
+: ((x33 == 1) ? (
+   -0.426902268107986*(-x257*x[5] - x258*x[5] - x259*x[5])
+)
+: ((x36 == 1) ? (
+   -0.426902268107986*(x260*x[5] + x261*x[5] + x262*x[5])
+)
+: 0))));
+    double x291 = x289 + x111*(x146 + x167 + x172 + x170*x[4]) + x111*(x149 - x179 - 8.60954*x286 + x180*x[5] + x285*x152 - x286*x176) + x282*x243 + x290*x163 + x37*x284;
+    double x292 = -x266*x282 + x290*x162;
+    double x293 = x125 + x292 + x265*x[5];
+    double x294 = x[2]*x67;
+    double x295 = pow(x97, -1);
+    double x296 = 74092.0*x295;
+    double x297 = pow(x[2], -9.0);
+    double x298 = ((x101 == 1) ? (
+   -7976.15 + 137.093038*x[2] - 0.001884662*x133 + x296 - 8.77664e-07*x98 - x[2]*x132
+)
+: ((x102 == 1) ? (
+   -11276.24 + 223.048446*x[2] + 0.018531982*x133 + x296 - 5.764227e-06*x98 - x[2]*x136
+)
+: ((x104 == 1) ? (
+   -11278.378 + 188.684153*x[2] - 1.230524e+28*x297 - x[2]*x138
+)
+: 0)));
+    double x299 = x146 + x298*x[6];
+    double x300 = 2.0*x50;
+    double x301 = x299*x158;
+    double x302 = x144*x[6];
+    double x303 = 16.629*x[2];
+    double x304 = x303*x158;
+    double x305 = 2.0*x[2];
+    double x306 = 38590.0 - x305;
+    double x307 = x306*x108;
+    double x308 = 2340.0*x105*x[4];
+    double x309 = 4680.0*x151;
+    double x310 = 21167.4 + 1.3398*x[2];
+    double x311 = x310*x[6];
+    double x312 = x311*x[5];
+    double x313 = x311*x[3];
+    double x314 = x313*x[5];
+    double x315 = 2340.0*x151;
+    double x316 = x315*x105;
+    double x317 = x316*x[4];
+    double x318 = 1170.0*pow(x151, 2);
+    double x319 = x306*x151;
+    double x320 = x319*x[4];
+    double x321 = -76066.1 + 18.6758*x[2];
+    double x322 = x321*x[6];
+    double x323 = x322*x[5];
+    double x324 = x306*x105;
+    double x325 = x324*x[4];
+    double x326 = -53520.0 + x305;
+    double x327 = x326*x[4];
+    double x328 = x314 + x317 + x323 + x325 + x312*x155 + x318*x108 + x320*x[6] + x327*x[6];
+    double x329 = 2.0*x158;
+    double x330 = x123 + x191;
+    double x331 = x63*x161;
+    double x332 = pow(x49, -3);
+    double x333 = x298*x[3];
+    double x334 = ((x106 == 1) ? (
+   -7770.458 + 130.485235*x[2] - 0.00265684*x133 + 52478.0*x295 + 1.29223e-07*x98 - x[2]*x168
+)
+: ((x107 == 1) ? (
+   -13542.026 + 183.803828*x[2] + 3.64167e+29*x297 - x[2]*x169
+)
+: 0));
+    double x335 = x334*x[6];
+    double x336 = ((x109 == 1) ? (
+   -236.7 + 132.416*x[2] - 0.00375752*x133 + 77359.0*x295 - 5.8927e-08*x98 - x[2]*x164
+)
+: ((x110 == 1) ? (
+   -27097.396 + 300.25256*x[2] + 2.78854e+31*x297 - x[2]*x165
+)
+: 0));
+    double x337 = x336*x[6];
+    double x338 = 2.0*(x333*x[6] + x335*x[4] + x337*x[5]);
+    double x339 = x303*x332;
+    double x340 = x318*x[4];
+    double x341 = 48232.5 - 8.60954*x[2];
+    double x342 = x341*x[6];
+    double x343 = x342*x[4];
+    double x344 = 8861.88 - 5.28975*x[2];
+    double x345 = x344*x175;
+    double x346 = x345*x[4];
+    double x347 = x0*x346 + x285*x313 + x320*x105 + x323*x[3] + x327*x105 + x340*x105 + x343*x[5];
+    double x348 = x338*x332 + x339*x187 + x339*x189 + 2.0*x347*x332;
+    double x349 = x348 - x304*x331 - x44*x159 + x53*x161;
+    double x350 = x117 + x119 + x330 + x349;
+    double x351 = -x303*x188 - x304*x189 - x329*x347 - x338*x158;
+    double x352 = x351 + x[2]*x85 + x294*x331;
+    double x353 = x326*x[6];
+    double x354 = x143 + x146;
+    double x355 = x199*x158;
+    double x356 = x146 + x335;
+    double x357 = x0*x344;
+    double x358 = x357*x[4];
+    double x359 = -x317 - x325 + x358 + x0*x345 + x318*x105 + x319*x105 + x342*x[5] + x353*x[3];
+    double x360 = -x355*x182 - x356*x174 - x359*x174;
+    double x361 = -1.0*x301 - x129*x183 - x328*x174;
+    double x362 = x[2]*x130 + x299*x111 + x328*x111;
+    double x363 = x[2]*x200 + x356*x111 + x359*x111;
+    double x364 = x352 + x362 + x363 + x127*(x192 + x349 + x360 + x361 + x111*(-x307 - x308 + x316 + x324 + x353 - x315*x108 + x318*x[6] + x319*x[6]) + (x302 + x354)*x111);
+    double x365 = x141 + x146;
+    double x366 = x361 + x111*(-x312 + x313 + x322 + x311*x155) + (x302 + x365)*x111;
+    double x367 = x83*x183;
+    double x368 = x63*x183;
+    double x369 = x146 + x337;
+    double x370 = x345*x[6];
+    double x371 = -x314 + x343 - x358 + x313*x155 + x322*x[3] + x370*x[4];
+    double x372 = x191 + x348 - x242*x367 + x245*x161 - x247*x183 - x263*x368 - x368*x161 - x369*x174 - x371*x174;
+    double x373 = x268 + x372;
+    double x374 = x83*x65;
+    double x375 = x330 + x351 + x[2]*x248 + x242*x374 + x369*x111 + x371*x111 + x66*x263;
+    double x376 = x362 + x375;
+    double x377 = x[3]*x[4];
+    double x378 = x377*x306;
+    double x379 = x321*x[5];
+    double x380 = x377*x315;
+    double x381 = x310*x[3];
+    double x382 = x381*x[5];
+    double x383 = x142*x[4];
+    double x384 = x140*x[5];
+    double x385 = x145 + x383 + x384;
+    double x386 = x111*(x320 + x327 + x340 + x378 + x379 + x380 + x382 + x285*x310) + (x146 + x298 + x302 + x385)*x111;
+    double x387 = x341*x[5];
+    double x388 = x320*x[3] + x327*x[3] + x346*x[5] + x377*x318 + x379*x[3] + x382*x155 + x387*x[4];
+    double x389 = x146 + x333 + x334*x[4] + x336*x[5];
+    double x390 = -x282*x367 - x288*x183 - x290*x368 - x388*x174 - x389*x174;
+    double x391 = x191 + x390 + x284*x161;
+    double x392 = x293 + x391;
+    double x393 = x[2]*x289 + x282*x374 + x388*x111 + x389*x111 + x66*x290;
+    double x394 = x344*x108;
+    double x395 = x360 + (x141 + x354)*x111 + (x342 - x357 + x370 + x394)*x111;
+    double x396 = x363 + x375;
+    double x397 = x286*x344;
+    double x398 = x111*(x334 + x354 + x385) + (-x378 - x380 + x387 + x397 + x318*x[3] + x319*x[3] + x326*x[3] + x345*x[5])*x111;
+    double x399 = 315.654653830539*x218;
+    double x400 = 2.1*x42;
+    double x401 = x400*x[6];
+    double x402 = -4.2*x118 + x241;
+    double x403 = x120 + x267 + (x401 + x402)*x374;
+    double x404 = x372 + x403;
+    double x405 = 4.2*x42;
+    double x406 = x65*x115;
+    double x407 = 2.0*x369;
+    double x408 = x63*x263;
+    double x409 = 9399.49413628717/x35;
+    double x410 = x58*x112;
+    double x411 = x72*x112;
+    double x412 = 3133.16471209573/pow(x2, 11);
+    double x413 = x74*x112;
+    double x414 = 1879.89882725743/pow(x2, 17);
+    double x415 = 84595.4472265846/x30;
+    double x416 = 16919.0894453169/pow(x18, 17);
+    double x417 = 28198.4824088615/pow(x18, 11);
+    double x418 = x76*x112;
+    double x419 = 80802.0*x22;
+    double x420 = 16160.4*pow(x18, 23);
+    double x421 = x78*x112;
+    double x422 = x80*x112;
+    double x423 = 26934.0*pow(x18, 13);
+    double x424 = 8978.0*x13;
+    double x425 = 1795.6*pow(x2, 23);
+    double x426 = 2992.66666666667*pow(x2, 13);
+    double x427 = x83*x242;
+    double x428 = x402 + x400*x[5];
+    double x429 = x0*x58;
+    double x430 = x0*x72;
+    double x431 = x0*x74;
+    double x432 = x0*x76;
+    double x433 = x0*x78;
+    double x434 = x0*x80;
+    double x435 = x127*(x120 + x390 + x111*(x336 + x365 + x385) + x111*(x346 - x382 - x397 + x321*x[3] + x341*x[4] + x381*x155) + x263*x284 + x290*x245 + x66*((x16 == 1) ? (
+   -x249 + x250 + x251 + x252 - x409*x429 - x412*x430 - x414*x431
+)
+: ((x24 == 1) ? (
+   x253 - x254 - x255 - x256 - x415*x429 - x416*x431 - x417*x430
+)
+: ((x33 == 1) ? (
+   -0.426902268107986*(-x257 - x258 - x259 + x419*x432 + x420*x433 + x423*x434)
+)
+: ((x36 == 1) ? (
+   -0.426902268107986*(x260 + x261 + x262 + x424*x432 + x425*x433 + x426*x434)
+)
+: 0)))) + (x401 + x428 - x45)*x374 - x406*x282*x242);
+    double x436 = x120 + x292 + x428*x374;
+    double x437 = x391 + x436;
+    double x438 = 1.0*x393;
+    double x439 = x58*x113;
+    double x440 = x72*x113;
+    double x441 = x74*x113;
+    double x442 = x76*x113;
+    double x443 = x78*x113;
+    double x444 = x80*x113;
+    out[0] = x127*(x126 + x85 + x111*(x0*((x109 == 1) ? (
+   -0.00751504 - 24.6643*x69 - 3.53562e-07*x97 + 154718.0*x99
+)
+: ((x110 == 1) ? (
+   2.509686e+33*x103 - 46.0*x69
+)
+: 0)) + x105*((x101 == 1) ? (
+   -0.003769324 + x100 - 24.3671976*x69 - 5.265984e-06*x97
+)
+: ((x102 == 1) ? (
+   0.037063964 + x100 - 38.5844296*x69 - 3.4585362e-05*x97
+)
+: ((x104 == 1) ? (
+   -1.1074716e+30*x103 - 31.748192*x69
+)
+: 0))) + x108*((x106 == 1) ? (
+   -0.00531368 - 24.112392*x69 + 7.75338e-07*x97 + 104956.0*x99
+)
+: ((x107 == 1) ? (
+   3.277503e+31*x103 - 31.38*x69
+)
+: 0))) + x53*x37 + x66*((x16 == 1) ? (
+   -x2*x59 - x54*x14 - x56*x10 - x7*x57
+)
+: ((x24 == 1) ? (
+   -x54*x23 - x56*x21 - x57*x20 - x59*x18
+)
+: ((x33 == 1) ? (
+   -0.426902268107986*(x60*x30 + x61*x27 + x62*x19)
+)
+: ((x36 == 1) ? (
+   -0.426902268107986*(x6*x62 + x60*x35 + x61*x34)
+)
+: 0)))) + x67*x68 + x67*x96);
+    out[1] = x194 + x196;
+    out[2] = x196 + x203;
+    out[3] = x196 + x127*(x264 + x268 + x66*((x16 == 1) ? (
+   105.218217943513*x207 + 26.3045544858783*x210 + x215
+)
+: ((x24 == 1) ? (
+   -172.928089675681*x220 + x225 - x219*x[6]
+)
+: ((x33 == 1) ? (
+   x234
+)
+: ((x36 == 1) ? (
+   -0.426902268107986*(-47.8571428571429*x236 + x240)
+)
+: 0)))));
+    out[4] = x127*(x291 + x293 + x66*((x16 == 1) ? (
+   105.218217943513*x269 + 26.3045544858783*x271 + x273
+)
+: ((x24 == 1) ? (
+   -172.928089675681*x274 + x275 - x219*x[5]
+)
+: ((x33 == 1) ? (
+   x279
+)
+: ((x36 == 1) ? (
+   -0.426902268107986*(-47.8571428571429*x280 + x281)
+)
+: 0)))));
+    out[5] = x194 + x195;
+    out[6] = x352 + x127*(-2.0*x301 + x350 + x111*(2*x307 + x308 + 2*x312 + x309*x108) - x304*x129 - x328*x329 + x65*(x95 + 1.0*((x86 == 1) ? (
+   pow(x[3], -1)
+)
+: 0)) + (x146 + 2*x302)*x111) + x294*x129 + x299*x300 + x300*x328;
+    out[7] = x364;
+    out[8] = x376 + (x366 + x373)*x127;
+    out[9] = x393 + (x386 + x392)*x127;
+    out[10] = x195 + x203;
+    out[11] = x364;
+    out[12] = x352 + x127*(x350 + x111*(x308 - 2*x324 + 2*x357 - x309*x105) - x355*x303 - x356*x329 - x359*x329 + x65*(x198 + 1.0*((x92 == 1) ? (
+   pow(x[4], -1)
+)
+: 0)) + (2*x143 + x146)*x111) + x294*x199 + x356*x300 + x359*x300;
+    out[13] = x396 + (x373 + x395)*x127;
+    out[14] = x393 + (x392 + x398)*x127;
+    out[15] = x195 + x127*(x264 + x403 + x66*((x16 == 1) ? (
+   105.218217943513*x207 + 26.3045544858783*x210 + x215
+)
+: ((x24 == 1) ? (
+   -172.928089675681*x220 + x225 - x399*x[6]
+)
+: ((x33 == 1) ? (
+   x234
+)
+: ((x36 == 1) ? (
+   -0.426902268107986*(-47.8571428571429*x236 + x240)
+)
+: 0)))));
+    out[16] = x376 + (x366 + x404)*x127;
+    out[17] = x396 + (x395 + x404)*x127;
+    out[18] = x351 + x127*(x348 - x247*x304 - x371*x329 + x374*(x402 + x405*x[6]) - x406*pow(x242, 2) - x407*x158 - x408*x304 - x427*x304 + x65*(x246 + 1.0*((x90 == 1) ? (
+   pow(x[5], -1)
+)
+: 0)) + x66*((x16 == 1) ? (
+   -x409*x410 - x412*x411 - x413*x414
+)
+: ((x24 == 1) ? (
+   -x411*x417 - x413*x416 - x415*x410
+)
+: ((x33 == 1) ? (
+   -0.426902268107986*(x418*x419 + x421*x420 + x423*x422)
+)
+: ((x36 == 1) ? (
+   -0.426902268107986*(x418*x424 + x422*x426 + x425*x421)
+)
+: 0)))) + (2*x141 + x146)*x111 + (-2*x313 - 2*x394)*x111 + x294*x263*x244) + x294*x247 + x371*x300 + x408*x294 + x427*x294 + x50*x407;
+    out[19] = x393 + x435;
+    out[20] = x127*(x291 + x436 + x66*((x16 == 1) ? (
+   105.218217943513*x269 + 26.3045544858783*x271 + x273
+)
+: ((x24 == 1) ? (
+   -172.928089675681*x274 + x275 - x399*x[5]
+)
+: ((x33 == 1) ? (
+   x279
+)
+: ((x36 == 1) ? (
+   -0.426902268107986*(-47.8571428571429*x280 + x281)
+)
+: 0)))));
+    out[21] = x438 + (x386 + x437)*x127;
+    out[22] = x438 + (x398 + x437)*x127;
+    out[23] = x435 + x438;
+    out[24] = x127*(x374*(x402 + x405*x[5]) - x406*pow(x282, 2) + x65*(x287 + 1.0*((x88 == 1) ? (
+   pow(x[6], -1)
+)
+: 0)) + x66*((x16 == 1) ? (
+   -x409*x439 - x412*x440 - x414*x441
+)
+: ((x24 == 1) ? (
+   -x415*x439 - x416*x441 - x417*x440
+)
+: ((x33 == 1) ? (
+   -0.426902268107986*(x419*x442 + x420*x443 + x423*x444)
+)
+: ((x36 == 1) ? (
+   -0.426902268107986*(x424*x442 + x425*x443 + x426*x444)
+)
+: 0)))) + (2*x145 + x146 + 2*x383 + 2*x384)*x111 + x294*x290*x283);
+}
+
+__device__ void pycgpu_model_1_internal_cons_func(double* out, const double* x) {
+    out[0] = 1.0*(-1 + x[3] + x[4] + x[5]);
+    out[1] = 1.0*(-1 + x[6]);
+}
+
+__device__ void pycgpu_model_1_internal_cons_jac(double* out, const double* x) {
+    out[0] = 0;
+    out[1] = 1.0;
+    out[2] = 1.0;
     out[3] = 1.0;
     out[4] = 0;
     out[5] = 0;
@@ -5192,85 +7453,37 @@ __device__ void pycgpu_model_0_formulamole_grad(double* out, const double* x) {
     out[9] = 1.0;
 }
 
-__device__ double pycgpu_model_1_obj(const double* x) {
-    return 1.0*(x[3]*((x[2] < 2750.0) ? (29781.555 - 10.816418*x[2] - 3.06098e-23*pow(x[2], 7.0) + ((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : (0)))) : ((2750.0 <= x[2]) ? (-7499.398 + 260.756148*x[2] - 41.77*x[2]*log(x[2])) : (0))) + x[4]*((x[2] < 1300.0) ? (12194.415 - 6.980938*x[2] + ((x[2] < 900.0) ? (-8059.921 + 133.615208*x[2] - 23.9933*x[2]*log(x[2]) + 72636.0*pow(x[2], (-1.0)) - 0.004777975*pow(x[2], 2.0) + 1.06716e-07*pow(x[2], 3.0)) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (-7811.815 + 132.988068*x[2] - 23.9887*x[2]*log(x[2]) + 42680.0*pow(x[2], (-1.0)) - 0.0042033*pow(x[2], 2.0) - 9.0876e-08*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (908.837 + 66.976538*x[2] - 14.9466*x[2]*log(x[2]) - 1477660.0*pow(x[2], (-1.0)) - 0.0081465*pow(x[2], 2.0) + 2.02715e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-124526.786 + 638.806871*x[2] - 87.2182461*x[2]*log(x[2]) + 36699805.0*pow(x[2], (-1.0)) + 0.008204849*pow(x[2], 2.0) - 3.04747e-07*pow(x[2], 3.0)) : (0)))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (369519.198 - 2554.0225*x[2] + 342.059267*x[2]*log(x[2]) - 67034516.0*pow(x[2], (-1.0)) - 0.163409355*pow(x[2], 2.0) + 1.2457117e-05*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-19887.066 + 298.7367*x[2] - 46.29*x[2]*log(x[2])) : (0)))))/(x[3] + x[4]) + 7406.1*x[3]*x[4]/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : (0)) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : (0)))/(x[3] + x[4]);
-}
-
-__device__ double pycgpu_model_1_formulaobj(const double* x) {
-    return 1.0*(x[3] + x[4])*(1.0*(x[3]*((x[2] < 2750.0) ? (29781.555 - 10.816418*x[2] - 3.06098e-23*pow(x[2], 7.0) + ((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : (0)))) : ((2750.0 <= x[2]) ? (-7499.398 + 260.756148*x[2] - 41.77*x[2]*log(x[2])) : (0))) + x[4]*((x[2] < 1300.0) ? (12194.415 - 6.980938*x[2] + ((x[2] < 900.0) ? (-8059.921 + 133.615208*x[2] - 23.9933*x[2]*log(x[2]) + 72636.0*pow(x[2], (-1.0)) - 0.004777975*pow(x[2], 2.0) + 1.06716e-07*pow(x[2], 3.0)) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (-7811.815 + 132.988068*x[2] - 23.9887*x[2]*log(x[2]) + 42680.0*pow(x[2], (-1.0)) - 0.0042033*pow(x[2], 2.0) - 9.0876e-08*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (908.837 + 66.976538*x[2] - 14.9466*x[2]*log(x[2]) - 1477660.0*pow(x[2], (-1.0)) - 0.0081465*pow(x[2], 2.0) + 2.02715e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-124526.786 + 638.806871*x[2] - 87.2182461*x[2]*log(x[2]) + 36699805.0*pow(x[2], (-1.0)) + 0.008204849*pow(x[2], 2.0) - 3.04747e-07*pow(x[2], 3.0)) : (0)))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (369519.198 - 2554.0225*x[2] + 342.059267*x[2]*log(x[2]) - 67034516.0*pow(x[2], (-1.0)) - 0.163409355*pow(x[2], 2.0) + 1.2457117e-05*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-19887.066 + 298.7367*x[2] - 46.29*x[2]*log(x[2])) : (0)))))/(x[3] + x[4]) + 7406.1*x[3]*x[4]/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : (0)) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : (0)))/(x[3] + x[4]));
-}
-
-__device__ void pycgpu_model_1_formulagrad(double* out, const double* x) {
-    out[0] = 1.0*(x[3] + x[4])*(1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? (0) : ((2750.0 <= x[2]) ? (0) : (0)))) : ((2750.0 <= x[2]) ? (0) : (0))) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? (0) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (0) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (0) : ((1941.0 <= x[2]) ? (0) : (0)))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (0) : ((1941.0 <= x[2]) ? (0) : (0)))))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (0) : (0)) + 1.0*((1e-15 < x[4]) ? (0) : (0)))/(x[3] + x[4]));
-    out[1] = 1.0*(x[3] + x[4])*(1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? (0) : ((2750.0 <= x[2]) ? (0) : (0)))) : ((2750.0 <= x[2]) ? (0) : (0))) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? (0) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (0) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (0) : ((1941.0 <= x[2]) ? (0) : (0)))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (0) : ((1941.0 <= x[2]) ? (0) : (0)))))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (0) : (0)) + 1.0*((1e-15 < x[4]) ? (0) : (0)))/(x[3] + x[4]));
-    out[2] = 1.0*(x[3] + x[4])*(1.0*(x[4]*((x[2] < 1300.0) ? (-6.980938 + ((x[2] < 900.0) ? (109.621908 - 72636.0*pow(x[2], (-2.0)) - 0.00955595*pow(x[2], 1.0) + 3.20148e-07*pow(x[2], 2.0) - 23.9933*log(x[2])) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (108.999368 - 42680.0*pow(x[2], (-2.0)) - 0.0084066*pow(x[2], 1.0) - 2.72628e-07*pow(x[2], 2.0) - 23.9887*log(x[2])) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (52.029938 + 1477660.0*pow(x[2], (-2.0)) - 0.016293*pow(x[2], 1.0) + 6.08145e-07*pow(x[2], 2.0) - 14.9466*log(x[2])) : ((1941.0 <= x[2]) ? (551.5886249 - 36699805.0*pow(x[2], (-2.0)) + 0.016409698*pow(x[2], 1.0) - 9.14241e-07*pow(x[2], 2.0) - 87.2182461*log(x[2])) : (0)))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (-2211.963233 + 67034516.0*pow(x[2], (-2.0)) - 0.32681871*pow(x[2], 1.0) + 3.7371351e-05*pow(x[2], 2.0) + 342.059267*log(x[2])) : ((1941.0 <= x[2]) ? (252.4467 - 46.29*log(x[2])) : (0)))) + ((x[2] < 2750.0) ? (-10.816418 - 2.142686e-22*pow(x[2], 6.0) + ((x[2] < 2750.0) ? (115.574375 - 93399.0*pow(x[2], (-2.0)) + 0.00040695*pow(x[2], 1.0) - 1.05036e-06*pow(x[2], 2.0) - 26.4711*log(x[2])) : ((2750.0 <= x[2]) ? (229.950843 - 1.3754142e+33*pow(x[2], (-10.0)) - 41.77*log(x[2])) : (0)))) : ((2750.0 <= x[2]) ? (218.986148 - 41.77*log(x[2])) : (0)))*x[3])/(x[3] + x[4]) + 8.3145*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : (0)) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : (0)))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (0) : (0)) + 1.0*((1e-15 < x[4]) ? (0) : (0)))/(x[3] + x[4]));
-    out[3] = 1.0*(x[3] + x[4])*(-1.0*(x[3]*((x[2] < 2750.0) ? (29781.555 - 10.816418*x[2] - 3.06098e-23*pow(x[2], 7.0) + ((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : (0)))) : ((2750.0 <= x[2]) ? (-7499.398 + 260.756148*x[2] - 41.77*x[2]*log(x[2])) : (0))) + x[4]*((x[2] < 1300.0) ? (12194.415 - 6.980938*x[2] + ((x[2] < 900.0) ? (-8059.921 + 133.615208*x[2] - 23.9933*x[2]*log(x[2]) + 72636.0*pow(x[2], (-1.0)) - 0.004777975*pow(x[2], 2.0) + 1.06716e-07*pow(x[2], 3.0)) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (-7811.815 + 132.988068*x[2] - 23.9887*x[2]*log(x[2]) + 42680.0*pow(x[2], (-1.0)) - 0.0042033*pow(x[2], 2.0) - 9.0876e-08*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (908.837 + 66.976538*x[2] - 14.9466*x[2]*log(x[2]) - 1477660.0*pow(x[2], (-1.0)) - 0.0081465*pow(x[2], 2.0) + 2.02715e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-124526.786 + 638.806871*x[2] - 87.2182461*x[2]*log(x[2]) + 36699805.0*pow(x[2], (-1.0)) + 0.008204849*pow(x[2], 2.0) - 3.04747e-07*pow(x[2], 3.0)) : (0)))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (369519.198 - 2554.0225*x[2] + 342.059267*x[2]*log(x[2]) - 67034516.0*pow(x[2], (-1.0)) - 0.163409355*pow(x[2], 2.0) + 1.2457117e-05*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-19887.066 + 298.7367*x[2] - 46.29*x[2]*log(x[2])) : (0)))))/pow((x[3] + x[4]), 2) + 7406.1*x[4]/(x[3] + x[4]) + 1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? (0) : ((2750.0 <= x[2]) ? (0) : (0)))) : ((2750.0 <= x[2]) ? (0) : (0))) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? (0) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (0) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (0) : ((1941.0 <= x[2]) ? (0) : (0)))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (0) : ((1941.0 <= x[2]) ? (0) : (0)))) + ((x[2] < 2750.0) ? (29781.555 - 10.816418*x[2] - 3.06098e-23*pow(x[2], 7.0) + ((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : (0)))) : ((2750.0 <= x[2]) ? (-7499.398 + 260.756148*x[2] - 41.77*x[2]*log(x[2])) : (0))))/(x[3] + x[4]) - 7406.1*x[3]*x[4]/pow((x[3] + x[4]), 2) - 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : (0)) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : (0)))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*(1.0*((1e-15 < x[4]) ? (0) : (0)) + 1.0*((1e-15 < x[3]) ? (1 + log(x[3])) : (0)))/(x[3] + x[4])) + 1.0*(1.0*(x[3]*((x[2] < 2750.0) ? (29781.555 - 10.816418*x[2] - 3.06098e-23*pow(x[2], 7.0) + ((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : (0)))) : ((2750.0 <= x[2]) ? (-7499.398 + 260.756148*x[2] - 41.77*x[2]*log(x[2])) : (0))) + x[4]*((x[2] < 1300.0) ? (12194.415 - 6.980938*x[2] + ((x[2] < 900.0) ? (-8059.921 + 133.615208*x[2] - 23.9933*x[2]*log(x[2]) + 72636.0*pow(x[2], (-1.0)) - 0.004777975*pow(x[2], 2.0) + 1.06716e-07*pow(x[2], 3.0)) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (-7811.815 + 132.988068*x[2] - 23.9887*x[2]*log(x[2]) + 42680.0*pow(x[2], (-1.0)) - 0.0042033*pow(x[2], 2.0) - 9.0876e-08*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (908.837 + 66.976538*x[2] - 14.9466*x[2]*log(x[2]) - 1477660.0*pow(x[2], (-1.0)) - 0.0081465*pow(x[2], 2.0) + 2.02715e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-124526.786 + 638.806871*x[2] - 87.2182461*x[2]*log(x[2]) + 36699805.0*pow(x[2], (-1.0)) + 0.008204849*pow(x[2], 2.0) - 3.04747e-07*pow(x[2], 3.0)) : (0)))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (369519.198 - 2554.0225*x[2] + 342.059267*x[2]*log(x[2]) - 67034516.0*pow(x[2], (-1.0)) - 0.163409355*pow(x[2], 2.0) + 1.2457117e-05*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-19887.066 + 298.7367*x[2] - 46.29*x[2]*log(x[2])) : (0)))))/(x[3] + x[4]) + 7406.1*x[3]*x[4]/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : (0)) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : (0)))/(x[3] + x[4]));
-    out[4] = 1.0*(x[3] + x[4])*(-1.0*(x[3]*((x[2] < 2750.0) ? (29781.555 - 10.816418*x[2] - 3.06098e-23*pow(x[2], 7.0) + ((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : (0)))) : ((2750.0 <= x[2]) ? (-7499.398 + 260.756148*x[2] - 41.77*x[2]*log(x[2])) : (0))) + x[4]*((x[2] < 1300.0) ? (12194.415 - 6.980938*x[2] + ((x[2] < 900.0) ? (-8059.921 + 133.615208*x[2] - 23.9933*x[2]*log(x[2]) + 72636.0*pow(x[2], (-1.0)) - 0.004777975*pow(x[2], 2.0) + 1.06716e-07*pow(x[2], 3.0)) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (-7811.815 + 132.988068*x[2] - 23.9887*x[2]*log(x[2]) + 42680.0*pow(x[2], (-1.0)) - 0.0042033*pow(x[2], 2.0) - 9.0876e-08*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (908.837 + 66.976538*x[2] - 14.9466*x[2]*log(x[2]) - 1477660.0*pow(x[2], (-1.0)) - 0.0081465*pow(x[2], 2.0) + 2.02715e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-124526.786 + 638.806871*x[2] - 87.2182461*x[2]*log(x[2]) + 36699805.0*pow(x[2], (-1.0)) + 0.008204849*pow(x[2], 2.0) - 3.04747e-07*pow(x[2], 3.0)) : (0)))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (369519.198 - 2554.0225*x[2] + 342.059267*x[2]*log(x[2]) - 67034516.0*pow(x[2], (-1.0)) - 0.163409355*pow(x[2], 2.0) + 1.2457117e-05*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-19887.066 + 298.7367*x[2] - 46.29*x[2]*log(x[2])) : (0)))))/pow((x[3] + x[4]), 2) + 7406.1*x[3]/(x[3] + x[4]) + 1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? (0) : ((2750.0 <= x[2]) ? (0) : (0)))) : ((2750.0 <= x[2]) ? (0) : (0))) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? (0) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (0) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (0) : ((1941.0 <= x[2]) ? (0) : (0)))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (0) : ((1941.0 <= x[2]) ? (0) : (0)))) + ((x[2] < 1300.0) ? (12194.415 - 6.980938*x[2] + ((x[2] < 900.0) ? (-8059.921 + 133.615208*x[2] - 23.9933*x[2]*log(x[2]) + 72636.0*pow(x[2], (-1.0)) - 0.004777975*pow(x[2], 2.0) + 1.06716e-07*pow(x[2], 3.0)) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (-7811.815 + 132.988068*x[2] - 23.9887*x[2]*log(x[2]) + 42680.0*pow(x[2], (-1.0)) - 0.0042033*pow(x[2], 2.0) - 9.0876e-08*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (908.837 + 66.976538*x[2] - 14.9466*x[2]*log(x[2]) - 1477660.0*pow(x[2], (-1.0)) - 0.0081465*pow(x[2], 2.0) + 2.02715e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-124526.786 + 638.806871*x[2] - 87.2182461*x[2]*log(x[2]) + 36699805.0*pow(x[2], (-1.0)) + 0.008204849*pow(x[2], 2.0) - 3.04747e-07*pow(x[2], 3.0)) : (0)))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (369519.198 - 2554.0225*x[2] + 342.059267*x[2]*log(x[2]) - 67034516.0*pow(x[2], (-1.0)) - 0.163409355*pow(x[2], 2.0) + 1.2457117e-05*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-19887.066 + 298.7367*x[2] - 46.29*x[2]*log(x[2])) : (0)))))/(x[3] + x[4]) - 7406.1*x[3]*x[4]/pow((x[3] + x[4]), 2) - 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : (0)) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : (0)))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (0) : (0)) + 1.0*((1e-15 < x[4]) ? (1 + log(x[4])) : (0)))/(x[3] + x[4])) + 1.0*(1.0*(x[3]*((x[2] < 2750.0) ? (29781.555 - 10.816418*x[2] - 3.06098e-23*pow(x[2], 7.0) + ((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : (0)))) : ((2750.0 <= x[2]) ? (-7499.398 + 260.756148*x[2] - 41.77*x[2]*log(x[2])) : (0))) + x[4]*((x[2] < 1300.0) ? (12194.415 - 6.980938*x[2] + ((x[2] < 900.0) ? (-8059.921 + 133.615208*x[2] - 23.9933*x[2]*log(x[2]) + 72636.0*pow(x[2], (-1.0)) - 0.004777975*pow(x[2], 2.0) + 1.06716e-07*pow(x[2], 3.0)) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (-7811.815 + 132.988068*x[2] - 23.9887*x[2]*log(x[2]) + 42680.0*pow(x[2], (-1.0)) - 0.0042033*pow(x[2], 2.0) - 9.0876e-08*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (908.837 + 66.976538*x[2] - 14.9466*x[2]*log(x[2]) - 1477660.0*pow(x[2], (-1.0)) - 0.0081465*pow(x[2], 2.0) + 2.02715e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-124526.786 + 638.806871*x[2] - 87.2182461*x[2]*log(x[2]) + 36699805.0*pow(x[2], (-1.0)) + 0.008204849*pow(x[2], 2.0) - 3.04747e-07*pow(x[2], 3.0)) : (0)))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (369519.198 - 2554.0225*x[2] + 342.059267*x[2]*log(x[2]) - 67034516.0*pow(x[2], (-1.0)) - 0.163409355*pow(x[2], 2.0) + 1.2457117e-05*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-19887.066 + 298.7367*x[2] - 46.29*x[2]*log(x[2])) : (0)))))/(x[3] + x[4]) + 7406.1*x[3]*x[4]/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : (0)) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : (0)))/(x[3] + x[4]));
-}
-
-__device__ void pycgpu_model_1_formulahess(double* out, const double* x) {
-    out[0] = 1.0*(x[3] + x[4])*(1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]));
-    out[1] = 1.0*(x[3] + x[4])*(1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]));
-    out[2] = 1.0*(x[3] + x[4])*(1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 8.3145*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]));
-    out[3] = 1.0*(x[3] + x[4])*(-1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/pow((x[3] + x[4]), 2) + 1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)))/(x[3] + x[4]) - 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4])) + 1.0*(1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]));
-    out[4] = 1.0*(x[3] + x[4])*(-1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/pow((x[3] + x[4]), 2) + 1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) - 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4])) + 1.0*(1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]));
-    out[5] = 1.0*(x[3] + x[4])*(1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]));
-    out[6] = 1.0*(x[3] + x[4])*(1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]));
-    out[7] = 1.0*(x[3] + x[4])*(1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 8.3145*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]));
-    out[8] = 1.0*(x[3] + x[4])*(-1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/pow((x[3] + x[4]), 2) + 1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)))/(x[3] + x[4]) - 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4])) + 1.0*(1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]));
-    out[9] = 1.0*(x[3] + x[4])*(-1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/pow((x[3] + x[4]), 2) + 1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) - 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4])) + 1.0*(1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]));
-    out[10] = 1.0*(x[3] + x[4])*(1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 8.3145*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]));
-    out[11] = 1.0*(x[3] + x[4])*(1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 8.3145*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]));
-    out[12] = 1.0*(x[3] + x[4])*(1.0*(x[3]*((x[2] < 2750.0) ? (-1.2856116e-21*pow(x[2], 5.0) + ((x[2] < 2750.0) ? (0.00040695 - 26.4711*pow(x[2], (-1)) + 186798.0*pow(x[2], (-3.0)) - 2.10072e-06*pow(x[2], 1.0)) : ((2750.0 <= x[2]) ? (-41.77*pow(x[2], (-1)) + 1.3754142e+34*pow(x[2], (-11.0))) : 0))) : ((2750.0 <= x[2]) ? (-41.77/x[2]) : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? (-0.00955595 - 23.9933*pow(x[2], (-1)) + 145272.0*pow(x[2], (-3.0)) + 6.40296e-07*pow(x[2], 1.0)) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (-0.0084066 - 23.9887*pow(x[2], (-1)) + 85360.0*pow(x[2], (-3.0)) - 5.45256e-07*pow(x[2], 1.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (-0.016293 - 14.9466*pow(x[2], (-1)) - 2955320.0*pow(x[2], (-3.0)) + 1.21629e-06*pow(x[2], 1.0)) : ((1941.0 <= x[2]) ? (0.016409698 - 87.2182461*pow(x[2], (-1)) + 73399610.0*pow(x[2], (-3.0)) - 1.828482e-06*pow(x[2], 1.0)) : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (-0.32681871 + 342.059267*pow(x[2], (-1)) - 134069032.0*pow(x[2], (-3.0)) + 7.4742702e-05*pow(x[2], 1.0)) : ((1941.0 <= x[2]) ? (-46.29/x[2]) : 0))))/(x[3] + x[4]) + 16.629*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]));
-    out[13] = 1.0*(x[3] + x[4])*(-1.0*(x[4]*((x[2] < 1300.0) ? (-6.980938 + ((x[2] < 900.0) ? (109.621908 - 72636.0*pow(x[2], (-2.0)) - 0.00955595*pow(x[2], 1.0) + 3.20148e-07*pow(x[2], 2.0) - 23.9933*log(x[2])) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (108.999368 - 42680.0*pow(x[2], (-2.0)) - 0.0084066*pow(x[2], 1.0) - 2.72628e-07*pow(x[2], 2.0) - 23.9887*log(x[2])) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (52.029938 + 1477660.0*pow(x[2], (-2.0)) - 0.016293*pow(x[2], 1.0) + 6.08145e-07*pow(x[2], 2.0) - 14.9466*log(x[2])) : ((1941.0 <= x[2]) ? (551.5886249 - 36699805.0*pow(x[2], (-2.0)) + 0.016409698*pow(x[2], 1.0) - 9.14241e-07*pow(x[2], 2.0) - 87.2182461*log(x[2])) : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (-2211.963233 + 67034516.0*pow(x[2], (-2.0)) - 0.32681871*pow(x[2], 1.0) + 3.7371351e-05*pow(x[2], 2.0) + 342.059267*log(x[2])) : ((1941.0 <= x[2]) ? (252.4467 - 46.29*log(x[2])) : 0))) + ((x[2] < 2750.0) ? (-10.816418 - 2.142686e-22*pow(x[2], 6.0) + ((x[2] < 2750.0) ? (115.574375 - 93399.0*pow(x[2], (-2.0)) + 0.00040695*pow(x[2], 1.0) - 1.05036e-06*pow(x[2], 2.0) - 26.4711*log(x[2])) : ((2750.0 <= x[2]) ? (229.950843 - 1.3754142e+33*pow(x[2], (-10.0)) - 41.77*log(x[2])) : 0))) : ((2750.0 <= x[2]) ? (218.986148 - 41.77*log(x[2])) : 0))*x[3])/pow((x[3] + x[4]), 2) - 8.3145*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : 0) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : 0))/pow((x[3] + x[4]), 2) + 8.3145*(1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0) + 1.0*((1e-15 < x[3]) ? (1 + log(x[3])) : 0))/(x[3] + x[4]) + 1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 2750.0) ? (-10.816418 - 2.142686e-22*pow(x[2], 6.0) + ((x[2] < 2750.0) ? (115.574375 - 93399.0*pow(x[2], (-2.0)) + 0.00040695*pow(x[2], 1.0) - 1.05036e-06*pow(x[2], 2.0) - 26.4711*log(x[2])) : ((2750.0 <= x[2]) ? (229.950843 - 1.3754142e+33*pow(x[2], (-10.0)) - 41.77*log(x[2])) : 0))) : ((2750.0 <= x[2]) ? (218.986148 - 41.77*log(x[2])) : 0)))/(x[3] + x[4]) - 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4])) + 1.0*(1.0*(x[4]*((x[2] < 1300.0) ? (-6.980938 + ((x[2] < 900.0) ? (109.621908 - 72636.0*pow(x[2], (-2.0)) - 0.00955595*pow(x[2], 1.0) + 3.20148e-07*pow(x[2], 2.0) - 23.9933*log(x[2])) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (108.999368 - 42680.0*pow(x[2], (-2.0)) - 0.0084066*pow(x[2], 1.0) - 2.72628e-07*pow(x[2], 2.0) - 23.9887*log(x[2])) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (52.029938 + 1477660.0*pow(x[2], (-2.0)) - 0.016293*pow(x[2], 1.0) + 6.08145e-07*pow(x[2], 2.0) - 14.9466*log(x[2])) : ((1941.0 <= x[2]) ? (551.5886249 - 36699805.0*pow(x[2], (-2.0)) + 0.016409698*pow(x[2], 1.0) - 9.14241e-07*pow(x[2], 2.0) - 87.2182461*log(x[2])) : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (-2211.963233 + 67034516.0*pow(x[2], (-2.0)) - 0.32681871*pow(x[2], 1.0) + 3.7371351e-05*pow(x[2], 2.0) + 342.059267*log(x[2])) : ((1941.0 <= x[2]) ? (252.4467 - 46.29*log(x[2])) : 0))) + ((x[2] < 2750.0) ? (-10.816418 - 2.142686e-22*pow(x[2], 6.0) + ((x[2] < 2750.0) ? (115.574375 - 93399.0*pow(x[2], (-2.0)) + 0.00040695*pow(x[2], 1.0) - 1.05036e-06*pow(x[2], 2.0) - 26.4711*log(x[2])) : ((2750.0 <= x[2]) ? (229.950843 - 1.3754142e+33*pow(x[2], (-10.0)) - 41.77*log(x[2])) : 0))) : ((2750.0 <= x[2]) ? (218.986148 - 41.77*log(x[2])) : 0))*x[3])/(x[3] + x[4]) + 8.3145*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : 0) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : 0))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]));
-    out[14] = 1.0*(x[3] + x[4])*(-1.0*(x[4]*((x[2] < 1300.0) ? (-6.980938 + ((x[2] < 900.0) ? (109.621908 - 72636.0*pow(x[2], (-2.0)) - 0.00955595*pow(x[2], 1.0) + 3.20148e-07*pow(x[2], 2.0) - 23.9933*log(x[2])) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (108.999368 - 42680.0*pow(x[2], (-2.0)) - 0.0084066*pow(x[2], 1.0) - 2.72628e-07*pow(x[2], 2.0) - 23.9887*log(x[2])) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (52.029938 + 1477660.0*pow(x[2], (-2.0)) - 0.016293*pow(x[2], 1.0) + 6.08145e-07*pow(x[2], 2.0) - 14.9466*log(x[2])) : ((1941.0 <= x[2]) ? (551.5886249 - 36699805.0*pow(x[2], (-2.0)) + 0.016409698*pow(x[2], 1.0) - 9.14241e-07*pow(x[2], 2.0) - 87.2182461*log(x[2])) : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (-2211.963233 + 67034516.0*pow(x[2], (-2.0)) - 0.32681871*pow(x[2], 1.0) + 3.7371351e-05*pow(x[2], 2.0) + 342.059267*log(x[2])) : ((1941.0 <= x[2]) ? (252.4467 - 46.29*log(x[2])) : 0))) + ((x[2] < 2750.0) ? (-10.816418 - 2.142686e-22*pow(x[2], 6.0) + ((x[2] < 2750.0) ? (115.574375 - 93399.0*pow(x[2], (-2.0)) + 0.00040695*pow(x[2], 1.0) - 1.05036e-06*pow(x[2], 2.0) - 26.4711*log(x[2])) : ((2750.0 <= x[2]) ? (229.950843 - 1.3754142e+33*pow(x[2], (-10.0)) - 41.77*log(x[2])) : 0))) : ((2750.0 <= x[2]) ? (218.986148 - 41.77*log(x[2])) : 0))*x[3])/pow((x[3] + x[4]), 2) - 8.3145*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : 0) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : 0))/pow((x[3] + x[4]), 2) + 8.3145*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (1 + log(x[4])) : 0))/(x[3] + x[4]) + 1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 1300.0) ? (-6.980938 + ((x[2] < 900.0) ? (109.621908 - 72636.0*pow(x[2], (-2.0)) - 0.00955595*pow(x[2], 1.0) + 3.20148e-07*pow(x[2], 2.0) - 23.9933*log(x[2])) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (108.999368 - 42680.0*pow(x[2], (-2.0)) - 0.0084066*pow(x[2], 1.0) - 2.72628e-07*pow(x[2], 2.0) - 23.9887*log(x[2])) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (52.029938 + 1477660.0*pow(x[2], (-2.0)) - 0.016293*pow(x[2], 1.0) + 6.08145e-07*pow(x[2], 2.0) - 14.9466*log(x[2])) : ((1941.0 <= x[2]) ? (551.5886249 - 36699805.0*pow(x[2], (-2.0)) + 0.016409698*pow(x[2], 1.0) - 9.14241e-07*pow(x[2], 2.0) - 87.2182461*log(x[2])) : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (-2211.963233 + 67034516.0*pow(x[2], (-2.0)) - 0.32681871*pow(x[2], 1.0) + 3.7371351e-05*pow(x[2], 2.0) + 342.059267*log(x[2])) : ((1941.0 <= x[2]) ? (252.4467 - 46.29*log(x[2])) : 0))))/(x[3] + x[4]) - 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4])) + 1.0*(1.0*(x[4]*((x[2] < 1300.0) ? (-6.980938 + ((x[2] < 900.0) ? (109.621908 - 72636.0*pow(x[2], (-2.0)) - 0.00955595*pow(x[2], 1.0) + 3.20148e-07*pow(x[2], 2.0) - 23.9933*log(x[2])) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (108.999368 - 42680.0*pow(x[2], (-2.0)) - 0.0084066*pow(x[2], 1.0) - 2.72628e-07*pow(x[2], 2.0) - 23.9887*log(x[2])) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (52.029938 + 1477660.0*pow(x[2], (-2.0)) - 0.016293*pow(x[2], 1.0) + 6.08145e-07*pow(x[2], 2.0) - 14.9466*log(x[2])) : ((1941.0 <= x[2]) ? (551.5886249 - 36699805.0*pow(x[2], (-2.0)) + 0.016409698*pow(x[2], 1.0) - 9.14241e-07*pow(x[2], 2.0) - 87.2182461*log(x[2])) : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (-2211.963233 + 67034516.0*pow(x[2], (-2.0)) - 0.32681871*pow(x[2], 1.0) + 3.7371351e-05*pow(x[2], 2.0) + 342.059267*log(x[2])) : ((1941.0 <= x[2]) ? (252.4467 - 46.29*log(x[2])) : 0))) + ((x[2] < 2750.0) ? (-10.816418 - 2.142686e-22*pow(x[2], 6.0) + ((x[2] < 2750.0) ? (115.574375 - 93399.0*pow(x[2], (-2.0)) + 0.00040695*pow(x[2], 1.0) - 1.05036e-06*pow(x[2], 2.0) - 26.4711*log(x[2])) : ((2750.0 <= x[2]) ? (229.950843 - 1.3754142e+33*pow(x[2], (-10.0)) - 41.77*log(x[2])) : 0))) : ((2750.0 <= x[2]) ? (218.986148 - 41.77*log(x[2])) : 0))*x[3])/(x[3] + x[4]) + 8.3145*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : 0) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : 0))/(x[3] + x[4]) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]));
-    out[15] = 1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 1.0*(x[3] + x[4])*(-1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/pow((x[3] + x[4]), 2) + 1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)))/(x[3] + x[4]) - 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4])) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]);
-    out[16] = 1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 1.0*(x[3] + x[4])*(-1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/pow((x[3] + x[4]), 2) + 1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)))/(x[3] + x[4]) - 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4])) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]);
-    out[17] = 1.0*(x[4]*((x[2] < 1300.0) ? (-6.980938 + ((x[2] < 900.0) ? (109.621908 - 72636.0*pow(x[2], (-2.0)) - 0.00955595*pow(x[2], 1.0) + 3.20148e-07*pow(x[2], 2.0) - 23.9933*log(x[2])) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (108.999368 - 42680.0*pow(x[2], (-2.0)) - 0.0084066*pow(x[2], 1.0) - 2.72628e-07*pow(x[2], 2.0) - 23.9887*log(x[2])) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (52.029938 + 1477660.0*pow(x[2], (-2.0)) - 0.016293*pow(x[2], 1.0) + 6.08145e-07*pow(x[2], 2.0) - 14.9466*log(x[2])) : ((1941.0 <= x[2]) ? (551.5886249 - 36699805.0*pow(x[2], (-2.0)) + 0.016409698*pow(x[2], 1.0) - 9.14241e-07*pow(x[2], 2.0) - 87.2182461*log(x[2])) : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (-2211.963233 + 67034516.0*pow(x[2], (-2.0)) - 0.32681871*pow(x[2], 1.0) + 3.7371351e-05*pow(x[2], 2.0) + 342.059267*log(x[2])) : ((1941.0 <= x[2]) ? (252.4467 - 46.29*log(x[2])) : 0))) + ((x[2] < 2750.0) ? (-10.816418 - 2.142686e-22*pow(x[2], 6.0) + ((x[2] < 2750.0) ? (115.574375 - 93399.0*pow(x[2], (-2.0)) + 0.00040695*pow(x[2], 1.0) - 1.05036e-06*pow(x[2], 2.0) - 26.4711*log(x[2])) : ((2750.0 <= x[2]) ? (229.950843 - 1.3754142e+33*pow(x[2], (-10.0)) - 41.77*log(x[2])) : 0))) : ((2750.0 <= x[2]) ? (218.986148 - 41.77*log(x[2])) : 0))*x[3])/(x[3] + x[4]) + 8.3145*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : 0) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : 0))/(x[3] + x[4]) + 1.0*(x[3] + x[4])*(-1.0*(x[4]*((x[2] < 1300.0) ? (-6.980938 + ((x[2] < 900.0) ? (109.621908 - 72636.0*pow(x[2], (-2.0)) - 0.00955595*pow(x[2], 1.0) + 3.20148e-07*pow(x[2], 2.0) - 23.9933*log(x[2])) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (108.999368 - 42680.0*pow(x[2], (-2.0)) - 0.0084066*pow(x[2], 1.0) - 2.72628e-07*pow(x[2], 2.0) - 23.9887*log(x[2])) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (52.029938 + 1477660.0*pow(x[2], (-2.0)) - 0.016293*pow(x[2], 1.0) + 6.08145e-07*pow(x[2], 2.0) - 14.9466*log(x[2])) : ((1941.0 <= x[2]) ? (551.5886249 - 36699805.0*pow(x[2], (-2.0)) + 0.016409698*pow(x[2], 1.0) - 9.14241e-07*pow(x[2], 2.0) - 87.2182461*log(x[2])) : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (-2211.963233 + 67034516.0*pow(x[2], (-2.0)) - 0.32681871*pow(x[2], 1.0) + 3.7371351e-05*pow(x[2], 2.0) + 342.059267*log(x[2])) : ((1941.0 <= x[2]) ? (252.4467 - 46.29*log(x[2])) : 0))) + ((x[2] < 2750.0) ? (-10.816418 - 2.142686e-22*pow(x[2], 6.0) + ((x[2] < 2750.0) ? (115.574375 - 93399.0*pow(x[2], (-2.0)) + 0.00040695*pow(x[2], 1.0) - 1.05036e-06*pow(x[2], 2.0) - 26.4711*log(x[2])) : ((2750.0 <= x[2]) ? (229.950843 - 1.3754142e+33*pow(x[2], (-10.0)) - 41.77*log(x[2])) : 0))) : ((2750.0 <= x[2]) ? (218.986148 - 41.77*log(x[2])) : 0))*x[3])/pow((x[3] + x[4]), 2) - 8.3145*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : 0) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : 0))/pow((x[3] + x[4]), 2) + 8.3145*(1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0) + 1.0*((1e-15 < x[3]) ? (1 + log(x[3])) : 0))/(x[3] + x[4]) + 1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 2750.0) ? (-10.816418 - 2.142686e-22*pow(x[2], 6.0) + ((x[2] < 2750.0) ? (115.574375 - 93399.0*pow(x[2], (-2.0)) + 0.00040695*pow(x[2], 1.0) - 1.05036e-06*pow(x[2], 2.0) - 26.4711*log(x[2])) : ((2750.0 <= x[2]) ? (229.950843 - 1.3754142e+33*pow(x[2], (-10.0)) - 41.77*log(x[2])) : 0))) : ((2750.0 <= x[2]) ? (218.986148 - 41.77*log(x[2])) : 0)))/(x[3] + x[4]) - 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4])) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]);
-    out[18] = -2.0*(x[3]*((x[2] < 2750.0) ? (29781.555 - 10.816418*x[2] - 3.06098e-23*pow(x[2], 7.0) + ((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : 0))) : ((2750.0 <= x[2]) ? (-7499.398 + 260.756148*x[2] - 41.77*x[2]*log(x[2])) : 0)) + x[4]*((x[2] < 1300.0) ? (12194.415 - 6.980938*x[2] + ((x[2] < 900.0) ? (-8059.921 + 133.615208*x[2] - 23.9933*x[2]*log(x[2]) + 72636.0*pow(x[2], (-1.0)) - 0.004777975*pow(x[2], 2.0) + 1.06716e-07*pow(x[2], 3.0)) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (-7811.815 + 132.988068*x[2] - 23.9887*x[2]*log(x[2]) + 42680.0*pow(x[2], (-1.0)) - 0.0042033*pow(x[2], 2.0) - 9.0876e-08*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (908.837 + 66.976538*x[2] - 14.9466*x[2]*log(x[2]) - 1477660.0*pow(x[2], (-1.0)) - 0.0081465*pow(x[2], 2.0) + 2.02715e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-124526.786 + 638.806871*x[2] - 87.2182461*x[2]*log(x[2]) + 36699805.0*pow(x[2], (-1.0)) + 0.008204849*pow(x[2], 2.0) - 3.04747e-07*pow(x[2], 3.0)) : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (369519.198 - 2554.0225*x[2] + 342.059267*x[2]*log(x[2]) - 67034516.0*pow(x[2], (-1.0)) - 0.163409355*pow(x[2], 2.0) + 1.2457117e-05*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-19887.066 + 298.7367*x[2] - 46.29*x[2]*log(x[2])) : 0))))/pow((x[3] + x[4]), 2) + 14812.2*x[4]/(x[3] + x[4]) + 2.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 2750.0) ? (29781.555 - 10.816418*x[2] - 3.06098e-23*pow(x[2], 7.0) + ((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : 0))) : ((2750.0 <= x[2]) ? (-7499.398 + 260.756148*x[2] - 41.77*x[2]*log(x[2])) : 0)))/(x[3] + x[4]) + 1.0*(x[3] + x[4])*(2.0*(x[3]*((x[2] < 2750.0) ? (29781.555 - 10.816418*x[2] - 3.06098e-23*pow(x[2], 7.0) + ((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : 0))) : ((2750.0 <= x[2]) ? (-7499.398 + 260.756148*x[2] - 41.77*x[2]*log(x[2])) : 0)) + x[4]*((x[2] < 1300.0) ? (12194.415 - 6.980938*x[2] + ((x[2] < 900.0) ? (-8059.921 + 133.615208*x[2] - 23.9933*x[2]*log(x[2]) + 72636.0*pow(x[2], (-1.0)) - 0.004777975*pow(x[2], 2.0) + 1.06716e-07*pow(x[2], 3.0)) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (-7811.815 + 132.988068*x[2] - 23.9887*x[2]*log(x[2]) + 42680.0*pow(x[2], (-1.0)) - 0.0042033*pow(x[2], 2.0) - 9.0876e-08*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (908.837 + 66.976538*x[2] - 14.9466*x[2]*log(x[2]) - 1477660.0*pow(x[2], (-1.0)) - 0.0081465*pow(x[2], 2.0) + 2.02715e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-124526.786 + 638.806871*x[2] - 87.2182461*x[2]*log(x[2]) + 36699805.0*pow(x[2], (-1.0)) + 0.008204849*pow(x[2], 2.0) - 3.04747e-07*pow(x[2], 3.0)) : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (369519.198 - 2554.0225*x[2] + 342.059267*x[2]*log(x[2]) - 67034516.0*pow(x[2], (-1.0)) - 0.163409355*pow(x[2], 2.0) + 1.2457117e-05*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-19887.066 + 298.7367*x[2] - 46.29*x[2]*log(x[2])) : 0))))/pow((x[3] + x[4]), 3) - 14812.2*x[4]/pow((x[3] + x[4]), 2) - 2.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 2750.0) ? (29781.555 - 10.816418*x[2] - 3.06098e-23*pow(x[2], 7.0) + ((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : 0))) : ((2750.0 <= x[2]) ? (-7499.398 + 260.756148*x[2] - 41.77*x[2]*log(x[2])) : 0)))/pow((x[3] + x[4]), 2) + 1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + 2*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)))/(x[3] + x[4]) + 14812.2*x[3]*x[4]/pow((x[3] + x[4]), 3) + 16.629*x[2]*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : 0) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : 0))/pow((x[3] + x[4]), 3) - 16.629*x[2]*( 1.0*((1e-15 < x[3]) ? (1 + log(x[3])) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*( 1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0))/(x[3] + x[4])) - 14812.2*x[3]*x[4]/pow((x[3] + x[4]), 2) - 16.629*x[2]*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : 0) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : 0))/pow((x[3] + x[4]), 2) + 16.629*x[2]*( 1.0*((1e-15 < x[3]) ? (1 + log(x[3])) : 0))/(x[3] + x[4]);
-    out[19] = -2.0*(x[3]*((x[2] < 2750.0) ? (29781.555 - 10.816418*x[2] - 3.06098e-23*pow(x[2], 7.0) + ((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : 0))) : ((2750.0 <= x[2]) ? (-7499.398 + 260.756148*x[2] - 41.77*x[2]*log(x[2])) : 0)) + x[4]*((x[2] < 1300.0) ? (12194.415 - 6.980938*x[2] + ((x[2] < 900.0) ? (-8059.921 + 133.615208*x[2] - 23.9933*x[2]*log(x[2]) + 72636.0*pow(x[2], (-1.0)) - 0.004777975*pow(x[2], 2.0) + 1.06716e-07*pow(x[2], 3.0)) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (-7811.815 + 132.988068*x[2] - 23.9887*x[2]*log(x[2]) + 42680.0*pow(x[2], (-1.0)) - 0.0042033*pow(x[2], 2.0) - 9.0876e-08*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (908.837 + 66.976538*x[2] - 14.9466*x[2]*log(x[2]) - 1477660.0*pow(x[2], (-1.0)) - 0.0081465*pow(x[2], 2.0) + 2.02715e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-124526.786 + 638.806871*x[2] - 87.2182461*x[2]*log(x[2]) + 36699805.0*pow(x[2], (-1.0)) + 0.008204849*pow(x[2], 2.0) - 3.04747e-07*pow(x[2], 3.0)) : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (369519.198 - 2554.0225*x[2] + 342.059267*x[2]*log(x[2]) - 67034516.0*pow(x[2], (-1.0)) - 0.163409355*pow(x[2], 2.0) + 1.2457117e-05*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-19887.066 + 298.7367*x[2] - 46.29*x[2]*log(x[2])) : 0))))/pow((x[3] + x[4]), 2) + 7406.1*x[3]/(x[3] + x[4]) + 7406.1*x[4]/(x[3] + x[4]) + 1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 2750.0) ? (29781.555 - 10.816418*x[2] - 3.06098e-23*pow(x[2], 7.0) + ((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : 0))) : ((2750.0 <= x[2]) ? (-7499.398 + 260.756148*x[2] - 41.77*x[2]*log(x[2])) : 0)))/(x[3] + x[4]) + 1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 1300.0) ? (12194.415 - 6.980938*x[2] + ((x[2] < 900.0) ? (-8059.921 + 133.615208*x[2] - 23.9933*x[2]*log(x[2]) + 72636.0*pow(x[2], (-1.0)) - 0.004777975*pow(x[2], 2.0) + 1.06716e-07*pow(x[2], 3.0)) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (-7811.815 + 132.988068*x[2] - 23.9887*x[2]*log(x[2]) + 42680.0*pow(x[2], (-1.0)) - 0.0042033*pow(x[2], 2.0) - 9.0876e-08*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (908.837 + 66.976538*x[2] - 14.9466*x[2]*log(x[2]) - 1477660.0*pow(x[2], (-1.0)) - 0.0081465*pow(x[2], 2.0) + 2.02715e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-124526.786 + 638.806871*x[2] - 87.2182461*x[2]*log(x[2]) + 36699805.0*pow(x[2], (-1.0)) + 0.008204849*pow(x[2], 2.0) - 3.04747e-07*pow(x[2], 3.0)) : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (369519.198 - 2554.0225*x[2] + 342.059267*x[2]*log(x[2]) - 67034516.0*pow(x[2], (-1.0)) - 0.163409355*pow(x[2], 2.0) + 1.2457117e-05*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-19887.066 + 298.7367*x[2] - 46.29*x[2]*log(x[2])) : 0))))/(x[3] + x[4]) + 1.0*(x[3] + x[4])*(2.0*(x[3]*((x[2] < 2750.0) ? (29781.555 - 10.816418*x[2] - 3.06098e-23*pow(x[2], 7.0) + ((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : 0))) : ((2750.0 <= x[2]) ? (-7499.398 + 260.756148*x[2] - 41.77*x[2]*log(x[2])) : 0)) + x[4]*((x[2] < 1300.0) ? (12194.415 - 6.980938*x[2] + ((x[2] < 900.0) ? (-8059.921 + 133.615208*x[2] - 23.9933*x[2]*log(x[2]) + 72636.0*pow(x[2], (-1.0)) - 0.004777975*pow(x[2], 2.0) + 1.06716e-07*pow(x[2], 3.0)) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (-7811.815 + 132.988068*x[2] - 23.9887*x[2]*log(x[2]) + 42680.0*pow(x[2], (-1.0)) - 0.0042033*pow(x[2], 2.0) - 9.0876e-08*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (908.837 + 66.976538*x[2] - 14.9466*x[2]*log(x[2]) - 1477660.0*pow(x[2], (-1.0)) - 0.0081465*pow(x[2], 2.0) + 2.02715e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-124526.786 + 638.806871*x[2] - 87.2182461*x[2]*log(x[2]) + 36699805.0*pow(x[2], (-1.0)) + 0.008204849*pow(x[2], 2.0) - 3.04747e-07*pow(x[2], 3.0)) : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (369519.198 - 2554.0225*x[2] + 342.059267*x[2]*log(x[2]) - 67034516.0*pow(x[2], (-1.0)) - 0.163409355*pow(x[2], 2.0) + 1.2457117e-05*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-19887.066 + 298.7367*x[2] - 46.29*x[2]*log(x[2])) : 0))))/pow((x[3] + x[4]), 3) - 7406.1*x[3]/pow((x[3] + x[4]), 2) - 7406.1*x[4]/pow((x[3] + x[4]), 2) - 1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 2750.0) ? (29781.555 - 10.816418*x[2] - 3.06098e-23*pow(x[2], 7.0) + ((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : 0))) : ((2750.0 <= x[2]) ? (-7499.398 + 260.756148*x[2] - 41.77*x[2]*log(x[2])) : 0)))/pow((x[3] + x[4]), 2) - 1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 1300.0) ? (12194.415 - 6.980938*x[2] + ((x[2] < 900.0) ? (-8059.921 + 133.615208*x[2] - 23.9933*x[2]*log(x[2]) + 72636.0*pow(x[2], (-1.0)) - 0.004777975*pow(x[2], 2.0) + 1.06716e-07*pow(x[2], 3.0)) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (-7811.815 + 132.988068*x[2] - 23.9887*x[2]*log(x[2]) + 42680.0*pow(x[2], (-1.0)) - 0.0042033*pow(x[2], 2.0) - 9.0876e-08*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (908.837 + 66.976538*x[2] - 14.9466*x[2]*log(x[2]) - 1477660.0*pow(x[2], (-1.0)) - 0.0081465*pow(x[2], 2.0) + 2.02715e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-124526.786 + 638.806871*x[2] - 87.2182461*x[2]*log(x[2]) + 36699805.0*pow(x[2], (-1.0)) + 0.008204849*pow(x[2], 2.0) - 3.04747e-07*pow(x[2], 3.0)) : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (369519.198 - 2554.0225*x[2] + 342.059267*x[2]*log(x[2]) - 67034516.0*pow(x[2], (-1.0)) - 0.163409355*pow(x[2], 2.0) + 1.2457117e-05*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-19887.066 + 298.7367*x[2] - 46.29*x[2]*log(x[2])) : 0))))/pow((x[3] + x[4]), 2) + 1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + ((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 14812.2*x[3]*x[4]/pow((x[3] + x[4]), 3) + 16.629*x[2]*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : 0) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : 0))/pow((x[3] + x[4]), 3) - 8.3145*x[2]*( 1.0*((1e-15 < x[4]) ? (1 + log(x[4])) : 0))/pow((x[3] + x[4]), 2) - 8.3145*x[2]*( 1.0*((1e-15 < x[3]) ? (1 + log(x[3])) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*(0)/(x[3] + x[4]) + 7406.1*pow((x[3] + x[4]), (-1))) - 14812.2*x[3]*x[4]/pow((x[3] + x[4]), 2) - 16.629*x[2]*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : 0) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*( 1.0*((1e-15 < x[4]) ? (1 + log(x[4])) : 0))/(x[3] + x[4]) + 8.3145*x[2]*( 1.0*((1e-15 < x[3]) ? (1 + log(x[3])) : 0))/(x[3] + x[4]);
-    out[20] = 1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 1.0*(x[3] + x[4])*(-1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/pow((x[3] + x[4]), 2) + 1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) - 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4])) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]);
-    out[21] = 1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 1.0*(x[3] + x[4])*(-1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/pow((x[3] + x[4]), 2) + 1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) - 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4])) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]);
-    out[22] = 1.0*(x[4]*((x[2] < 1300.0) ? (-6.980938 + ((x[2] < 900.0) ? (109.621908 - 72636.0*pow(x[2], (-2.0)) - 0.00955595*pow(x[2], 1.0) + 3.20148e-07*pow(x[2], 2.0) - 23.9933*log(x[2])) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (108.999368 - 42680.0*pow(x[2], (-2.0)) - 0.0084066*pow(x[2], 1.0) - 2.72628e-07*pow(x[2], 2.0) - 23.9887*log(x[2])) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (52.029938 + 1477660.0*pow(x[2], (-2.0)) - 0.016293*pow(x[2], 1.0) + 6.08145e-07*pow(x[2], 2.0) - 14.9466*log(x[2])) : ((1941.0 <= x[2]) ? (551.5886249 - 36699805.0*pow(x[2], (-2.0)) + 0.016409698*pow(x[2], 1.0) - 9.14241e-07*pow(x[2], 2.0) - 87.2182461*log(x[2])) : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (-2211.963233 + 67034516.0*pow(x[2], (-2.0)) - 0.32681871*pow(x[2], 1.0) + 3.7371351e-05*pow(x[2], 2.0) + 342.059267*log(x[2])) : ((1941.0 <= x[2]) ? (252.4467 - 46.29*log(x[2])) : 0))) + ((x[2] < 2750.0) ? (-10.816418 - 2.142686e-22*pow(x[2], 6.0) + ((x[2] < 2750.0) ? (115.574375 - 93399.0*pow(x[2], (-2.0)) + 0.00040695*pow(x[2], 1.0) - 1.05036e-06*pow(x[2], 2.0) - 26.4711*log(x[2])) : ((2750.0 <= x[2]) ? (229.950843 - 1.3754142e+33*pow(x[2], (-10.0)) - 41.77*log(x[2])) : 0))) : ((2750.0 <= x[2]) ? (218.986148 - 41.77*log(x[2])) : 0))*x[3])/(x[3] + x[4]) + 8.3145*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : 0) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : 0))/(x[3] + x[4]) + 1.0*(x[3] + x[4])*(-1.0*(x[4]*((x[2] < 1300.0) ? (-6.980938 + ((x[2] < 900.0) ? (109.621908 - 72636.0*pow(x[2], (-2.0)) - 0.00955595*pow(x[2], 1.0) + 3.20148e-07*pow(x[2], 2.0) - 23.9933*log(x[2])) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (108.999368 - 42680.0*pow(x[2], (-2.0)) - 0.0084066*pow(x[2], 1.0) - 2.72628e-07*pow(x[2], 2.0) - 23.9887*log(x[2])) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (52.029938 + 1477660.0*pow(x[2], (-2.0)) - 0.016293*pow(x[2], 1.0) + 6.08145e-07*pow(x[2], 2.0) - 14.9466*log(x[2])) : ((1941.0 <= x[2]) ? (551.5886249 - 36699805.0*pow(x[2], (-2.0)) + 0.016409698*pow(x[2], 1.0) - 9.14241e-07*pow(x[2], 2.0) - 87.2182461*log(x[2])) : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (-2211.963233 + 67034516.0*pow(x[2], (-2.0)) - 0.32681871*pow(x[2], 1.0) + 3.7371351e-05*pow(x[2], 2.0) + 342.059267*log(x[2])) : ((1941.0 <= x[2]) ? (252.4467 - 46.29*log(x[2])) : 0))) + ((x[2] < 2750.0) ? (-10.816418 - 2.142686e-22*pow(x[2], 6.0) + ((x[2] < 2750.0) ? (115.574375 - 93399.0*pow(x[2], (-2.0)) + 0.00040695*pow(x[2], 1.0) - 1.05036e-06*pow(x[2], 2.0) - 26.4711*log(x[2])) : ((2750.0 <= x[2]) ? (229.950843 - 1.3754142e+33*pow(x[2], (-10.0)) - 41.77*log(x[2])) : 0))) : ((2750.0 <= x[2]) ? (218.986148 - 41.77*log(x[2])) : 0))*x[3])/pow((x[3] + x[4]), 2) - 8.3145*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : 0) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : 0))/pow((x[3] + x[4]), 2) + 8.3145*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (1 + log(x[4])) : 0))/(x[3] + x[4]) + 1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 1300.0) ? (-6.980938 + ((x[2] < 900.0) ? (109.621908 - 72636.0*pow(x[2], (-2.0)) - 0.00955595*pow(x[2], 1.0) + 3.20148e-07*pow(x[2], 2.0) - 23.9933*log(x[2])) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (108.999368 - 42680.0*pow(x[2], (-2.0)) - 0.0084066*pow(x[2], 1.0) - 2.72628e-07*pow(x[2], 2.0) - 23.9887*log(x[2])) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (52.029938 + 1477660.0*pow(x[2], (-2.0)) - 0.016293*pow(x[2], 1.0) + 6.08145e-07*pow(x[2], 2.0) - 14.9466*log(x[2])) : ((1941.0 <= x[2]) ? (551.5886249 - 36699805.0*pow(x[2], (-2.0)) + 0.016409698*pow(x[2], 1.0) - 9.14241e-07*pow(x[2], 2.0) - 87.2182461*log(x[2])) : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (-2211.963233 + 67034516.0*pow(x[2], (-2.0)) - 0.32681871*pow(x[2], 1.0) + 3.7371351e-05*pow(x[2], 2.0) + 342.059267*log(x[2])) : ((1941.0 <= x[2]) ? (252.4467 - 46.29*log(x[2])) : 0))))/(x[3] + x[4]) - 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4])) + 8.3145*x[2]*(1.0*((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4]);
-    out[23] = -2.0*(x[3]*((x[2] < 2750.0) ? (29781.555 - 10.816418*x[2] - 3.06098e-23*pow(x[2], 7.0) + ((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : 0))) : ((2750.0 <= x[2]) ? (-7499.398 + 260.756148*x[2] - 41.77*x[2]*log(x[2])) : 0)) + x[4]*((x[2] < 1300.0) ? (12194.415 - 6.980938*x[2] + ((x[2] < 900.0) ? (-8059.921 + 133.615208*x[2] - 23.9933*x[2]*log(x[2]) + 72636.0*pow(x[2], (-1.0)) - 0.004777975*pow(x[2], 2.0) + 1.06716e-07*pow(x[2], 3.0)) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (-7811.815 + 132.988068*x[2] - 23.9887*x[2]*log(x[2]) + 42680.0*pow(x[2], (-1.0)) - 0.0042033*pow(x[2], 2.0) - 9.0876e-08*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (908.837 + 66.976538*x[2] - 14.9466*x[2]*log(x[2]) - 1477660.0*pow(x[2], (-1.0)) - 0.0081465*pow(x[2], 2.0) + 2.02715e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-124526.786 + 638.806871*x[2] - 87.2182461*x[2]*log(x[2]) + 36699805.0*pow(x[2], (-1.0)) + 0.008204849*pow(x[2], 2.0) - 3.04747e-07*pow(x[2], 3.0)) : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (369519.198 - 2554.0225*x[2] + 342.059267*x[2]*log(x[2]) - 67034516.0*pow(x[2], (-1.0)) - 0.163409355*pow(x[2], 2.0) + 1.2457117e-05*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-19887.066 + 298.7367*x[2] - 46.29*x[2]*log(x[2])) : 0))))/pow((x[3] + x[4]), 2) + 7406.1*x[3]/(x[3] + x[4]) + 7406.1*x[4]/(x[3] + x[4]) + 1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 2750.0) ? (29781.555 - 10.816418*x[2] - 3.06098e-23*pow(x[2], 7.0) + ((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : 0))) : ((2750.0 <= x[2]) ? (-7499.398 + 260.756148*x[2] - 41.77*x[2]*log(x[2])) : 0)))/(x[3] + x[4]) + 1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 1300.0) ? (12194.415 - 6.980938*x[2] + ((x[2] < 900.0) ? (-8059.921 + 133.615208*x[2] - 23.9933*x[2]*log(x[2]) + 72636.0*pow(x[2], (-1.0)) - 0.004777975*pow(x[2], 2.0) + 1.06716e-07*pow(x[2], 3.0)) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (-7811.815 + 132.988068*x[2] - 23.9887*x[2]*log(x[2]) + 42680.0*pow(x[2], (-1.0)) - 0.0042033*pow(x[2], 2.0) - 9.0876e-08*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (908.837 + 66.976538*x[2] - 14.9466*x[2]*log(x[2]) - 1477660.0*pow(x[2], (-1.0)) - 0.0081465*pow(x[2], 2.0) + 2.02715e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-124526.786 + 638.806871*x[2] - 87.2182461*x[2]*log(x[2]) + 36699805.0*pow(x[2], (-1.0)) + 0.008204849*pow(x[2], 2.0) - 3.04747e-07*pow(x[2], 3.0)) : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (369519.198 - 2554.0225*x[2] + 342.059267*x[2]*log(x[2]) - 67034516.0*pow(x[2], (-1.0)) - 0.163409355*pow(x[2], 2.0) + 1.2457117e-05*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-19887.066 + 298.7367*x[2] - 46.29*x[2]*log(x[2])) : 0))))/(x[3] + x[4]) + 1.0*(x[3] + x[4])*(2.0*(x[3]*((x[2] < 2750.0) ? (29781.555 - 10.816418*x[2] - 3.06098e-23*pow(x[2], 7.0) + ((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : 0))) : ((2750.0 <= x[2]) ? (-7499.398 + 260.756148*x[2] - 41.77*x[2]*log(x[2])) : 0)) + x[4]*((x[2] < 1300.0) ? (12194.415 - 6.980938*x[2] + ((x[2] < 900.0) ? (-8059.921 + 133.615208*x[2] - 23.9933*x[2]*log(x[2]) + 72636.0*pow(x[2], (-1.0)) - 0.004777975*pow(x[2], 2.0) + 1.06716e-07*pow(x[2], 3.0)) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (-7811.815 + 132.988068*x[2] - 23.9887*x[2]*log(x[2]) + 42680.0*pow(x[2], (-1.0)) - 0.0042033*pow(x[2], 2.0) - 9.0876e-08*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (908.837 + 66.976538*x[2] - 14.9466*x[2]*log(x[2]) - 1477660.0*pow(x[2], (-1.0)) - 0.0081465*pow(x[2], 2.0) + 2.02715e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-124526.786 + 638.806871*x[2] - 87.2182461*x[2]*log(x[2]) + 36699805.0*pow(x[2], (-1.0)) + 0.008204849*pow(x[2], 2.0) - 3.04747e-07*pow(x[2], 3.0)) : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (369519.198 - 2554.0225*x[2] + 342.059267*x[2]*log(x[2]) - 67034516.0*pow(x[2], (-1.0)) - 0.163409355*pow(x[2], 2.0) + 1.2457117e-05*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-19887.066 + 298.7367*x[2] - 46.29*x[2]*log(x[2])) : 0))))/pow((x[3] + x[4]), 3) - 7406.1*x[3]/pow((x[3] + x[4]), 2) - 7406.1*x[4]/pow((x[3] + x[4]), 2) - 1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 2750.0) ? (29781.555 - 10.816418*x[2] - 3.06098e-23*pow(x[2], 7.0) + ((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : 0))) : ((2750.0 <= x[2]) ? (-7499.398 + 260.756148*x[2] - 41.77*x[2]*log(x[2])) : 0)))/pow((x[3] + x[4]), 2) - 1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 1300.0) ? (12194.415 - 6.980938*x[2] + ((x[2] < 900.0) ? (-8059.921 + 133.615208*x[2] - 23.9933*x[2]*log(x[2]) + 72636.0*pow(x[2], (-1.0)) - 0.004777975*pow(x[2], 2.0) + 1.06716e-07*pow(x[2], 3.0)) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (-7811.815 + 132.988068*x[2] - 23.9887*x[2]*log(x[2]) + 42680.0*pow(x[2], (-1.0)) - 0.0042033*pow(x[2], 2.0) - 9.0876e-08*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (908.837 + 66.976538*x[2] - 14.9466*x[2]*log(x[2]) - 1477660.0*pow(x[2], (-1.0)) - 0.0081465*pow(x[2], 2.0) + 2.02715e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-124526.786 + 638.806871*x[2] - 87.2182461*x[2]*log(x[2]) + 36699805.0*pow(x[2], (-1.0)) + 0.008204849*pow(x[2], 2.0) - 3.04747e-07*pow(x[2], 3.0)) : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (369519.198 - 2554.0225*x[2] + 342.059267*x[2]*log(x[2]) - 67034516.0*pow(x[2], (-1.0)) - 0.163409355*pow(x[2], 2.0) + 1.2457117e-05*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-19887.066 + 298.7367*x[2] - 46.29*x[2]*log(x[2])) : 0))))/pow((x[3] + x[4]), 2) + 1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + ((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 14812.2*x[3]*x[4]/pow((x[3] + x[4]), 3) + 16.629*x[2]*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : 0) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : 0))/pow((x[3] + x[4]), 3) - 8.3145*x[2]*( 1.0*((1e-15 < x[4]) ? (1 + log(x[4])) : 0))/pow((x[3] + x[4]), 2) - 8.3145*x[2]*( 1.0*((1e-15 < x[3]) ? (1 + log(x[3])) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*(0)/(x[3] + x[4]) + 7406.1*pow((x[3] + x[4]), (-1))) - 14812.2*x[3]*x[4]/pow((x[3] + x[4]), 2) - 16.629*x[2]*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : 0) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*( 1.0*((1e-15 < x[4]) ? (1 + log(x[4])) : 0))/(x[3] + x[4]) + 8.3145*x[2]*( 1.0*((1e-15 < x[3]) ? (1 + log(x[3])) : 0))/(x[3] + x[4]);
-    out[24] = -2.0*(x[3]*((x[2] < 2750.0) ? (29781.555 - 10.816418*x[2] - 3.06098e-23*pow(x[2], 7.0) + ((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : 0))) : ((2750.0 <= x[2]) ? (-7499.398 + 260.756148*x[2] - 41.77*x[2]*log(x[2])) : 0)) + x[4]*((x[2] < 1300.0) ? (12194.415 - 6.980938*x[2] + ((x[2] < 900.0) ? (-8059.921 + 133.615208*x[2] - 23.9933*x[2]*log(x[2]) + 72636.0*pow(x[2], (-1.0)) - 0.004777975*pow(x[2], 2.0) + 1.06716e-07*pow(x[2], 3.0)) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (-7811.815 + 132.988068*x[2] - 23.9887*x[2]*log(x[2]) + 42680.0*pow(x[2], (-1.0)) - 0.0042033*pow(x[2], 2.0) - 9.0876e-08*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (908.837 + 66.976538*x[2] - 14.9466*x[2]*log(x[2]) - 1477660.0*pow(x[2], (-1.0)) - 0.0081465*pow(x[2], 2.0) + 2.02715e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-124526.786 + 638.806871*x[2] - 87.2182461*x[2]*log(x[2]) + 36699805.0*pow(x[2], (-1.0)) + 0.008204849*pow(x[2], 2.0) - 3.04747e-07*pow(x[2], 3.0)) : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (369519.198 - 2554.0225*x[2] + 342.059267*x[2]*log(x[2]) - 67034516.0*pow(x[2], (-1.0)) - 0.163409355*pow(x[2], 2.0) + 1.2457117e-05*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-19887.066 + 298.7367*x[2] - 46.29*x[2]*log(x[2])) : 0))))/pow((x[3] + x[4]), 2) + 14812.2*x[3]/(x[3] + x[4]) + 2.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 1300.0) ? (12194.415 - 6.980938*x[2] + ((x[2] < 900.0) ? (-8059.921 + 133.615208*x[2] - 23.9933*x[2]*log(x[2]) + 72636.0*pow(x[2], (-1.0)) - 0.004777975*pow(x[2], 2.0) + 1.06716e-07*pow(x[2], 3.0)) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (-7811.815 + 132.988068*x[2] - 23.9887*x[2]*log(x[2]) + 42680.0*pow(x[2], (-1.0)) - 0.0042033*pow(x[2], 2.0) - 9.0876e-08*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (908.837 + 66.976538*x[2] - 14.9466*x[2]*log(x[2]) - 1477660.0*pow(x[2], (-1.0)) - 0.0081465*pow(x[2], 2.0) + 2.02715e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-124526.786 + 638.806871*x[2] - 87.2182461*x[2]*log(x[2]) + 36699805.0*pow(x[2], (-1.0)) + 0.008204849*pow(x[2], 2.0) - 3.04747e-07*pow(x[2], 3.0)) : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (369519.198 - 2554.0225*x[2] + 342.059267*x[2]*log(x[2]) - 67034516.0*pow(x[2], (-1.0)) - 0.163409355*pow(x[2], 2.0) + 1.2457117e-05*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-19887.066 + 298.7367*x[2] - 46.29*x[2]*log(x[2])) : 0))))/(x[3] + x[4]) + 1.0*(x[3] + x[4])*(2.0*(x[3]*((x[2] < 2750.0) ? (29781.555 - 10.816418*x[2] - 3.06098e-23*pow(x[2], 7.0) + ((x[2] < 2750.0) ? (-8519.353 + 142.045475*x[2] - 26.4711*x[2]*log(x[2]) + 93399.0*pow(x[2], (-1.0)) + 0.000203475*pow(x[2], 2.0) - 3.5012e-07*pow(x[2], 3.0)) : ((2750.0 <= x[2]) ? (-37669.3 + 271.720843*x[2] - 41.77*x[2]*log(x[2]) + 1.528238e+32*pow(x[2], (-9.0))) : 0))) : ((2750.0 <= x[2]) ? (-7499.398 + 260.756148*x[2] - 41.77*x[2]*log(x[2])) : 0)) + x[4]*((x[2] < 1300.0) ? (12194.415 - 6.980938*x[2] + ((x[2] < 900.0) ? (-8059.921 + 133.615208*x[2] - 23.9933*x[2]*log(x[2]) + 72636.0*pow(x[2], (-1.0)) - 0.004777975*pow(x[2], 2.0) + 1.06716e-07*pow(x[2], 3.0)) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (-7811.815 + 132.988068*x[2] - 23.9887*x[2]*log(x[2]) + 42680.0*pow(x[2], (-1.0)) - 0.0042033*pow(x[2], 2.0) - 9.0876e-08*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (908.837 + 66.976538*x[2] - 14.9466*x[2]*log(x[2]) - 1477660.0*pow(x[2], (-1.0)) - 0.0081465*pow(x[2], 2.0) + 2.02715e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-124526.786 + 638.806871*x[2] - 87.2182461*x[2]*log(x[2]) + 36699805.0*pow(x[2], (-1.0)) + 0.008204849*pow(x[2], 2.0) - 3.04747e-07*pow(x[2], 3.0)) : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (369519.198 - 2554.0225*x[2] + 342.059267*x[2]*log(x[2]) - 67034516.0*pow(x[2], (-1.0)) - 0.163409355*pow(x[2], 2.0) + 1.2457117e-05*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-19887.066 + 298.7367*x[2] - 46.29*x[2]*log(x[2])) : 0))))/pow((x[3] + x[4]), 3) - 14812.2*x[3]/pow((x[3] + x[4]), 2) - 2.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + ((x[2] < 1300.0) ? (12194.415 - 6.980938*x[2] + ((x[2] < 900.0) ? (-8059.921 + 133.615208*x[2] - 23.9933*x[2]*log(x[2]) + 72636.0*pow(x[2], (-1.0)) - 0.004777975*pow(x[2], 2.0) + 1.06716e-07*pow(x[2], 3.0)) : (((x[2] < 1155.0) && (900.0 <= x[2])) ? (-7811.815 + 132.988068*x[2] - 23.9887*x[2]*log(x[2]) + 42680.0*pow(x[2], (-1.0)) - 0.0042033*pow(x[2], 2.0) - 9.0876e-08*pow(x[2], 3.0)) : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? (908.837 + 66.976538*x[2] - 14.9466*x[2]*log(x[2]) - 1477660.0*pow(x[2], (-1.0)) - 0.0081465*pow(x[2], 2.0) + 2.02715e-07*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-124526.786 + 638.806871*x[2] - 87.2182461*x[2]*log(x[2]) + 36699805.0*pow(x[2], (-1.0)) + 0.008204849*pow(x[2], 2.0) - 3.04747e-07*pow(x[2], 3.0)) : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? (369519.198 - 2554.0225*x[2] + 342.059267*x[2]*log(x[2]) - 67034516.0*pow(x[2], (-1.0)) - 0.163409355*pow(x[2], 2.0) + 1.2457117e-05*pow(x[2], 3.0)) : ((1941.0 <= x[2]) ? (-19887.066 + 298.7367*x[2] - 46.29*x[2]*log(x[2])) : 0))))/pow((x[3] + x[4]), 2) + 1.0*(x[3]*((x[2] < 2750.0) ? (((x[2] < 2750.0) ? 0 : ((2750.0 <= x[2]) ? 0 : 0))) : ((2750.0 <= x[2]) ? 0 : 0)) + x[4]*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))) + 2*((x[2] < 1300.0) ? (((x[2] < 900.0) ? 0 : (((x[2] < 1155.0) && (900.0 <= x[2])) ? 0 : (((x[2] < 1941.0) && (1155.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))) : (((x[2] < 1941.0) && (1300.0 <= x[2])) ? 0 : ((1941.0 <= x[2]) ? 0 : 0))))/(x[3] + x[4]) + 14812.2*x[3]*x[4]/pow((x[3] + x[4]), 3) + 16.629*x[2]*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : 0) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : 0))/pow((x[3] + x[4]), 3) - 16.629*x[2]*( 1.0*((1e-15 < x[4]) ? (1 + log(x[4])) : 0))/pow((x[3] + x[4]), 2) + 8.3145*x[2]*( 1.0*((1e-15 < x[4]) ? (pow(x[4], (-1))) : 0))/(x[3] + x[4])) - 14812.2*x[3]*x[4]/pow((x[3] + x[4]), 2) - 16.629*x[2]*(1.0*((1e-15 < x[3]) ? (x[3]*log(x[3])) : 0) + 1.0*((1e-15 < x[4]) ? (x[4]*log(x[4])) : 0))/pow((x[3] + x[4]), 2) + 16.629*x[2]*( 1.0*((1e-15 < x[4]) ? (1 + log(x[4])) : 0))/(x[3] + x[4]);
-}
-
-__device__ void pycgpu_model_1_internal_cons_func(double* out, const double* x) {
-    out[0] = 1.0*(-1 + x[3] + x[4]);
-}
-
-__device__ void pycgpu_model_1_internal_cons_jac(double* out, const double* x) {
-    out[0] = 0;
-    out[1] = 0;
-    out[2] = 0;
-    out[3] = 1.0;
-    out[4] = 1.0;
-}
-
 __device__ void pycgpu_model_1_mass_obj(double* out, const double* x) {
-    out[0] = 1.0*x[3]/(x[3] + x[4]);
-    out[1] = 1.0*x[4]/(x[3] + x[4]);
-    out[2] = 0;
+    double x0 = 1.0/(x[3] + x[4] + x[5]);
+    out[0] = x0*x[3];
+    out[1] = x0*x[4];
+    out[2] = x0*x[5];
+    out[3] = 0;
 }
 
 __device__ void pycgpu_model_1_formulamole_obj(double* out, const double* x) {
     out[0] = 1.0*x[3];
     out[1] = 1.0*x[4];
-    out[2] = 0.0;
+    out[2] = 1.0*x[5];
+    out[3] = 0.0;
 }
 
 __device__ void pycgpu_model_1_formulamole_grad(double* out, const double* x) {
     out[0] = 0;
-    out[1] = 0;
+    out[1] = 1.0;
     out[2] = 0;
-    out[3] = 1.0;
+    out[3] = 0;
     out[4] = 0;
     out[5] = 0;
     out[6] = 0;
-    out[7] = 0;
+    out[7] = 1.0;
     out[8] = 0;
-    out[9] = 1.0;
+    out[9] = 0;
+    out[10] = 0;
+    out[11] = 0;
+    out[12] = 0;
+    out[13] = 1.0;
+    out[14] = 0;
 }
 
 
@@ -5365,8 +7578,8 @@ __global__ void init_all_gpu_phase_records() {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         printf("GPU DEBUG: init_all_gpu_phase_records kernel called\n");
     }
-        g_phase_records_array[0].init(&pycgpu_model_0_obj, &pycgpu_model_0_formulaobj, &pycgpu_model_0_formulagrad, &pycgpu_model_0_formulahess, &pycgpu_model_0_internal_cons_func, &pycgpu_model_0_internal_cons_jac, &pycgpu_model_0_mass_obj, &pycgpu_model_0_formulamole_obj, &pycgpu_model_0_formulamole_grad, 3, 2, 3, 1, 2);
-    g_phase_records_array[1].init(&pycgpu_model_1_obj, &pycgpu_model_1_formulaobj, &pycgpu_model_1_formulagrad, &pycgpu_model_1_formulahess, &pycgpu_model_1_internal_cons_func, &pycgpu_model_1_internal_cons_jac, &pycgpu_model_1_mass_obj, &pycgpu_model_1_formulamole_obj, &pycgpu_model_1_formulamole_grad, 3, 2, 3, 1, 2);
+        g_phase_records_array[0].init(&pycgpu_model_0_obj, &pycgpu_model_0_formulaobj, &pycgpu_model_0_formulagrad, &pycgpu_model_0_formulahess, &pycgpu_model_0_internal_cons_func, &pycgpu_model_0_internal_cons_jac, &pycgpu_model_0_mass_obj, &pycgpu_model_0_formulamole_obj, &pycgpu_model_0_formulamole_grad, 3, 3, 4, 2, 3);
+    g_phase_records_array[1].init(&pycgpu_model_1_obj, &pycgpu_model_1_formulaobj, &pycgpu_model_1_formulagrad, &pycgpu_model_1_formulahess, &pycgpu_model_1_internal_cons_func, &pycgpu_model_1_internal_cons_jac, &pycgpu_model_1_mass_obj, &pycgpu_model_1_formulamole_obj, &pycgpu_model_1_formulamole_grad, 3, 4, 4, 2, 3);
 
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         printf("GPU DEBUG: init_all_gpu_phase_records kernel completed\n");
@@ -6509,22 +8722,13 @@ __device__ void solve_equilibrium_at_condition_global_mem(
             }
         }
         
-        // Step 2: Store original phase amount before normalization
-        double original_phase_amt = cs->NP;
-        
-        // Step 3: Normalize phase amount by composition sum (CPU line 536)
-        if (phase_comp_sum > 1e-15) {
-            cs->NP /= phase_comp_sum;
-        }
-        
-        // Step 4: Call update with normalized amounts (CPU line 592)
-        // CPU: compset.update(x[spec.num_statevars:], self.phase_amt[idx] * phase_comp_sum, x[:spec.num_statevars])
-        // This equals: update(site_fractions, original_phase_amt, state_vars)
-        double update_amount = cs->NP * phase_comp_sum;  // This should equal original_phase_amt
+        // CRITICAL: Phase amounts are now normalized at Python level - no need to normalize again
+        // The original GPU kernel normalization is disabled since Python does this properly
+        double original_phase_amt = cs->NP;  // This is already normalized by Python
         
         if (thread_id == 0 && current_sys_state.num_compsets < 2) {
-            printf("[GPU DEBUG] CPU Normalization: phase_comp_sum=%.6f, original_amt=%.6f, normalized_amt=%.6f, update_amt=%.6f\n",
-                   phase_comp_sum, original_phase_amt, cs->NP, update_amount);
+            printf("[GPU DEBUG] Phase amount already normalized by Python: phase_comp_sum=%.6f, phase_amt=%.6f\n",
+                   phase_comp_sum, cs->NP);
         }
         
         // CRITICAL FIX: Must call cs->update() to calculate energy and composition
@@ -7033,25 +9237,27 @@ __device__ void solve_equilibrium_at_condition_global_mem(
     int stable_phase_count = 0;
     
     // CRITICAL FIX: Calculate sum of phase_amt to normalize to mole fractions
+    // Match CPU behavior - include ALL phases, no threshold filtering
     double sum_phase_amt = 0.0;
     for (int i = 0; i < current_sys_state.num_compsets; ++i) {
-        if (current_sys_state.phase_amt[i] > MIN_PHASE_FRACTION / 10.0) {
-            sum_phase_amt += current_sys_state.phase_amt[i];
-        }
+        // CPU includes all phases in the sum, no threshold check
+        sum_phase_amt += current_sys_state.phase_amt[i];
     }
     if (sum_phase_amt < 1e-15) sum_phase_amt = 1.0;  // Avoid division by zero
     
     if (thread_id == 0) {
-        printf("GPU DEBUG: final calc - num_compsets=%d, MIN_PHASE_FRACTION=%e, sum_phase_amt=%f\n", 
-               current_sys_state.num_compsets, MIN_PHASE_FRACTION / 10.0, sum_phase_amt);
+        printf("GPU DEBUG: final calc - num_compsets=%d, sum_phase_amt=%f (including ALL phases - no threshold)\n", 
+               current_sys_state.num_compsets, sum_phase_amt);
     }
     
     for (int i = 0; i < current_sys_state.num_compsets; ++i) {
         if (thread_id == 0) {
-            printf("GPU DEBUG: compset %d - phase_amt=%f, energy=%f, threshold=%e\n", 
-                   i, current_sys_state.phase_amt[i], current_sys_state.cs_states[i].energy, MIN_PHASE_FRACTION / 10.0);
+            printf("GPU DEBUG: compset %d - phase_amt=%f, energy=%f (ALL phases included)\n", 
+                   i, current_sys_state.phase_amt[i], current_sys_state.cs_states[i].energy);
         }
-        if (current_sys_state.phase_amt[i] > MIN_PHASE_FRACTION / 10.0) {
+        // CRITICAL FIX: Include ALL phases to match CPU behavior
+        // CPU does not filter phases by amount in the final result
+        {
             // CRITICAL FIX: Normalize phase_amt to get mole fraction for GM calculation
             double phase_mole_fraction = current_sys_state.phase_amt[i] / sum_phase_amt;
             final_gm_calc += phase_mole_fraction * current_sys_state.cs_states[i].energy;

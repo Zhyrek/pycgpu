@@ -346,6 +346,7 @@ typedef struct SystemState {
         for (int i = 0; i < MAX_PHASES; ++i) {
             metastable_phase_iterations[i] = 0;
             times_compset_removed[i] = 0;
+            // CRITICAL FIX: Initialize phase_amt from NP, but we'll normalize below
             phase_amt[i] = (i < num_compsets) ? compsets[i].NP : 0.0;
             _driving_forces_arr[i] = 0.0;
             _phase_energies_per_mole_atoms_arr[i] = 0.0;
@@ -379,6 +380,8 @@ typedef struct SystemState {
         
         // CRITICAL FIX: Calculate phase_compositions using formulamole_obj like CPU does
         // This is essential for phase amount normalization to work correctly
+        
+        
         double phase_comp_sum;
         for (int idx = 0; idx < num_compsets; ++idx) {
             CompositionSet* compset = &compsets[idx];
@@ -438,15 +441,13 @@ typedef struct SystemState {
             // CRITICAL FIX: Convert phase amounts to formula units like CPU does
             // CPU minimizer.pyx line 776: self.phase_amt[idx] /= phase_comp_sum
             // This normalization must happen in __init__ to match CPU behavior!
+            
             if (phase_comp_sum > 1e-12) {
-                // DEBUG: Print normalization
-                printf("[GPU INIT] Phase %d: phase_amt before = %.15e, phase_comp_sum = %.15e\n", 
-                       idx, phase_amt[idx], phase_comp_sum);
+                // Normalize phase amount to formula units
                 phase_amt[idx] /= phase_comp_sum;
-                printf("[GPU INIT] Phase %d: phase_amt after = %.15e (formula units)\n", 
-                       idx, phase_amt[idx]);
             }
         }
+        
 
         num_free_stable_compsets = 0;
         // Collecting free stable compsets
@@ -520,6 +521,32 @@ typedef struct SystemState {
             phase_amt_sum += phase_amt[idx];
         }
         printf("[GPU MASS BALANCE] recompute() - iteration %d: sum(phase_amt) = %.15e\n", iteration, phase_amt_sum);
+        
+        // CRITICAL FIX: If this is the first recompute and phase amounts aren't normalized, fix them
+        if (iteration == 0 && phase_amt_sum > 0.9 && phase_amt_sum < 1.1) {
+            printf("[GPU FIX] Normalizing phase amounts in recompute (init normalization failed)\n");
+            
+            // Normalize each phase by its phase_comp_sum
+            for (int idx = 0; idx < num_compsets; ++idx) {
+                double comp_sum = 0.0;
+                for (int comp_idx = 0; comp_idx < spec->num_components; comp_idx++) {
+                    comp_sum += phase_compositions[idx * MAX_COMPONENTS + comp_idx];
+                }
+                
+                if (comp_sum > 1.5) { // Multi-sublattice phase like ALCU_ZETA
+                    printf("[GPU FIX] Phase %d: normalizing by %.2f (multi-sublattice)\n", idx, comp_sum);
+                    phase_amt[idx] /= comp_sum;
+                }
+            }
+            
+            // Recalculate sum after normalization
+            phase_amt_sum = 0.0;
+            for (int idx = 0; idx < num_compsets; ++idx) {
+                phase_amt_sum += phase_amt[idx];
+            }
+            printf("[GPU FIX] After normalization: sum(phase_amt) = %.15e\n", phase_amt_sum);
+        }
+        
 
         for (int idx = 0; idx < num_compsets; ++idx) {
             CompositionSet* compset = &compsets[idx];
@@ -571,49 +598,48 @@ typedef struct SystemState {
                     }
                     
                     if (compset->phase_record->formulamole_grad != nullptr) {
-                        // For now, calculate mass jacobian for all components together
-                        // The GPU version seems to use a different interface than CPU
-                        double mass_jac_temp[MAX_COMPONENTS * (MAX_STATEVARS + MAX_DOF_PER_PHASE)];
-                        for (int i = 0; i < MAX_COMPONENTS * (MAX_STATEVARS + MAX_DOF_PER_PHASE); ++i) {
-                            mass_jac_temp[i] = 0.0;
+                        // CSE formulamole_grad functions output reduced format
+                        // Output format: [comp0_dT, comp0_dY1, comp0_dY2, ..., comp1_dT, comp1_dY1, comp1_dY2, ...]
+                        double temp_mass_jac[MAX_COMPONENTS * (1 + MAX_DOF_PER_PHASE)];
+                        for (int i = 0; i < MAX_COMPONENTS * (1 + MAX_DOF_PER_PHASE); ++i) {
+                            temp_mass_jac[i] = 0.0;
                         }
                         
-                        // CRITICAL FIX: Match CPU behavior - pass workspace DOF directly
-                        // CPU minimizer.pyx line 898: compset.phase_record.formulamole_grad(csst.mass_jac[comp_idx, :], x, comp_idx)
-                        // The CPU passes the full workspace DOF array, not phase DOF
+                        // Call formulamole_grad with workspace DOF
+                        compset->phase_record->formulamole_grad(temp_mass_jac, compset->dof);
                         
-                        // Call formulamole_grad with workspace DOF (matching CPU)
-                        compset->phase_record->formulamole_grad(mass_jac_temp, compset->dof);
+                        // Zero out the full mass_jac array
+                        for (int i = 0; i < csst->mass_jac_rows * csst->mass_jac_cols; ++i) {
+                            csst->mass_jac[i] = 0.0;
+                        }
+                        
+                        // Map the reduced gradient to full workspace format
+                        // CSE outputs: [comp0_dT, comp0_dY1, comp0_dY2, ..., comp1_dT, comp1_dY1, comp1_dY2, ...]
+                        // Full format expects: [comp0_dN, comp0_dP, comp0_dT, comp0_dY1, comp0_dY2, ..., comp1_dN, comp1_dP, comp1_dT, ...]
+                        int reduced_cols = 1 + compset->phase_record->phase_dof; // T + site fractions
+                        int full_cols = spec->num_statevars + compset->phase_record->phase_dof;
+                        
+                        for (int comp_idx = 0; comp_idx < spec->num_components; ++comp_idx) {
+                            // Temperature derivative (index 0 in reduced -> index 2 in full)
+                            csst->mass_jac[comp_idx * full_cols + 2] = temp_mass_jac[comp_idx * reduced_cols + 0];
+                            
+                            // Site fraction derivatives (indices 1..n in reduced -> indices num_statevars..num_statevars+n-1 in full)
+                            for (int j = 0; j < compset->phase_record->phase_dof; ++j) {
+                                csst->mass_jac[comp_idx * full_cols + spec->num_statevars + j] = 
+                                    temp_mass_jac[comp_idx * reduced_cols + 1 + j];
+                            }
+                        }
                         
                         // DEBUG: Print raw gradient values from formulamole_grad
                         if (idx == 0 && iteration < 2) {
                             printf("GPU DEBUG: Raw formulamole_grad output (phase %d):\n", idx);
-                            // CRITICAL: The gradient function outputs workspace DOF gradients [dN, dP, dT, dY_NB, dY_TI]
-                            // but we passed phase DOF [P, T, Y_NB, Y_TI]
-                            // The function still generates all workspace gradients, so we need to read accordingly
-                            int workspace_dof_count = spec->num_statevars + compset->phase_record->phase_dof;
+                            int reduced_cols = 1 + compset->phase_record->phase_dof;
                             for (int comp_idx = 0; comp_idx < spec->num_components && comp_idx < 2; ++comp_idx) {
-                                printf("  Component %d gradients (workspace DOF): ", comp_idx);
-                                for (int j = 0; j < workspace_dof_count && j < 5; ++j) {
-                                    printf("d/dx[%d]=%e ", j, mass_jac_temp[comp_idx * workspace_dof_count + j]);
+                                printf("  Component %d gradients (reduced format): ", comp_idx);
+                                for (int j = 0; j < reduced_cols; ++j) {
+                                    printf("d/d[T,Y1,Y2][%d]=%e ", j, temp_mass_jac[comp_idx * reduced_cols + j]);
                                 }
                                 printf("\n");
-                            }
-                        }
-                        
-                        // Copy to csst mass_jac array
-                        // CRITICAL FIX: The gradient function outputs workspace DOF gradients
-                        // even though we passed phase DOF. The output is still [dN, dP, dT, dY_NB, dY_TI]
-                        int workspace_dof_count = spec->num_statevars + compset->phase_record->phase_dof;
-                        for (int comp_idx = 0; comp_idx < spec->num_components; ++comp_idx) {
-                            // The gradients are already in workspace DOF format, just copy directly
-                            for (int j = 0; j < csst->mass_jac_cols; ++j) {
-                                if (j < workspace_dof_count) {
-                                    csst->mass_jac[comp_idx * csst->mass_jac_cols + j] = 
-                                        mass_jac_temp[comp_idx * workspace_dof_count + j];
-                                } else {
-                                    csst->mass_jac[comp_idx * csst->mass_jac_cols + j] = 0.0;
-                                }
                             }
                         }
                         
@@ -642,11 +668,11 @@ typedef struct SystemState {
                 // CRITICAL FIX: masses should contain mole fractions from formulamole_obj
                 // This matches CPU line 749: compset.phase_record.formulamole_obj(csst.masses[comp_idx, :], x, comp_idx)
                 csst->masses[comp_idx] = formulamoles[comp_idx];
-                phase_compositions[idx * MAX_COMPONENTS + comp_idx] = formulamoles[comp_idx];
                 
                 // DEBUG: Print phase compositions
                 if (thread_id == 0 && iteration < 3 && comp_idx < 2) {
-                    printf("GPU: Phase %d composition[%d] = %.6f\n", idx, comp_idx, formulamoles[comp_idx]);
+                    printf("GPU: Phase %d composition[%d] = %.6f (will update after compset update)\n", idx, comp_idx, 
+                           phase_compositions[idx * MAX_COMPONENTS + comp_idx]);
                 }
 
                 // CRITICAL FIX: phase_amt is already in formula units (normalized in constructor)
@@ -654,6 +680,15 @@ typedef struct SystemState {
                 if (phase_amt[idx] > 1e-20) { // Avoid adding noise from zero phase_amt
                     mole_fractions[comp_idx] += phase_amt[idx] * csst->masses[comp_idx];
                     system_amount += phase_amt[idx] * csst->masses[comp_idx];
+                }
+            }
+            
+            // CRITICAL FIX: Update phase_compositions AFTER formulamole_obj calculation
+            // This matches CPU line 832: self.phase_compositions[idx, comp_idx] = csst.masses[comp_idx, 0]
+            // But only for active phases to avoid overwriting with zeros
+            if (phase_amt[idx] > 1e-10) {
+                for (int comp_idx = 0; comp_idx < spec->num_components; ++comp_idx) {
+                    phase_compositions[idx * MAX_COMPONENTS + comp_idx] = csst->masses[comp_idx];
                 }
             }
         }
@@ -778,17 +813,19 @@ typedef struct SystemState {
             // REMOVED: Old code that created current_dof_for_phase incorrectly
             // Now we create model_dof_for_calcs properly from workspace DOF when needed
 
+            // CRITICAL FIX: Calculate phase_comp_sum from stored phase_compositions
+            // This matches CPU behavior (minimizer.pyx line 880-881)
+            // For multi-sublattice phases, this equals the sum of site ratios (e.g., 20 for ALCU_ZETA)
             double phase_sum_moles_atoms_per_formula = 0.0;
-            for(int c=0; c < spec->num_components; ++c) {
-                double comp_val = phase_compositions[idx * MAX_COMPONENTS + c];
-                // Safety check: ensure composition values are reasonable
-                if (comp_val >= 0.0 && comp_val <= 10.0) { // Reasonable range for moles per formula unit
-                    phase_sum_moles_atoms_per_formula += comp_val;
-                }
+            for (int comp_idx = 0; comp_idx < spec->num_components; comp_idx++) {
+                phase_sum_moles_atoms_per_formula += phase_compositions[idx * MAX_COMPONENTS + comp_idx];
             }
-            // More robust fallback for phase_sum_moles_atoms_per_formula
-            if (phase_sum_moles_atoms_per_formula < 1e-12 || phase_sum_moles_atoms_per_formula > 100.0) {
+            
+            // Safety check
+            if (phase_sum_moles_atoms_per_formula < 1e-12) {
                 phase_sum_moles_atoms_per_formula = 1.0; // Safe fallback
+                printf("[GPU WARNING] Phase %d: phase_comp_sum too small (%.15e), using fallback 1.0\n", 
+                       idx, phase_sum_moles_atoms_per_formula);
             }
 
             // Call compset update. NP is moles of formula units.
@@ -812,11 +849,12 @@ typedef struct SystemState {
             // The update function expects workspace state variables, not model state variables
             compset->update(&compset->dof[spec->num_statevars], update_amount, compset->dof, spec->num_statevars);
             
-            // csst->energy will be G (from pr->obj)
+            // csst->energy will be G per formula unit (from pr->formulaobj)
             // Pass full workspace DOF to energy calculation, matching CPU behavior
             // The generated functions now expect workspace DOF format [N, P, T, Y1, Y2...]
-            // CRITICAL FIX: Use pr->obj() not pr->formulaobj() to match CompositionSet
-            csst->energy = pr->obj(compset->dof);
+            // CRITICAL FIX: Use pr->formulaobj() for equilibrium matrix (per formula unit, not per mole atoms)
+            // This matches the CPU behavior where equilibrium matrix uses unnormalized energy values
+            csst->energy = pr->formulaobj(compset->dof);
             
             // Add numerical debug output for phase energy
             printf("[GPU]   phase_%d_comp_sum: %.15e\n", idx, phase_sum_moles_atoms_per_formula);
@@ -867,41 +905,59 @@ typedef struct SystemState {
                         printf("%e ", compset->dof[k]);
                     }
                     printf("\n");
+                    printf("[GPU MASS_JAC DEBUG] pr->num_statevars=%d, spec->num_statevars=%d, pr->phase_dof=%d\n",
+                           pr->num_statevars, spec->num_statevars, pr->phase_dof);
                 }
                 pr->formulamole_grad(temp_mass_jac, compset->dof);
+                
+                // DEBUG: Print raw formulamole_grad output
+                if (iteration < 2) {
+                    printf("GPU DEBUG: Raw formulamole_grad output (phase %d):\n", idx);
+                    // CRITICAL FIX: CSE functions output in reduced format [T, Y1, Y2, ...]
+                    // So the gradient matrix is nonvacant_elements x (1 + phase_dof)
+                    int reduced_cols = 1 + pr->phase_dof; // T + site fractions
+                    for (int i = 0; i < pr->nonvacant_elements && i < 3; i++) {
+                        printf("  Component %d gradients (CSE format [T,Y1,Y2]): ", i);
+                        for (int j = 0; j < reduced_cols && j < 5; j++) {
+                            printf("[%d]=%e ", j, temp_mass_jac[i * reduced_cols + j]);
+                        }
+                        printf("\n");
+                    }
+                }
             } else {
                 printf("GPU ERROR: formulamole_grad is null for phase %d\\n", idx);
             }
             
             // Now copy the gradients to the correct positions in csst->mass_jac
-            // We need to map from nonvacant element indices to component indices
+            // CRITICAL FIX: CSE functions output in reduced format [T, Y1, Y2, ...]
+            // We need to map this to workspace format [N, P, T, Y1, Y2, ...]
             int nonvacant_idx = 0;
+            int reduced_cols = 1 + pr->phase_dof; // CSE output columns: T + site fractions
+            
             for (int comp_idx = 0; comp_idx < spec->num_components; comp_idx++) {
                 // Check if this component is a nonvacant element
                 // For now, assume components are ordered as [NB, TI, VA] and nonvacant are [NB, TI]
                 if (comp_idx < pr->nonvacant_elements) {
                     // This is a nonvacant element - copy its gradients
-                    // Map from Model DOF to Workspace DOF
-                    for (int model_col = 0; model_col < pr->num_statevars + pr->phase_dof; model_col++) {
+                    // First, zero out the entire row
+                    for (int col = 0; col < csst->mass_jac_cols; col++) {
+                        csst->mass_jac[comp_idx * csst->mass_jac_cols + col] = 0.0;
+                    }
+                    
+                    // Map from CSE reduced format to Workspace DOF
+                    for (int cse_col = 0; cse_col < reduced_cols; cse_col++) {
                         int workspace_col;
-                        if (model_col < pr->num_statevars) {
-                            // State variable column - need to map from Model to Workspace format
-                            // Model has [T, ...] while Workspace has [N, P, T, ...]
-                            if (pr->num_statevars == 1 && spec->num_statevars >= 3) {
-                                // Model has only T, map to workspace T position
-                                workspace_col = 2; // T is at position 2 in [N, P, T]
-                            } else {
-                                // Direct mapping for other cases
-                                workspace_col = model_col;
-                            }
+                        if (cse_col == 0) {
+                            // Temperature column in CSE -> position 2 in workspace [N, P, T]
+                            workspace_col = 2;
                         } else {
-                            // Site fraction column - offset by workspace num_statevars
-                            workspace_col = spec->num_statevars + (model_col - pr->num_statevars);
+                            // Site fraction columns: cse_col 1,2,... -> workspace cols 3,4,...
+                            workspace_col = spec->num_statevars + (cse_col - 1);
                         }
                         
                         if (workspace_col < csst->mass_jac_cols) {
                             csst->mass_jac[comp_idx * csst->mass_jac_cols + workspace_col] = 
-                                temp_mass_jac[nonvacant_idx * (pr->num_statevars + pr->phase_dof) + model_col];
+                                temp_mass_jac[nonvacant_idx * reduced_cols + cse_col];
                         }
                     }
                     nonvacant_idx++;
@@ -917,10 +973,11 @@ typedef struct SystemState {
             // So d(moles_i)/d(Y_j) = 0 for i != j
             // The generated formulamole_grad function already handles this correctly
             
-            // DEBUG: Print mass_jac matrix for phase 0
-            if (idx == 0 && iteration < 2) {
-                printf("GPU DEBUG: Phase %d mass_jac matrix:\\n", idx);
-                for (int comp_idx = 0; comp_idx < spec->num_components; comp_idx++) {
+            // DEBUG: Print mass_jac matrix
+            if (iteration < 2) {
+                printf("GPU DEBUG: Phase %d mass_jac matrix (workspace DOF format):\\n", idx);
+                printf("  Columns: [N, P, T, Y_NB, Y_TI, ...]\\n");
+                for (int comp_idx = 0; comp_idx < spec->num_components && comp_idx < 3; comp_idx++) {
                     printf("  Component %d: ", comp_idx);
                     for (int col = 0; col < csst->mass_jac_cols && col < 5; col++) {
                         printf("%e ", csst->mass_jac[comp_idx * csst->mass_jac_cols + col]);
@@ -939,11 +996,44 @@ typedef struct SystemState {
                     }
                     printf("\n");
                 }
-                pr->formulahess(csst->hess, compset->dof);
+                // Temporary array to hold the reduced Hessian output from CSE functions
+                double temp_hess[(MAX_DOF_PER_PHASE + 1) * (MAX_DOF_PER_PHASE + 1)];
+                pr->formulahess(temp_hess, compset->dof);
                 
-                // NOTE: GPU hessian has spurious terms from /(Y_NB + Y_TI) divisor
-                // but fixing it here doesn't improve convergence significantly.
-                // The issue might be elsewhere in the solver.
+                // Map the reduced Hessian (T + site fractions) to the full matrix (N, P, T + site fractions)
+                // The CSE Hessian functions output a (1 + phase_dof) x (1 + phase_dof) matrix:
+                // - temp_hess[0] corresponds to d²G/dT² (T,T element) 
+                // - temp_hess[i] corresponds to d²G/dTdY_i (T,site_fraction elements)
+                // - temp_hess[j*(1+phase_dof)+i] corresponds to d²G/dY_i dY_j (site_fraction block)
+                
+                int reduced_dim = 1 + pr->phase_dof; // T + site fractions
+                
+                // Zero out the full Hessian matrix first
+                for (int i = 0; i < csst->hess_rows * csst->hess_cols; ++i) {
+                    csst->hess[i] = 0.0;
+                }
+                
+                // Map T,T element: temp_hess[0] -> csst->hess[2,2] (T is at index 2)
+                csst->hess[2 * csst->hess_cols + 2] = temp_hess[0];
+                
+                // Map T,site_fraction elements: temp_hess[i] -> csst->hess[2, 3+i-1] and csst->hess[3+i-1, 2]
+                for (int i = 1; i < reduced_dim; i++) {
+                    int site_idx = spec->num_statevars + (i - 1); // Convert to full matrix site fraction index
+                    // T,site_fraction element
+                    csst->hess[2 * csst->hess_cols + site_idx] = temp_hess[i];
+                    // site_fraction,T element (symmetric)
+                    csst->hess[site_idx * csst->hess_cols + 2] = temp_hess[i];
+                }
+                
+                // Map site_fraction,site_fraction block
+                for (int i = 1; i < reduced_dim; i++) {
+                    for (int j = 1; j < reduced_dim; j++) {
+                        int reduced_idx = i * reduced_dim + j;
+                        int full_row = spec->num_statevars + (i - 1);
+                        int full_col = spec->num_statevars + (j - 1);
+                        csst->hess[full_row * csst->hess_cols + full_col] = temp_hess[reduced_idx];
+                    }
+                }
                 
         // DEBUG: Print Hessian values
         // DEBUG: Print Hessian values
@@ -993,7 +1083,29 @@ typedef struct SystemState {
                 printf("GPU ERROR: formulagrad pointer is null, skipping\n");
                 // Set gradient to zero (already initialized)
             } else {
-                pr->formulagrad(csst->grad, compset->dof);
+                // CSE gradient functions output reduced gradient in the correct order
+                // Expected order: [dG/dT, dG/dY1, dG/dY2, ...]
+                double temp_grad[1 + MAX_DOF_PER_PHASE];  // Temporary array for reduced gradient
+                pr->formulagrad(temp_grad, compset->dof);
+                
+                // Zero out the full gradient array first
+                for (int i = 0; i < csst->grad_length; ++i) {
+                    csst->grad[i] = 0.0;
+                }
+                
+                // Map the reduced gradient to full gradient:
+                // temp_grad[0] -> temperature derivative (index 2 in full gradient)
+                // temp_grad[1..n] -> site fraction derivatives (indices num_statevars+0..num_statevars+n-1)
+                
+                // Temperature derivative
+                csst->grad[2] = temp_grad[0];
+                
+                // Site fraction derivatives
+                for (int i = 0; i < pr->phase_dof; i++) {
+                    csst->grad[spec->num_statevars + i] = temp_grad[1 + i];
+                }
+                
+                // N and P derivatives (indices 0, 1) remain zero as CSE doesn't compute them
             }
             // Completed formulagrad
             
@@ -1016,12 +1128,40 @@ typedef struct SystemState {
             }
             
             pr->internal_cons_func(csst->internal_cons, compset->dof);
-            pr->internal_cons_jac(csst->cons_jac_tmp, compset->dof);
+            
+            // CSE constraint Jacobian functions output reduced format
+            if (pr->internal_cons_jac != nullptr) {
+                // Temporary array for reduced constraint Jacobian
+                // CSE outputs flat array: [dC1/dT, dC1/dY1, dC1/dY2, ..., dC2/dT, dC2/dY1, ...]
+                double temp_cons_jac[(1 + MAX_DOF_PER_PHASE) * MAX_INTERNAL_CONSTRAINTS];
+                pr->internal_cons_jac(temp_cons_jac, compset->dof);
+                
+                // Zero out the full constraint Jacobian first
+                for (int i = 0; i < pr->num_internal_cons * (spec->num_statevars + pr->phase_dof); ++i) {
+                    csst->cons_jac_tmp[i] = 0.0;
+                }
+                
+                // Map the reduced constraint Jacobian to full format
+                // CSE outputs: [dC/dT, dC/dY1, dC/dY2, ...] in flat array
+                // Full format expects: [dC/dN, dC/dP, dC/dT, dC/dY1, dC/dY2, ...] per constraint
+                int reduced_size = 1 + pr->phase_dof; // T + site fractions
+                int full_cols = spec->num_statevars + pr->phase_dof;
+                
+                for (int i = 0; i < pr->num_internal_cons; ++i) {
+                    // Temperature derivative (index 0 in reduced -> index 2 in full)
+                    csst->cons_jac_tmp[i * full_cols + 2] = temp_cons_jac[i * reduced_size + 0];
+                    
+                    // Site fraction derivatives (indices 1..n in reduced -> indices num_statevars..num_statevars+n-1 in full)
+                    for (int j = 0; j < pr->phase_dof; ++j) {
+                        csst->cons_jac_tmp[i * full_cols + spec->num_statevars + j] = temp_cons_jac[i * reduced_size + 1 + j];
+                    }
+                }
+            }
             
             // DEBUG: Print constraint Jacobian values
             if (idx == 0 && iteration < 2 && pr->num_internal_cons > 0) {
                 printf("GPU DEBUG: Constraint Jacobian for phase %d (num_cons=%d):\n", idx, pr->num_internal_cons);
-                int cons_jac_dim = pr->num_statevars + pr->phase_dof;
+                int cons_jac_dim = spec->num_statevars + pr->phase_dof;
                 for (int i = 0; i < pr->num_internal_cons; ++i) {
                     printf("  Constraint %d: ", i);
                     for (int j = 0; j < cons_jac_dim; ++j) {
@@ -1137,10 +1277,30 @@ typedef struct SystemState {
             for (int i = 0; i < num_phase_dof_for_csst; ++i) {
                 for (int j = 0; j < num_phase_dof_for_csst; ++j) {
                     for (int sv_idx = 0; sv_idx < spec->num_statevars; ++sv_idx) {
-                        csst->c_statevars[i * csst->c_statevars_cols + sv_idx] -=
-                            csst->full_e_matrix[i * csst->full_e_matrix_dim + j] *
-                            csst->hess[(spec->num_statevars + j) * csst->hess_cols + sv_idx];
+                        // With CSE Hessian functions, only T derivatives (sv_idx=2) are non-zero
+                        // N and P derivatives (sv_idx=0,1) are always zero
+                        if (sv_idx == 2) { // Temperature index
+                            csst->c_statevars[i * csst->c_statevars_cols + sv_idx] -=
+                                csst->full_e_matrix[i * csst->full_e_matrix_dim + j] *
+                                csst->hess[(spec->num_statevars + j) * csst->hess_cols + sv_idx];
+                        }
+                        // For N and P (sv_idx=0,1), the derivative is zero, so no contribution
                     }
+                }
+            }
+            
+            // CRITICAL FIX: Calculate c_component IMMEDIATELY after phase matrix inversion
+            // This must be done before fill_equilibrium_system uses c_component
+            // DEBUG: Print mass_jac values before c_component calculation
+            if (thread_id == 0 && iteration < 2) {
+                printf("[GPU DEBUG] Phase %d mass_jac BEFORE c_component calc (phase_dof=%d, num_elements=%d):\n", 
+                       idx, pr->phase_dof, pr->num_elements);
+                for (int cidx = 0; cidx < spec->num_components && cidx < 3; cidx++) {
+                    printf("  Component %d: ", cidx);
+                    for (int col = spec->num_statevars; col < spec->num_statevars + pr->phase_dof && col < spec->num_statevars + 3; col++) {
+                        printf("mass_jac[%d,%d]=%e ", cidx, col, csst->mass_jac[cidx * csst->mass_jac_cols + col]);
+                    }
+                    printf("\n");
                 }
             }
             
@@ -1155,7 +1315,7 @@ typedef struct SystemState {
                             csst->c_component[cidx * csst->c_component_cols + i] += mass_jac_val * e_matrix_val;
                             
                             // DEBUG: Print calculation for BOTH phases
-                            if (thread_id == 0 && iteration == 0 && cidx < 2 && i == 0 && j < 2) {
+                            if (thread_id == 0 && iteration < 2 && cidx < 2 && i < 2 && j < 2) {
                                 printf("  Phase %d: c_component[%d,%d] += mass_jac[%d,%d]=%e * e_matrix[%d,%d]=%e = %e\n",
                                        idx, cidx, i, cidx, spec->num_statevars + j, mass_jac_val, i, j, e_matrix_val,
                                        mass_jac_val * e_matrix_val);
@@ -1169,12 +1329,27 @@ typedef struct SystemState {
             if (thread_id == 0 && iteration < 5) {
                 printf("[GPU C_COMPONENT] Phase %d matrix (iter %d):\n", idx, iteration);
                 printf("  phase_amt = %.15e\n", phase_amt[idx]);
+                printf("  phase_dof = %d, num_elements = %d\n", pr->phase_dof, pr->num_elements);
                 for (int cidx = 0; cidx < 2; cidx++) {
                     printf("  Component %d: ", cidx);
                     for (int i = 0; i < 2; i++) {
                         printf("%e ", csst->c_component[cidx * csst->c_component_cols + i]);
                     }
                     printf("\n");
+                }
+                
+                // Check if c_component is all zeros
+                bool all_zeros = true;
+                for (int cidx = 0; cidx < spec->num_components && cidx < pr->num_elements; cidx++) {
+                    for (int i = 0; i < pr->phase_dof; i++) {
+                        if (fabs(csst->c_component[cidx * csst->c_component_cols + i]) > 1e-15) {
+                            all_zeros = false;
+                            break;
+                        }
+                    }
+                }
+                if (all_zeros) {
+                    printf("  WARNING: c_component is all zeros!\n");
                 }
             }
             for (int cidx = 0; cidx < spec->num_components; ++cidx) {
@@ -1199,6 +1374,14 @@ typedef struct SystemState {
                         csst->moles_normalization_grad[i_dof] += csst->mass_jac[cidx * csst->mass_jac_cols + i_dof];
                     }
                  }
+            }
+            
+            // DEBUG: Print moles_normalization for each phase
+            if (thread_id == 0 && iteration < 2) {
+                printf("[GPU MOLES_NORM] Phase %d: moles_normalization = %e (should be ~%e for %d sublattices)\n", 
+                       idx, csst->moles_normalization, 
+                       pr->phase_dof > 2 ? 20.0 : 1.0,  // Rough estimate
+                       pr->phase_dof > 2 ? 2 : 1);
             }
         }
         delta_ms_rows = num_compsets; // Update after loop in case num_compsets changed (though not in recompute)
@@ -1605,13 +1788,23 @@ __device__ void write_row_fixed_mole_amount(double* out_row, double* out_rhs,
     int free_variable_column_offset = 0;
     int num_system_statevars = c_statevars_cols_cs;
     
+    // CRITICAL FIX: Normalize by moles_normalization to handle multi-sublattice phases correctly
+    // This ensures all phases contribute equally to the system amount constraint regardless of site ratios
+    double normalization_factor = (moles_normalization_cs > 1e-12) ? moles_normalization_cs : 1.0;
+    
+    // DEBUG: Print normalization factor for each phase
+    if (component_idx == 0 && phase_amt_sys[compset_original_idx_sys] > 1e-10) {
+        printf("[GPU SYSTEM AMOUNT] Phase %d: moles_norm=%e, using factor=%e\n", 
+               compset_original_idx_sys, moles_normalization_cs, normalization_factor);
+    }
+    
     // 2a. This component row: free chemical potentials
     for (int i = 0; i < num_free_chemical_potentials; ++i) {
         int chempot_idx = free_chemical_potential_indices[i];
         for (int j = 0; j < c_component_cols_cs; ++j) {  // j is phase_dof index
-            // out_row[offset + i] += phase_amt * mass_jac[comp_idx, num_sv+j] * c_component[chempot_idx, j]
+            // out_row[offset + i] += phase_amt * mass_jac[comp_idx, num_sv+j] * c_component[chempot_idx, j] / moles_norm
             out_row[free_variable_column_offset + i] += 
-                phase_amt_sys[compset_original_idx_sys] * 
+                (phase_amt_sys[compset_original_idx_sys] / normalization_factor) * 
                 mass_jac_cs[component_idx * mass_jac_cols_cs + num_system_statevars + j] * 
                 c_component_cs[chempot_idx * c_component_cols_cs + j];
         }
@@ -1623,8 +1816,8 @@ __device__ void write_row_fixed_mole_amount(double* out_row, double* out_rhs,
         int compset_idx = free_stable_compset_indices[i];
         // Only fill this out if the current idx is equal to a free composition set
         if (compset_idx == compset_original_idx_sys) {
-            // For fixed_mole_amount, the coefficient is just the mass of this component
-            out_row[free_variable_column_offset + i] += masses_cs[component_idx];
+            // For fixed_mole_amount, the coefficient is the mass of this component normalized by moles_normalization
+            out_row[free_variable_column_offset + i] += masses_cs[component_idx] / normalization_factor;
         }
     }
     free_variable_column_offset += num_free_stable_compsets;
@@ -1633,17 +1826,17 @@ __device__ void write_row_fixed_mole_amount(double* out_row, double* out_rhs,
     for (int i = 0; i < num_free_statevars; ++i) {
         int statevar_idx = free_statevar_indices[i];
         for (int j = 0; j < c_statevars_cols_cs; ++j) {  // j is phase_dof index
-            // out_row[offset + i] += phase_amt * mass_jac[comp_idx, num_sv+j] * c_statevars[j, statevar_idx]
+            // out_row[offset + i] += phase_amt * mass_jac[comp_idx, num_sv+j] * c_statevars[j, statevar_idx] / moles_norm
             out_row[free_variable_column_offset + i] += 
-                phase_amt_sys[compset_original_idx_sys] * 
+                (phase_amt_sys[compset_original_idx_sys] / normalization_factor) * 
                 mass_jac_cs[component_idx * mass_jac_cols_cs + num_system_statevars + j] * 
                 c_statevars_cs[j * c_statevars_cols_cs + statevar_idx];
         }
     }
     
-    // 3. RHS contribution from c_G
+    // 3. RHS contribution from c_G (also needs normalization)
     for (int j = 0; j < c_G_length_cs; ++j) {
-        *out_rhs += -phase_amt_sys[compset_original_idx_sys] * 
+        *out_rhs += -(phase_amt_sys[compset_original_idx_sys] / normalization_factor) * 
                     mass_jac_cs[component_idx * mass_jac_cols_cs + num_system_statevars + j] * 
                     c_G_cs[j];
     }
@@ -1653,7 +1846,7 @@ __device__ void write_row_fixed_mole_amount(double* out_row, double* out_rhs,
         int chempot_idx = fixed_chemical_potential_indices[i];
         // 6. Subtract fixed chemical potentials from the N=1 row
         for (int j = 0; j < c_component_cols_cs; ++j) {
-            *out_rhs -= phase_amt_sys[compset_original_idx_sys] * 
+            *out_rhs -= (phase_amt_sys[compset_original_idx_sys] / normalization_factor) * 
                         current_chemical_potentials_sys[chempot_idx] * 
                         mass_jac_cs[component_idx * mass_jac_cols_cs + num_system_statevars + j] * 
                         c_component_cs[chempot_idx * c_component_cols_cs + j];
@@ -2468,20 +2661,65 @@ __device__ bool remove_and_consolidate_phases(SystemSpecification* spec, SystemS
                 }
                 if (num_to_remove < MAX_PHASES) compset_indices_to_remove_temp[num_to_remove++] = idx2;
                 
-                // CRITICAL FIX: Match CPU behavior - just add phase amounts, don't average site fractions
-                // CPU code at line 1480: state.phase_amt[idx] = max(state.phase_amt[idx] + state.phase_amt[idx2], 1e-8)
-                // CPU keeps the site fractions of idx1 unchanged and just adds the amounts
-                double total_amt = state->phase_amt[idx1] + state->phase_amt[idx2];
-                state->phase_amt[idx1] = fmax(total_amt, 1e-8);
+                // CRITICAL FIX: Match CPU behavior - add phase amounts but account for normalization
+                // Phase amounts are stored in formula units (normalized by moles_normalization)
+                // When consolidating, we need to convert to moles, add, then re-normalize
                 
-                // DEBUG: What happens after consolidation
-                if (thread_id == 0 && state->iteration < 2) {
-                    printf("[CONSOLIDATION] Consolidated phases %d and %d:\n", idx1, idx2);
-                    printf("  Phase %d: amount=%.15e, X=[%.15e, %.15e]\n", 
-                           idx1, state->phase_amt[idx1],
+                // Get moles_normalization for both phases (sum of moles per formula unit)
+                double moles_norm1 = state->cs_states[idx1].moles_normalization;
+                double moles_norm2 = state->cs_states[idx2].moles_normalization;
+                
+                // DEBUG: Print moles_normalization values
+                if (thread_id == 0) {
+                    printf("[GPU CONSOLIDATION DEBUG] Phase %d moles_norm=%e, phase %d moles_norm=%e\n",
+                           idx1, moles_norm1, idx2, moles_norm2);
+                }
+                
+                // For single sublattice phases, moles_normalization should be 1.0
+                // since there's only one site and site fractions sum to 1
+                // If moles_normalization is not calculated yet, fall back to simple addition
+                double old_amt1 = state->phase_amt[idx1];
+                double old_amt2 = state->phase_amt[idx2];
+                
+                if (moles_norm1 < 1e-12 || moles_norm2 < 1e-12) {
+                    // Fallback - just add the phase amounts directly
+                    state->phase_amt[idx1] = fmax(state->phase_amt[idx1] + state->phase_amt[idx2], 1e-8);
+                    if (thread_id == 0) {
+                        printf("[GPU CONSOLIDATION] Using direct addition due to zero moles_norm\n");
+                        printf("  Phase amounts: phase %d = %.15e + phase %d = %.15e -> %.15e\n",
+                               idx1, old_amt1, idx2, old_amt2, state->phase_amt[idx1]);
+                    }
+                } else {
+                    // Convert phase amounts from formula units to moles
+                    double moles1 = state->phase_amt[idx1] * moles_norm1;
+                    double moles2 = state->phase_amt[idx2] * moles_norm2;
+                    
+                    // Add the moles
+                    double total_moles = moles1 + moles2;
+                    
+                    // Convert back to formula units using the normalization of the target phase
+                    state->phase_amt[idx1] = fmax(total_moles / moles_norm1, 1e-8);
+                    
+                    // DEBUG: What happens after consolidation
+                    if (thread_id == 0) {
+                        printf("[CONSOLIDATION] Consolidated phases %d and %d:\n", idx1, idx2);
+                        printf("  Moles normalization: phase %d = %.15e, phase %d = %.15e\n",
+                               idx1, moles_norm1, idx2, moles_norm2);
+                        printf("  Phase amounts before: phase %d = %.15e, phase %d = %.15e\n",
+                               idx1, old_amt1, idx2, old_amt2);
+                        printf("  Moles: phase %d = %.15e, phase %d = %.15e, total = %.15e\n",
+                               idx1, moles1, idx2, moles2, total_moles);
+                        printf("  Phase %d: new amount=%.15e (formula units)\n", 
+                               idx1, state->phase_amt[idx1]);
+                    }
+                }
+                
+                if (thread_id == 0) {
+                    // Show compositions
+                    printf("  Phase %d: X=[%.15e, %.15e]\n", 
+                           idx1,
                            state->phase_compositions[idx1 * MAX_COMPONENTS + 0],
                            state->phase_compositions[idx1 * MAX_COMPONENTS + 1]);
-                    printf("  Phase %d: amount=%.15e (removed)\n", idx2, state->phase_amt[idx2]);
                     
                     // Also show site fractions
                     CompositionSet* cs1 = &state->compsets[idx1];

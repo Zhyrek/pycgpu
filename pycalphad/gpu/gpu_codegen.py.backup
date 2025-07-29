@@ -8,15 +8,9 @@ import re
 import math
 import tempfile
 import subprocess
-import time
 from typing import List, Set, Optional, Dict, Tuple
 from pycalphad.core.workspace import Workspace
 from pycalphad.model import Model
-
-# Import SymEngine for improved code generation
-import symengine as se
-from symengine import cse
-from symengine.lib.symengine_wrapper import ccode
 
 # Global constants for C code generation
 _C_PYCALPHAD_VARIABLE_PREFIX_NOTEBOOK = "x"  # Variable array name in C device functions
@@ -1567,269 +1561,7 @@ def fix_hessian_spurious_terms(hess_str, i_idx, j_idx):
     return fixed
 
 
-def notebook_source_from_expr_cse(
-    expr_or_list_in, 
-    c_function_name_base_suffix: str,
-    model_obj: Model,
-    model_c_idx: int,
-    wks_obj: Workspace,
-    expr_type: str = "func", 
-    c_output_type: str = "double",
-    validate: bool = True,
-    verbose: bool = False,
-) -> str:
-    """
-    NEW CSE-BASED: Converts SymEngine expression(s) to C __device__ function using CSE + ccode().
-    This replaces the regex-heavy approach with SymEngine's native capabilities.
-    """
-    try:
-        num_exprs = len(expr_or_list_in)
-    except:
-        num_exprs = 1 if hasattr(expr_or_list_in, 'free_symbols') else len(list(expr_or_list_in))
-    print(f"[CSE CODEGEN] Processing {expr_type} with {num_exprs} expressions")
-    
-    start_time = time.time()
-    
-    # Build function name and signature
-    full_c_func_name = notebook_model_c_func_name_prefix(model_c_idx) + c_function_name_base_suffix
-    c_output_arg_name = "out"
-    c_input_arg_name = "x"
-    
-    # Start building the C function
-    if expr_type == "func" and c_output_type == "double" and (hasattr(expr_or_list_in, 'free_symbols') or len(expr_or_list_in) == 1):
-        # Scalar function - no output parameter
-        c_code = f"__device__ {c_output_type} {full_c_func_name}(const double* {c_input_arg_name}) {{\n"
-    else:
-        # Vector function or void - include output parameter
-        c_code = f"__device__ {c_output_type} {full_c_func_name}(double* {c_output_arg_name}, const double* {c_input_arg_name}) {{\n"
-    
-    try:
-        if expr_type == "func":
-            # Process function expressions (free energy, etc.)
-            # Handle both single expressions and lists
-            if hasattr(expr_or_list_in, 'free_symbols'):
-                # Single expression
-                all_expressions = [expr_or_list_in]
-            else:
-                # List of expressions
-                all_expressions = list(expr_or_list_in)
-            
-            # Apply CSE to all expressions together for maximum efficiency
-            print(f"[CSE CODEGEN] Applying CSE to {len(all_expressions)} function expressions...")
-            cse_start = time.time()
-            replacements, reduced_exprs = cse(all_expressions)
-            cse_time = time.time() - cse_start
-            
-            print(f"[CSE CODEGEN] CSE found {len(replacements)} common subexpressions in {cse_time:.3f}s")
-            
-            # Generate subexpression assignments
-            for symbol, subexpr in replacements:
-                c_subexpr = ccode(subexpr)
-                c_subexpr = apply_cse_variable_mapping(c_subexpr, model_obj, wks_obj)
-                c_code += f"    double {ccode(symbol)} = {c_subexpr};\n"
-            
-            # Generate main expressions
-            if len(reduced_exprs) == 1 and c_output_type == "double":
-                # Single scalar function - return directly
-                c_expr = ccode(reduced_exprs[0])
-                c_expr = apply_cse_variable_mapping(c_expr, model_obj, wks_obj)
-                c_code += f"    return {c_expr};\n"
-            else:
-                # Multiple expressions or void function - write to output array
-                for i, reduced_expr in enumerate(reduced_exprs):
-                    c_expr = ccode(reduced_expr)
-                    c_expr = apply_cse_variable_mapping(c_expr, model_obj, wks_obj)
-                    c_code += f"    {c_output_arg_name}[{i}] = {c_expr};\n"
-        
-        elif expr_type == "grad":
-            # Process gradient expressions
-            print(f"[CSE CODEGEN] Processing gradient expressions...")
-            all_grad_expressions = []
-            
-            # Get ordered symbols for differentiation
-            ordered_symbols_for_diff = get_ordered_symbols_for_diff(model_obj, wks_obj)
-            
-            # Handle both single expressions and lists
-            if hasattr(expr_or_list_in, 'free_symbols'):
-                expr_list = [expr_or_list_in]
-            else:
-                expr_list = list(expr_or_list_in)
-            
-            # Collect all gradient expressions
-            for m_expr_idx, sub_expr in enumerate(expr_list):
-                for sym_to_diff_against in ordered_symbols_for_diff:
-                    deriv_expr = sub_expr.diff(sym_to_diff_against)
-                    all_grad_expressions.append(deriv_expr)
-            
-            # Apply CSE to all gradients together
-            cse_start = time.time()
-            replacements, reduced_exprs = cse(all_grad_expressions)
-            cse_time = time.time() - cse_start
-            
-            print(f"[CSE CODEGEN] Gradient CSE found {len(replacements)} subexpressions in {cse_time:.3f}s")
-            
-            # Generate subexpression assignments
-            for symbol, subexpr in replacements:
-                c_subexpr = ccode(subexpr)
-                c_subexpr = apply_cse_variable_mapping(c_subexpr, model_obj, wks_obj)
-                c_code += f"    double {ccode(symbol)} = {c_subexpr};\n"
-            
-            # CRITICAL: Generate gradient assignments in the EXACT order we want
-            # The reduced_exprs from CSE might not be in the order we need
-            # We need to map them back to our intended order
-            
-            # Build a mapping of which reduced_expr corresponds to which derivative
-            expr_index = 0
-            output_index = 0
-            
-            for m_expr_idx, sub_expr in enumerate(expr_list):
-                for sym_idx, sym_to_diff_against in enumerate(ordered_symbols_for_diff):
-                    # This is the derivative we want at output position 'output_index'
-                    # It corresponds to reduced_exprs[expr_index]
-                    c_expr = ccode(reduced_exprs[expr_index])
-                    c_expr = apply_cse_variable_mapping(c_expr, model_obj, wks_obj)
-                    c_code += f"    {c_output_arg_name}[{output_index}] = {c_expr};\n"
-                    
-                    expr_index += 1
-                    output_index += 1
-        
-        elif expr_type == "hess":
-            # Process Hessian expressions
-            print(f"[CSE CODEGEN] Processing Hessian expressions...")
-            all_hess_expressions = []
-            
-            # Get ordered symbols for differentiation
-            ordered_symbols_for_diff = get_ordered_symbols_for_diff(model_obj, wks_obj)
-            
-            # Handle both single expressions and lists
-            if hasattr(expr_or_list_in, 'free_symbols'):
-                expr_list = [expr_or_list_in]
-            else:
-                expr_list = list(expr_or_list_in)
-            
-            # Collect all Hessian expressions
-            for m_expr_idx, sub_expr in enumerate(expr_list):
-                for i_sym_idx, sym_j in enumerate(ordered_symbols_for_diff):
-                    first_deriv = sub_expr.diff(sym_j)
-                    for j_sym_idx, sym_k in enumerate(ordered_symbols_for_diff):
-                        second_deriv_expr = first_deriv.diff(sym_k)
-                        all_hess_expressions.append(second_deriv_expr)
-            
-            # Apply CSE to all Hessian expressions together
-            cse_start = time.time()
-            replacements, reduced_exprs = cse(all_hess_expressions)
-            cse_time = time.time() - cse_start
-            
-            print(f"[CSE CODEGEN] Hessian CSE found {len(replacements)} subexpressions in {cse_time:.3f}s")
-            
-            # Generate subexpression assignments
-            for symbol, subexpr in replacements:
-                c_subexpr = ccode(subexpr)
-                c_subexpr = apply_cse_variable_mapping(c_subexpr, model_obj, wks_obj)
-                c_code += f"    double {ccode(symbol)} = {c_subexpr};\n"
-            
-            # Generate Hessian assignments
-            for i, reduced_expr in enumerate(reduced_exprs):
-                c_expr = ccode(reduced_expr)
-                c_expr = apply_cse_variable_mapping(c_expr, model_obj, wks_obj)
-                c_code += f"    {c_output_arg_name}[{i}] = {c_expr};\n"
-        
-        # Close the function
-        c_code += "}\n\n"
-        
-        total_time = time.time() - start_time
-        print(f"[CSE CODEGEN] Generated {expr_type} function in {total_time:.3f}s")
-        
-        return c_code
-        
-    except Exception as e:
-        print(f"[CSE CODEGEN ERROR] Failed to generate {expr_type}: {e}")
-        # Fall back to original method
-        print(f"[CSE CODEGEN] Falling back to original regex-based method...")
-        return notebook_source_from_expr_original(
-            expr_or_list_in, c_function_name_base_suffix, model_obj, model_c_idx, 
-            wks_obj, expr_type, c_output_type, validate, verbose
-        )
-
-def apply_cse_variable_mapping(c_expr: str, model_obj: Model, wks_obj: Workspace) -> str:
-    """Apply variable name to array index mapping using existing logic."""
-    # Use existing function to get the mapping
-    result = notebook_convert_var_names(c_expr, model_obj, wks_obj)
-    
-    # Fix SymEngine CSE symbols that aren't handled by the original replacements
-    result = fix_cse_symbols(result)
-    
-    return result
-
-def fix_cse_symbols(source: str) -> str:
-    """Fix SymEngine CSE symbols that need C replacements."""
-    import re
-    
-    # Replace And() function with logical AND (&&)
-    source = re.sub(r'\bAnd\(([^,]+),\s*([^)]+)\)', r'(\1 && \2)', source)
-    
-    # Replace True with 1 and False with 0
-    source = re.sub(r'\bTrue\b', '1', source)
-    source = re.sub(r'\bFalse\b', '0', source)
-    
-    return source
-
-def get_ordered_symbols_for_diff(model_obj: Model, wks_obj: Workspace) -> list:
-    """Get ordered symbols for differentiation in the correct order for GPU.
-    
-    Returns symbols in the order expected by the GPU code:
-    1. Temperature (T)
-    2. Site fractions for first sublattice (in alphabetical order by species)
-    3. Site fractions for second sublattice (in alphabetical order by species)
-    4. etc.
-    
-    This ensures the gradient output order matches what the GPU minimizer expects.
-    """
-    from pycalphad import variables as v
-    import symengine as se
-    
-    # Start with temperature - this is the critical ordering requirement
-    ordered_symbols = []
-    
-    # Find temperature variable in the model's free symbols
-    temp_found = False
-    for sym in model_obj.ast.free_symbols:
-        if str(sym) == 'T':
-            ordered_symbols.append(sym)
-            temp_found = True
-            break
-    
-    # If T wasn't found in free symbols but is in state variables, add it
-    if not temp_found:
-        for var in model_obj.state_variables:
-            if isinstance(var, v.Temperature) or str(var) == 'T':
-                # Create a SymEngine symbol for T
-                ordered_symbols.append(se.Symbol('T'))
-                break
-    
-    # Now add site fractions grouped by sublattice
-    site_fractions = model_obj.site_fractions
-    
-    # Group site fractions by sublattice
-    sublattice_groups = {}
-    for sf in site_fractions:
-        sublattice_idx = sf.sublattice_index
-        if sublattice_idx not in sublattice_groups:
-            sublattice_groups[sublattice_idx] = []
-        sublattice_groups[sublattice_idx].append(sf)
-    
-    # Add site fractions in order by sublattice, then alphabetically by species within each sublattice
-    for sublattice_idx in sorted(sublattice_groups.keys()):
-        # Sort by species name within each sublattice
-        sorted_sfs = sorted(sublattice_groups[sublattice_idx], 
-                           key=lambda sf: sf.species.name)
-        ordered_symbols.extend(sorted_sfs)
-    
-    print(f"[CSE GRADIENT] Ordered symbols for {model_obj.phase_name}: {[str(s) for s in ordered_symbols]}")
-    
-    return ordered_symbols
-
-def notebook_source_from_expr_original(
+def notebook_source_from_expr(
     expr_or_list_in, 
     c_function_name_base_suffix: str,
     model_obj: Model,
@@ -2156,34 +1888,6 @@ def notebook_source_from_expr_original(
             # Don't raise error - let the GPU compilation catch real issues
 
     return c_code
-
-def notebook_source_from_expr(
-    expr_or_list_in, 
-    c_function_name_base_suffix: str,
-    model_obj: Model,
-    model_c_idx: int,
-    wks_obj: Workspace,
-    expr_type: str = "func", 
-    c_output_type: str = "double",
-    validate: bool = True,
-    verbose: bool = False,
-) -> str:
-    """
-    Wrapper function that uses the new CSE-based code generation by default.
-    Falls back to original regex-based method if CSE fails.
-    """
-    # Try the new CSE-based method first
-    try:
-        return notebook_source_from_expr_cse(
-            expr_or_list_in, c_function_name_base_suffix, model_obj, model_c_idx,
-            wks_obj, expr_type, c_output_type, validate, verbose
-        )
-    except Exception as e:
-        print(f"[CODEGEN] CSE method failed, falling back to original: {e}")
-        return notebook_source_from_expr_original(
-            expr_or_list_in, c_function_name_base_suffix, model_obj, model_c_idx,
-            wks_obj, expr_type, c_output_type, validate, verbose
-        )
 
 
 # --- Property-specific C code generator functions ---
@@ -3896,13 +3600,22 @@ __device__ void solve_equilibrium_at_condition_global_mem(
             }}
         }}
         
-        // CRITICAL: Phase amounts are now normalized at Python level - no need to normalize again
-        // The original GPU kernel normalization is disabled since Python does this properly
-        double original_phase_amt = cs->NP;  // This is already normalized by Python
+        // Step 2: Store original phase amount before normalization
+        double original_phase_amt = cs->NP;
+        
+        // Step 3: Normalize phase amount by composition sum (CPU line 536)
+        if (phase_comp_sum > 1e-15) {{
+            cs->NP /= phase_comp_sum;
+        }}
+        
+        // Step 4: Call update with normalized amounts (CPU line 592)
+        // CPU: compset.update(x[spec.num_statevars:], self.phase_amt[idx] * phase_comp_sum, x[:spec.num_statevars])
+        // This equals: update(site_fractions, original_phase_amt, state_vars)
+        double update_amount = cs->NP * phase_comp_sum;  // This should equal original_phase_amt
         
         if (thread_id == 0 && current_sys_state.num_compsets < 2) {{
-            printf("[GPU DEBUG] Phase amount already normalized by Python: phase_comp_sum=%.6f, phase_amt=%.6f\\n",
-                   phase_comp_sum, cs->NP);
+            printf("[GPU DEBUG] CPU Normalization: phase_comp_sum=%.6f, original_amt=%.6f, normalized_amt=%.6f, update_amt=%.6f\\n",
+                   phase_comp_sum, original_phase_amt, cs->NP, update_amount);
         }}
         
         // CRITICAL FIX: Must call cs->update() to calculate energy and composition
@@ -4411,27 +4124,25 @@ __device__ void solve_equilibrium_at_condition_global_mem(
     int stable_phase_count = 0;
     
     // CRITICAL FIX: Calculate sum of phase_amt to normalize to mole fractions
-    // Match CPU behavior - include ALL phases, no threshold filtering
     double sum_phase_amt = 0.0;
     for (int i = 0; i < current_sys_state.num_compsets; ++i) {{
-        // CPU includes all phases in the sum, no threshold check
-        sum_phase_amt += current_sys_state.phase_amt[i];
+        if (current_sys_state.phase_amt[i] > MIN_PHASE_FRACTION / 10.0) {{
+            sum_phase_amt += current_sys_state.phase_amt[i];
+        }}
     }}
     if (sum_phase_amt < 1e-15) sum_phase_amt = 1.0;  // Avoid division by zero
     
     if (thread_id == 0) {{
-        printf("GPU DEBUG: final calc - num_compsets=%d, sum_phase_amt=%f (including ALL phases - no threshold)\\n", 
-               current_sys_state.num_compsets, sum_phase_amt);
+        printf("GPU DEBUG: final calc - num_compsets=%d, MIN_PHASE_FRACTION=%e, sum_phase_amt=%f\\n", 
+               current_sys_state.num_compsets, MIN_PHASE_FRACTION / 10.0, sum_phase_amt);
     }}
     
     for (int i = 0; i < current_sys_state.num_compsets; ++i) {{
         if (thread_id == 0) {{
-            printf("GPU DEBUG: compset %d - phase_amt=%f, energy=%f (ALL phases included)\\n", 
-                   i, current_sys_state.phase_amt[i], current_sys_state.cs_states[i].energy);
+            printf("GPU DEBUG: compset %d - phase_amt=%f, energy=%f, threshold=%e\\n", 
+                   i, current_sys_state.phase_amt[i], current_sys_state.cs_states[i].energy, MIN_PHASE_FRACTION / 10.0);
         }}
-        // CRITICAL FIX: Include ALL phases to match CPU behavior
-        // CPU does not filter phases by amount in the final result
-        {{
+        if (current_sys_state.phase_amt[i] > MIN_PHASE_FRACTION / 10.0) {{
             // CRITICAL FIX: Normalize phase_amt to get mole fraction for GM calculation
             double phase_mole_fraction = current_sys_state.phase_amt[i] / sum_phase_amt;
             final_gm_calc += phase_mole_fraction * current_sys_state.cs_states[i].energy;

@@ -59,16 +59,20 @@ struct CompositionSet {
         energy = phase_record->obj(dof);
         
         // DEBUG: Check memory before mass_obj
+        #ifdef VERBOSE_DEBUG
         if (workspace_num_statevars == 3) {
             printf("GPU DEBUG: update() before mass_obj - workspace_num_statevars still = %d\\n", workspace_num_statevars);
         }
+        #endif
         
         phase_record->mass_obj(X, dof);  // Fills entire X array at once
         
         // DEBUG: Check memory after mass_obj
+        #ifdef VERBOSE_DEBUG
         if (workspace_num_statevars != 3) {
             printf("GPU ERROR: update() after mass_obj - workspace_num_statevars corrupted to %d!\\n", workspace_num_statevars);
         }
+        #endif
     }
     
     __device__ double calculate_phase_comp_sum(int workspace_num_statevars) {

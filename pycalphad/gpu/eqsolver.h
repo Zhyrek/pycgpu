@@ -343,6 +343,7 @@ __device__ void solve_equilibrium_at_condition(
     int actual_num_initial_compsets = 0;
 
     // Debug: Initial data verification
+    #ifdef VERBOSE_DEBUG
     if (thread_id == 0) {
         printf("GPU DEBUG: solve_equilibrium_at_condition - num_phases=%d\n", initial_data->num_phases);
         for (int debug_i = 0; debug_i < initial_data->num_phases && debug_i < 3; ++debug_i) {
@@ -350,6 +351,7 @@ __device__ void solve_equilibrium_at_condition(
                    debug_i, initial_data->phase_indices[debug_i], initial_data->phase_amounts[debug_i], MIN_PHASE_FRACTION/100.0);
         }
     }
+    #endif
 
     // Use data from lower_convex_hull instead of default initialization
     // CRITICAL FIX: Phases are stored contiguously, not by phase ID!
@@ -357,19 +359,25 @@ __device__ void solve_equilibrium_at_condition(
     for (int i = 0; i < initial_data->num_phases && i < MAX_PHASES; ++i) {
         // CRITICAL FIX: Preserve spec integrity across iterations
         if (current_spec.num_statevars != global_spec_base->num_statevars) {
+            #ifdef VERBOSE_DEBUG
             if (thread_id == 0) printf("GPU DEBUG: WARNING - num_statevars corrupted from %d to %d, restoring\n", 
                                       global_spec_base->num_statevars, current_spec.num_statevars);
+            #endif
             current_spec.num_statevars = global_spec_base->num_statevars;
         }
         int pr_idx = initial_data->phase_indices[i];  // Which phase model to use
         if (pr_idx < 0 || pr_idx >= phase_data->num_unique_phase_records) {
+            #ifdef VERBOSE_DEBUG
             if (thread_id == 0) printf("GPU DEBUG: Skipping phase instance %d - invalid model idx=%d\n", i, pr_idx);
+            #endif
             continue;
         }
         
         double phase_amount = initial_data->phase_amounts[i];
         if (phase_amount <= MIN_PHASE_FRACTION/100.0) {
+            #ifdef VERBOSE_DEBUG
             if (thread_id == 0) printf("GPU DEBUG: Skipping phase %d - amount %f <= threshold %e\n", i, phase_amount, MIN_PHASE_FRACTION/100.0);
+            #endif
             continue; // Skip negligible phases
         }
 
@@ -397,6 +405,7 @@ __device__ void solve_equilibrium_at_condition(
         }
         
         // Debug: Confirm site fractions are being read correctly
+        #ifdef VERBOSE_DEBUG
         if (thread_id == 0) {
             printf("[INITIAL] Phase instance %d (using model %d) site fractions from lower_convex_hull:\n", i, pr_idx);
             printf("  Raw site fractions: ");
@@ -411,6 +420,7 @@ __device__ void solve_equilibrium_at_condition(
             }
             printf("\n");
         }
+        #endif
         
         // Set phase amount from lower_convex_hull results (not default values!)
         initial_compsets_for_thread[actual_num_initial_compsets].NP = phase_amount;
@@ -424,15 +434,19 @@ __device__ void solve_equilibrium_at_condition(
         actual_num_initial_compsets++;
         
         // Debug: Confirm CompositionSet was created successfully
+        #ifdef VERBOSE_DEBUG
         if (thread_id == 0) {
             printf("GPU DEBUG: Successfully created CompositionSet %d for phase %d\n", actual_num_initial_compsets-1, i);
         }
+        #endif
     }
 
     // Debug: Show total number of CompositionSets created
+    #ifdef VERBOSE_DEBUG
     if (thread_id == 0) {
         printf("GPU DEBUG: Total CompositionSets created: %d\n", actual_num_initial_compsets);
     }
+    #endif
 
     SystemState current_sys_state;
     current_sys_state.init(&current_spec, initial_compsets_for_thread, actual_num_initial_compsets);
@@ -441,6 +455,7 @@ __device__ void solve_equilibrium_at_condition(
     current_sys_state.recompute(&current_spec);
     
     // Debug: Verify SystemState initialization
+    #ifdef VERBOSE_DEBUG
     if (thread_id == 0) {
         printf("GPU DEBUG: SystemState initialized with num_compsets=%d\n", current_sys_state.num_compsets);
         // Check all phases
@@ -461,6 +476,7 @@ __device__ void solve_equilibrium_at_condition(
         printf("GPU DEBUG: After recompute - phase_compositions for phase 0: [%.6f, %.6f]\n",
                current_sys_state.phase_compositions[0], current_sys_state.phase_compositions[1]);
     }
+    #endif
     
     // Initialize chemical potentials from lower_convex_hull results
     for (int i = 0; i < current_spec.num_components && i < MAX_COMPONENTS; ++i) {
@@ -469,11 +485,13 @@ __device__ void solve_equilibrium_at_condition(
 
     // 2. Call add_nearly_stable_gpu (equivalent to pyx _solve_eq_at_conditions pre-loop call)
     // SEGMENT 14: ADD NEARLY STABLE PHASES
+    #ifdef VERBOSE_DEBUG
     if (thread_id == 0) {
         printf("[GPU] SEGMENT 14: Add nearly stable phases\n");
         printf("[GPU]   threshold: -1000 J/mol\n");
         printf("[GPU]   initial_phase_count: %d\n", current_sys_state.num_compsets);
     }
+    #endif
     
     int nearly_stable_candidates_indices[MAX_PHASES]; // Max possible phases to add
     double nearly_stable_candidates_dfs[MAX_PHASES];
@@ -529,9 +547,11 @@ __device__ void solve_equilibrium_at_condition(
         current_sys_state.num_compsets++;
     }
     
+    #ifdef VERBOSE_DEBUG
     if (thread_id == 0) {
         printf("[GPU]   phase_count_after_adding: %d\n", current_sys_state.num_compsets);
     }
+    #endif
     
     // Normalize phase amounts after adding nearly stable phases (matching CPU logic lines 231-235)
     // CRITICAL FIX: Only normalize if phase amounts sum is significantly different from 1.0
@@ -541,9 +561,11 @@ __device__ void solve_equilibrium_at_condition(
         phase_amt_sum += current_sys_state.compsets[i].NP;
     }
     
+    #ifdef VERBOSE_DEBUG
     if (thread_id == 0) {
         printf("[GPU]   phase_amount_sum_before_normalization: %.15e\n", phase_amt_sum);
     }
+    #endif
     
     // Only normalize if the sum is significantly different from 1.0
     // This preserves the phase amounts from consolidation scenarios
@@ -559,6 +581,7 @@ __device__ void solve_equilibrium_at_condition(
         }
     }
     
+    #ifdef VERBOSE_DEBUG
     if (thread_id == 0) {
         printf("[GPU]   normalized_phases: [");
         for (int i = 0; i < current_sys_state.num_compsets; ++i) {
@@ -567,6 +590,7 @@ __device__ void solve_equilibrium_at_condition(
         }
         printf("]\n");
     }
+    #endif
     
     // CRITICAL FIX: Synchronize phase_amt with NP but don't normalize here
     // The normalization should only happen in minimizer.h recompute() to match CPU
@@ -588,10 +612,12 @@ __device__ void solve_equilibrium_at_condition(
         // The solver updates NP but phase_amt might be out of sync
         current_sys_state.phase_amt[i] = current_sys_state.compsets[i].NP;
         
+        #ifdef VERBOSE_DEBUG
         if (thread_id == 0 && i == 0) {
             printf("GPU DEBUG: synchronized phase_amt[%d]=%f with NP=%f\n", 
                    i, current_sys_state.phase_amt[i], current_sys_state.compsets[i].NP);
         }
+        #endif
     }
     
     // After adding nearly stable, re-initialize free_stable_compset_indices and other counts in SystemState
@@ -656,11 +682,13 @@ __device__ void solve_equilibrium_at_condition(
         }
 
         // SEGMENT 41: PHASE ADDITION - DRIVING FORCE CALCULATION
+        #ifdef VERBOSE_DEBUG
         if (thread_id == 0) {
             printf("[GPU] SEGMENT 41: Phase addition - driving force calculation\n");
             printf("[GPU]   chemical_potentials: [%.6f, %.6f]\n",
                    current_sys_state.chemical_potentials[0], current_sys_state.chemical_potentials[1]);
         }
+        #endif
         
         int candidate_idx_to_add = -1;
         double candidate_df = 0.0;
@@ -671,18 +699,22 @@ __device__ void solve_equilibrium_at_condition(
                                         1e-4 /* minimum_df from pyx */,
                                         removed_compsets, num_removed_compsets);
         
+        #ifdef VERBOSE_DEBUG
         if (thread_id == 0) {
             printf("[GPU]   max_driving_force: %.15e\n", candidate_df);
             printf("[GPU]   min_driving_force: %.15e\n", -1e30); // hardcoded minimum
         }
+        #endif
 
         // SEGMENT 42: PHASE ADDITION - DECISION
+        #ifdef VERBOSE_DEBUG
         if (thread_id == 0) {
             printf("[GPU] SEGMENT 42: Phase addition - decision\n");
             printf("[GPU]   largest_df: %.15e\n", candidate_df);
             printf("[GPU]   minimum_df: %.15e\n", 1e-4);
             printf("[GPU]   will_add_phase: %s\n", changed_phases_in_iteration ? "true" : "false");
         }
+        #endif
         
         if (changed_phases_in_iteration && candidate_idx_to_add != -1) {
             if (current_sys_state.num_compsets < MAX_PHASES) {
@@ -690,6 +722,7 @@ __device__ void solve_equilibrium_at_condition(
                 if (phase_id_from_grid < 0 || phase_id_from_grid >= phase_data->num_unique_phase_records) {
                      changed_phases_in_iteration = false; // Invalid candidate
                 } else {
+                    #ifdef VERBOSE_DEBUG
                     if (thread_id == 0) {
                         printf("[GPU]   candidate_phase: phase_%d\n", phase_id_from_grid);
                         // Print candidate composition - need to get from grid
@@ -700,6 +733,7 @@ __device__ void solve_equilibrium_at_condition(
                         }
                         printf("]\n");
                     }
+                    #endif
                     CompositionSet* new_cs = &current_sys_state.compsets[current_sys_state.num_compsets];
                     new_cs->phase_record = &phase_data->phase_records_array[phase_id_from_grid];
                     const PhaseRecord* pr = new_cs->phase_record;
@@ -791,6 +825,7 @@ __device__ void solve_equilibrium_at_condition(
     // 4. Store results (copied and adapted from previous `solve_equilibrium_at_condition` body)
     
     // DEBUG: Final values
+    #ifdef VERBOSE_DEBUG
     if (thread_id == 0) {
         printf("\n[GPU FINAL VALUES]\n");
         printf("  Converged: %s\n", converged ? "true" : "false");
@@ -808,6 +843,7 @@ __device__ void solve_equilibrium_at_condition(
         printf("  System mole fractions: X(NB)=%.15e, X(TI)=%.15e\n",
                current_sys_state.mole_fractions[0], current_sys_state.mole_fractions[1]);
     }
+    #endif
     
     result->converged = converged;
     // ... (rest of result population is identical to the previous response's version of this function)
@@ -817,28 +853,36 @@ __device__ void solve_equilibrium_at_condition(
     }
 
     // SEGMENT 40: FINAL GIBBS ENERGY CALCULATION
+    #ifdef VERBOSE_DEBUG
     if (thread_id == 0) {
         printf("[GPU] SEGMENT 40: Final Gibbs energy calculation\n");
     }
+    #endif
     
     double final_gm_calc = 0.0;
     int stable_phase_count = 0;
+    #ifdef VERBOSE_DEBUG
     printf("GPU DEBUG: Collecting stable phases - num_compsets=%d, MIN_PHASE_FRACTION/10=%e\n", 
            current_sys_state.num_compsets, MIN_PHASE_FRACTION / 10.0);
+    #endif
     for (int i = 0; i < current_sys_state.num_compsets; ++i) {
+        #ifdef VERBOSE_DEBUG
         printf("GPU DEBUG: compset %d - phase_amt=%.10f, threshold=%e\n", 
                i, current_sys_state.phase_amt[i], MIN_PHASE_FRACTION / 10.0);
+        #endif
         if (current_sys_state.phase_amt[i] > MIN_PHASE_FRACTION / 10.0) {
             // Use cs_states[i].energy which is set to pr->formulaobj(compset->dof) in recompute()
             // This is the Gibbs energy per formula unit, which is what the CPU uses
             double phase_contribution = current_sys_state.phase_amt[i] * current_sys_state.cs_states[i].energy;
             final_gm_calc += phase_contribution;
             
+            #ifdef VERBOSE_DEBUG
             if (thread_id == 0) {
                 printf("[GPU]   phase_%d_contribution: NP=%.15e * energy=%.15e = %.15e\n",
                        i, current_sys_state.phase_amt[i], current_sys_state.cs_states[i].energy,
                        phase_contribution);
             }
+            #endif
             
             if (stable_phase_count < MAX_PHASES) {
                 result->phase_ids[stable_phase_count] = -1;
@@ -867,22 +911,27 @@ __device__ void solve_equilibrium_at_condition(
                 if (current_sys_state.compsets[i].phase_record) {
                     const PhaseRecord* pr = current_sys_state.compsets[i].phase_record;
                     
+                    #ifdef VERBOSE_DEBUG
                     if (thread_id == 0) {
                         printf("[GPU]   phase_%d_Y: [", i);
                     }
+                    #endif
                     
                     for (int sf = 0; sf < pr->phase_dof; ++sf) {
                         if (stable_phase_count * MAX_DOF_PER_PHASE + sf < MAX_PHASES * MAX_DOF_PER_PHASE && sf < MAX_DOF_PER_PHASE) {
                             result->Y_phases[stable_phase_count * MAX_DOF_PER_PHASE + sf] =
                                 current_sys_state.compsets[i].dof[current_spec.num_statevars + sf];
                             
+                            #ifdef VERBOSE_DEBUG
                             if (thread_id == 0) {
                                 printf("%.6f", current_sys_state.compsets[i].dof[current_spec.num_statevars + sf]);
                                 if (sf < pr->phase_dof - 1) printf(", ");
                             }
+                            #endif
                         }
                     }
                     
+                    #ifdef VERBOSE_DEBUG
                     if (thread_id == 0) {
                         printf("]\n");
                         printf("[GPU]   phase_%d_X: [", i);
@@ -892,6 +941,7 @@ __device__ void solve_equilibrium_at_condition(
                         }
                         printf("]\n");
                     }
+                    #endif
                 }
                 stable_phase_count++;
             }
@@ -900,14 +950,18 @@ __device__ void solve_equilibrium_at_condition(
     result->final_system_gm = final_gm_calc;
     result->num_stable_phases = stable_phase_count;
     
+    #ifdef VERBOSE_DEBUG
     if (thread_id == 0) {
         printf("[GPU]   final_GM: %.15e\n", final_gm_calc);
     }
+    #endif
     
+    #ifdef VERBOSE_DEBUG
     printf("GPU DEBUG: Final result assembly - stable_phase_count=%d\n", stable_phase_count);
     for (int i = 0; i < stable_phase_count; ++i) {
         printf("GPU DEBUG: result->NP[%d] = %.10f\n", i, result->NP[i]);
     }
+    #endif
     
     for (int i = stable_phase_count; i < MAX_PHASES; ++i) {
         result->phase_ids[i] = -1;

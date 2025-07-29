@@ -2618,6 +2618,7 @@ def _generate_full_gpu_source(wks_obj: Workspace,
 
 // --- GPU Debug logging helpers (must be outside extern "C") ---
 __device__ void gpu_debug_log(int segment, const char* message, int condition_idx) {{
+    #ifdef VERBOSE_DEBUG
     // Only print for first 3 conditions to reduce clutter
     if (condition_idx >= 3 && condition_idx >= 0) return;
     
@@ -2626,13 +2627,17 @@ __device__ void gpu_debug_log(int segment, const char* message, int condition_id
     }} else {{
         printf("[GPU] SEGMENT %02d: %s\\n", segment, message);
     }}
+    #endif
 }}
 
 __device__ void gpu_debug_log_value(const char* message, double value) {{
+    #ifdef VERBOSE_DEBUG
     printf("[GPU]   %s: %.15e\\n", message, value);
+    #endif
 }}
 
 __device__ void gpu_debug_log_array(const char* message, const double* arr, int size) {{
+    #ifdef VERBOSE_DEBUG
     printf("[GPU]   %s: [", message);
     for (int i = 0; i < size && i < 5; ++i) {{
         printf("%.6f", arr[i]);
@@ -2640,6 +2645,7 @@ __device__ void gpu_debug_log_array(const char* message, const double* arr, int 
     }}
     if (size > 5) printf("...");
     printf("]\\n");
+    #endif
 }}
 
 // --- Static C Code Includes ---
@@ -2751,10 +2757,13 @@ __global__ void minimal_equilibrium_kernel(
 
 // --- Kernel to Initialize Global PhaseRecords ---
 __global__ void init_all_gpu_phase_records() {{
+    #ifdef VERBOSE_DEBUG
     if (threadIdx.x == 0 && blockIdx.x == 0) {{
         printf("GPU DEBUG: init_all_gpu_phase_records kernel called\\n");
     }}
+    #endif
     {"".join(g_phase_record_array_init_calls_c_code)}
+    #ifdef VERBOSE_DEBUG
     if (threadIdx.x == 0 && blockIdx.x == 0) {{
         printf("GPU DEBUG: init_all_gpu_phase_records kernel completed\\n");
         // Debug: Print what was initialized
@@ -2763,6 +2772,7 @@ __global__ void init_all_gpu_phase_records() {{
             // printf("GPU DEBUG: g_phase_records_array[%d].formulamole_obj = %p\\n", i, (void*)g_phase_records_array[i].formulamole_obj);
         }}
     }}
+    #endif
 }}
 
 // --- COMMENTED OUT: Original complex solver implementation ---
@@ -2841,6 +2851,7 @@ __device__ bool run_loop_global_mem(
             printf("GPU DEBUG: State before iteration:\\n");
             printf("GPU DEBUG:   Chemical potentials: [%.6f, %.6f]\\n", 
                    state->chemical_potentials[0], state->chemical_potentials[1]);
+            #ifdef VERBOSE_DEBUG
             printf("GPU DEBUG:   Number of phases: %d\\n", state->num_free_stable_compsets);
             printf("GPU DEBUG:   Free stable indices: ");
             for (int i = 0; i < state->num_free_stable_compsets; ++i) {{
@@ -2850,12 +2861,14 @@ __device__ bool run_loop_global_mem(
             printf("GPU DEBUG:   System amount: %.6f\\n", state->system_amount);
             printf("GPU DEBUG:   Mole fractions: [%.6f, %.6f]\\n", 
                    state->mole_fractions[0], state->mole_fractions[1]);
+            #endif
             
             // Details for each phase
             for (int i = 0; i < state->num_free_stable_compsets; ++i) {{
                 int idx = state->free_stable_compset_indices[i];
                 CompositionSet* cs = &state->compsets[idx];
                 CompsetState* css = &state->cs_states[idx];
+                #ifdef VERBOSE_DEBUG
                 printf("GPU DEBUG:   Phase %d:\\n", idx);
                 printf("GPU DEBUG:     NP=%.6f\\n", cs->NP);
                 printf("GPU DEBUG:     phase_amt=%.6f (formula units)\\n", state->phase_amt[idx]);
@@ -2865,14 +2878,17 @@ __device__ bool run_loop_global_mem(
                 printf("GPU DEBUG:     phase_compositions=[%.6f, %.6f]\\n",
                        state->phase_compositions[idx * MAX_COMPONENTS + 0],
                        state->phase_compositions[idx * MAX_COMPONENTS + 1]);
+                #endif
                 // Calculate phase_comp_sum
                 double phase_comp_sum = 0.0;
                 for (int j = 0; j < spec->num_components; ++j) {{
                     phase_comp_sum += state->phase_compositions[idx * MAX_COMPONENTS + j];
                 }}
+                #ifdef VERBOSE_DEBUG
                 printf("GPU DEBUG:     phase_comp_sum=%.6f\\n", phase_comp_sum);
                 printf("GPU DEBUG:     phase_amt * phase_comp_sum=%.6f\\n", 
                        state->phase_amt[idx] * phase_comp_sum);
+                #endif
             }}
         }} else if (thread_id == 0) {{
             printf("GPU DEBUG: Entered iteration loop, max_iterations=%d\\n", max_iterations);
@@ -2880,7 +2896,9 @@ __device__ bool run_loop_global_mem(
         
         // SEGMENT 21: PRE-SOLVE HOOK
         if (thread_id < 3 && iteration_count < 3) {{
+            #ifdef VERBOSE_DEBUG
             printf("[GPU] SEGMENT 21: Pre-solve hook (condition %d, iteration %d)\\n", thread_id, iteration_count);
+            #endif
         }}
         
         // Call pre_solve_hook (this should be safe, no large arrays)
@@ -2888,13 +2906,16 @@ __device__ bool run_loop_global_mem(
         if (!pre_hook_result) {{
             // DEBUG: Mark pre_solve_hook failure (removed debug_gm_history references)
             if (thread_id == 0) {{
+                #ifdef VERBOSE_DEBUG
                 printf("GPU DEBUG: pre_solve_hook failed!\\n");
+                #endif
             }}
             break;
         }}
         
         // SEGMENT 22: STATE RECOMPUTATION
         if (thread_id < 3 && iteration_count < 3) {{
+            #ifdef VERBOSE_DEBUG
             printf("[GPU] SEGMENT 22: State recomputation (condition %d)\\n", thread_id);
             printf("[GPU]   num_phases_active: %d\\n", state->num_free_stable_compsets);
             for (int i = 0; i < state->num_free_stable_compsets; ++i) {{
@@ -2913,6 +2934,7 @@ __device__ bool run_loop_global_mem(
                     }}
                 }}
             }}
+            #endif
         }}
         
         // NOTE: recompute is called inside solve_state, matching CPU behavior
@@ -2922,16 +2944,20 @@ __device__ bool run_loop_global_mem(
         
         // DEBUG: Store eq_soln_len calculation (removed debug_gm_history references)
         if (thread_id == 0 && iteration_count == 0) {{
+            #ifdef VERBOSE_DEBUG
             printf("GPU DEBUG: eq_soln_len=%d (chem_pot=%d + compsets=%d + statevars=%d)\\n", 
                    eq_soln_len, spec->num_free_chemical_potentials, 
                    state->num_free_stable_compsets, spec->num_free_statevars);
+            #endif
         }}
         
         if (eq_soln_len > MAX_EQ_SOLN_LEN || eq_soln_len <= 0) {{
             // DEBUG: Mark eq_soln_len failure (removed debug_gm_history references)
             if (thread_id == 0) {{
+                #ifdef VERBOSE_DEBUG
                 printf("GPU DEBUG: eq_soln_len check failed! eq_soln_len=%d, MAX_EQ_SOLN_LEN=%d\\n", 
                        eq_soln_len, MAX_EQ_SOLN_LEN);
+                #endif
             }}
             converged = false;
             break;
@@ -2947,7 +2973,9 @@ __device__ bool run_loop_global_mem(
         
         // SEGMENT 27-30: SOLVE STATE
         if (thread_id < 3 && iteration_count < 3) {{
+            #ifdef VERBOSE_DEBUG
             printf("[GPU] SEGMENT 27: Construct equilibrium system (condition %d)\\n", thread_id);
+            #endif
         }}
         
         // Call solve_state with global memory arrays
@@ -2958,6 +2986,7 @@ __device__ bool run_loop_global_mem(
         
         // DEBUG: After solve_state
         if ((iteration_count < 3 || iteration_count % 50 == 0) && thread_id == 0) {{ 
+            #ifdef VERBOSE_DEBUG
             printf("GPU DEBUG: Equilibrium solution at iteration %d (len=%d): [", iteration_count, eq_soln_len);
             for (int i = 0; i < eq_soln_len && i < 10; ++i) {{
                 printf("%.6e", eq_soln[i]);
@@ -2981,8 +3010,10 @@ __device__ bool run_loop_global_mem(
             printf("GPU DEBUG: After solve_state:\\n");
             printf("GPU DEBUG:   Chemical potentials: [%.6f, %.6f]\\n", 
                    state->chemical_potentials[0], state->chemical_potentials[1]);
+            #endif
             
             // Details for each phase after solve
+            #ifdef VERBOSE_DEBUG
             for (int i = 0; i < state->num_free_stable_compsets; ++i) {{
                 int idx = state->free_stable_compset_indices[i];
                 CompositionSet* cs = &state->compsets[idx];
@@ -2992,28 +3023,37 @@ __device__ bool run_loop_global_mem(
                 printf("GPU DEBUG:     dof=[%.15f, %.15f, %.15f]\\n", 
                        cs->dof[0], cs->dof[1], cs->dof[2]);
             }}
+            #endif
         }}
         
         // SEGMENT 33: POST SOLVE HOOK (matching CPU order)
         if (thread_id < 3 && iteration_count < 3) {{
+            #ifdef VERBOSE_DEBUG
             printf("[GPU] SEGMENT 33: Post solve hook\\n");
+            #endif
         }}
         
         // Call post_solve_hook first (matching CPU behavior)
         if (!post_solve_hook(spec, state)) {{
             if (thread_id < 3 && iteration_count < 3) {{
+                #ifdef VERBOSE_DEBUG
                 printf("[GPU]   post_solve_hook_returned_false\\n");
+                #endif
             }}
             break;
         }}
         
         if (thread_id < 3 && iteration_count < 3) {{
+            #ifdef VERBOSE_DEBUG
             printf("[GPU]   post_solve_hook_returned_true\\n");
+            #endif
         }}
         
         // SEGMENT 34: REMOVE AND CONSOLIDATE PHASES (before advance_state to match CPU)
         if (thread_id < 3 && iteration_count < 3) {{
+            #ifdef VERBOSE_DEBUG
             printf("[GPU] SEGMENT 34: Remove and consolidate phases\\n");
+            #endif
         }}
         
         // NOTE: Phase compositions are calculated in solve_state->recompute()
@@ -3023,16 +3063,21 @@ __device__ bool run_loop_global_mem(
         if (remove_and_consolidate_phases(spec, state)) {{
             phases_changed_iter = true;
             if (thread_id < 3 && iteration_count < 3) {{
+                #ifdef VERBOSE_DEBUG
                 printf("[GPU]   phases_removed: true\\n");
+                #endif
             }}
         }}
         
         // SEGMENT 32: CHECK CONVERGENCE
         if (thread_id < 3 && iteration_count < 3) {{
+            #ifdef VERBOSE_DEBUG
             printf("[GPU] SEGMENT 32: Check convergence\\n");
+            #endif
         }}
         bool convergence_result = check_convergence(spec, state);
         if (thread_id == 0 && (iteration_count < 3 || iteration_count % 50 == 0 || convergence_result)) {{
+            #ifdef VERBOSE_DEBUG
             printf("GPU DEBUG: Convergence check at iteration %d:\\n", iteration_count);
             printf("  largest_phase_amt_change=%.2e (limit 1e-10)\\n", state->largest_phase_amt_change);
             printf("  largest_y_change=%.2e (limit 5e-09)\\n", state->largest_y_change);
@@ -3040,6 +3085,7 @@ __device__ bool run_loop_global_mem(
             printf("  mass_residual=%.2e (limit %.2e)\\n", state->mass_residual, spec->ALLOWED_MASS_RESIDUAL);
             printf("  iterations_since_last_phase_change=%d (need >=5)\\n", state->iterations_since_last_phase_change);
             printf("  Converged: %s\\n", convergence_result ? "YES" : "NO");
+            #endif
         }}
         
         if (convergence_result) {{
@@ -3047,7 +3093,9 @@ __device__ bool run_loop_global_mem(
             if (change_phases(spec, state)) {{
                 phases_changed_iter = true;
                 if (thread_id < 3 && iteration_count < 3) {{
+                    #ifdef VERBOSE_DEBUG
                     printf("[GPU]   phases_added: true\\n");
+                    #endif
                 }}
             }}
             
@@ -3067,17 +3115,21 @@ __device__ bool run_loop_global_mem(
         
         // DEBUG: Before advance_state
         if (thread_id < 3 && iteration_count < 3) {{ 
+            #ifdef VERBOSE_DEBUG
             printf("GPU DEBUG iter %d: Before advance_state\\n", iteration_count);
             printf("  Phase amounts: [%.6f, %.6f]\\n", state->phase_amt[0], state->phase_amt[1]);
             printf("  eq_soln phase deltas: [%.6e, %.6e]\\n", 
                    eq_soln[spec->num_free_chemical_potentials], 
                    eq_soln[spec->num_free_chemical_potentials + 1]);
+            #endif
         }}
         
         // SEGMENT 31: ADVANCE STATE (only if phases weren't changed)
         if (thread_id < 3 && iteration_count < 3) {{
+            #ifdef VERBOSE_DEBUG
             printf("[GPU] SEGMENT 31: Advance state\\n");
             printf("[GPU]   step_size: %.6f\\n", step_size);
+            #endif
         }}
         
         // CRITICAL FIX: Skip advance_state if phases changed (match CPU behavior)
@@ -3086,12 +3138,15 @@ __device__ bool run_loop_global_mem(
             advance_state(spec, state, eq_soln, eq_soln_len, step_size);
         }} else {{
             if (thread_id < 3 && iteration_count < 3) {{
+                #ifdef VERBOSE_DEBUG
                 printf("[GPU] SKIPPING advance_state due to phase changes\\n");
+                #endif
             }}
         }}
         
         // DEBUG: Add detailed output after first iteration
         if (iteration_count == 0 && thread_id == 0) {{
+            #ifdef VERBOSE_DEBUG
             printf("\\n[GPU TRACE] ===== AFTER ITERATION 0 =====\\n");
             printf("[GPU TRACE] Chemical potentials: [");
             for (int i = 0; i < spec->num_components; ++i) {{
@@ -3114,7 +3169,9 @@ __device__ bool run_loop_global_mem(
                 if (i < state->num_free_stable_compsets - 1) printf(", ");
             }}
             printf("]\\n");
+            #endif
             
+            #ifdef VERBOSE_DEBUG
             for (int idx = 0; idx < state->num_free_stable_compsets; ++idx) {{
                 int cs_idx = state->free_stable_compset_indices[idx];
                 CompositionSet* compset = &state->compsets[cs_idx];
@@ -3148,7 +3205,9 @@ __device__ bool run_loop_global_mem(
                 }}
                 printf("]\\n");
             }}
+            #endif
             
+            #ifdef VERBOSE_DEBUG
             printf("\\n[GPU TRACE] Convergence status:\\n");
             printf("  converged: %s\\n", converged ? "true" : "false");
             printf("  phases_changed: %s\\n", phases_changed_iter ? "true" : "false");
@@ -3156,6 +3215,7 @@ __device__ bool run_loop_global_mem(
             printf("  largest_y_change: %.15e\\n", state->largest_y_change);
             printf("  largest_statevar_change: %.15e\\n", state->largest_statevar_change);
             printf("[GPU TRACE] ===== END ITERATION 0 =====\\n\\n");
+            #endif
         }}
     }}
     
@@ -3360,7 +3420,9 @@ __device__ void solve_equilibrium_at_condition_global_mem(
     // STACK OVERFLOW FIX: All large arrays are now passed as parameters from global memory
     
     if (thread_id == 0) {{
+        #ifdef VERBOSE_DEBUG  
         printf("GPU DEBUG: solve_equilibrium_at_condition_global_mem STARTED\\n");
+        #endif
     }}
     
     // Step 1: Validate inputs and global memory arrays
@@ -5010,7 +5072,9 @@ __global__ void top_level_equilibrium_kernel(
                         phase_energy = phase_rec->obj(phase_dof);
                         
                         if (verbose && ph_idx < 2) {{
+                            #ifdef VERBOSE_DEBUG
                             printf("[GPU]   phase_%d_energy: %.15e\\n", ph_idx, phase_energy);
+                            #endif
                         }}
                         
                         if (tid == 0) {{

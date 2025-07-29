@@ -39,19 +39,19 @@ def run_comprehensive_test(verbose=False):
     start_time = time.time()
     
     try:
-        # GPU calculation - all conditions at once
-        print("Running GPU calculation...")
-        gpu_start = time.time()
-        result_gpu = equilibrium(dbf, comps, phases, conditions, gpu=True, verbose=verbose)
-        gpu_time = time.time() - gpu_start
-        print(f"GPU calculation completed in {gpu_time:.1f} seconds")
-        
         # CPU calculation - all conditions at once
         print("Running CPU calculation...")
         cpu_start = time.time()
         result_cpu = equilibrium(dbf, comps, phases, conditions, gpu=False, verbose=verbose)
         cpu_time = time.time() - cpu_start
         print(f"CPU calculation completed in {cpu_time:.1f} seconds")
+        
+        # GPU calculation - all conditions at once
+        print("Running GPU calculation...")
+        gpu_start = time.time()
+        result_gpu = equilibrium(dbf, comps, phases, conditions, gpu=True, verbose=verbose)
+        gpu_time = time.time() - gpu_start
+        print(f"GPU calculation completed in {gpu_time:.1f} seconds")
         
         # Extract results
         cpu_gm = result_cpu.GM.values

@@ -315,7 +315,9 @@ typedef struct SystemState {
     double _phase_amounts_per_mole_atoms_arr[MAX_PHASES * MAX_COMPONENTS];
 
     __device__ void init(SystemSpecification* spec, CompositionSet* initial_compsets, int initial_num_compsets) {
+        #ifdef VERBOSE_DEBUG
         printf("GPU DEBUG: SystemState::init called with num_compsets=%d\n", initial_num_compsets);
+        #endif
         num_compsets = initial_num_compsets;
         if (num_compsets > MAX_PHASES) num_compsets = MAX_PHASES; // Cap at MAX_PHASES
 
@@ -405,10 +407,12 @@ typedef struct SystemState {
                     }
                 }
                 if (!dof_valid) {
+                    #ifdef VERBOSE_DEBUG
                     printf("GPU ERROR: Invalid DOF values in recompute for phase %d\\n", idx);
                     for (int i = 0; i < 5; ++i) {
                         printf("  dof[%d] = %f\\n", i, i < (compset->phase_record->num_statevars + compset->phase_record->phase_dof) ? compset->dof[i] : 0.0);
                     }
+                    #endif
                 } else {
                     // CRITICAL FIX: Create Model DOF array from Workspace DOF
                     // With updated energy functions, use full workspace DOF
@@ -477,25 +481,32 @@ typedef struct SystemState {
         
         // DEBUG: Check spec pointer validity at entry
         if (spec == nullptr) {
+            #ifdef VERBOSE_DEBUG
             printf("GPU ERROR: spec pointer is NULL in recompute!\n");
+            #endif
             return;
         }
         
         // DEBUG: Check if spec values look reasonable
         if (spec->num_statevars < 0 || spec->num_statevars > 10 || 
             spec->num_components < 0 || spec->num_components > 10) {
+            #ifdef VERBOSE_DEBUG
             printf("GPU ERROR: spec appears corrupted at recompute entry!\n");
             printf("  spec=%p\n", spec);
             printf("  spec->num_statevars=%d (0x%X)\n", spec->num_statevars, spec->num_statevars);
             printf("  spec->num_components=%d (0x%X)\n", spec->num_components, spec->num_components);
+            #endif
             // Don't return - try to continue
         }
         
         // Entered recompute function - removed pointer printf to avoid alignment issues
+        #ifdef VERBOSE_DEBUG
         printf("GPU DEBUG: num_compsets=%d, iteration=%d\n", num_compsets, iteration);
+        #endif
         // SEGMENT 22: STATE RECOMPUTE - GLOBAL QUANTITIES
         gpu_debug_log(22, "State recompute - global quantities", condition_idx);
         // Direct printf to test if this code is being reached
+        #ifdef VERBOSE_DEBUG
         if (condition_idx < 3) {
             printf("[GPU] SEGMENT 22 DEBUG: iteration=%d, num_components=%d\n", iteration, spec->num_components);
             printf("[GPU]   chemical_potentials: [%.15e, %.15e]\n", chemical_potentials[0], chemical_potentials[1]);
@@ -505,6 +516,7 @@ typedef struct SystemState {
             gpu_debug_log_value("system_amount", system_amount);
             gpu_debug_log_array("mole_fractions", mole_fractions, spec->num_components);
         }
+        #endif
         
         // REMOVED: current_dof_for_phase array - now using model_dof_for_calcs created locally where needed
 
@@ -520,11 +532,15 @@ typedef struct SystemState {
         for (int idx = 0; idx < num_compsets; ++idx) {
             phase_amt_sum += phase_amt[idx];
         }
+        #ifdef VERBOSE_DEBUG
         printf("[GPU MASS BALANCE] recompute() - iteration %d: sum(phase_amt) = %.15e\n", iteration, phase_amt_sum);
+        #endif
         
         // CRITICAL FIX: If this is the first recompute and phase amounts aren't normalized, fix them
         if (iteration == 0 && phase_amt_sum > 0.9 && phase_amt_sum < 1.1) {
+            #ifdef VERBOSE_DEBUG
             printf("[GPU FIX] Normalizing phase amounts in recompute (init normalization failed)\n");
+            #endif
             
             // Normalize each phase by its phase_comp_sum
             for (int idx = 0; idx < num_compsets; ++idx) {
@@ -534,7 +550,9 @@ typedef struct SystemState {
                 }
                 
                 if (comp_sum > 1.5) { // Multi-sublattice phase like ALCU_ZETA
+                    #ifdef VERBOSE_DEBUG
                     printf("[GPU FIX] Phase %d: normalizing by %.2f (multi-sublattice)\n", idx, comp_sum);
+                    #endif
                     phase_amt[idx] /= comp_sum;
                 }
             }
@@ -544,7 +562,9 @@ typedef struct SystemState {
             for (int idx = 0; idx < num_compsets; ++idx) {
                 phase_amt_sum += phase_amt[idx];
             }
+            #ifdef VERBOSE_DEBUG
             printf("[GPU FIX] After normalization: sum(phase_amt) = %.15e\n", phase_amt_sum);
+            #endif
         }
         
 
@@ -574,10 +594,12 @@ typedef struct SystemState {
                     }
                 }
                 if (!dof_valid) {
+                    #ifdef VERBOSE_DEBUG
                     printf("GPU ERROR: Invalid DOF values in recompute for phase %d\\n", idx);
                     for (int i = 0; i < 5; ++i) {
                         printf("  dof[%d] = %f\\n", i, i < (compset->phase_record->num_statevars + compset->phase_record->phase_dof) ? compset->dof[i] : 0.0);
                     }
+                    #endif
                 } else {
                     // CRITICAL FIX: Create Model DOF array from Workspace DOF
                     // With updated energy functions, use full workspace DOF
@@ -631,6 +653,7 @@ typedef struct SystemState {
                         }
                         
                         // DEBUG: Print raw gradient values from formulamole_grad
+                        #ifdef VERBOSE_DEBUG
                         if (idx == 0 && iteration < 2) {
                             printf("GPU DEBUG: Raw formulamole_grad output (phase %d):\n", idx);
                             int reduced_cols = 1 + compset->phase_record->phase_dof;
@@ -642,8 +665,10 @@ typedef struct SystemState {
                                 printf("\n");
                             }
                         }
+                        #endif
                         
                         // DEBUG: Print mass_jac for first phase and iteration
+                        #ifdef VERBOSE_DEBUG
                         if (idx == 0 && iteration < 2) {
                             printf("GPU DEBUG: Phase %d mass_jac matrix (workspace DOF format):\\n", idx);
                             printf("  Columns: [N, P, T, Y_NB, Y_TI, ...]\\n");
@@ -655,6 +680,7 @@ typedef struct SystemState {
                                 printf("\\n");
                             }
                         }
+                        #endif
                     }
                 }
             } else {
@@ -670,10 +696,12 @@ typedef struct SystemState {
                 csst->masses[comp_idx] = formulamoles[comp_idx];
                 
                 // DEBUG: Print phase compositions
+                #ifdef VERBOSE_DEBUG
                 if (thread_id == 0 && iteration < 3 && comp_idx < 2) {
                     printf("GPU: Phase %d composition[%d] = %.6f (will update after compset update)\n", idx, comp_idx, 
                            phase_compositions[idx * MAX_COMPONENTS + comp_idx]);
                 }
+                #endif
 
                 // CRITICAL FIX: phase_amt is already in formula units (normalized in constructor)
                 // So we use it directly like CPU does in recompute()
@@ -718,6 +746,7 @@ typedef struct SystemState {
         
         // Log phase details
         if (condition_idx < 3) {
+            #ifdef VERBOSE_DEBUG
             for (int idx = 0; idx < num_compsets; ++idx) {
                 if (phase_amt[idx] > 1e-10) {
                     // Use direct printf instead of sprintf for device code
@@ -731,6 +760,7 @@ typedef struct SystemState {
                     printf("]\n");
                 }
             }
+            #endif
         }
         
         if (condition_idx < 3) {
@@ -746,6 +776,7 @@ typedef struct SystemState {
             double residual_contrib = fabs(current_sum - spec->prescribed_mole_fraction_rhs[cond_idx]);
             
             // DEBUG: Print details for first few iterations
+            #ifdef VERBOSE_DEBUG
             if (condition_idx < 3 && iteration < 3) {
                 printf("[GPU] Mass residual calc (iteration %d, cond %d):\n", iteration, cond_idx);
                 printf("  Coefficients: [");
@@ -767,6 +798,7 @@ typedef struct SystemState {
                 }
                 printf("  Residual contribution: %.15e\n", residual_contrib);
             }
+            #endif
             
             mass_residual += residual_contrib;
         }
@@ -782,6 +814,7 @@ typedef struct SystemState {
         }
         
         if (condition_idx < 3) {
+            #ifdef VERBOSE_DEBUG
             for (int idx = 0; idx < num_compsets; ++idx) {
                 if (phase_amt[idx] > 1e-10) {
                     // Use direct printf instead of sprintf for device code
@@ -795,6 +828,7 @@ typedef struct SystemState {
                     printf("]\n");
                 }
             }
+            #endif
         }
 
         for (int idx = 0; idx < num_compsets; ++idx) {
@@ -824,8 +858,10 @@ typedef struct SystemState {
             // Safety check
             if (phase_sum_moles_atoms_per_formula < 1e-12) {
                 phase_sum_moles_atoms_per_formula = 1.0; // Safe fallback
+                #ifdef VERBOSE_DEBUG
                 printf("[GPU WARNING] Phase %d: phase_comp_sum too small (%.15e), using fallback 1.0\n", 
                        idx, phase_sum_moles_atoms_per_formula);
+                #endif
             }
 
             // Call compset update. NP is moles of formula units.
@@ -834,12 +870,14 @@ typedef struct SystemState {
             double update_amount = phase_amt[idx] * phase_sum_moles_atoms_per_formula;
             
             // DEBUG: Print update calculation
+            #ifdef VERBOSE_DEBUG
             if (thread_id == 0 && iteration < 3) {
                 printf("[GPU UPDATE] Phase %d: phase_amt=%.15e (formula units), phase_comp_sum=%.15e\n",
                        idx, phase_amt[idx], phase_sum_moles_atoms_per_formula);
                 printf("[GPU UPDATE] Phase %d: update_amount=%.15e (mole fractions for NP)\n",
                        idx, update_amount);
             }
+            #endif
             
             // Additional safety check for update amount
             if (update_amount < 1e-15 || update_amount > 1e6) {
@@ -857,8 +895,10 @@ typedef struct SystemState {
             csst->energy = pr->formulaobj(compset->dof);
             
             // Add numerical debug output for phase energy
+            #ifdef VERBOSE_DEBUG
             printf("[GPU]   phase_%d_comp_sum: %.15e\n", idx, phase_sum_moles_atoms_per_formula);
             printf("[GPU]   phase_%d_energy: %.15e\n", idx, csst->energy);
+            #endif
 
 
             for(int i=0; i<csst->mass_jac_rows * csst->mass_jac_cols; ++i) csst->mass_jac[i] = 0.0;
@@ -868,6 +908,7 @@ typedef struct SystemState {
             for(int i=0; i<csst->grad_length; ++i) csst->grad[i] = 0.0;
 
             // DEBUG: Print workspace DOF before calling formulamole_grad
+            #ifdef VERBOSE_DEBUG
             if (idx == 0 && iteration < 2) {
                 printf("GPU DEBUG: Before DOF print - spec=%p, pr=%p, compset=%p\n", spec, pr, compset);
                 printf("  spec->num_statevars=%d, pr->phase_dof=%d, total=%d\n", 
@@ -884,6 +925,7 @@ typedef struct SystemState {
                     printf("GPU ERROR: Invalid DOF size: %d\n", spec->num_statevars + pr->phase_dof);
                 }
             }
+            #endif
             
             // CRITICAL FIX: Properly handle mass_jac from formulamole_grad output
             // formulamole_grad outputs a matrix of size (num_nonvacant_elements × num_model_dof)
@@ -899,6 +941,7 @@ typedef struct SystemState {
             // Call formulamole_grad to get gradients for nonvacant elements only
             if (pr->formulamole_grad != nullptr) {
                 // DEBUG: Print the DOF values being passed to formulamole_grad
+                #ifdef VERBOSE_DEBUG
                 if (iteration == 0) {
                     printf("[GPU MASS_JAC] Phase %d calling formulamole_grad with DOF: ", idx);
                     for (int k = 0; k < spec->num_statevars + pr->phase_dof; ++k) {
@@ -908,9 +951,11 @@ typedef struct SystemState {
                     printf("[GPU MASS_JAC DEBUG] pr->num_statevars=%d, spec->num_statevars=%d, pr->phase_dof=%d\n",
                            pr->num_statevars, spec->num_statevars, pr->phase_dof);
                 }
+                #endif
                 pr->formulamole_grad(temp_mass_jac, compset->dof);
                 
                 // DEBUG: Print raw formulamole_grad output
+                #ifdef VERBOSE_DEBUG
                 if (iteration < 2) {
                     printf("GPU DEBUG: Raw formulamole_grad output (phase %d):\n", idx);
                     // CRITICAL FIX: CSE functions output in reduced format [T, Y1, Y2, ...]
@@ -924,8 +969,11 @@ typedef struct SystemState {
                         printf("\n");
                     }
                 }
+                #endif
             } else {
+                #ifdef VERBOSE_DEBUG
                 printf("GPU ERROR: formulamole_grad is null for phase %d\\n", idx);
+                #endif
             }
             
             // Now copy the gradients to the correct positions in csst->mass_jac
@@ -974,6 +1022,7 @@ typedef struct SystemState {
             // The generated formulamole_grad function already handles this correctly
             
             // DEBUG: Print mass_jac matrix
+            #ifdef VERBOSE_DEBUG
             if (iteration < 2) {
                 printf("GPU DEBUG: Phase %d mass_jac matrix (workspace DOF format):\\n", idx);
                 printf("  Columns: [N, P, T, Y_NB, Y_TI, ...]\\n");
@@ -985,10 +1034,12 @@ typedef struct SystemState {
                     printf("\\n");
                 }
             }
+            #endif
             
             if (pr->formulahess != nullptr) {
                 // Calling formulahess - MUST pass full workspace DOF like CPU does
                 // DEBUG: Print DOF values passed to formulahess
+                #ifdef VERBOSE_DEBUG
                 if (iteration < 3) {
                     printf("[GPU FORMULAHESS INPUT] Phase %d iteration %d, DOF: ", idx, iteration);
                     for (int i = 0; i < 5; i++) {
@@ -996,6 +1047,7 @@ typedef struct SystemState {
                     }
                     printf("\n");
                 }
+                #endif
                 // Temporary array to hold the reduced Hessian output from CSE functions
                 double temp_hess[(MAX_DOF_PER_PHASE + 1) * (MAX_DOF_PER_PHASE + 1)];
                 pr->formulahess(temp_hess, compset->dof);
@@ -1037,6 +1089,7 @@ typedef struct SystemState {
                 
         // DEBUG: Print Hessian values
         // DEBUG: Print Hessian values
+        #ifdef VERBOSE_DEBUG
         if (thread_id == 0 && idx < 2) {
             printf("GPU DEBUG: Hessian calculated for phase record %d\n", idx);
             printf("  Hessian size: %dx%d, hess_cols=%d\n", pr->phase_dof + spec->num_statevars, pr->phase_dof + spec->num_statevars, csst->hess_cols);
@@ -1053,12 +1106,15 @@ typedef struct SystemState {
                 printf("\n");
             }
         }
+        #endif
 
                 // Completed formulahess
             } else {
+                #ifdef VERBOSE_DEBUG
                 if (thread_id == 0 && iteration == 0) {
                     printf("[GPU HESSIAN] Phase %d has NO Hessian function - using identity matrix\n", idx);
                 }
+                #endif
                 // CRITICAL FIX: Use identity matrix when Hessian is not available
                 // This allows the solver to make progress using gradient descent
                 // Zero out the entire hessian array first
@@ -1080,7 +1136,9 @@ typedef struct SystemState {
             
             // Check if formulagrad pointer looks valid
             if (pr->formulagrad == nullptr) {
+                #ifdef VERBOSE_DEBUG
                 printf("GPU ERROR: formulagrad pointer is null, skipping\n");
+                #endif
                 // Set gradient to zero (already initialized)
             } else {
                 // CSE gradient functions output reduced gradient in the correct order
@@ -1117,6 +1175,7 @@ typedef struct SystemState {
                     break;
                 }
             }
+            #ifdef VERBOSE_DEBUG
             if (all_gradients_zero && iteration < 3) {
                 printf("GPU WARNING: All gradients are zero for phase %d at iteration %d\n", idx, iteration);
                 printf("  workspace_dof: ");
@@ -1126,6 +1185,7 @@ typedef struct SystemState {
                 printf("\n");
                 printf("  energy: %.15e\n", csst->energy);
             }
+            #endif
             
             pr->internal_cons_func(csst->internal_cons, compset->dof);
             
@@ -1159,6 +1219,7 @@ typedef struct SystemState {
             }
             
             // DEBUG: Print constraint Jacobian values
+            #ifdef VERBOSE_DEBUG
             if (idx == 0 && iteration < 2 && pr->num_internal_cons > 0) {
                 printf("GPU DEBUG: Constraint Jacobian for phase %d (num_cons=%d):\n", idx, pr->num_internal_cons);
                 int cons_jac_dim = spec->num_statevars + pr->phase_dof;
@@ -1170,6 +1231,7 @@ typedef struct SystemState {
                     printf("\n");
                 }
             }
+            #endif
 
             // Pass site fractions from workspace DOF to compute_phase_matrix
             // Site fractions start at spec->num_statevars in workspace DOF
@@ -1178,6 +1240,7 @@ typedef struct SystemState {
                                  &compset->dof[spec->num_statevars]);
 
             // DEBUG: Check phase_matrix before inversion
+            #ifdef VERBOSE_DEBUG
             if (idx == 0 && iteration < 2) {
                 printf("GPU DEBUG: Phase matrix before inversion (dim=%d):\n", csst->full_e_matrix_dim);
                 for (int i = 0; i < csst->full_e_matrix_dim && i < 3; ++i) {
@@ -1188,6 +1251,7 @@ typedef struct SystemState {
                     printf("\n");
                 }
             }
+            #endif
 
             for (int i = 0; i < csst->full_e_matrix_dim * csst->full_e_matrix_dim; ++i) {
                 csst->full_e_matrix[i] = csst->phase_matrix[i];
@@ -1197,6 +1261,7 @@ typedef struct SystemState {
                           spec->U_inv, spec->V_inv, spec->singular_values_inv, spec->superdiag_inv, spec->work_inv);
             
             // DEBUG: Check full_e_matrix after inversion for BOTH phases
+            #ifdef VERBOSE_DEBUG
             if (iteration == 0) {
                 printf("GPU DEBUG: Phase %d Full E matrix after inversion:\n", idx);
                 for (int i = 0; i < csst->full_e_matrix_dim && i < 3; ++i) {
@@ -1207,6 +1272,7 @@ typedef struct SystemState {
                     printf("\n");
                 }
             }
+            #endif
 
             int num_phase_dof_for_csst = pr->phase_dof;
             for(int i=0; i < csst->c_G_length; ++i) csst->c_G[i] = 0.0;
@@ -1216,6 +1282,7 @@ typedef struct SystemState {
             for(int i=0; i < csst->moles_normalization_grad_length; ++i) csst->moles_normalization_grad[i] = 0.0;
 
             // DEBUG: Print gradient values before computing c_G
+            #ifdef VERBOSE_DEBUG
             if (idx < 2 && iteration < 5) {
                 printf("GPU DEBUG: Phase %d gradients before c_G calculation (iter %d):\n", idx, iteration);
                 printf("  energy = %.15e\n", csst->energy);
@@ -1231,6 +1298,7 @@ typedef struct SystemState {
                 }
                 printf("]\n");
             }
+            #endif
             
             for (int i = 0; i < num_phase_dof_for_csst; ++i) {
                 for (int j = 0; j < num_phase_dof_for_csst; ++j) {
@@ -1240,14 +1308,17 @@ typedef struct SystemState {
                     csst->c_G[i] -= matrix_elem * grad_elem;
                     
                     // DEBUG: Print calculation details for first phase and iteration
+                    #ifdef VERBOSE_DEBUG
                     if (thread_id == 0 && idx == 0 && iteration < 2) {
                         printf("  c_G[%d] calc: full_e_matrix[%d,%d]=%e * grad[%d]=%e = %e\n", 
                                i, i, j, matrix_elem, spec->num_statevars + j, grad_elem, matrix_elem * grad_elem);
                     }
+                    #endif
                 }
             }
             
             // DEBUG: Print c_G values after calculation
+            #ifdef VERBOSE_DEBUG
             if (idx < 2 && iteration < 5) {
                 printf("GPU DEBUG: Phase %d c_G values (iter %d):\n", idx, iteration);
                 printf("  phase_amt = %.15e\n", phase_amt[idx]);
@@ -1274,6 +1345,7 @@ typedef struct SystemState {
                 }
                 printf("]\n");
             }
+            #endif
             for (int i = 0; i < num_phase_dof_for_csst; ++i) {
                 for (int j = 0; j < num_phase_dof_for_csst; ++j) {
                     for (int sv_idx = 0; sv_idx < spec->num_statevars; ++sv_idx) {
@@ -1292,6 +1364,7 @@ typedef struct SystemState {
             // CRITICAL FIX: Calculate c_component IMMEDIATELY after phase matrix inversion
             // This must be done before fill_equilibrium_system uses c_component
             // DEBUG: Print mass_jac values before c_component calculation
+            #ifdef VERBOSE_DEBUG
             if (thread_id == 0 && iteration < 2) {
                 printf("[GPU DEBUG] Phase %d mass_jac BEFORE c_component calc (phase_dof=%d, num_elements=%d):\n", 
                        idx, pr->phase_dof, pr->num_elements);
@@ -1303,6 +1376,7 @@ typedef struct SystemState {
                     printf("\n");
                 }
             }
+            #endif
             
             for (int cidx = 0; cidx < spec->num_components; ++cidx) {
                 for (int i = 0; i < num_phase_dof_for_csst; ++i) {
@@ -1315,17 +1389,20 @@ typedef struct SystemState {
                             csst->c_component[cidx * csst->c_component_cols + i] += mass_jac_val * e_matrix_val;
                             
                             // DEBUG: Print calculation for BOTH phases
+                            #ifdef VERBOSE_DEBUG
                             if (thread_id == 0 && iteration < 2 && cidx < 2 && i < 2 && j < 2) {
                                 printf("  Phase %d: c_component[%d,%d] += mass_jac[%d,%d]=%e * e_matrix[%d,%d]=%e = %e\n",
                                        idx, cidx, i, cidx, spec->num_statevars + j, mass_jac_val, i, j, e_matrix_val,
                                        mass_jac_val * e_matrix_val);
                             }
+                            #endif
                          }
                     }
                 }
             }
             
             // DEBUG: Print c_component matrix for BOTH phases
+            #ifdef VERBOSE_DEBUG
             if (thread_id == 0 && iteration < 5) {
                 printf("[GPU C_COMPONENT] Phase %d matrix (iter %d):\n", idx, iteration);
                 printf("  phase_amt = %.15e\n", phase_amt[idx]);
@@ -1352,6 +1429,7 @@ typedef struct SystemState {
                     printf("  WARNING: c_component is all zeros!\n");
                 }
             }
+            #endif
             for (int cidx = 0; cidx < spec->num_components; ++cidx) {
                 for (int i = 0; i < num_phase_dof_for_csst; ++i) {
                     double mu_c_sum = 0.0;
@@ -1377,12 +1455,14 @@ typedef struct SystemState {
             }
             
             // DEBUG: Print moles_normalization for each phase
+            #ifdef VERBOSE_DEBUG
             if (thread_id == 0 && iteration < 2) {
                 printf("[GPU MOLES_NORM] Phase %d: moles_normalization = %e (should be ~%e for %d sublattices)\n", 
                        idx, csst->moles_normalization, 
                        pr->phase_dof > 2 ? 20.0 : 1.0,  // Rough estimate
                        pr->phase_dof > 2 ? 2 : 1);
             }
+            #endif
         }
         delta_ms_rows = num_compsets; // Update after loop in case num_compsets changed (though not in recompute)
         phase_compositions_rows = num_compsets;
@@ -1523,6 +1603,7 @@ __device__ void write_row_stable_phase(double* out_row, double* out_rhs,
                                      const double* grad_for_compset,   // csst->grad
                                      double energy_for_compset) {     // csst->energy
     // DEBUG: Print the row being written
+    #ifdef VERBOSE_DEBUG
     printf("[GPU EQUILIBRIUM MATRIX DEBUG] Writing row for stable phase:\n");
     printf("  Energy: %e\n", energy_for_compset);
     printf("  Masses: ");
@@ -1532,6 +1613,7 @@ __device__ void write_row_stable_phase(double* out_row, double* out_rhs,
         }
     }
     printf("\n");
+    #endif
     
     int free_variable_column_offset = 0;
     int chempot_idx, statevar_idx, i;
@@ -1579,12 +1661,14 @@ __device__ void write_row_stable_phase(double* out_row, double* out_rhs,
     }
     
     // DEBUG: Print the final row values and RHS
+    #ifdef VERBOSE_DEBUG
     printf("  Row values (first %d): ", num_free_chemical_potentials + num_free_stable_compsets + num_free_statevars);
     for (int debug_idx = 0; debug_idx < num_free_chemical_potentials + num_free_stable_compsets + num_free_statevars; debug_idx++) {
         printf("%e ", out_row[debug_idx]);
     }
     printf("\n");
     printf("  RHS: %e\n", out_rhs[0]);
+    #endif
 }
 
 __device__ void write_row_fixed_mole_fraction(double* out_row, double* out_rhs,
@@ -1633,6 +1717,7 @@ __device__ void write_row_fixed_mole_fraction(double* out_row, double* out_rhs,
             term2 += (-system_mole_fractions_sys[component_idx_of_constraint] * mole_norm_grad_val) * c_comp_val;
             
             // DEBUG: Print intermediate values for both phases, component 1, chempot 0
+            #ifdef VERBOSE_DEBUG
             if (component_idx_of_constraint == 1 && i == 0 && j < 2) {
                 printf("  Phase %d, j=%d: mass_jac[%d,%d]=%e, c_component[%d,%d]=%e\n", 
                        compset_original_idx_sys, j, component_idx_of_constraint, num_system_statevars + j, 
@@ -1644,6 +1729,7 @@ __device__ void write_row_fixed_mole_fraction(double* out_row, double* out_rhs,
                        mass_jac_val * c_comp_val,
                        (-system_mole_fractions_sys[component_idx_of_constraint] * mole_norm_grad_val) * c_comp_val);
             }
+            #endif
         }
         if (fabs(current_system_amount_sys)>1e-12) {
              double contribution = prefactor_for_this_component *
@@ -1651,13 +1737,16 @@ __device__ void write_row_fixed_mole_fraction(double* out_row, double* out_rhs,
              out_row[free_variable_column_offset + i] += contribution;
              
              // DEBUG: Show exact contribution for mole fraction constraint
+             #ifdef VERBOSE_DEBUG
              if (component_idx_of_constraint == 1 && i < 2) {
                  printf("[GPU MOLE FRAC] Phase %d adds %e to col %d (chem pot %d)\n", 
                         compset_original_idx_sys, contribution, free_variable_column_offset + i, i);
              }
+             #endif
         }
         
         // DEBUG: Print values for both phases and first constraint
+        #ifdef VERBOSE_DEBUG
         if (component_idx_of_constraint == 1 && i == 0) {
             printf("[GPU MOLE FRAC DEBUG] Phase %d, Component 1, ChemPot 0:\n", compset_original_idx_sys);
             printf("  prefactor=%e, phase_amt=%e, sys_amt=%e\n", 
@@ -1670,6 +1759,7 @@ __device__ void write_row_fixed_mole_fraction(double* out_row, double* out_rhs,
             printf("  Result added to out_row[%d]: %e\n", free_variable_column_offset + i,
                    prefactor_for_this_component * (phase_amt_sys[compset_original_idx_sys] / current_system_amount_sys) * (term1 + term2));
         }
+        #endif
     }
     free_variable_column_offset += num_free_chemical_potentials;
 
@@ -1718,6 +1808,7 @@ __device__ void write_row_fixed_mole_fraction(double* out_row, double* out_rhs,
     }
     
     // DEBUG: Print RHS contribution for both phases and first constraint
+    #ifdef VERBOSE_DEBUG
     if (component_idx_of_constraint == 1) {
         printf("[GPU MOLE FRAC RHS DEBUG] Phase %d, Component 1:\n", compset_original_idx_sys);
         printf("  c_G_length=%d, c_G[0]=%e, c_G[1]=%e\n", c_G_length_cs, 
@@ -1732,6 +1823,7 @@ __device__ void write_row_fixed_mole_fraction(double* out_row, double* out_rhs,
                rhs_term1, rhs_term2,
                -prefactor_for_this_component * (phase_amt_sys[compset_original_idx_sys] / current_system_amount_sys) * (rhs_term1 + rhs_term2));
     }
+    #endif
 
     // 4. Subtract fixed chemical potentials from fixed component RHS
     for (int i = 0; i < num_fixed_chemical_potentials; i++) {
@@ -1793,10 +1885,12 @@ __device__ void write_row_fixed_mole_amount(double* out_row, double* out_rhs,
     double normalization_factor = (moles_normalization_cs > 1e-12) ? moles_normalization_cs : 1.0;
     
     // DEBUG: Print normalization factor for each phase
+    #ifdef VERBOSE_DEBUG
     if (component_idx == 0 && phase_amt_sys[compset_original_idx_sys] > 1e-10) {
         printf("[GPU SYSTEM AMOUNT] Phase %d: moles_norm=%e, using factor=%e\n", 
                compset_original_idx_sys, moles_normalization_cs, normalization_factor);
     }
+    #endif
     
     // 2a. This component row: free chemical potentials
     for (int i = 0; i < num_free_chemical_potentials; ++i) {
@@ -1886,6 +1980,7 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
     }
     
     // DEBUG: Print equilibrium matrix construction details
+    #ifdef VERBOSE_DEBUG
     if (state->condition_idx == 0 && (state->iteration == 0 || num_free_stable_phases == 1)) {
         printf("[GPU EQUILIBRIUM MATRIX] Filling equilibrium system at iteration %d\n", state->iteration);
         printf("  num_free_stable_phases: %d\n", num_free_stable_phases);
@@ -1910,6 +2005,7 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
             printf("  Mass residual = %.10e\n", state->mass_residual);
         }
     }
+    #endif
     
     for(int i=0; i < total_rows * equilibrium_matrix_cols; ++i) equilibrium_matrix[i] = 0.0;
     for(int i=0; i < total_rows; ++i) equilibrium_rhs[i] = 0.0;
@@ -1989,6 +2085,7 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
     }
     
     // DEBUG: Check c_G values before calling write_row_fixed_mole_fraction
+    #ifdef VERBOSE_DEBUG
     if (state->iteration < 2) {
         printf("\n[GPU] Before write_row_fixed_mole_fraction calls:\n");
         for (int i = 0; i < state->num_compsets && i < 2; ++i) {
@@ -1997,6 +2094,7 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
                    state->cs_states[i].c_G_length > 1 ? state->cs_states[i].c_G[1] : 0.0);
         }
     }
+    #endif
     
     // Loop over fixed stable phases (matching CPU behavior)
     for (int fixed_idx = 0; fixed_idx < spec->num_fixed_stable_compsets; fixed_idx++) {
@@ -2040,6 +2138,7 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
         if (phase_compset->phase_record == nullptr) continue;
         
         // DEBUG: Print which phases are contributing
+        #ifdef VERBOSE_DEBUG
         if (state->condition_idx == 0 && state->iteration == 0) {
             printf("[GPU DEBUG] Phase %d contributing to mole frac constraints\n", phase_idx);
             printf("  Phase amount: %e\n", state->phase_amt[phase_idx]);
@@ -2053,6 +2152,7 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
             }
             printf("%s\n", is_free ? "YES" : "NO");
         }
+        #endif
         
         // Contribute this phase to all mole fraction constraint rows
         for (int mole_frac_cond_row_idx = 0; mole_frac_cond_row_idx < num_fixed_mole_frac_conds; mole_frac_cond_row_idx++) {
@@ -2060,11 +2160,13 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
                 prefactor = spec->prescribed_mole_fraction_coefficients[mole_frac_cond_row_idx][current_component_idx];
                 
                 // DEBUG: Print constraint details for all phases
+                #ifdef VERBOSE_DEBUG
                 if (state->iteration == 0 && mole_frac_cond_row_idx == 0) {
                     printf("[GPU MOLE FRAC CONSTRAINT] Phase %d, Constraint %d, Component %d: prefactor=%e\n", 
                            phase_idx, mole_frac_cond_row_idx, current_component_idx, prefactor);
                     printf("  Phase amount: %e, num_compsets=%d\n", state->phase_amt[phase_idx], state->num_compsets);
                 }
+                #endif
                 
                 // write_row_fixed_mole_fraction accumulates, so it's okay to call multiple times for the same matrix row
                 write_row_fixed_mole_fraction(
@@ -2088,12 +2190,14 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
     */
     
     // DEBUG: Print RHS values before residual subtraction
+    #ifdef VERBOSE_DEBUG
     if (state->condition_idx == 0 && state->iteration == 0) {
         printf("[GPU DEBUG] Before residual subtraction:\n");
         for (int i = 0; i < num_fixed_mole_frac_conds; i++) {
             printf("  Mole frac constraint %d RHS: %e\n", i, equilibrium_rhs[current_row_offset + i]);
         }
     }
+    #endif
     
     // After accumulating all phase contributions, subtract the residual from RHS
     for (int mole_frac_cond_row_idx = 0; mole_frac_cond_row_idx < num_fixed_mole_frac_conds; mole_frac_cond_row_idx++) {
@@ -2105,6 +2209,7 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
         component_residual -= spec->prescribed_mole_fraction_rhs[mole_frac_cond_row_idx];
         
         // DEBUG: Print mole fraction constraint calculation
+        #ifdef VERBOSE_DEBUG
         if (state->condition_idx == 0 && state->iteration < 3) {
             printf("[GPU MOLE FRAC CONSTRAINT] Row %d: residual = %e (current X*coeff = %e, target = %e)\n",
                    mole_frac_cond_row_idx, component_residual, 
@@ -2113,28 +2218,35 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
             printf("  state->mole_fractions: [%e, %e]\n", 
                    state->mole_fractions[0], state->mole_fractions[1]);
         }
+        #endif
         
         // DEBUG: Print RHS before and after residual subtraction
+        #ifdef VERBOSE_DEBUG
         if (state->condition_idx == 0 && state->iteration < 3) {
             printf("[GPU MOLE FRAC] Row %d RHS before residual: %e\n", 
                    mole_frac_cond_row_idx, equilibrium_rhs[current_row_offset + mole_frac_cond_row_idx]);
         }
+        #endif
         
         equilibrium_rhs[current_row_offset + mole_frac_cond_row_idx] -= component_residual;
         
+        #ifdef VERBOSE_DEBUG
         if (state->condition_idx == 0 && state->iteration < 3) {
             printf("[GPU MOLE FRAC] Row %d RHS after residual: %e (residual was %e)\n", 
                    mole_frac_cond_row_idx, equilibrium_rhs[current_row_offset + mole_frac_cond_row_idx], component_residual);
         }
+        #endif
     }
     int system_amount_row_true_idx = current_row_offset + num_fixed_mole_frac_conds;
     
     // DEBUG: Check row index
+    #ifdef VERBOSE_DEBUG
     if (state->iteration < 5) {
         printf("[GPU SYSTEM AMOUNT] Row index calculation: current_row_offset=%d + num_fixed_mole_frac_conds=%d = %d\n",
                current_row_offset, num_fixed_mole_frac_conds, system_amount_row_true_idx);
         printf("[GPU SYSTEM AMOUNT] Total rows = %d\n", total_rows);
     }
+    #endif
     
     // CRITICAL FIX: Write system amount constraint ONCE with ALL phases contributing
     // This matches CPU behavior where all phases contribute to a single system amount row
@@ -2195,6 +2307,7 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
     equilibrium_rhs[system_amount_row_true_idx] -= system_amount_residual;
     
     // DEBUG: Check system amount constraint
+    #ifdef VERBOSE_DEBUG
     if (state->iteration < 5) {
         printf("[GPU SYSTEM AMOUNT] iteration %d: state->system_amount = %.15e, spec->prescribed_system_amount = %.15e\n", 
                state->iteration, state->system_amount, spec->prescribed_system_amount);
@@ -2209,8 +2322,10 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
         if (equilibrium_matrix_cols > 10) printf("...");
         printf("\n");
     }
+    #endif
     
     // DEBUG: Print the complete equilibrium matrix for iteration 0
+    #ifdef VERBOSE_DEBUG
     if (state->condition_idx == 0 && state->iteration == 0) {
         printf("[GPU EQUILIBRIUM MATRIX] Complete matrix at iteration 0 (rows=%d, cols=%d):\n", total_rows, equilibrium_matrix_cols);
         for (int row = 0; row < total_rows; row++) {
@@ -2221,6 +2336,7 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
             printf("| RHS: %+e\n", equilibrium_rhs[row]);
         }
     }
+    #endif
 }
 
 // run_loop, solve_state, advance_state, remove_and_consolidate_phases, change_phases
@@ -2348,10 +2464,12 @@ __device__ void advance_state(SystemSpecification* spec, SystemState* state, con
     gpu_debug_log(35, "Update phase amounts", state->iteration);
     gpu_debug_log_value("phase_amt_step_limiter", phase_amt_step_size_limiter);
     
+    #ifdef VERBOSE_DEBUG
     if (state->iteration < 10 && thread_id == 0 && phase_amt_step_size_limiter < 1.0) {
         printf("GPU DEBUG: Step size limited to %.6e at iteration %d\n", 
                phase_amt_step_size_limiter, state->iteration);
     }
+    #endif
     
     
     for (int i = 0; i < state->num_free_stable_compsets; ++i) {
@@ -2365,10 +2483,12 @@ __device__ void advance_state(SystemSpecification* spec, SystemState* state, con
         state->phase_amt[compset_original_idx] += actual_change;
         
         // DEBUG: Print details
+        #ifdef VERBOSE_DEBUG
         if (state->iteration < 10) {
             printf("  Phase %d: old=%.6e, delta=%.6e (raw), actual_change=%.6e, new=%.6e\n",
                    compset_original_idx, old_amt, delta, actual_change, state->phase_amt[compset_original_idx]);
         }
+        #endif
         
         if (state->phase_amt[compset_original_idx] < MIN_PHASE_AMOUNT) {
             state->phase_amt[compset_original_idx] = MIN_PHASE_AMOUNT;
@@ -2382,20 +2502,24 @@ __device__ void advance_state(SystemSpecification* spec, SystemState* state, con
         }
         
         // Additional debug for phase removal issue
+        #ifdef VERBOSE_DEBUG
         if (state->iteration < 50 && state->phase_amt[compset_original_idx] < 1e-6) {
             printf("GPU DEBUG: Phase %d amount became very small (%.10e) at iteration %d\n", 
                    compset_original_idx, state->phase_amt[compset_original_idx], state->iteration);
         }
+        #endif
     }
     
     gpu_debug_log_value("largest_phase_amt_change", state->largest_phase_amt_change);
     
     // DEBUG: Check total phase amounts after update
+    #ifdef VERBOSE_DEBUG
     double phase_amt_sum_after = 0.0;
     for (int idx = 0; idx < state->num_compsets; ++idx) {
         phase_amt_sum_after += state->phase_amt[idx];
     }
     printf("[GPU MASS BALANCE] advance_state() - after phase update: sum(phase_amt) = %.15e\n", phase_amt_sum_after);
+    #endif
     
     // CRITICAL FIX: DO NOT normalize phase amounts in advance_state!
     // The CPU solver doesn't do this, and it prevents convergence by undoing all changes.
@@ -2438,6 +2562,7 @@ __device__ void advance_state(SystemSpecification* spec, SystemState* state, con
     }
 
     // DEBUG: Check phase_compositions before site fraction update
+    #ifdef VERBOSE_DEBUG
     if (thread_id == 0 && state->iteration < 5) {
         printf("GPU DEBUG: Phase compositions BEFORE site fraction update (iteration %d):\n", state->iteration);
         for (int i = 0; i < state->num_free_stable_compsets && i < 2; ++i) {
@@ -2447,6 +2572,7 @@ __device__ void advance_state(SystemSpecification* spec, SystemState* state, con
                    state->phase_compositions[idx * MAX_COMPONENTS + 1]);
         }
     }
+    #endif
     
     // SEGMENT 37: UPDATE SITE FRACTIONS
     gpu_debug_log(37, "Update site fractions", state->iteration);
@@ -2486,6 +2612,7 @@ __device__ void advance_state(SystemSpecification* spec, SystemState* state, con
         }
         
         // DEBUG: Print delta_y calculation details after consolidation
+        #ifdef VERBOSE_DEBUG
         if (state->iteration >= 2 && state->iteration < 5 && idx == 0) {
             printf("GPU DEBUG: delta_y calculation for phase %d at iteration %d:\n", idx, state->iteration);
             for (int i = 0; i < num_site_fracs; ++i) {
@@ -2503,6 +2630,7 @@ __device__ void advance_state(SystemSpecification* spec, SystemState* state, con
                 printf("(total: %.15e)\n", cp_contrib);
             }
         }
+        #endif
 
         double site_frac_step_limiter = current_step_size;
         double min_allowed_sf_step = 1e-20 * current_step_size;
@@ -2670,10 +2798,12 @@ __device__ bool remove_and_consolidate_phases(SystemSpecification* spec, SystemS
                 double moles_norm2 = state->cs_states[idx2].moles_normalization;
                 
                 // DEBUG: Print moles_normalization values
+                #ifdef VERBOSE_DEBUG
                 if (thread_id == 0) {
                     printf("[GPU CONSOLIDATION DEBUG] Phase %d moles_norm=%e, phase %d moles_norm=%e\n",
                            idx1, moles_norm1, idx2, moles_norm2);
                 }
+                #endif
                 
                 // For single sublattice phases, moles_normalization should be 1.0
                 // since there's only one site and site fractions sum to 1
@@ -2684,11 +2814,13 @@ __device__ bool remove_and_consolidate_phases(SystemSpecification* spec, SystemS
                 if (moles_norm1 < 1e-12 || moles_norm2 < 1e-12) {
                     // Fallback - just add the phase amounts directly
                     state->phase_amt[idx1] = fmax(state->phase_amt[idx1] + state->phase_amt[idx2], 1e-8);
+                    #ifdef VERBOSE_DEBUG
                     if (thread_id == 0) {
                         printf("[GPU CONSOLIDATION] Using direct addition due to zero moles_norm\n");
                         printf("  Phase amounts: phase %d = %.15e + phase %d = %.15e -> %.15e\n",
                                idx1, old_amt1, idx2, old_amt2, state->phase_amt[idx1]);
                     }
+                    #endif
                 } else {
                     // Convert phase amounts from formula units to moles
                     double moles1 = state->phase_amt[idx1] * moles_norm1;
@@ -2701,6 +2833,7 @@ __device__ bool remove_and_consolidate_phases(SystemSpecification* spec, SystemS
                     state->phase_amt[idx1] = fmax(total_moles / moles_norm1, 1e-8);
                     
                     // DEBUG: What happens after consolidation
+                    #ifdef VERBOSE_DEBUG
                     if (thread_id == 0) {
                         printf("[CONSOLIDATION] Consolidated phases %d and %d:\n", idx1, idx2);
                         printf("  Moles normalization: phase %d = %.15e, phase %d = %.15e\n",
@@ -2712,8 +2845,10 @@ __device__ bool remove_and_consolidate_phases(SystemSpecification* spec, SystemS
                         printf("  Phase %d: new amount=%.15e (formula units)\n", 
                                idx1, state->phase_amt[idx1]);
                     }
+                    #endif
                 }
                 
+                #ifdef VERBOSE_DEBUG
                 if (thread_id == 0) {
                     // Show compositions
                     printf("  Phase %d: X=[%.15e, %.15e]\n", 
@@ -2726,6 +2861,7 @@ __device__ bool remove_and_consolidate_phases(SystemSpecification* spec, SystemS
                     printf("  Phase %d site fractions: Y=[%.15e, %.15e]\n",
                            idx1, cs1->dof[3], cs1->dof[4]);
                 }
+                #endif
                 state->phase_amt[idx2] = 0.0;
                 
                 // DO NOT modify site fractions or phase compositions of idx1
@@ -2777,9 +2913,11 @@ __device__ bool remove_and_consolidate_phases(SystemSpecification* spec, SystemS
                 state->chemical_potentials[comp_idx] = spec->initial_chemical_potentials[comp_idx];
             }
             
+            #ifdef VERBOSE_DEBUG
             if (thread_id == 0) {
                 printf("[GPU PHASE CONSOLIDATION] All phases would be removed - resetting phase amounts to 1.0 and chemical potentials\n");
             }
+            #endif
         }
 
 
@@ -2817,6 +2955,7 @@ __device__ bool remove_and_consolidate_phases(SystemSpecification* spec, SystemS
                 state->phase_compositions[remaining_phase_idx * MAX_COMPONENTS + 0] = target_x_nb;  // X(NB)
                 state->phase_compositions[remaining_phase_idx * MAX_COMPONENTS + 1] = target_x_ti;  // X(TI)
                 
+                #ifdef VERBOSE_DEBUG
                 if (thread_id == 0) {
                     printf("[GPU PHASE RESET] Single phase remaining - reset site fractions to match overall composition:\n");
                     printf("  Phase %d: Y(NB)=%.15e, Y(TI)=%.15e (matching X(TI)=%.15e)\n",
@@ -2826,10 +2965,12 @@ __device__ bool remove_and_consolidate_phases(SystemSpecification* spec, SystemS
                            state->phase_compositions[remaining_phase_idx * MAX_COMPONENTS + 0],
                            state->phase_compositions[remaining_phase_idx * MAX_COMPONENTS + 1]);
                 }
+                #endif
             }
         }
         
         // DEBUG: Print the updated free stable compsets
+        #ifdef VERBOSE_DEBUG
         if (thread_id == 0) {
             printf("[GPU PHASE CONSOLIDATION] Updated num_free_stable_compsets from %d to %d\n", 
                    state->num_free_stable_compsets + num_to_remove, new_count);
@@ -2839,6 +2980,7 @@ __device__ bool remove_and_consolidate_phases(SystemSpecification* spec, SystemS
             }
             printf("\n");
         }
+        #endif
     }
     
     
@@ -2847,9 +2989,11 @@ __device__ bool remove_and_consolidate_phases(SystemSpecification* spec, SystemS
 
 __device__ bool change_phases(SystemSpecification* spec, SystemState* state) {
     int thread_id = threadIdx.x + blockIdx.x * blockDim.x;
+    #ifdef VERBOSE_DEBUG
     if (thread_id == 0) {
         printf("GPU DEBUG: change_phases called - initial num_free_stable_compsets=%d\n", state->num_free_stable_compsets);
     }
+    #endif
     bool phases_changed = false;
     double current_driving_forces[MAX_PHASES]; // Sized to MAX_PHASES
     state->driving_forces(spec, current_driving_forces, MAX_PHASES); // Get DFs for all possible phases
@@ -2865,10 +3009,12 @@ __device__ bool change_phases(SystemSpecification* spec, SystemState* state) {
         // Gibbs phase rule is currently being violated
         // Try forcing phases with small amounts out of the equilibrium
         current_min_phase_amount_for_removal = 1e-4;
+        #ifdef VERBOSE_DEBUG
         if (thread_id == 0) {
             printf("GPU DEBUG: Gibbs phase rule violation: increasing MIN_PHASE_AMOUNT to %.2e\n", 
                    current_min_phase_amount_for_removal);
         }
+        #endif
     }
 
     int compsets_to_remove_indices[MAX_PHASES];
@@ -2879,10 +3025,12 @@ __device__ bool change_phases(SystemSpecification* spec, SystemState* state) {
         if (state->phase_amt[cs_original_idx] < current_min_phase_amount_for_removal && !state->compsets[cs_original_idx].fixed) {
             if (num_to_remove < MAX_PHASES) {
                 compsets_to_remove_indices[num_to_remove++] = cs_original_idx;
+                #ifdef VERBOSE_DEBUG
                 if (thread_id == 0) {
                     printf("GPU DEBUG: Phase %d marked for removal in change_phases - amt=%.10e < %.10e (iteration %d)\n", 
                            cs_original_idx, state->phase_amt[cs_original_idx], current_min_phase_amount_for_removal, state->iteration);
                 }
+                #endif
             }
         }
     }
@@ -2987,6 +3135,7 @@ __device__ bool change_phases(SystemSpecification* spec, SystemState* state) {
     if (current_free_set_changed_flag) phases_changed = true;
 
     state->num_free_stable_compsets = final_free_count;
+    #ifdef VERBOSE_DEBUG
     if (thread_id == 0) {
         printf("GPU DEBUG: change_phases - final_free_count=%d, free_stable_indices=[", final_free_count);
         for (int i = 0; i < final_free_count; ++i) {
@@ -3001,6 +3150,12 @@ __device__ bool change_phases(SystemSpecification* spec, SystemState* state) {
             state->free_stable_compset_indices[i] = final_free_stable_indices[i];
         }
     }
+    #else
+    // When verbose debug is off, still need to set the indices for all threads
+    for (int i = 0; i < final_free_count; ++i) {
+        state->free_stable_compset_indices[i] = final_free_stable_indices[i];
+    }
+    #endif
     
     for (int i = 0; i < final_free_count; ++i) {
         int current_idx = final_free_stable_indices[i];  // CRITICAL FIX: Use NEW array, not old!
@@ -3106,6 +3261,7 @@ __device__ void lstsq(double* A, int nrows, int ncols, double* b, double toleran
     
     // DEBUG: Print singular values for small systems
     bool is_infeasible = false;
+    #ifdef VERBOSE_DEBUG
     if (nrows <= 4 && ncols <= 3) {  // Small systems that might be infeasible
         printf("[GPU LSTSQ DEBUG] SVD results for %dx%d system:\n", nrows, ncols);
         for (int i = 0; i < ncols; ++i) {
@@ -3121,6 +3277,7 @@ __device__ void lstsq(double* A, int nrows, int ncols, double* b, double toleran
             printf("  System appears INFEASIBLE (rank-deficient), min_sv/max_sv = %.15e\n", min_sv/singular_values[0]);
         }
     }
+    #endif
     
     // Solve using SVD result
     // Note: b is input as RHS (size nrows), output as solution (size ncols)
@@ -3140,6 +3297,7 @@ __device__ void lstsq(double* A, int nrows, int ncols, double* b, double toleran
         residual += diff * diff;
     }
     
+    #ifdef VERBOSE_DEBUG
     if (nrows <= 4 && ncols <= 3) {
         printf("  Residual after solve: %.15e\n", residual);
         printf("  Solution vector:\n");
@@ -3147,6 +3305,7 @@ __device__ void lstsq(double* A, int nrows, int ncols, double* b, double toleran
             printf("    x[%d] = %.15e\n", i, temp_solution[i]);
         }
     }
+    #endif
     
     // Copy solution back to b
     for (int i = 0; i < ncols; ++i) {

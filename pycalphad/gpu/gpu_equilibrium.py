@@ -2072,8 +2072,8 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     # 2. Assemble full GPU source and compile kernel (with caching)
     # Include dynamic sizes in cache key since they affect compilation
     dynamic_sizes = compute_dynamic_kernel_sizes(wks_obj)
-    # Include conversion fix marker in cache key
-    cache_key_input = model_funcs_c + str(num_unique_models_for_gpu) + str(sorted(dynamic_sizes.items())) + "_HESSIAN_FIX_V2"
+    # Include conversion fix marker and verbose flag in cache key
+    cache_key_input = model_funcs_c + str(num_unique_models_for_gpu) + str(sorted(dynamic_sizes.items())) + "_HESSIAN_FIX_V2" + ("_VERBOSE" if verbose else "")
     cache_key = hashlib.md5(cache_key_input.encode()).hexdigest()
 
     # Remove GPU-only debug - no CPU equivalent
@@ -2104,7 +2104,9 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             for define_name, value in dynamic_sizes.items():
                 define_flags.append(f'-D{define_name}={value}')
             
+            # Add VERBOSE_DEBUG flag if verbose mode is enabled
             if verbose:
+                define_flags.append('-DVERBOSE_DEBUG')
                 print(f"[GPU] Using dynamic kernel sizing: {dynamic_sizes}")
                 print(f"[GPU] Compiler defines: {define_flags}")
             

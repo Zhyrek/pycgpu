@@ -7082,10 +7082,8 @@ __device__ bool run_loop_global_mem(
             printf("GPU DEBUG: After solve_state:\n");
             printf("GPU DEBUG:   Chemical potentials: [%.6f, %.6f]\n", 
                    state->chemical_potentials[0], state->chemical_potentials[1]);
-            #endif
             
             // Details for each phase after solve
-            #ifdef VERBOSE_DEBUG
             for (int i = 0; i < state->num_free_stable_compsets; ++i) {
                 int idx = state->free_stable_compset_indices[i];
                 CompositionSet* cs = &state->compsets[idx];
@@ -9177,7 +9175,9 @@ __global__ void top_level_equilibrium_kernel(
                     // CRITICAL FIX: GPU functions expect [N, P, T, site_fractions] format
                     // This is because gpu_codegen.py inserts P into state variables
                     if (tid == 0 && ph_idx == 0) {
+                        #ifdef VERBOSE_DEBUG
                         printf("GPU DEBUG: Setting up DOF array (GPU format: N, P, T, site_fractions)\n");
+                        #endif
                     }
                     
                     // Extract values from condition data based on actual state_variables order
@@ -9213,8 +9213,10 @@ __global__ void top_level_equilibrium_kernel(
                     // Site fractions will be added starting at index 3
                     
                     if (tid == 0 && ph_idx == 0) {
+                        #ifdef VERBOSE_DEBUG
                         printf("GPU DEBUG: DOF state vars from condition_data: N=%f (pos 0), P=%f (pos 1), T=%f (pos 2)\n", 
                                moles_val, pressure_val, temp_val);
+                        #endif
                     }
                     
                     // SAFETY CHECK: Validate state variables
@@ -9234,7 +9236,9 @@ __global__ void top_level_equilibrium_kernel(
                     }
                     
                     if (tid == 0 && ph_idx == 0) {
+                        #ifdef VERBOSE_DEBUG
                         printf("GPU DEBUG: State variables processed, moving to site fractions\n");
+                        #endif
                     }
                     
                     // Site fractions - extract from per-thread data using direct array access
@@ -9242,7 +9246,9 @@ __global__ void top_level_equilibrium_kernel(
                     for (int sf = 0; sf < phase_rec->phase_dof && sf < MAX_DOF_PER_PHASE; ++sf) {
                         double site_frac_val = initial_data_byte_array[site_frac_offset + sf];
                         if (tid == 0 && ph_idx == 0) {
+                            #ifdef VERBOSE_DEBUG
                             printf("GPU DEBUG: Site fraction %d = %.15f (phase_dof=%d)\n", sf, site_frac_val, phase_rec->phase_dof);
+                            #endif
                         }
                         // SAFETY CHECK: Validate site fractions
                         if (isnan(site_frac_val) || isinf(site_frac_val) || site_frac_val < 0.0 || site_frac_val > 1.0) {
@@ -9260,15 +9266,19 @@ __global__ void top_level_equilibrium_kernel(
                     }
                     
                     if (tid == 0 && ph_idx == 0) {
+                        #ifdef VERBOSE_DEBUG
                         printf("GPU DEBUG: Site fractions processed, calculating phase energy\n");
+                        #endif
                     }
                     
                     // Calculate phase energy using the phase record (mirrors CPU compset.energy calculation)
                     double phase_energy = 0.0;
                     if (phase_rec->obj != nullptr) {
                         if (tid == 0 && ph_idx == 0) {
+                            #ifdef VERBOSE_DEBUG
                             printf("GPU DEBUG: DOF for energy calc - N=%.15f, P=%.15f, T=%.15f, Y(NB)=%.15f, Y(TI)=%.15f\n", 
                                    phase_dof[0], phase_dof[1], phase_dof[2], phase_dof[3], phase_dof[4]);
+                            #endif
                         }
                         phase_energy = phase_rec->obj(phase_dof);
                         
@@ -9279,7 +9289,9 @@ __global__ void top_level_equilibrium_kernel(
                         }
                         
                         if (tid == 0) {
+                            #ifdef VERBOSE_DEBUG
                             printf("GPU DEBUG: Phase %d energy = %.6f J/mol\n", ph_idx, phase_energy);
+                            #endif
                         }
                         
                         // NUMERICAL STABILITY CHECK: Detect and prevent NaN/inf propagation
@@ -9295,7 +9307,9 @@ __global__ void top_level_equilibrium_kernel(
                         // Additional range check: Ensure energy is within reasonable bounds (increased limit for thermodynamic energies)
                         if (phase_energy > 1e8 || phase_energy < -1e8) {
                             if (tid == 0) {
+                                #ifdef VERBOSE_DEBUG
                                 printf("GPU DEBUG: Phase energy %f exceeds range check (1e6), triggering early return\n", phase_energy);
+                                #endif
                             }
                             // Store debug info about extreme energy values
                             results_array[base_offset + 0] = -888.0 - (double)condition_idx;  // Extreme energy error marker
@@ -9308,7 +9322,9 @@ __global__ void top_level_equilibrium_kernel(
                     
                     // SAFETY CHECK: Validate phase amount before multiplication
                     if (tid == 0 && ph_idx < 2) {
+                        #ifdef VERBOSE_DEBUG
                         printf("GPU DEBUG: Phase %d - amount=%f, energy=%f\n", ph_idx, phase_amount, phase_energy);
+                        #endif
                     }
                     if (isnan(phase_amount) || isinf(phase_amount) || phase_amount < 0.0) {
                         results_array[base_offset + 0] = -777.0 - (double)condition_idx;  // Invalid phase amount marker
@@ -9357,7 +9373,9 @@ __global__ void top_level_equilibrium_kernel(
             
             // Prepare data structures for the real solver
             if (tid == 0) {
+                #ifdef VERBOSE_DEBUG
                 printf("GPU DEBUG: About to prepare solver data structures\n");
+                #endif
             }
             
             // CRITICAL: Create thread-local copy of SystemSpecification with correct composition
@@ -9423,6 +9441,7 @@ __global__ void top_level_equilibrium_kernel(
             
             // DEBUG: Print what we just copied
             if (condition_idx <= 2) {
+                #ifdef VERBOSE_DEBUG
                 printf("GPU DEBUG: Thread %d - Copied from my_spec_doubles at offset %d:\n", 
                        condition_idx, condition_idx * spec_size_doubles);
                 printf("  First 10 doubles: ");
@@ -9432,10 +9451,13 @@ __global__ void top_level_equilibrium_kernel(
                 printf("\n");
                 printf("  Resulting thread_spec: num_statevars=%d, num_components=%d\n",
                        thread_spec.num_statevars, thread_spec.num_components);
+                #endif
                 
                 // Print prescribed_mole_fraction_rhs values
+                #ifdef VERBOSE_DEBUG
                 printf("GPU DEBUG: Thread %d using prescribed_mole_fraction_rhs[0] = %f (should be X(TI) for this condition)\n",
                        condition_idx, thread_spec.prescribed_mole_fraction_rhs[0]);
+                #endif
             }
             
             // Index arrays with their counts
@@ -9497,11 +9519,13 @@ __global__ void top_level_equilibrium_kernel(
             }
             
             if (tid == 0) {
+                #ifdef VERBOSE_DEBUG
                 printf("GPU DEBUG: Copied %d state variables to condition_args_single:\n", actual_num_statevars);
                 printf("  [0]=%f (N), [1]=%f (P), [2]=%f (T)\n", 
                        condition_args_single.state_variables_values[0],
                        condition_args_single.state_variables_values[1],
                        condition_args_single.state_variables_values[2]);
+                #endif
             }
             
             // Set up initial phase data single
@@ -9523,10 +9547,12 @@ __global__ void top_level_equilibrium_kernel(
                 thread_spec.prescribed_mole_fraction_rhs[0] = thread_mole_fractions[1];  // X(TI) for this thread
                 
                 if (tid < 5) {
+                    #ifdef VERBOSE_DEBUG
                     printf("GPU DEBUG: Thread %d UPDATED prescribed_mole_fraction_rhs[0] = %f (X(TI) for this condition)\n", 
                            tid, thread_spec.prescribed_mole_fraction_rhs[0]);
                     printf("GPU DEBUG: Thread %d SystemSpec: num_statevars=%d, num_components=%d\n",
                            tid, thread_spec.num_statevars, thread_spec.num_components);
+                    #endif
                 }
             }
             
@@ -9661,8 +9687,10 @@ __global__ void top_level_equilibrium_kernel(
             
             // Store final results from the REAL solver
             if (tid <= 2) {
+                #ifdef VERBOSE_DEBUG
                 printf("GPU DEBUG: Thread %d storing final result - equilibrium_result.final_system_gm=%f\n", 
                        tid, equilibrium_result.final_system_gm);
+                #endif
             }
             results_array[base_offset + 0] = equilibrium_result.final_system_gm;       // Final GM from solver
             for (int i = 0; i < MAX_COMPONENTS; ++i) {

@@ -2198,7 +2198,8 @@ def _nb_formulagrad_from_model(model_obj: Model, model_c_idx: int, wks_obj: Work
     return notebook_source_from_expr(model_obj.G, "formulagrad", model_obj, model_c_idx, wks_obj, expr_type="grad", c_output_type="void", validate=validate, verbose=verbose)
 
 def _nb_formulahess_from_model(model_obj: Model, model_c_idx: int, wks_obj: Workspace, validate: bool = True, verbose: bool = False) -> str:
-    print(f"[GPU] _nb_formulahess_from_model called for model {model_c_idx}, verbose={verbose}")
+    if verbose:
+        print(f"[GPU] _nb_formulahess_from_model called for model {model_c_idx}, verbose={verbose}")
     result = notebook_source_from_expr(model_obj.G, "formulahess", model_obj, model_c_idx, wks_obj, expr_type="hess", c_output_type="void", validate=validate, verbose=verbose)
     
     # Apply fix_piecewise_zeros to the entire result as a post-processing step
@@ -2207,7 +2208,8 @@ def _nb_formulahess_from_model(model_obj: Model, model_c_idx: int, wks_obj: Work
     result = fix_piecewise_zeros(result)
     after_count = len(re.findall(r'1\.0\*\(\(1e-15 < x\[\d+\]\) \? \(0\) : \(0\)\)', result))
     
-    print(f"[GPU] Hessian post-processed: fixed {before_count - after_count} of {before_count} all-zero patterns")
+    if verbose:
+        print(f"[GPU] Hessian post-processed: fixed {before_count - after_count} of {before_count} all-zero patterns")
     
     # Apply fix for missing operators
     result = fix_missing_operators(result)
@@ -2369,7 +2371,7 @@ def _generate_c_code_for_phase_models(wks_obj: Workspace, include_hess: bool = F
     Args:
         validate: Whether to validate generated code (default True)
     """
-    if wks_obj.verbose:
+    if verbose:
         print("[GPU] Generating C code for phase models...")
 
     unique_py_models = []
@@ -2383,7 +2385,7 @@ def _generate_c_code_for_phase_models(wks_obj: Workspace, include_hess: bool = F
             unique_py_models.append(wks_obj.models[ph_name])
     
     # DEBUG: Print the phase name to index mapping
-    if wks_obj.verbose:
+    if verbose:
         print(f"[GPU] Phase name to unique index mapping: {py_phase_name_to_unique_idx_map}")
 
     # Validate workspace-level constraints if validation enabled
@@ -2403,7 +2405,7 @@ def _generate_c_code_for_phase_models(wks_obj: Workspace, include_hess: bool = F
     g_phase_record_array_init_calls_c_code = []
 
     for model_c_idx, model_obj in enumerate(unique_py_models):
-        if wks_obj.verbose:
+        if verbose:
             print(f"[GPU] Generating functions for model {model_c_idx}: {model_obj.phase_name}")
 
         try:
@@ -2413,7 +2415,8 @@ def _generate_c_code_for_phase_models(wks_obj: Workspace, include_hess: bool = F
             all_model_device_functions_c_code += _nb_formulagrad_from_model(model_obj, model_c_idx, wks_obj, validate, wks_obj.verbose)
             
             if include_hess:
-                print(f"[GPU DEBUG] Generating Hessian for model {model_c_idx}, verbose={wks_obj.verbose}")
+                if verbose:
+                    print(f"[GPU DEBUG] Generating Hessian for model {model_c_idx}, verbose={wks_obj.verbose}")
                 all_model_device_functions_c_code += _nb_formulahess_from_model(model_obj, model_c_idx, wks_obj, validate, wks_obj.verbose)
                 
             all_model_device_functions_c_code += _nb_internal_cons_func_from_model(model_obj, model_c_idx, wks_obj, validate, wks_obj.verbose)
@@ -2427,7 +2430,7 @@ def _generate_c_code_for_phase_models(wks_obj: Workspace, include_hess: bool = F
                 raise CodeValidationError(f"Validation failed for model {model_obj.phase_name}: {e}")
             else:
                 validation_warnings.append(f"Model {model_obj.phase_name}: {e}")
-                if wks_obj.verbose:
+                if verbose:
                     print(f"[GPU] Warning: {e}")
                 continue
 
@@ -2594,7 +2597,7 @@ def _generate_full_gpu_source(wks_obj: Workspace,
     """
     Assembles the complete CUDA C++ source string for the equilibrium calculation.
     """
-    if wks_obj.verbose:
+    if verbose:
         print("[GPU] Assembling full GPU source code...")
     
     # Define template variables for the kernel
@@ -4013,8 +4016,10 @@ __device__ void solve_equilibrium_at_condition_global_mem(
         double original_phase_amt = cs->NP;  // This is already normalized by Python
         
         if (thread_id == 0 && current_sys_state.num_compsets < 2) {{
+            #ifdef VERBOSE_DEBUG
             printf("[GPU DEBUG] Phase amount already normalized by Python: phase_comp_sum=%.6f, phase_amt=%.6f\\n",
                    phase_comp_sum, cs->NP);
+            #endif
         }}
         
         // CRITICAL FIX: Must call cs->update() to calculate energy and composition
@@ -4091,12 +4096,14 @@ __device__ void solve_equilibrium_at_condition_global_mem(
     }}
     
     if (thread_id == 0) {{
+        #ifdef VERBOSE_DEBUG
         printf("[GPU DEBUG] CPU phase amount normalization - sum was %.6f, normalized to 1.0\\n", phase_amt_sum);
         // Print detailed phase amounts after normalization to match CPU debug format
         for (int i = 0; i < current_sys_state.num_compsets; ++i) {{
             printf("[GPU DEBUG] Phase %d: amount=%.6f, energy=%.6f J/mol\\n", 
                    i, current_sys_state.compsets[i].NP, current_sys_state.cs_states[i].energy);
         }}
+        #endif
     }}
     
     // CRITICAL: Set up free_stable_compset_indices array

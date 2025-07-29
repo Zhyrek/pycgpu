@@ -2823,7 +2823,9 @@ __device__ bool run_loop_global_mem(
     // IMPLEMENTATION: This mirrors the original run_loop but uses global memory arrays
     
     if (thread_id == 0) {{
+        #ifdef VERBOSE_DEBUG
         printf("GPU DEBUG: run_loop_global_mem STARTED with max_iterations=%d\\n", max_iterations);
+        #endif
     }}
     
     double step_size = 1.0;
@@ -2840,17 +2842,21 @@ __device__ bool run_loop_global_mem(
     
     for (int iteration_count = 0; iteration_count < max_iterations; ++iteration_count) {{
         if (thread_id == 0 && iteration_count % 50 == 0) {{
+            #ifdef VERBOSE_DEBUG
             printf("\\nGPU DEBUG: Iteration %d/%d\\n", iteration_count, max_iterations);
+            #endif
         }}
         state->iteration = iteration_count;
         phases_changed_iter = false;
         
         // DEBUG: Mark that we entered the iteration loop (removed debug_gm_history references)
         if (DEBUG_ENABLED && thread_id == 0 && iteration_count == 0) {{
+            #ifdef VERBOSE_DEBUG
             printf("\\nGPU DEBUG: ===== ITERATION 0 (DETAILED) =====\\n");
             printf("GPU DEBUG: State before iteration:\\n");
             printf("GPU DEBUG:   Chemical potentials: [%.6f, %.6f]\\n", 
                    state->chemical_potentials[0], state->chemical_potentials[1]);
+            #endif
             #ifdef VERBOSE_DEBUG
             printf("GPU DEBUG:   Number of phases: %d\\n", state->num_free_stable_compsets);
             printf("GPU DEBUG:   Free stable indices: ");
@@ -2891,7 +2897,9 @@ __device__ bool run_loop_global_mem(
                 #endif
             }}
         }} else if (thread_id == 0) {{
+            #ifdef VERBOSE_DEBUG
             printf("GPU DEBUG: Entered iteration loop, max_iterations=%d\\n", max_iterations);
+            #endif
         }}
         
         // SEGMENT 21: PRE-SOLVE HOOK
@@ -3263,8 +3271,10 @@ __device__ void solve_state(
     
     // DEBUG: Verify spec pointer before calling recompute
     if (thread_id == 0) {{
+        #ifdef VERBOSE_DEBUG
         printf("GPU DEBUG: solve_state - spec=%p, spec->num_statevars=%d\\n", 
                spec, spec->num_statevars);
+        #endif
         if (spec->num_statevars < 0 || spec->num_statevars > 10) {{
             printf("GPU ERROR: spec appears corrupted in solve_state!\\n");
             printf("  spec->num_statevars=%d (0x%X)\\n", spec->num_statevars, spec->num_statevars);
@@ -3450,6 +3460,7 @@ __device__ void solve_equilibrium_at_condition_global_mem(
     
     // DEBUG: Verify the copy worked
     if (thread_id == 0 || thread_id == 1) {{
+        #ifdef VERBOSE_DEBUG
         printf("GPU DEBUG: Thread %d - Copied SystemSpecification to global memory at %p\\n", thread_id, current_spec_ptr);
         printf("  Thread %d: global_spec_base=%p\\n", thread_id, global_spec_base);
         printf("  Thread %d: num_statevars=%d, num_components=%d\\n", 
@@ -3458,6 +3469,7 @@ __device__ void solve_equilibrium_at_condition_global_mem(
             printf("  Thread %d: prescribed_mole_fraction_rhs[0]=%f\\n", 
                    thread_id, current_spec.prescribed_mole_fraction_rhs[0]);
         }}
+        #endif
     }}
     
     // The struct is now fully copied with correct layout from Python
@@ -3467,6 +3479,7 @@ __device__ void solve_equilibrium_at_condition_global_mem(
     
     // Debug: print what we received from Python
     if (thread_id < 3) {{
+        #ifdef VERBOSE_DEBUG
         printf("GPU DEBUG: Thread %d SystemSpecification from Python:\\n", thread_id);
         printf("  Thread %d: num_statevars = %d\\n", thread_id, current_spec.num_statevars);
         printf("  Thread %d: num_components = %d\\n", thread_id, current_spec.num_components);
@@ -3525,6 +3538,7 @@ __device__ void solve_equilibrium_at_condition_global_mem(
             }}
         }}
         printf("  Thread %d: prescribed_system_amount = %f\\n", thread_id, current_spec.prescribed_system_amount);
+        #endif
     }}
     
     // Step 3: Allocate SystemState on stack as per the kernel signature comment
@@ -3617,6 +3631,7 @@ __device__ void solve_equilibrium_at_condition_global_mem(
     // The kernel might be interpreting this as a multi-condition array
     // Let's try accessing it as a 2D array and see if that fixes it
     if (thread_id == 0) {{
+        #ifdef VERBOSE_DEBUG
         printf("GPU DEBUG: TESTING DIFFERENT ACCESS PATTERNS:\\n");
         printf("  Direct access to initial_data:\\n");
         printf("    [0]=%f, [1]=%f, [2]=%f, [44]=%f\\n", 
@@ -3630,10 +3645,12 @@ __device__ void solve_equilibrium_at_condition_global_mem(
                condition_offset+1, initial_data_flat[condition_offset+1], 
                condition_offset+2, initial_data_flat[condition_offset+2],
                condition_offset+44, initial_data_flat[condition_offset+44]);
+        #endif
     }}
     
     // DEBUG: Check num_phases value and constants
     if (thread_id == 0) {{
+        #ifdef VERBOSE_DEBUG
         printf("GPU DEBUG: Constants - MAX_PHASES=%d, MAX_DOF_PER_PHASE=%d, MAX_COMPONENTS=%d\\n", 
                MAX_PHASES, MAX_DOF_PER_PHASE, MAX_COMPONENTS);
         printf("GPU DEBUG: Python layout offset calculation: 4 + 4 + (4*4) + (4*4) + 3 = %d\\n", num_phases_offset);
@@ -3642,6 +3659,7 @@ __device__ void solve_equilibrium_at_condition_global_mem(
                initial_data_flat[num_phases_offset-1], initial_data_flat[num_phases_offset], initial_data_flat[num_phases_offset+1], 
                initial_data_flat[num_phases_offset+2], initial_data_flat[num_phases_offset+3]);
         printf("GPU DEBUG: num_phases_offset=%d, num_phases=%d\\n", num_phases_offset, num_phases);
+        #endif
     }}
     
     // Set up initial composition sets from lower_convex_hull data
@@ -3688,10 +3706,12 @@ __device__ void solve_equilibrium_at_condition_global_mem(
         
         // DEBUG: Check memory before accessing arrays
         if (thread_id == 0) {{
+            #ifdef VERBOSE_DEBUG
             printf("GPU DEBUG: About to access compsets[%d] and cs_states[%d], MAX_PHASES=%d\\n", 
                    current_sys_state.num_compsets, current_sys_state.num_compsets, MAX_PHASES);
             printf("GPU DEBUG: current_spec at %p still valid? num_statevars=%d\\n", 
                    &current_spec, current_spec.num_statevars);
+            #endif
         }}
         
         // Set up CompositionSet directly in SystemState (avoiding stack arrays)
@@ -3700,9 +3720,11 @@ __device__ void solve_equilibrium_at_condition_global_mem(
         
         // Initialize the CompositionSet
         if (thread_id == 0) {{
+            #ifdef VERBOSE_DEBUG
             printf("GPU DEBUG: Setting phase_record for phase %d, phase_data=%p, pr_idx=%d\\n", 
                    current_sys_state.num_compsets, phase_data, pr_idx);
             printf("GPU DEBUG: Before init - current_spec.num_statevars = %d\\n", current_spec.num_statevars);
+            #endif
         }}
         if (phase_data == nullptr || phase_data->phase_records_array == nullptr) {{
             printf("GPU ERROR: phase_data or phase_records_array is null!\\n");
@@ -4129,18 +4151,24 @@ __device__ void solve_equilibrium_at_condition_global_mem(
     
     // CRITICAL: Call recompute to ensure all state is properly initialized
     if (thread_id == 0) {{
+        #ifdef VERBOSE_DEBUG
         printf("GPU DEBUG: About to call recompute()\\n");
         printf("GPU DEBUG: current_spec num_components: %d\\n", current_spec.num_components);
         printf("GPU DEBUG: current_sys_state.num_compsets: %d\\n", current_sys_state.num_compsets);
+        #endif
     }}
     __syncthreads();  // Ensure all threads are synchronized before recompute
     if (thread_id == 0) {{
+        #ifdef VERBOSE_DEBUG
         printf("GPU DEBUG: Calling recompute\\n");
+        #endif
         current_sys_state.recompute(&current_spec);
     }}
     __syncthreads();  // Sync after recompute
     if (thread_id == 0) {{
+        #ifdef VERBOSE_DEBUG
         printf("GPU DEBUG: recompute() completed successfully\\n");
+        #endif
     }}
     
     // =============================================================================
@@ -4411,11 +4439,13 @@ __device__ void solve_equilibrium_at_condition_global_mem(
     }}
     
     if (thread_id == 0) {{
+        #ifdef VERBOSE_DEBUG
         printf("GPU DEBUG: About to call run_loop_global_mem...\\n");
         printf("GPU DEBUG: CRITICAL VALUES - num_compsets=%d, num_free_stable_compsets=%d\\n",
                current_sys_state.num_compsets, current_sys_state.num_free_stable_compsets);
         printf("GPU DEBUG: Initialized energies - cs_states[0].energy=%f, cs_states[1].energy=%f\\n",
                current_sys_state.cs_states[0].energy, current_sys_state.cs_states[1].energy);
+        #endif
     }}
     
     bool converged = run_loop_global_mem(
@@ -5376,6 +5406,7 @@ __global__ void top_level_equilibrium_kernel(
             // REFACTORED: Call sophisticated solver with global memory arrays
             // This is the full equilibrium solver using global memory to avoid stack overflow
             if (condition_idx == 0 || condition_idx == 1 || condition_idx == 2) {{
+                #ifdef VERBOSE_DEBUG
                 printf("GPU DEBUG: CALLING solve_equilibrium_at_condition_global_mem for condition %d\\n", condition_idx);
                 printf("GPU DEBUG: global_spec_ptr_raw=%p, thread_spec address=%p\\n", global_spec_ptr_raw, &thread_spec);
                 printf("GPU DEBUG: Thread %d thread_spec fields after copy:\\n", condition_idx);
@@ -5385,9 +5416,12 @@ __global__ void top_level_equilibrium_kernel(
                 printf("  num_prescribed_mole_fraction_conditions=%d\\n", thread_spec.num_prescribed_mole_fraction_conditions);
                 printf("  initial_chemical_potentials[0]=%f\\n", thread_spec.initial_chemical_potentials[0]);
                 printf("  initial_chemical_potentials[1]=%f\\n", thread_spec.initial_chemical_potentials[1]);
+                #endif
                 if (thread_spec.num_prescribed_mole_fraction_conditions > 0) {{
+                    #ifdef VERBOSE_DEBUG
                     printf("  prescribed_mole_fraction_rhs[0]=%f (should be X(TI) for this condition)\\n",
                            thread_spec.prescribed_mole_fraction_rhs[0]);
+                    #endif
                 }}
             }}
             solve_equilibrium_at_condition_global_mem(

@@ -2371,7 +2371,7 @@ def _generate_c_code_for_phase_models(wks_obj: Workspace, include_hess: bool = F
     Args:
         validate: Whether to validate generated code (default True)
     """
-    if verbose:
+    if wks_obj.verbose:
         print("[GPU] Generating C code for phase models...")
 
     unique_py_models = []
@@ -2385,7 +2385,7 @@ def _generate_c_code_for_phase_models(wks_obj: Workspace, include_hess: bool = F
             unique_py_models.append(wks_obj.models[ph_name])
     
     # DEBUG: Print the phase name to index mapping
-    if verbose:
+    if wks_obj.verbose:
         print(f"[GPU] Phase name to unique index mapping: {py_phase_name_to_unique_idx_map}")
 
     # Validate workspace-level constraints if validation enabled
@@ -2405,7 +2405,7 @@ def _generate_c_code_for_phase_models(wks_obj: Workspace, include_hess: bool = F
     g_phase_record_array_init_calls_c_code = []
 
     for model_c_idx, model_obj in enumerate(unique_py_models):
-        if verbose:
+        if wks_obj.verbose:
             print(f"[GPU] Generating functions for model {model_c_idx}: {model_obj.phase_name}")
 
         try:
@@ -2415,7 +2415,7 @@ def _generate_c_code_for_phase_models(wks_obj: Workspace, include_hess: bool = F
             all_model_device_functions_c_code += _nb_formulagrad_from_model(model_obj, model_c_idx, wks_obj, validate, wks_obj.verbose)
             
             if include_hess:
-                if verbose:
+                if wks_obj.verbose:
                     print(f"[GPU DEBUG] Generating Hessian for model {model_c_idx}, verbose={wks_obj.verbose}")
                 all_model_device_functions_c_code += _nb_formulahess_from_model(model_obj, model_c_idx, wks_obj, validate, wks_obj.verbose)
                 
@@ -2430,7 +2430,7 @@ def _generate_c_code_for_phase_models(wks_obj: Workspace, include_hess: bool = F
                 raise CodeValidationError(f"Validation failed for model {model_obj.phase_name}: {e}")
             else:
                 validation_warnings.append(f"Model {model_obj.phase_name}: {e}")
-                if verbose:
+                if wks_obj.verbose:
                     print(f"[GPU] Warning: {e}")
                 continue
 
@@ -2597,7 +2597,7 @@ def _generate_full_gpu_source(wks_obj: Workspace,
     """
     Assembles the complete CUDA C++ source string for the equilibrium calculation.
     """
-    if verbose:
+    if wks_obj.verbose:
         print("[GPU] Assembling full GPU source code...")
     
     # Define template variables for the kernel

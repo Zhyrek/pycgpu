@@ -179,9 +179,10 @@ cdef void write_row_fixed_mole_fraction(double[:] out_row, double* out_rhs, int 
     
     # DEBUG: Print when this function is called
     import sys
-    sys.stderr.write(f"[CPU] write_row_fixed_mole_fraction called: phase_idx={idx}, component_idx={component_idx}, prefactor={prefactor}\n")
-    sys.stderr.write(f"  out_rhs[0] on entry: {out_rhs[0]}\n")
-    sys.stderr.flush()
+    if DEBUG_MODE:
+        sys.stderr.write(f"[CPU] write_row_fixed_mole_fraction called: phase_idx={idx}, component_idx={component_idx}, prefactor={prefactor}\n")
+        sys.stderr.write(f"  out_rhs[0] on entry: {out_rhs[0]}\n")
+        sys.stderr.flush()
     cdef int free_variable_column_offset = 0
     cdef int num_statevars = c_statevars.shape[1]
     cdef int chempot_idx, compset_idx, statevar_idx, i, j
@@ -360,9 +361,10 @@ cdef void fill_equilibrium_system(double[::1,:] equilibrium_matrix, double[::1] 
     
     # DEBUG: Always print to check if mole fraction constraints are being filled
     import sys
-    sys.stderr.write(f"[CPU DEBUG] Iteration {state.iteration}: num_fixed_mole_fraction_conditions = {num_fixed_mole_fraction_conditions}\n")
-    sys.stderr.write(f"[CPU DEBUG] num_stable_phases = {state.free_stable_compset_indices.shape[0]}\n")
-    sys.stderr.flush()
+    if DEBUG_MODE:
+        sys.stderr.write(f"[CPU DEBUG] Iteration {state.iteration}: num_fixed_mole_fraction_conditions = {num_fixed_mole_fraction_conditions}\n")
+        sys.stderr.write(f"[CPU DEBUG] num_stable_phases = {state.free_stable_compset_indices.shape[0]}\n")
+        sys.stderr.flush()
     
     for stable_idx in range(state.free_stable_compset_indices.shape[0]):
         idx = state.free_stable_compset_indices[stable_idx]
@@ -876,12 +878,13 @@ cdef class SystemState:
                 coef = spec.prescribed_mole_fraction_coefficients[fixed_molefrac_cond_idx,:]
                 dot_product = np.dot(coef, self.mole_fractions)
                 rhs = spec.prescribed_mole_fraction_rhs[fixed_molefrac_cond_idx]
-                print(f"[CPU] Mass residual calc (iteration {self.iteration}):")
-                print(f"  Coefficients: {coef}")
-                print(f"  Mole fractions: {self.mole_fractions}")
-                print(f"  Dot product: {dot_product:.15e}")
-                print(f"  RHS: {rhs:.15e}")
-                print(f"  Residual contribution: {abs(dot_product - rhs):.15e}")
+                if DEBUG_MODE:
+                    print(f"[CPU] Mass residual calc (iteration {self.iteration}):")
+                    print(f"  Coefficients: {coef}")
+                    print(f"  Mole fractions: {self.mole_fractions}")
+                    print(f"  Dot product: {dot_product:.15e}")
+                    print(f"  RHS: {rhs:.15e}")
+                    print(f"  Residual contribution: {abs(dot_product - rhs):.15e}")
             self.mass_residual += abs(np.dot(spec.prescribed_mole_fraction_coefficients[fixed_molefrac_cond_idx,:], self.mole_fractions) - spec.prescribed_mole_fraction_rhs[fixed_molefrac_cond_idx])
         
         debug_log(f"  mass_residual: {self.mass_residual:.15e}", True)

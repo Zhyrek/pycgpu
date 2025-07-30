@@ -1083,7 +1083,7 @@ cpdef construct_equilibrium_system(SystemSpecification spec, SystemState state, 
     fill_equilibrium_system(equilibrium_matrix, equilibrium_rhs, spec, state)
     
     # DEBUG: Print equilibrium matrix for first few iterations
-    if state.iteration < 3:
+    if DEBUG_MODE and state.iteration < 3:
         # print(f"\n[CPU MATRIX DEBUG] Equilibrium matrix at iteration {state.iteration} (rows={equilibrium_matrix.shape[0]}, cols={equilibrium_matrix.shape[1]}):")
         for i in range(min(equilibrium_matrix.shape[0], 5)):
             row_str = f"  Row {i}: "

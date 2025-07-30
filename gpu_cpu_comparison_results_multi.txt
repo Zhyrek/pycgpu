@@ -45,7 +45,7 @@ X(TI)	T(K)	CPU_GM	GPU_GM	GM_DIFF	CPU_MU_NB	CPU_MU_TI	GPU_MU_NB	GPU_MU_TI	MU_NB_D
 # Passed: 40
 # Failed: 0
 # Pass rate: 100.0%
-# CPU time: 0.6 seconds
-# GPU time: 0.9 seconds
-# Speedup: 0.7x
-# Total time: 1.5 seconds
+# CPU time: 0.4 seconds
+# GPU time: 0.6 seconds
+# Speedup: 0.6x
+# Total time: 1.0 seconds

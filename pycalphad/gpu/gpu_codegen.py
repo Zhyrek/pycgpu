@@ -1075,7 +1075,7 @@ def notebook_get_all_sym_names_for_model(model_obj: Model, wks_obj: Workspace) -
     return state_variables + site_variables
 
 
-def notebook_convert_var_names(source_str: str, model_obj: Model, wks_obj: Workspace) -> str:
+def notebook_convert_var_names(source_str: str, model_obj: Model, wks_obj: Workspace, verbose: bool = False) -> str:
     """Convert symbolic variable names to array indices in C code. Fixed to avoid substring issues."""
     import re
     names = notebook_get_all_sym_names_for_model(model_obj, wks_obj)
@@ -1084,7 +1084,8 @@ def notebook_convert_var_names(source_str: str, model_obj: Model, wks_obj: Works
     if not hasattr(notebook_convert_var_names, '_printed_mappings'):
         notebook_convert_var_names._printed_mappings = set()
     if model_obj.phase_name not in notebook_convert_var_names._printed_mappings:
-        print(f"[GPU CODEGEN] Variable mapping for {model_obj.phase_name}: {dict(zip(names, [f'x[{i}]' for i in range(len(names))]))}")
+        if verbose:
+            print(f"[GPU CODEGEN] Variable mapping for {model_obj.phase_name}: {dict(zip(names, [f'x[{i}]' for i in range(len(names))]))}")
         notebook_convert_var_names._printed_mappings.add(model_obj.phase_name)
     
     # Traverse in reverse order to replace longer names first (e.g., BCC_A20NB before N)
@@ -1628,20 +1629,20 @@ def notebook_source_from_expr_cse(
             # Generate subexpression assignments
             for symbol, subexpr in replacements:
                 c_subexpr = ccode(subexpr)
-                c_subexpr = apply_cse_variable_mapping(c_subexpr, model_obj, wks_obj)
+                c_subexpr = apply_cse_variable_mapping(c_subexpr, model_obj, wks_obj, verbose)
                 c_code += f"    double {ccode(symbol)} = {c_subexpr};\n"
             
             # Generate main expressions
             if len(reduced_exprs) == 1 and c_output_type == "double":
                 # Single scalar function - return directly
                 c_expr = ccode(reduced_exprs[0])
-                c_expr = apply_cse_variable_mapping(c_expr, model_obj, wks_obj)
+                c_expr = apply_cse_variable_mapping(c_expr, model_obj, wks_obj, verbose)
                 c_code += f"    return {c_expr};\n"
             else:
                 # Multiple expressions or void function - write to output array
                 for i, reduced_expr in enumerate(reduced_exprs):
                     c_expr = ccode(reduced_expr)
-                    c_expr = apply_cse_variable_mapping(c_expr, model_obj, wks_obj)
+                    c_expr = apply_cse_variable_mapping(c_expr, model_obj, wks_obj, verbose)
                     c_code += f"    {c_output_arg_name}[{i}] = {c_expr};\n"
         
         elif expr_type == "grad":
@@ -1676,7 +1677,7 @@ def notebook_source_from_expr_cse(
             # Generate subexpression assignments
             for symbol, subexpr in replacements:
                 c_subexpr = ccode(subexpr)
-                c_subexpr = apply_cse_variable_mapping(c_subexpr, model_obj, wks_obj)
+                c_subexpr = apply_cse_variable_mapping(c_subexpr, model_obj, wks_obj, verbose)
                 c_code += f"    double {ccode(symbol)} = {c_subexpr};\n"
             
             # CRITICAL: Generate gradient assignments in the EXACT order we want
@@ -1692,7 +1693,7 @@ def notebook_source_from_expr_cse(
                     # This is the derivative we want at output position 'output_index'
                     # It corresponds to reduced_exprs[expr_index]
                     c_expr = ccode(reduced_exprs[expr_index])
-                    c_expr = apply_cse_variable_mapping(c_expr, model_obj, wks_obj)
+                    c_expr = apply_cse_variable_mapping(c_expr, model_obj, wks_obj, verbose)
                     c_code += f"    {c_output_arg_name}[{output_index}] = {c_expr};\n"
                     
                     expr_index += 1
@@ -1732,13 +1733,13 @@ def notebook_source_from_expr_cse(
             # Generate subexpression assignments
             for symbol, subexpr in replacements:
                 c_subexpr = ccode(subexpr)
-                c_subexpr = apply_cse_variable_mapping(c_subexpr, model_obj, wks_obj)
+                c_subexpr = apply_cse_variable_mapping(c_subexpr, model_obj, wks_obj, verbose)
                 c_code += f"    double {ccode(symbol)} = {c_subexpr};\n"
             
             # Generate Hessian assignments
             for i, reduced_expr in enumerate(reduced_exprs):
                 c_expr = ccode(reduced_expr)
-                c_expr = apply_cse_variable_mapping(c_expr, model_obj, wks_obj)
+                c_expr = apply_cse_variable_mapping(c_expr, model_obj, wks_obj, verbose)
                 c_code += f"    {c_output_arg_name}[{i}] = {c_expr};\n"
         
         # Close the function
@@ -1760,10 +1761,10 @@ def notebook_source_from_expr_cse(
             wks_obj, expr_type, c_output_type, validate, verbose
         )
 
-def apply_cse_variable_mapping(c_expr: str, model_obj: Model, wks_obj: Workspace) -> str:
+def apply_cse_variable_mapping(c_expr: str, model_obj: Model, wks_obj: Workspace, verbose: bool = False) -> str:
     """Apply variable name to array index mapping using existing logic."""
     # Use existing function to get the mapping
-    result = notebook_convert_var_names(c_expr, model_obj, wks_obj)
+    result = notebook_convert_var_names(c_expr, model_obj, wks_obj, verbose)
     
     # Fix SymEngine CSE symbols that aren't handled by the original replacements
     result = fix_cse_symbols(result)
@@ -1899,7 +1900,7 @@ def notebook_source_from_expr_original(
                 # Fix all-zero Piecewise BEFORE conversion to ternary
                 s = fix_all_zero_piecewise_from_logs(s)
                 s = notebook_replace_piecewise(s)
-                s = notebook_convert_var_names(s, model_obj, wks_obj)
+                s = notebook_convert_var_names(s, model_obj, wks_obj, verbose)
                 s = notebook_replace_exp(s)
                 # Fix syntax issues from Piecewise conversion
                 # Fix 1: Remove extra parenthesis in number comparisons
@@ -1946,7 +1947,7 @@ def notebook_source_from_expr_original(
                     # Fix all-zero Piecewise BEFORE conversion to ternary
                     s = fix_all_zero_piecewise_from_logs(s)
                     s = notebook_replace_piecewise(s)
-                    s = notebook_convert_var_names(s, model_obj, wks_obj)
+                    s = notebook_convert_var_names(s, model_obj, wks_obj, verbose)
                     s = notebook_replace_exp(s)
                     s = fix_ternary_operator_precedence(s)  # Fix operator precedence issues
                     s = fix_piecewise_zeros(s)  # Clean up all-zero Piecewise expressions
@@ -1981,7 +1982,7 @@ def notebook_source_from_expr_original(
                             print(f"[GPU POST-FIX] Hessian element [{i_sym_idx},{j_sym_idx}] has {all_zero_after} all-zero Piecewise patterns (fixed {all_zero_before - all_zero_after})")
                         
                         s = notebook_replace_piecewise(s)
-                        s = notebook_convert_var_names(s, model_obj, wks_obj)
+                        s = notebook_convert_var_names(s, model_obj, wks_obj, verbose)
                         s = notebook_replace_exp(s)
                         # Fix syntax issues from Piecewise conversion
                         # Fix 1: Remove extra parenthesis in number comparisons
@@ -2107,7 +2108,7 @@ def notebook_source_from_expr_original(
                 deriv_expr = single_expr.diff(sym_to_diff_against)
                 s = str(deriv_expr)
                 s = notebook_replace_piecewise(s)
-                s = notebook_convert_var_names(s, model_obj, wks_obj)
+                s = notebook_convert_var_names(s, model_obj, wks_obj, verbose)
                 s = notebook_replace_exp(s)
                 s = fix_ternary_operator_precedence(s)  # Fix operator precedence issues
                 # Fix missing operators
@@ -2137,7 +2138,7 @@ def notebook_source_from_expr_original(
                         s = fix_hessian_spurious_terms_v2(s, i, j, ordered_symbols_for_diff[i], ordered_symbols_for_diff[j])
                     
                     # Convert variable names last
-                    s = notebook_convert_var_names(s, model_obj, wks_obj)
+                    s = notebook_convert_var_names(s, model_obj, wks_obj, verbose)
                     
                     # Also apply post-conversion fix for any remaining spurious terms
                     # Standard state variables are N, P, T (indices 0, 1, 2)
@@ -2339,7 +2340,8 @@ def _nb_formulamole_grad_from_model(model_obj: Model, model_c_idx: int, wks_obj:
                     dependent_expr = 1 - sum(independent_sfs)
                     dependent_subs[dependent_sf] = dependent_expr
                     
-                    print(f"[GPU CODEGEN] Sublattice {subl_idx}: dependent {dependent_sf} = 1 - sum({independent_sfs})")
+                    if verbose:
+                        print(f"[GPU CODEGEN] Sublattice {subl_idx}: dependent {dependent_sf} = 1 - sum({independent_sfs})")
     
     for el in model_obj.nonvacant_elements:
         moles_expr = model_obj.moles(el, per_formula_unit=True)
@@ -2351,12 +2353,13 @@ def _nb_formulamole_grad_from_model(model_obj: Model, model_c_idx: int, wks_obj:
         funcs.append(moles_expr)
     
     # Always print debug info for moles expressions
-    print(f"[GPU CODEGEN] _nb_formulamole_grad_from_model for {model_obj.phase_name}:")
-    print(f"  nonvacant_elements: {model_obj.nonvacant_elements}")
-    print(f"  Number of functions: {len(funcs)}")
-    print(f"  Dependent substitutions IDENTIFIED but NOT APPLIED to match CPU: {dependent_subs}")
-    for i, el in enumerate(model_obj.nonvacant_elements):
-        print(f"  moles({el}) = {funcs[i]}")
+    if verbose:
+        print(f"[GPU CODEGEN] _nb_formulamole_grad_from_model for {model_obj.phase_name}:")
+        print(f"  nonvacant_elements: {model_obj.nonvacant_elements}")
+        print(f"  Number of functions: {len(funcs)}")
+        print(f"  Dependent substitutions IDENTIFIED but NOT APPLIED to match CPU: {dependent_subs}")
+        for i, el in enumerate(model_obj.nonvacant_elements):
+            print(f"  moles({el}) = {funcs[i]}")
     
     if not funcs:
         fname = notebook_model_c_func_name_prefix(model_c_idx) + "formulamole_grad"

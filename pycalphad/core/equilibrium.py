@@ -77,6 +77,14 @@ def equilibrium(dbf, comps, phases, conditions, output=None, model=None,
     # Initialize debug output for CPU mode only
     init_debug_output(enabled=verbose, mode="CPU")
     
+    # Enable Cython debug output if verbose
+    if verbose:
+        try:
+            from pycalphad.core.minimizer import set_debug_mode
+            set_debug_mode(True)
+        except ImportError:
+            pass  # Function might not be available in older builds
+    
     # SEGMENT 1: ENTRY POINT AND PARAMETER VALIDATION
     debug_log(1, "Entry point and parameter validation", {
         "gpu_mode": gpu,
@@ -244,5 +252,13 @@ def equilibrium(dbf, comps, phases, conditions, output=None, model=None,
             print(f"[CPU] DEBUG: First entry: {_cpu_buffer[0]}")
     
     close_debug_output(mode="CPU")
+    
+    # Disable Cython debug output
+    if verbose:
+        try:
+            from pycalphad.core.minimizer import set_debug_mode
+            set_debug_mode(False)
+        except ImportError:
+            pass
     
     return properties

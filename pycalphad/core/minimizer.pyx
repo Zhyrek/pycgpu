@@ -9,6 +9,22 @@ from libc.stdlib cimport malloc, free
 from libc.math cimport isnan
 from libc.stdio cimport printf
 
+# Module-level debug flag that can be set from Python
+# Set to True to enable debug output, False to suppress it
+cdef bint DEBUG_MODE = False
+
+# Python-accessible function to control debug output
+def set_debug_mode(bint enabled):
+    """Enable or disable debug output in minimizer.
+    
+    Parameters
+    ----------
+    enabled : bool
+        True to enable debug output, False to suppress it
+    """
+    global DEBUG_MODE
+    DEBUG_MODE = enabled
+
 @cython.boundscheck(False)
 cdef void lstsq(double *A, int M, int N, double* x, double rcond) nogil:
     # Note: This function will destroy input matrix A
@@ -88,11 +104,12 @@ cdef void compute_phase_matrix(double[:,::1] phase_matrix, double[:,::1] hess,
         compset.phase_record.phase_local_cons_jac(phase_local_jac_tmp, phase_dof, compset.phase_local_cons_jac)
 
     # DEBUG: Print Hessian values
-    printf("[CPU HESSIAN DEBUG] compute_phase_matrix called\n")
+    if DEBUG_MODE:
+        printf("[CPU HESSIAN DEBUG] compute_phase_matrix called\n")
     for i in range(compset.phase_record.phase_dof):
         for j in range(compset.phase_record.phase_dof):
             phase_matrix[i, j] = hess[num_statevars+i, num_statevars+j]
-            if i < 2 and j < 2:
+            if DEBUG_MODE and i < 2 and j < 2:
                 printf("  hess[%d,%d] = %e\n", num_statevars+i, num_statevars+j, hess[num_statevars+i, num_statevars+j])
 
     for i in range(compset.phase_record.num_internal_cons):
@@ -112,12 +129,13 @@ cdef void write_row_stable_phase(double[:] out_row, double* out_rhs, int[::1] fr
                                  double[:, ::1] masses, double[::1] grad, double energy):
     # DEBUG: Print the row being written
     cdef int debug_idx
-    printf("[CPU EQUILIBRIUM MATRIX DEBUG] Writing row for stable phase:\n")
-    printf("  Energy: %e\n", energy)
-    printf("  Masses: ")
-    for debug_idx in range(masses.shape[0]):
-        printf("%e ", masses[debug_idx, 0])
-    printf("\n")
+    if DEBUG_MODE:
+        printf("[CPU EQUILIBRIUM MATRIX DEBUG] Writing row for stable phase:\n")
+        printf("  Energy: %e\n", energy)
+        printf("  Masses: ")
+        for debug_idx in range(masses.shape[0]):
+            printf("%e ", masses[debug_idx, 0])
+        printf("\n")
     
     # 1a. This phase row: free chemical potentials
     cdef int free_variable_column_offset = 0
@@ -168,7 +186,7 @@ cdef void write_row_fixed_mole_fraction(double[:] out_row, double* out_rhs, int 
     cdef int chempot_idx, compset_idx, statevar_idx, i, j
     
     # DEBUG: Print mass_jac structure for first call
-    if idx == 0 and component_idx == 1:
+    if DEBUG_MODE and idx == 0 and component_idx == 1:
         printf("[CPU MOLE FRAC DEBUG] Phase %d, Component %d:\n", idx, component_idx)
         printf("  mass_jac shape: (%d, %d)\n", mass_jac.shape[0], mass_jac.shape[1])
         printf("  num_statevars: %d\n", num_statevars)

@@ -2719,9 +2719,11 @@ __device__ bool remove_and_consolidate_phases(SystemSpecification* spec, SystemS
             
             if (num_to_remove < MAX_PHASES) compset_indices_to_remove_temp[num_to_remove++] = idx1;
             state->phase_amt[idx1] = 0.0;  // CPU sets to 0 at line 1330
+            #ifdef VERBOSE_DEBUG
             if (thread_id == 0 && state->iteration < 5) {
                 printf("  Phase %d marked for removal - amount %.2e < 1e-10\n", idx1, state->phase_amt[idx1]);
             }
+            #endif
             continue;
         }
 

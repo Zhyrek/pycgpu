@@ -3313,6 +3313,7 @@ __device__ void solve_state(
                            equilibrium_rhs, spec, state);
     
     // DEBUG: Check RHS after fill_equilibrium_system
+    #ifdef VERBOSE_DEBUG
     if (thread_id == 0 && state->iteration < 3) {{
         printf("  RHS after fill_equilibrium_system: [");
         for (int i = 0; i < equilibrium_matrix_rows && i < 5; ++i) {{
@@ -3321,6 +3322,7 @@ __device__ void solve_state(
         }}
         printf("]\\n");
     }}
+    #endif
     
     // DEBUG: Disabled to avoid compilation issues
     // if (iteration_count == 0 && thread_id == 0) {{ printf("GPU DEBUG\\n"); }}
@@ -3360,6 +3362,7 @@ __device__ void solve_state(
     // The solution should be in equilibrium_rhs after lstsq completes
     
     // DEBUG: Check if lstsq produced a non-zero solution
+    #ifdef VERBOSE_DEBUG
     if (thread_id == 0 && state->iteration < 3) {{
         printf("  RHS after lstsq (solution): [");
         for (int i = 0; i < equilibrium_matrix_cols && i < 5; ++i) {{
@@ -3368,6 +3371,7 @@ __device__ void solve_state(
         }}
         printf("]\\n");
     }}
+    #endif
     // Copy back to output solution
     for (int i = 0; i < soln_length && i < equilibrium_matrix_cols; ++i) {{
         out_equilibrium_soln[i] = equilibrium_rhs[i];

@@ -1586,7 +1586,8 @@ def notebook_source_from_expr_cse(
         num_exprs = len(expr_or_list_in)
     except:
         num_exprs = 1 if hasattr(expr_or_list_in, 'free_symbols') else len(list(expr_or_list_in))
-    print(f"[CSE CODEGEN] Processing {expr_type} with {num_exprs} expressions")
+    if verbose:
+        print(f"[CSE CODEGEN] Processing {expr_type} with {num_exprs} expressions")
     
     start_time = time.time()
     
@@ -1615,12 +1616,14 @@ def notebook_source_from_expr_cse(
                 all_expressions = list(expr_or_list_in)
             
             # Apply CSE to all expressions together for maximum efficiency
-            print(f"[CSE CODEGEN] Applying CSE to {len(all_expressions)} function expressions...")
+            if verbose:
+                print(f"[CSE CODEGEN] Applying CSE to {len(all_expressions)} function expressions...")
             cse_start = time.time()
             replacements, reduced_exprs = cse(all_expressions)
             cse_time = time.time() - cse_start
             
-            print(f"[CSE CODEGEN] CSE found {len(replacements)} common subexpressions in {cse_time:.3f}s")
+            if verbose:
+                print(f"[CSE CODEGEN] CSE found {len(replacements)} common subexpressions in {cse_time:.3f}s")
             
             # Generate subexpression assignments
             for symbol, subexpr in replacements:
@@ -1643,11 +1646,12 @@ def notebook_source_from_expr_cse(
         
         elif expr_type == "grad":
             # Process gradient expressions
-            print(f"[CSE CODEGEN] Processing gradient expressions...")
+            if verbose:
+                print(f"[CSE CODEGEN] Processing gradient expressions...")
             all_grad_expressions = []
             
             # Get ordered symbols for differentiation
-            ordered_symbols_for_diff = get_ordered_symbols_for_diff(model_obj, wks_obj)
+            ordered_symbols_for_diff = get_ordered_symbols_for_diff(model_obj, wks_obj, verbose)
             
             # Handle both single expressions and lists
             if hasattr(expr_or_list_in, 'free_symbols'):
@@ -1666,7 +1670,8 @@ def notebook_source_from_expr_cse(
             replacements, reduced_exprs = cse(all_grad_expressions)
             cse_time = time.time() - cse_start
             
-            print(f"[CSE CODEGEN] Gradient CSE found {len(replacements)} subexpressions in {cse_time:.3f}s")
+            if verbose:
+                print(f"[CSE CODEGEN] Gradient CSE found {len(replacements)} subexpressions in {cse_time:.3f}s")
             
             # Generate subexpression assignments
             for symbol, subexpr in replacements:
@@ -1695,11 +1700,12 @@ def notebook_source_from_expr_cse(
         
         elif expr_type == "hess":
             # Process Hessian expressions
-            print(f"[CSE CODEGEN] Processing Hessian expressions...")
+            if verbose:
+                print(f"[CSE CODEGEN] Processing Hessian expressions...")
             all_hess_expressions = []
             
             # Get ordered symbols for differentiation
-            ordered_symbols_for_diff = get_ordered_symbols_for_diff(model_obj, wks_obj)
+            ordered_symbols_for_diff = get_ordered_symbols_for_diff(model_obj, wks_obj, verbose)
             
             # Handle both single expressions and lists
             if hasattr(expr_or_list_in, 'free_symbols'):
@@ -1720,7 +1726,8 @@ def notebook_source_from_expr_cse(
             replacements, reduced_exprs = cse(all_hess_expressions)
             cse_time = time.time() - cse_start
             
-            print(f"[CSE CODEGEN] Hessian CSE found {len(replacements)} subexpressions in {cse_time:.3f}s")
+            if verbose:
+                print(f"[CSE CODEGEN] Hessian CSE found {len(replacements)} subexpressions in {cse_time:.3f}s")
             
             # Generate subexpression assignments
             for symbol, subexpr in replacements:
@@ -1738,14 +1745,16 @@ def notebook_source_from_expr_cse(
         c_code += "}\n\n"
         
         total_time = time.time() - start_time
-        print(f"[CSE CODEGEN] Generated {expr_type} function in {total_time:.3f}s")
+        if verbose:
+            print(f"[CSE CODEGEN] Generated {expr_type} function in {total_time:.3f}s")
         
         return c_code
         
     except Exception as e:
         print(f"[CSE CODEGEN ERROR] Failed to generate {expr_type}: {e}")
         # Fall back to original method
-        print(f"[CSE CODEGEN] Falling back to original regex-based method...")
+        if verbose:
+            print(f"[CSE CODEGEN] Falling back to original regex-based method...")
         return notebook_source_from_expr_original(
             expr_or_list_in, c_function_name_base_suffix, model_obj, model_c_idx, 
             wks_obj, expr_type, c_output_type, validate, verbose
@@ -1774,7 +1783,7 @@ def fix_cse_symbols(source: str) -> str:
     
     return source
 
-def get_ordered_symbols_for_diff(model_obj: Model, wks_obj: Workspace) -> list:
+def get_ordered_symbols_for_diff(model_obj: Model, wks_obj: Workspace, verbose: bool = False) -> list:
     """Get ordered symbols for differentiation in the correct order for GPU.
     
     Returns symbols in the order expected by the GPU code:
@@ -1825,7 +1834,8 @@ def get_ordered_symbols_for_diff(model_obj: Model, wks_obj: Workspace) -> list:
                            key=lambda sf: sf.species.name)
         ordered_symbols.extend(sorted_sfs)
     
-    print(f"[CSE GRADIENT] Ordered symbols for {model_obj.phase_name}: {[str(s) for s in ordered_symbols]}")
+    if verbose:
+        print(f"[CSE GRADIENT] Ordered symbols for {model_obj.phase_name}: {[str(s) for s in ordered_symbols]}")
     
     return ordered_symbols
 

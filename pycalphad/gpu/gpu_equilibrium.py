@@ -62,7 +62,8 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
     Args:
         properties: Pre-computed properties from starting_point() (to avoid calling full equilibrium)
     """
-    print("[GPU DEBUG] _prepare_gpu_data function called - this is where phase normalization should happen")
+    if wks_obj.verbose:
+        print("[GPU DEBUG] _prepare_gpu_data function called - this is where phase normalization should happen")
     # SEGMENT 13: SOLVER INPUT VALIDATION
     debug_log(13, "Solver input validation")
     if properties is not None and hasattr(properties, 'NP'):
@@ -118,25 +119,32 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
             try:
                 if hasattr(properties, 'GM'):
                     gm_data = properties.GM.values if hasattr(properties.GM, 'values') else properties.GM
-                    print(f"[GPU]   GM shape: {gm_data.shape}, values: {gm_data.flatten()}")
+                    if wks_obj.verbose:
+                        print(f"[GPU]   GM shape: {gm_data.shape}, values: {gm_data.flatten()}")
                 else:
-                    print(f"[GPU]   GM: Not found")
+                    if wks_obj.verbose:
+                        print(f"[GPU]   GM: Not found")
                     
                 if hasattr(properties, 'MU'):
                     mu_data = properties.MU.values if hasattr(properties.MU, 'values') else properties.MU
-                    print(f"[GPU]   MU shape: {mu_data.shape}, values: {mu_data.flatten()[:4]}")
+                    if wks_obj.verbose:
+                        print(f"[GPU]   MU shape: {mu_data.shape}, values: {mu_data.flatten()[:4]}")
                 else:
-                    print(f"[GPU]   MU: Not found")
+                    if wks_obj.verbose:
+                        print(f"[GPU]   MU: Not found")
                     
                 if hasattr(properties, 'Phase'):
                     phase_data = properties.Phase.values if hasattr(properties.Phase, 'values') else properties.Phase
-                    print(f"[GPU]   Phase shape: {phase_data.shape}, values: {phase_data.flatten()}")
+                    if wks_obj.verbose:
+                        print(f"[GPU]   Phase shape: {phase_data.shape}, values: {phase_data.flatten()}")
                 else:
-                    print(f"[GPU]   Phase: Not found")
+                    if wks_obj.verbose:
+                        print(f"[GPU]   Phase: Not found")
                     
                 if hasattr(properties, 'NP'):
                     np_data = properties.NP.values if hasattr(properties.NP, 'values') else properties.NP
-                    print(f"[GPU]   NP shape: {np_data.shape}, values: {np_data.flatten()}")
+                    if wks_obj.verbose:
+                        print(f"[GPU]   NP shape: {np_data.shape}, values: {np_data.flatten()}")
                     
                     # Count active phases in starting_point
                     np_values = np_data.flatten()
@@ -144,27 +152,33 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
                     active_mask = np_values > 1e-10
                     num_active = np.sum(active_mask)
                     
-                    print(f"[GPU]   Active phases in starting_point: {num_active}")
-                    if len(phase_values) > 0:
-                        print(f"[GPU]   Active phase names: {phase_values[active_mask]}")
-                    print(f"[GPU]   Active phase amounts: {np_values[active_mask]}")
+                    if wks_obj.verbose:
+                        print(f"[GPU]   Active phases in starting_point: {num_active}")
+                        if len(phase_values) > 0:
+                            print(f"[GPU]   Active phase names: {phase_values[active_mask]}")
+                        print(f"[GPU]   Active phase amounts: {np_values[active_mask]}")
                     
                     # CRITICAL: Do NOT consolidate phases! 
                     # CPU passes the original multi-phase starting point to the solver.
                     # GPU must do exactly the same to get identical inputs.
-                    print(f"[GPU] ✅ Preserving original starting point: {num_active} phases (same as CPU)")
+                    if wks_obj.verbose:
+                        print(f"[GPU] ✅ Preserving original starting point: {num_active} phases (same as CPU)")
                 else:
-                    print(f"[GPU]   NP: Not found")
+                    if wks_obj.verbose:
+                        print(f"[GPU]   NP: Not found")
                     
                 if hasattr(properties, 'X'):
                     x_data = properties.X.values if hasattr(properties.X, 'values') else properties.X
-                    print(f"[GPU]   X shape: {x_data.shape}, values: {x_data.flatten()[:6]}")
+                    if wks_obj.verbose:
+                        print(f"[GPU]   X shape: {x_data.shape}, values: {x_data.flatten()[:6]}")
                 else:
-                    print(f"[GPU]   X: Not found")
+                    if wks_obj.verbose:
+                        print(f"[GPU]   X: Not found")
                     
             except Exception as debug_e:
-                print(f"[GPU]   DEBUG ERROR: {debug_e}")
-                print(f"[GPU]   Properties attributes: {dir(properties)}")
+                if wks_obj.verbose:
+                    print(f"[GPU]   DEBUG ERROR: {debug_e}")
+                    print(f"[GPU]   Properties attributes: {dir(properties)}")
     
     # CRITICAL: NO phase consolidation! GPU must use identical input data as CPU.
     # CPU passes the original starting point data directly to the solver.
@@ -670,7 +684,7 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
                     print(f"[GPU] Phase {phase_name} has site_ratios={site_ratios}, sum={site_ratio_sum}, keeping NP={np_amount:.6f} as mole fraction")
             except (KeyError, AttributeError) as e:
                 # Phase record not found or no site ratio information - use original amount
-                if cond_idx < 2:
+                if cond_idx < 2 and wks_obj.verbose:
                     print(f"[GPU] Warning: Could not get site ratios for phase {phase_name}: {e}")
                 pass
                     
@@ -713,7 +727,8 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
     if wks_obj.verbose:
         print(f"[GPU] About to prepare grid data, grid type: {type(grid)}")
     if grid is None:
-        print(f"[GPU] Warning: grid is None, cannot prepare grid data")
+        if wks_obj.verbose:
+            print(f"[GPU] Warning: grid is None, cannot prepare grid data")
         grid_data_device_struct_np = None
     else:
         try:
@@ -1339,7 +1354,7 @@ def _create_system_specification_struct(global_spec_scalars, global_spec_arrays,
     return system_spec
 
 
-def _create_condition_args_struct_array(condition_args_np):
+def _create_condition_args_struct_array(condition_args_np, verbose=False):
     """
     Create a binary-compatible ConditionArgsSingle struct array from our flat array.
     """
@@ -1359,13 +1374,13 @@ def _create_condition_args_struct_array(condition_args_np):
         condition_args_struct[i]['state_variables_values'][:] = condition_args_np[i, :MAX_STATEVARS]
         
         # DEBUG: Print what we're storing in the struct
-        if i == 0:
+        if i == 0 and verbose:
             print(f"[GPU] DEBUG: ConditionArgsSingle[0] state_variables_values: {condition_args_struct[i]['state_variables_values']}")
     
     return condition_args_struct
 
 
-def _create_initial_phase_data_struct_array(initial_phase_data_arrays, num_conditions, dynamic_sizes=None):
+def _create_initial_phase_data_struct_array(initial_phase_data_arrays, num_conditions, dynamic_sizes=None, verbose=False):
     """
     Create a binary-compatible InitialPhaseDataSingle struct array from our flat arrays.
     Updated to use all-double memory layout to avoid GPU struct alignment issues.
@@ -1390,8 +1405,9 @@ def _create_initial_phase_data_struct_array(initial_phase_data_arrays, num_condi
     # Create a flat double array that can be accessed directly by GPU threads
     initial_phase_data_flat = np.zeros((num_conditions, doubles_per_struct), dtype=np.float64)
     
-    print(f"[GPU] NEW All-double layout: {doubles_per_struct} doubles per condition = {doubles_per_struct * 8} bytes")
-    print(f"[GPU] Total initial phase data: {initial_phase_data_flat.nbytes} bytes for {num_conditions} conditions")
+    if verbose:
+        print(f"[GPU] NEW All-double layout: {doubles_per_struct} doubles per condition = {doubles_per_struct * 8} bytes")
+        print(f"[GPU] Total initial phase data: {initial_phase_data_flat.nbytes} bytes for {num_conditions} conditions")
     
     # Copy data from our structured arrays to the flat double arrays
     for i in range(num_conditions):
@@ -1413,7 +1429,7 @@ def _create_initial_phase_data_struct_array(initial_phase_data_arrays, num_condi
         offset += (MAX_PHASES * MAX_DOF_PER_PHASE)
         
         # DEBUG: Print detailed site fractions data for first condition
-        if i == 0:
+        if i == 0 and verbose:
             print(f"[GPU] DEBUG: SITE_FRACTIONS DETAILED for condition {i}:")
             print(f"  Original shape: {initial_phase_data_arrays['site_fractions'][i].shape}")
             print(f"  Original data: {initial_phase_data_arrays['site_fractions'][i]}")
@@ -1447,13 +1463,13 @@ def _create_initial_phase_data_struct_array(initial_phase_data_arrays, num_condi
         initial_phase_data_flat[i, offset] = float(initial_phase_data_arrays['num_phases'][i])
         
         # DOUBLE CHECK: Print the actual flat array being created
-        if i == 0:
+        if i == 0 and verbose:
             print(f"[GPU] PYTHON SIDE FLAT ARRAY DUMP - First 45 values:")
             for idx in range(45):
                 print(f"  [{idx}]: {initial_phase_data_flat[i, idx]}")
         
         # DEBUG: Log the struct data for first few conditions to verify transfer
-        if i < 5:
+        if i < 5 and verbose:
             phase_indices = initial_phase_data_flat[i, 0:MAX_PHASES].astype(int)
             phase_amounts = initial_phase_data_flat[i, MAX_PHASES:2*MAX_PHASES]
             num_phases = int(initial_phase_data_flat[i, -1])
@@ -2053,9 +2069,11 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         # Remove GPU-specific debug - no CPU equivalent
     except Exception as e:
         if "CodeValidationError" in str(type(e)):
-            print(f"[GPU] Code validation failed: {e}")
+            if verbose:
+                print(f"[GPU] Code validation failed: {e}")
             if not validate_code:
-                print("[GPU] Continuing without validation...")
+                if verbose:
+                    print("[GPU] Continuing without validation...")
                 model_funcs_c, pr_init_calls_c, unique_py_models, py_phase_name_to_unique_idx_map = \
                     _generate_c_code_for_phase_models(wks_obj, include_hess=True, validate=False)
                 num_unique_models_for_gpu = len(unique_py_models)
@@ -2121,7 +2139,8 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             raise
         _gpu_module_cache[cache_key] = module
     else:
-        if verbose: print(f"[GPU] Cache hit for key: {cache_key}. Using existing module.")
+        if verbose:
+            print(f"[GPU] Cache hit for key: {cache_key}. Using existing module.")
         module = _gpu_module_cache[cache_key]
     
     # CRITICAL: Call the global PhaseRecord initialization kernel every time
@@ -2131,7 +2150,8 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         init_records_kernel = module.get_function("init_all_gpu_phase_records")
         init_records_kernel((1,), (1,), args=())
         cp.cuda.runtime.deviceSynchronize()
-        if verbose: print("[GPU] Global PhaseRecords initialized on GPU.")
+        if verbose:
+            print("[GPU] Global PhaseRecords initialized on GPU.")
     except Exception as e:
         if verbose:
             print(f"[GPU] ERROR: PhaseRecord initialization failed: {e}")
@@ -2163,25 +2183,31 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         test_result = cp.asnumpy(test_output)
         expected = np.arange(10) * 2.0 + 1.0
         if not np.allclose(test_result, expected):
-            print(f"[GPU] ✗ Test kernel failed! Expected {expected}, got {test_result}")
+            if verbose:
+                print(f"[GPU] ✗ Test kernel failed! Expected {expected}, got {test_result}")
     except Exception as e:
-        print(f"[GPU] Test kernel failed: {e}")
+        if verbose:
+            print(f"[GPU] Test kernel failed: {e}")
     
     # Test kernel argument passing with a struct-like test
-    print("\n[GPU] DEBUG: Testing struct-like argument passing...")
+    if verbose:
+        print("\n[GPU] DEBUG: Testing struct-like argument passing...")
     try:
-        print("[GPU] DEBUG: Getting test_struct_kernel function...")
+        if verbose:
+            print("[GPU] DEBUG: Getting test_struct_kernel function...")
         test_struct_kernel = module.get_function("test_struct_kernel")
         
         # Create simple test data similar to our real kernel arguments
-        print("[GPU] DEBUG: Creating test struct data...")
+        if verbose:
+            print("[GPU] DEBUG: Creating test struct data...")
         test_data1 = cp.zeros(100, dtype=cp.uint8)  # Similar to our struct data
         test_data2 = cp.zeros(200, dtype=cp.uint8)
         test_output = cp.zeros(10, dtype=cp.float64)  # Output to check if kernel ran
         test_data4 = cp.zeros(300, dtype=cp.uint8)
         test_data5 = cp.zeros(400, dtype=cp.uint8)
         
-        print("[GPU] DEBUG: Testing struct kernel with pointer arguments...")
+        if verbose:
+            print("[GPU] DEBUG: Testing struct kernel with pointer arguments...")
         test_struct_args = (
             test_data1.data.ptr,
             test_data2.data.ptr, 
@@ -2190,8 +2216,9 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             test_data4.data.ptr,
             test_data5.data.ptr
         )
-        print(f"[GPU] DEBUG: Struct test args: {test_struct_args}")
-        print(f"[GPU] DEBUG: Struct test args types: {[type(arg) for arg in test_struct_args]}")
+        if verbose:
+            print(f"[GPU] DEBUG: Struct test args: {test_struct_args}")
+            print(f"[GPU] DEBUG: Struct test args types: {[type(arg) for arg in test_struct_args]}")
         
         # Try calling the test struct kernel
         test_struct_kernel((1,), (1,), test_struct_args)
@@ -2200,10 +2227,12 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         # Check if kernel executed by looking for magic number
         result = cp.asnumpy(test_output)
         if result[0] != 42.0:
-            print(f"[GPU] ✗ Struct test kernel failed. Expected 42.0, got {result[0]}")
+            if verbose:
+                print(f"[GPU] ✗ Struct test kernel failed. Expected 42.0, got {result[0]}")
         
     except Exception as e:
-        print(f"[GPU] Struct argument test failed: {e}")
+        if verbose:
+            print(f"[GPU] Struct argument test failed: {e}")
 
     # Remove GPU-specific numerical validation - no CPU equivalent numerical validation in this format
     
@@ -2219,7 +2248,8 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         debug_log(f"  gpu_initial_phases: {initial_phase_data_arrays['num_phases']}", verbose)
     
     if num_total_conditions_pts == 0:
-        if verbose: print("[GPU] No calculation points. Returning empty result.")
+        if verbose:
+            print("[GPU] No calculation points. Returning empty result.")
         return _process_gpu_results(np.array([]), wks_obj, 0, unique_py_models, py_phase_name_to_unique_idx_map, original_properties=None, dynamic_sizes=dynamic_sizes)
 
     # 4. Create struct-compatible memory layouts
@@ -2239,12 +2269,12 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             print("[GPU] DEBUG: SystemSpecification array created")
         
         # Create ConditionArgsSingle struct array
-        condition_args_struct = _create_condition_args_struct_array(condition_args_np)
+        condition_args_struct = _create_condition_args_struct_array(condition_args_np, verbose)
         if verbose:
             print(f"[GPU] DEBUG: ConditionArgsSingle struct array created with {len(condition_args_struct)} conditions")
         
         # Create InitialPhaseDataSingle struct array
-        initial_phase_data_struct = _create_initial_phase_data_struct_array(initial_phase_data_arrays, num_total_conditions_pts, dynamic_sizes)
+        initial_phase_data_struct = _create_initial_phase_data_struct_array(initial_phase_data_arrays, num_total_conditions_pts, dynamic_sizes, verbose)
         if verbose:
             print(f"[GPU] DEBUG: InitialPhaseDataSingle struct array created with {len(initial_phase_data_struct)} conditions")
             print(f"[GPU] DEBUG: Array shape: {initial_phase_data_struct.shape}, dtype: {initial_phase_data_struct.dtype}")
@@ -2444,7 +2474,8 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         debug_arrays['iteration_count'] = cp.zeros(num_total_conditions_pts, dtype=cp.int32)
     
     # 6b. Create global memory arrays for solver stack overflow fix
-    print(f"[GPU] Creating global memory arrays to replace stack memory...")
+    if verbose:
+        print(f"[GPU] Creating global memory arrays to replace stack memory...")
     
     # Calculate array sizes based on MAX constants
     MAX_SVD_DIM = dynamic_sizes['MAX_COMPONENTS'] + dynamic_sizes['MAX_PHASES'] + dynamic_sizes['MAX_STATEVARS'] + dynamic_sizes['MAX_FIXED_MOLE_FRACTION_CONDITIONS'] + 2  # 4+4+4+4+2=18
@@ -2487,7 +2518,8 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     
     # Calculate total memory usage
     total_memory_mb = sum(arr.nbytes for arr in global_memory_arrays.values()) / (1024 * 1024)
-    print(f"[GPU] Allocated {len(global_memory_arrays)} global memory arrays, total: {total_memory_mb:.1f} MB")
+    if verbose:
+        print(f"[GPU] Allocated {len(global_memory_arrays)} global memory arrays, total: {total_memory_mb:.1f} MB")
     
     # Remove GPU-only debug - no CPU equivalent
     
@@ -2740,17 +2772,20 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     try:
         err = cp.cuda.runtime.getLastError()
         if err != 0:
-            print(f"[GPU] CUDA Error after kernel: {err}")
+            if verbose:
+                print(f"[GPU] CUDA Error after kernel: {err}")
     except AttributeError:
         # getLastError may not be available in all CuPy versions
         pass
     
-    if verbose: print("[GPU] Kernel execution completed.")
+    if verbose:
+        print("[GPU] Kernel execution completed.")
     
     
     # 7a. Process debug arrays if enabled
     if debug_enabled:
-        print(f"\n[GPU] ===== SOLVER DEBUG ANALYSIS =====")
+        if verbose:
+            print(f"\n[GPU] ===== SOLVER DEBUG ANALYSIS =====")
         try:
             # Transfer debug arrays back from GPU
             gm_history = cp.asnumpy(debug_arrays['gm_history'])
@@ -2759,21 +2794,24 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             iteration_count = cp.asnumpy(debug_arrays['iteration_count'])
             
             for cond_idx in range(min(num_total_conditions_pts, 3)):  # Show first 3 conditions
-                print(f"\n[GPU] Condition {cond_idx} solver history:")
-                print(f"  Total iterations: {iteration_count[cond_idx]}")
+                if verbose:
+                    print(f"\n[GPU] Condition {cond_idx} solver history:")
+                    print(f"  Total iterations: {iteration_count[cond_idx]}")
                 
                 for step in range(min(iteration_count[cond_idx], debug_step_count)):
                     gm_val = gm_history[cond_idx, step]
                     mu_vals = mu_history[cond_idx, step, :2]  # First 2 components
                     converged = convergence_history[cond_idx, step]
                     
-                    print(f"  Step {step}: GM={gm_val:.6f}, MU=[{mu_vals[0]:.2f}, {mu_vals[1]:.2f}], Conv={converged}")
+                    if verbose:
+                        print(f"  Step {step}: GM={gm_val:.6f}, MU=[{mu_vals[0]:.2f}, {mu_vals[1]:.2f}], Conv={converged}")
                     
                 if iteration_count[cond_idx] == 0:
-                    print(f"  ❌ No iterations recorded - solver may not be running!")
+                    if verbose:
+                        print(f"  ❌ No iterations recorded - solver may not be running!")
                     
                     # Extract detailed debug values from GM history
-                    if debug_step_count > 12:
+                    if debug_step_count > 12 and verbose:
                         gm_vals = gm_history[cond_idx, :]
                         print(f"  🔍 DETAILED DEBUG VALUES:")
                         print(f"    num_free_chemical_potentials: {gm_vals[5] if len(gm_vals) > 5 else 'N/A'}")
@@ -2793,10 +2831,12 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                             print(f"    ✓ Passed eq_soln_len check")
                             
                 elif iteration_count[cond_idx] >= debug_step_count:
-                    print(f"  ⚠️  Reached maximum debug steps ({debug_step_count})")
+                    if verbose:
+                        print(f"  ⚠️  Reached maximum debug steps ({debug_step_count})")
                     
         except Exception as debug_error:
-            print(f"[GPU] Debug processing failed: {debug_error}")
+            if verbose:
+                print(f"[GPU] Debug processing failed: {debug_error}")
     
     # 7b. Transfer results back and process
     # GPU-specific processing (no CPU equivalent, so no debug segment)

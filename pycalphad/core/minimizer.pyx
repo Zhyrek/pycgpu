@@ -157,12 +157,13 @@ cdef void write_row_stable_phase(double[:] out_row, double* out_rhs, int[::1] fr
         out_rhs[0] -= masses[chempot_idx, 0] * chemical_potentials[chempot_idx]
     
     # DEBUG: Print the final row values and RHS
-    printf("  Row values (first %d): ", 
-           free_chemical_potential_indices.shape[0] + free_stable_compset_indices.shape[0] + free_statevar_indices.shape[0])
-    for debug_idx in range(free_chemical_potential_indices.shape[0] + free_stable_compset_indices.shape[0] + free_statevar_indices.shape[0]):
-        printf("%e ", out_row[debug_idx])
-    printf("\n")
-    printf("  RHS: %e\n", out_rhs[0])
+    if DEBUG_MODE:
+        printf("  Row values (first %d): ", 
+               free_chemical_potential_indices.shape[0] + free_stable_compset_indices.shape[0] + free_statevar_indices.shape[0])
+        for debug_idx in range(free_chemical_potential_indices.shape[0] + free_stable_compset_indices.shape[0] + free_statevar_indices.shape[0]):
+            printf("%e ", out_row[debug_idx])
+        printf("\n")
+        printf("  RHS: %e\n", out_rhs[0])
 
 cdef void write_row_fixed_mole_fraction(double[:] out_row, double* out_rhs, int component_idx,
                                         int[::1] free_chemical_potential_indices, int[::1] free_stable_compset_indices,
@@ -223,8 +224,8 @@ cdef void write_row_fixed_mole_fraction(double[:] out_row, double* out_rhs, int 
                 (phase_amt[idx]/current_system_amount) * (-system_mole_fractions[component_idx] * moles_normalization_grad[num_statevars+j]) * c_statevars[j, statevar_idx]
     # 3.
     # DEBUG: Print RHS calculation details
-    if idx < 2 and component_idx == 1 and prefactor != 0.0:
-        # print(f"[CPU MOLE FRAC RHS DEBUG] Phase {idx}, Component 1:")
+    if DEBUG_MODE and idx < 2 and component_idx == 1 and prefactor != 0.0:
+        print(f"[CPU MOLE FRAC RHS DEBUG] Phase {idx}, Component 1:")
         print(f"  c_G.shape[0]={c_G.shape[0]}")
         if c_G.shape[0] > 0:
             print(f"  c_G values: {np.asarray(c_G)}")
@@ -235,7 +236,7 @@ cdef void write_row_fixed_mole_fraction(double[:] out_row, double* out_rhs, int 
     cdef double rhs_term2 = 0.0
     
     for j in range(c_G.shape[0]):
-        if idx < 2 and component_idx == 1 and prefactor != 0.0:
+        if DEBUG_MODE and idx < 2 and component_idx == 1 and prefactor != 0.0:
             print(f"    j={j}: mass_jac[1,{num_statevars+j}]={mass_jac[component_idx, num_statevars+j]:.6e}, c_G[{j}]={c_G[j]:.6e}")
         rhs_term1 += mass_jac[component_idx, num_statevars+j] * c_G[j]
         out_rhs[0] += -prefactor * (phase_amt[idx]/current_system_amount) * \
@@ -245,8 +246,8 @@ cdef void write_row_fixed_mole_fraction(double[:] out_row, double* out_rhs, int 
         out_rhs[0] += -prefactor * (phase_amt[idx]/current_system_amount) * \
             (-system_mole_fractions[component_idx] * moles_normalization_grad[num_statevars+j]) * c_G[j]
             
-    if idx < 2 and component_idx == 1 and prefactor != 0.0:
-        # print(f"  [CPU] Phase {idx} rhs_term1={rhs_term1}, rhs_term2={rhs_term2}")
+    if DEBUG_MODE and idx < 2 and component_idx == 1 and prefactor != 0.0:
+        print(f"  [CPU] Phase {idx} rhs_term1={rhs_term1}, rhs_term2={rhs_term2}")
         print(f"  phase_amt={phase_amt[idx]}, system_amt={current_system_amount}, prefactor={prefactor}")
         print(f"  RHS contribution: {-prefactor * (phase_amt[idx]/current_system_amount) * (rhs_term1 + rhs_term2)}")
         print(f"  out_rhs[0] after this phase: {out_rhs[0]}")
@@ -645,18 +646,18 @@ cdef class SystemSpecification:
                 advance_state(self, state, eq_soln, step_size)
             
             # DEBUG: Add detailed output after first iteration
-            if iteration == 0:
-                # print(f"\n[CPU TRACE] ===== AFTER ITERATION 0 =====")
-                # print(f"[CPU TRACE] Chemical potentials: {np.array(state.chemical_potentials)}")
-                # print(f"[CPU TRACE] System amount: {state.system_amount:.15e}")
-                # print(f"[CPU TRACE] Mole fractions: {np.array(state.mole_fractions)}")
-                # print(f"[CPU TRACE] Mass residual: {state.mass_residual:.15e}")
-                # print(f"[CPU TRACE] Number of active phases: {len(state.free_stable_compset_indices)}")
-                # print(f"[CPU TRACE] Free stable indices: {state.free_stable_compset_indices}")
+            if DEBUG_MODE and iteration == 0:
+                print(f"\n[CPU TRACE] ===== AFTER ITERATION 0 =====")
+                print(f"[CPU TRACE] Chemical potentials: {np.array(state.chemical_potentials)}")
+                print(f"[CPU TRACE] System amount: {state.system_amount:.15e}")
+                print(f"[CPU TRACE] Mole fractions: {np.array(state.mole_fractions)}")
+                print(f"[CPU TRACE] Mass residual: {state.mass_residual:.15e}")
+                print(f"[CPU TRACE] Number of active phases: {len(state.free_stable_compset_indices)}")
+                print(f"[CPU TRACE] Free stable indices: {state.free_stable_compset_indices}")
                 
                 for idx in state.free_stable_compset_indices:
                     compset = state.compsets[idx]
-                    # print(f"\n[CPU TRACE] Phase {idx} ({compset.phase_record.phase_name}):")
+                    print(f"\n[CPU TRACE] Phase {idx} ({compset.phase_record.phase_name}):")
                     print(f"  NP (mole fraction): {compset.NP:.15e}")
                     print(f"  phase_amt (formula units): {state.phase_amt[idx]:.15e}")
                     print(f"  energy: {compset.energy:.15e}")
@@ -667,13 +668,13 @@ cdef class SystemSpecification:
                     print(f"  Site fractions: {np.array(state.dof[idx][num_sv:])}")
                     print(f"  State variables: {np.array(state.dof[idx][:num_sv])}")
                     
-                # print(f"\n[CPU TRACE] Convergence status:")
+                print(f"\n[CPU TRACE] Convergence status:")
                 print(f"  converged: {converged}")
                 print(f"  phases_changed: {phases_changed}")
                 print(f"  largest_phase_amt_change: {state.largest_phase_amt_change[0]:.15e}")
                 print(f"  largest_y_change: {state.largest_y_change[0]:.15e}")
                 print(f"  largest_statevar_change: {state.largest_statevar_change[0]:.15e}")
-                # print(f"[CPU TRACE] ===== END ITERATION 0 =====\n")
+                print(f"[CPU TRACE] ===== END ITERATION 0 =====\n")
                 
         if state.free_stable_compset_indices.shape[0] > self.max_num_free_stable_phases:
             # Gibbs phase rule violation in solution
@@ -866,11 +867,11 @@ cdef class SystemState:
         self.mass_residual = 0.0
         for fixed_molefrac_cond_idx in range(spec.prescribed_mole_fraction_rhs.shape[0]):
             # DEBUG: Print mass residual calculation details
-            if self.iteration < 3:
+            if DEBUG_MODE and self.iteration < 3:
                 coef = spec.prescribed_mole_fraction_coefficients[fixed_molefrac_cond_idx,:]
                 dot_product = np.dot(coef, self.mole_fractions)
                 rhs = spec.prescribed_mole_fraction_rhs[fixed_molefrac_cond_idx]
-                # print(f"[CPU] Mass residual calc (iteration {self.iteration}):")
+                print(f"[CPU] Mass residual calc (iteration {self.iteration}):")
                 print(f"  Coefficients: {coef}")
                 print(f"  Mole fractions: {self.mole_fractions}")
                 print(f"  Dot product: {dot_product:.15e}")
@@ -915,7 +916,7 @@ cdef class SystemState:
             
             for comp_idx in range(num_components):
                 compset.phase_record.formulamole_grad(csst.mass_jac[comp_idx, :], x, comp_idx)
-            if state.iteration < 3:
+            if DEBUG_MODE and state.iteration < 3:
                 printf("[CPU FORMULAHESS INPUT] Phase %d iteration %d, DOF: ", idx, state.iteration);
                 for i in range(5):
                     printf("%.15e ", x[i])
@@ -923,8 +924,8 @@ cdef class SystemState:
             compset.phase_record.formulahess(csst.hess, x)
             
             # DEBUG: Print CPU Hessian values after calculation
-            if True:  # Always print for debugging
-                # print(f"[CPU HESSIAN] Phase {idx} ({compset.phase_record.phase_name}) Hessian after formulahess:")
+            if DEBUG_MODE:
+                print(f"[CPU HESSIAN] Phase {idx} ({compset.phase_record.phase_name}) Hessian after formulahess:")
                 for i in range(spec.num_statevars, min(spec.num_statevars + 2, csst.hess.shape[0])):
                     print(f"  Row {i}: ", end="")
                     for j in range(spec.num_statevars, min(spec.num_statevars + 2, csst.hess.shape[1])):
@@ -963,17 +964,17 @@ cdef class SystemState:
             
             # Calculate c_G
             # DEBUG: Print c_G calculation details
-            if idx < 2 and self.iteration < 2:
-                # print(f"[CPU c_G DEBUG] Phase {idx} calculation:")
+            if DEBUG_MODE and idx < 2 and self.iteration < 2:
+                print(f"[CPU c_G DEBUG] Phase {idx} calculation:")
                 print(f"  gradient values: {np.asarray(csst.grad[spec.num_statevars:spec.num_statevars+num_phase_dof])}")
                 print(f"  full_e_matrix diagonal: {[csst.full_e_matrix[i,i] for i in range(num_phase_dof)]}")
                 print(f"  Before c_G calc, c_G = {np.asarray(csst.c_G)}")
             for i in range(num_phase_dof):
                 for j in range(num_phase_dof):
-                    if idx < 2 and self.iteration < 2 and i == 0:
+                    if DEBUG_MODE and idx < 2 and self.iteration < 2 and i == 0:
                         print(f"    c_G[{i}] -= {csst.full_e_matrix[i, j]:.6e} * {csst.grad[spec.num_statevars+j]:.6e} = {csst.full_e_matrix[i, j] * csst.grad[spec.num_statevars+j]:.6e}")
                     csst.c_G[i] -= csst.full_e_matrix[i, j] * csst.grad[spec.num_statevars+j]
-            if idx < 2 and self.iteration < 2:
+            if DEBUG_MODE and idx < 2 and self.iteration < 2:
                 print(f"  After c_G calc, c_G = {np.asarray(csst.c_G[:num_phase_dof])}")
             
             debug_log(f"  c_G: {np.array(csst.c_G[:num_phase_dof])}", True)
@@ -1393,8 +1394,8 @@ cpdef advance_state(SystemSpecification spec, SystemState state, double[::1] equ
         csst.delta_y[:] = 0
         
         # DEBUG: Print delta_y calculation at iteration 1 for single phase
-        if state.iteration == 1 and len(state.free_stable_compset_indices) == 1 and idx == 0:
-            # print(f"\n[CPU DELTA_Y DEBUG] Iteration 1, Phase {idx}:")
+        if DEBUG_MODE and state.iteration == 1 and len(state.free_stable_compset_indices) == 1 and idx == 0:
+            print(f"\n[CPU DELTA_Y DEBUG] Iteration 1, Phase {idx}:")
             print(f"  c_G values: {np.asarray(csst.c_G)}")
             print(f"  Chemical potentials: {np.asarray(state.chemical_potentials)}")
 
@@ -1408,7 +1409,7 @@ cpdef advance_state(SystemSpecification spec, SystemState state, double[::1] equ
                 csst.delta_y[i] -= csst.full_e_matrix[csst.delta_y.shape[0] + cons_idx, i] * csst.internal_cons[cons_idx]
         
         # DEBUG: Print final delta_y at iteration 1
-        if state.iteration == 1 and len(state.free_stable_compset_indices) == 1 and idx == 0:
+        if DEBUG_MODE and state.iteration == 1 and len(state.free_stable_compset_indices) == 1 and idx == 0:
             print(f"  Calculated delta_y: {np.asarray(csst.delta_y)}")
 
         new_y = np.array(x)
@@ -1437,7 +1438,7 @@ cpdef advance_state(SystemSpecification spec, SystemState state, double[::1] equ
             state.largest_y_change[0] = max(state.largest_y_change[0], abs(x[i] - new_y[i]))
         
         # DEBUG: Show site fraction update at iteration 1
-        if state.iteration == 1 and len(state.free_stable_compset_indices) == 1 and idx == 0:
+        if DEBUG_MODE and state.iteration == 1 and len(state.free_stable_compset_indices) == 1 and idx == 0:
             print(f"  Step size used: {step_size}")
             print(f"  Site fractions before update: {x[spec.num_statevars:]}")
             print(f"  Site fractions after update: {new_y[spec.num_statevars:]}")

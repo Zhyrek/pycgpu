@@ -335,6 +335,7 @@ cdef void fill_equilibrium_system(double[::1,:] equilibrium_matrix, double[::1] 
         
         # DEBUG: Print gradient details for first iteration
         if state.iteration < 3 and stable_idx < 2:
+            pass
             # print(f"[CPU] Phase {stable_idx} gradient (iteration {state.iteration}): {np.asarray(csst.grad)}")
             # print(f"[CPU] Phase {stable_idx} energy: {csst.energy:.15e}")
             # print(f"[CPU] Phase {stable_idx} masses: {np.asarray(csst.masses)}")
@@ -441,6 +442,7 @@ cdef void fill_equilibrium_system(double[::1,:] equilibrium_matrix, double[::1] 
         debug_log(f"  constraint_{fixed_molefrac_cond_idx}_residual: {component_residual:.15e}", debug_enabled)
         # DEBUG: Print mole fraction constraint RHS
         if state.iteration < 3:
+            pass
             # print(f"[CPU] Mole fraction constraint {fixed_molefrac_cond_idx} RHS before residual: {equilibrium_rhs[component_row_offset + fixed_molefrac_cond_idx] + component_residual:.6f}")
             # print(f"[CPU] Mole fraction constraint {fixed_molefrac_cond_idx} residual: {component_residual:.6f}")
             # print(f"[CPU] Mole fraction constraint {fixed_molefrac_cond_idx} RHS after residual: {equilibrium_rhs[component_row_offset + fixed_molefrac_cond_idx]:.6f}")
@@ -594,6 +596,7 @@ cdef class SystemSpecification:
                 # print(f"\n[CPU DEBUG] ===== ITERATION {iteration} =====")
                 # print(f"[CPU DEBUG]   Chemical potentials: {np.array(state.chemical_potentials)}")
                 for idx in state.free_stable_compset_indices:
+                    pass
                     # print(f"[CPU DEBUG]   Phase {idx}: amount={state.phase_amt[idx]:.6f}, energy={state.cs_states[idx].energy:.6f}")
             
             if not self.pre_solve_hook(state):
@@ -1042,8 +1045,9 @@ cpdef construct_equilibrium_system(SystemSpecification spec, SystemState state, 
     from pycalphad.core.debug_output import debug_log
     
     import sys
-    sys.stderr.write(f"[CPU MATRIX DEBUG] construct_equilibrium_system called, state.iteration={state.iteration}\n")
-    sys.stderr.flush()
+    if DEBUG_MODE:
+        sys.stderr.write(f"[CPU MATRIX DEBUG] construct_equilibrium_system called, state.iteration={state.iteration}\n")
+        sys.stderr.flush()
     
     cdef double[::1,:] equilibrium_matrix  # Fortran ordering required by call into lapack
     cdef double[::1] equilibrium_soln

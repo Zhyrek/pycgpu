@@ -317,12 +317,12 @@ cdef void fill_equilibrium_system(double[::1,:] equilibrium_matrix, double[::1] 
     cdef int num_fixed_phases = spec.fixed_stable_compset_indices.shape[0]
     cdef int num_fixed_mole_fraction_conditions = spec.prescribed_mole_fraction_rhs.shape[0]
     cdef double prefactor
-    cdef bint debug_enabled = False  # Debug controlled globally via debug_output.py
+    # Use global DEBUG_MODE instead
 
     # SEGMENT 28: FILL EQUILIBRIUM SYSTEM - PHASE ROWS
     debug_log(28, f"Fill equilibrium system - phase rows (iteration {state.iteration})")
-    debug_log(f"  num_stable_phases: {num_stable_phases}", debug_enabled)
-    debug_log(f"  num_fixed_phases: {num_fixed_phases}", debug_enabled)
+    debug_log(f"  num_stable_phases: {num_stable_phases}", DEBUG_MODE)
+    debug_log(f"  num_fixed_phases: {num_fixed_phases}", DEBUG_MODE)
 
     for stable_idx in range(state.free_stable_compset_indices.shape[0]):
         idx = state.free_stable_compset_indices[stable_idx]
@@ -341,7 +341,7 @@ cdef void fill_equilibrium_system(double[::1,:] equilibrium_matrix, double[::1] 
             # print(f"[CPU] Phase {stable_idx} masses: {np.asarray(csst.masses)}")
             # print(f"[CPU] Phase {stable_idx} equilibrium_rhs before: {equilibrium_rhs[stable_idx]:.15e}")
             
-        debug_log(f"  phase_row_{stable_idx}_rhs: {equilibrium_rhs[stable_idx]:.15e}", debug_enabled)
+        debug_log(f"  phase_row_{stable_idx}_rhs: {equilibrium_rhs[stable_idx]:.15e}", DEBUG_MODE)
 
     # Handle phases which are fixed to be stable at some amount
     # Example shown in Eq. 60, Sundman et al 2015
@@ -356,7 +356,7 @@ cdef void fill_equilibrium_system(double[::1,:] equilibrium_matrix, double[::1] 
 
     # SEGMENT 29: FILL EQUILIBRIUM SYSTEM - CONSTRAINT ROWS
     debug_log(29, f"Fill equilibrium system - constraint rows (iteration {state.iteration})")
-    debug_log(f"  num_fixed_mole_fraction_conditions: {num_fixed_mole_fraction_conditions}", debug_enabled)
+    debug_log(f"  num_fixed_mole_fraction_conditions: {num_fixed_mole_fraction_conditions}", DEBUG_MODE)
     
     # DEBUG: Always print to check if mole fraction constraints are being filled
     import sys
@@ -431,7 +431,7 @@ cdef void fill_equilibrium_system(double[::1,:] equilibrium_matrix, double[::1] 
     debug_log(30, f"Fill equilibrium system - residuals (iteration {state.iteration})")
     
     # Show first few residuals for debugging
-    debug_log(f"  equilibrium_rhs[0:3]: {equilibrium_rhs[0]:.15e}, {equilibrium_rhs[1]:.15e}, {equilibrium_rhs[2]:.15e}", debug_enabled)
+    debug_log(f"  equilibrium_rhs[0:3]: {equilibrium_rhs[0]:.15e}, {equilibrium_rhs[1]:.15e}, {equilibrium_rhs[2]:.15e}", DEBUG_MODE)
     
     # Add mass residual to fixed component row RHS, plus N=1 row
     component_row_offset = num_stable_phases + num_fixed_phases
@@ -439,7 +439,7 @@ cdef void fill_equilibrium_system(double[::1,:] equilibrium_matrix, double[::1] 
     for fixed_molefrac_cond_idx in range(num_fixed_mole_fraction_conditions):
         component_residual = np.dot(spec.prescribed_mole_fraction_coefficients[fixed_molefrac_cond_idx, :], state.mole_fractions) - spec.prescribed_mole_fraction_rhs[fixed_molefrac_cond_idx]
         equilibrium_rhs[component_row_offset + fixed_molefrac_cond_idx] -= component_residual
-        debug_log(f"  constraint_{fixed_molefrac_cond_idx}_residual: {component_residual:.15e}", debug_enabled)
+        debug_log(f"  constraint_{fixed_molefrac_cond_idx}_residual: {component_residual:.15e}", DEBUG_MODE)
         # DEBUG: Print mole fraction constraint RHS
         if state.iteration < 3:
             pass
@@ -450,8 +450,8 @@ cdef void fill_equilibrium_system(double[::1,:] equilibrium_matrix, double[::1] 
     system_residual = state.system_amount - spec.prescribed_system_amount
     equilibrium_rhs[system_amount_index] -= system_residual
     
-    debug_log(f"  system_amount_residual: {system_residual:.15e}", debug_enabled)
-    debug_log(f"  mass_residual: {state.mass_residual:.15e}", debug_enabled)
+    debug_log(f"  system_amount_residual: {system_residual:.15e}", DEBUG_MODE)
+    debug_log(f"  mass_residual: {state.mass_residual:.15e}", DEBUG_MODE)
 
 
 cdef class SystemSpecification:
@@ -496,7 +496,7 @@ cdef class SystemSpecification:
 
     cpdef bint check_convergence(self, SystemState state):
         from pycalphad.core.debug_output import debug_log
-        cdef bint debug_enabled = False  # Debug controlled globally via debug_output.py
+        # Use global DEBUG_MODE instead
         
         # SEGMENT 35: CHECK CONVERGENCE
         debug_log(35, f"Check convergence (iteration {state.iteration})")
@@ -506,11 +506,11 @@ cdef class SystemSpecification:
         cdef double ALLOWED_DELTA_PHASE_AMT = 1e-10
         cdef double ALLOWED_DELTA_STATEVAR = 1e-5  # changes defined as percent change
         
-        debug_log(f"  largest_phase_amt_change: {state.largest_phase_amt_change[0]:.15e}", debug_enabled)
-        debug_log(f"  largest_y_change: {state.largest_y_change[0]:.15e}", debug_enabled)
-        debug_log(f"  largest_statevar_change: {state.largest_statevar_change[0]:.15e}", debug_enabled)
-        debug_log(f"  mass_residual: {state.mass_residual:.15e}", debug_enabled)
-        debug_log(f"  iterations_since_last_phase_change: {state.iterations_since_last_phase_change}", debug_enabled)
+        debug_log(f"  largest_phase_amt_change: {state.largest_phase_amt_change[0]:.15e}", DEBUG_MODE)
+        debug_log(f"  largest_y_change: {state.largest_y_change[0]:.15e}", DEBUG_MODE)
+        debug_log(f"  largest_statevar_change: {state.largest_statevar_change[0]:.15e}", DEBUG_MODE)
+        debug_log(f"  mass_residual: {state.mass_residual:.15e}", DEBUG_MODE)
+        debug_log(f"  iterations_since_last_phase_change: {state.iterations_since_last_phase_change}", DEBUG_MODE)
         
         cdef bint solution_is_feasible = (
             (state.largest_phase_amt_change[0] < ALLOWED_DELTA_PHASE_AMT) and
@@ -519,13 +519,13 @@ cdef class SystemSpecification:
             (state.mass_residual < self.ALLOWED_MASS_RESIDUAL)
         )
         
-        debug_log(f"  solution_is_feasible: {solution_is_feasible}", debug_enabled)
+        debug_log(f"  solution_is_feasible: {solution_is_feasible}", DEBUG_MODE)
         
         if solution_is_feasible and (state.iterations_since_last_phase_change >= 5):
-            debug_log(f"  converged: True", debug_enabled)
+            debug_log(f"  converged: True", DEBUG_MODE)
             return True
         else:
-            debug_log(f"  converged: False", debug_enabled)
+            debug_log(f"  converged: False", DEBUG_MODE)
             return False
 
     cpdef bint pre_solve_hook(self, SystemState state):
@@ -615,6 +615,7 @@ cdef class SystemSpecification:
                     # print(f"[CPU DEBUG]     NP={compset.NP:.6f}")
                     # print(f"[CPU DEBUG]     dof={np.array(state.dof[idx])}")
             elif False:  # disabled
+                pass
                 # print(f"[CPU DEBUG] Equilibrium solution: {np.array(eq_soln)}")
             
             # SEGMENT 33: POST SOLVE HOOK
@@ -636,6 +637,7 @@ cdef class SystemSpecification:
                 phases_changed = phases_changed or change_phases(self, state)
                 if phases_changed:
                     # print(f"[CPU DEBUG] Phases changed at iteration {iteration}: num_phases={len(state.free_stable_compset_indices)}")
+                    pass
                 if phases_changed:
                     # TODO: this preserves old logic about phase changes, but should we
                     # reset the counter `if phases_changed and not converged` -
@@ -919,8 +921,8 @@ cdef class SystemState:
             
             for comp_idx in range(num_components):
                 compset.phase_record.formulamole_grad(csst.mass_jac[comp_idx, :], x, comp_idx)
-            if DEBUG_MODE and state.iteration < 3:
-                printf("[CPU FORMULAHESS INPUT] Phase %d iteration %d, DOF: ", idx, state.iteration);
+            if DEBUG_MODE and self.iteration < 3:
+                printf("[CPU FORMULAHESS INPUT] Phase %d iteration %d, DOF: ", idx, <int>self.iteration);
                 for i in range(5):
                     printf("%.15e ", x[i])
                 printf("\n")
@@ -1236,8 +1238,7 @@ cpdef solve_state(SystemSpecification spec, SystemState state):
     
     # DEBUG: Log state before recompute (CPU minimizer)
     # Note: verbose flag not directly available here, but we can check if state has debug attributes
-    cdef bint debug_enabled = False  # Debug controlled globally via debug_output.py
-    # if debug_enabled:
+    if DEBUG_MODE:
         print(f"\n--- CPU Minimizer solve_state start ---")
         print(f"Previous chemical potentials: {np.array(state.previous_chemical_potentials)}")
         print(f"Current chemical potentials: {np.array(state.chemical_potentials)}")
@@ -1254,7 +1255,7 @@ cpdef solve_state(SystemSpecification spec, SystemState state):
     # System constructed
     
     # DEBUG: Log equilibrium system details
-    # if debug_enabled:
+    if DEBUG_MODE:
         print(f"Equilibrium matrix shape: {equilibrium_matrix.shape}")
         print(f"Matrix condition number estimate: {np.linalg.cond(np.array(equilibrium_matrix)) if equilibrium_matrix.shape[0] < 100 else 'skipped (large matrix)'}")
 
@@ -1276,18 +1277,18 @@ cpdef solve_state(SystemSpecification spec, SystemState state):
     for i in range(spec.free_chemical_potential_indices.shape[0]):
         chempot_idx = spec.free_chemical_potential_indices[i]
         state.chemical_potentials[chempot_idx] = equilibrium_soln[i]
-        debug_log(f"  free_mu_{chempot_idx}: {equilibrium_soln[i]:.15e}", debug_enabled)
+        debug_log(f"  free_mu_{chempot_idx}: {equilibrium_soln[i]:.15e}", DEBUG_MODE)
 
     # Force some chemical potentials to adopt their fixed values
     for chempot_idx in range(spec.fixed_chemical_potential_indices.shape[0]):
         comp_idx = spec.fixed_chemical_potential_indices[chempot_idx]
         state.chemical_potentials[comp_idx] = spec.initial_chemical_potentials[comp_idx]
-        debug_log(f"  fixed_mu_{comp_idx}: {spec.initial_chemical_potentials[comp_idx]:.15e}", debug_enabled)
+        debug_log(f"  fixed_mu_{comp_idx}: {spec.initial_chemical_potentials[comp_idx]:.15e}", DEBUG_MODE)
     
-    debug_log(f"  final_chemical_potentials: {np.array(state.chemical_potentials)}", debug_enabled)
+    debug_log(f"  final_chemical_potentials: {np.array(state.chemical_potentials)}", DEBUG_MODE)
     
     # DEBUG: Log updated chemical potentials
-    # if debug_enabled:
+    if DEBUG_MODE:
         print(f"Updated chemical potentials: {np.array(state.chemical_potentials)}")
 
     state.largest_chemical_potential_difference = -np.inf
@@ -1295,7 +1296,7 @@ cpdef solve_state(SystemSpecification spec, SystemState state):
         state.largest_chemical_potential_difference = max(state.largest_chemical_potential_difference, abs(state.chemical_potentials[comp_idx] - state.previous_chemical_potentials[comp_idx]))
 
     # DEBUG: Log convergence metrics
-    # if debug_enabled:
+    if DEBUG_MODE:
         print(f"Largest chemical potential change: {state.largest_chemical_potential_difference:.6e}")
         print(f"Mass residual: {state.mass_residual:.6e}")
         print(f"--- CPU Minimizer solve_state end ---\n")
@@ -1321,12 +1322,12 @@ cpdef advance_state(SystemSpecification spec, SystemState state, double[::1] equ
     cdef double MIN_PHASE_AMOUNT = 1e-16
     
     # DEBUG: Log advance_state start
-    cdef bint debug_enabled = False  # Debug controlled globally via debug_output.py
+    # Use global DEBUG_MODE instead
     
     debug_log(f"  initial_step_size: {step_size:.15e}", True)
     debug_log(f"  equilibrium_soln_norm: {np.linalg.norm(np.array(equilibrium_soln)):.15e}", True)
     
-    # if debug_enabled:
+    if DEBUG_MODE:
         print(f"\n--- CPU Minimizer advance_state start ---")
         print(f"Initial step size: {step_size:.6e}")
         for i, compset in enumerate(state.compsets):
@@ -1359,7 +1360,7 @@ cpdef advance_state(SystemSpecification spec, SystemState state, double[::1] equ
         
         # DEBUG: Log phase amount changes
         # if debug_enabled and abs(old_amt - state.phase_amt[compset_idx]) > 1e-12:
-            print(f"Phase amount change {compset_idx}: {old_amt:.6e} -> {state.phase_amt[compset_idx]:.6e} (delta: {state.phase_amt[compset_idx] - old_amt:.6e})")
+        #     print(f"Phase amount change {compset_idx}: {old_amt:.6e} -> {state.phase_amt[compset_idx]:.6e} (delta: {state.phase_amt[compset_idx] - old_amt:.6e})")
     soln_index_offset += state.free_stable_compset_indices.shape[0]
     
     # DEBUG: Check total phase amounts after update
@@ -1452,14 +1453,14 @@ cpdef advance_state(SystemSpecification spec, SystemState state, double[::1] equ
         
         # DEBUG: Log site fraction changes
         # if debug_enabled and state.largest_y_change[0] > 1e-12:
-            print(f"Phase {idx} largest site fraction change: {state.largest_y_change[0]:.6e}")
+        #     print(f"Phase {idx} largest site fraction change: {state.largest_y_change[0]:.6e}")
     
     # DEBUG: Log advance_state end
     debug_log(f"  final_largest_phase_amt_change: {state.largest_phase_amt_change[0]:.15e}", True)
     debug_log(f"  final_largest_y_change: {state.largest_y_change[0]:.15e}", True)  
     debug_log(f"  final_largest_statevar_change: {state.largest_statevar_change[0]:.15e}", True)
     
-    # if debug_enabled:
+    if DEBUG_MODE:
         print(f"Final largest phase amount change: {state.largest_phase_amt_change[0]:.6e}")
         print(f"Final largest y change: {state.largest_y_change[0]:.6e}")
         print(f"Final largest statevar change: {state.largest_statevar_change[0]:.6e}")
@@ -1477,7 +1478,7 @@ cdef bint remove_and_consolidate_phases(SystemSpecification spec, SystemState st
     cdef bint phases_changed = False
     cdef double composition_difference
     cdef double COMPSET_CONSOLIDATE_DISTANCE = 1e-4
-    cdef bint debug_enabled = False  # Debug controlled globally via debug_output.py
+    # Use global DEBUG_MODE instead
 
     # SEGMENT 34: REMOVE AND CONSOLIDATE PHASES
     debug_log(34, f"Remove and consolidate phases (iteration {state.iteration})")
@@ -1547,7 +1548,7 @@ cdef bint remove_and_consolidate_phases(SystemSpecification spec, SystemState st
 
 cdef bint change_phases(SystemSpecification spec, SystemState state):
     from pycalphad.core.debug_output import debug_log
-    cdef bint debug_enabled = False  # Debug controlled globally via debug_output.py
+    # Use global DEBUG_MODE instead
     
     # SEGMENT 36: CHANGE PHASES  
     debug_log(36, f"Change phases (iteration {state.iteration})")

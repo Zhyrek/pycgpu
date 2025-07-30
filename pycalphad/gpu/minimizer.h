@@ -2755,6 +2755,7 @@ __device__ bool remove_and_consolidate_phases(SystemSpecification* spec, SystemS
             }
             
             // Debug: Log consolidation check
+            #ifdef VERBOSE_DEBUG
             if (thread_id == 0 && state->iteration < 5) {
                 printf("  Checking phases %d and %d for consolidation:\n", idx1, idx2);
                 printf("    Max composition diff: %.6f (threshold: %.6f)\n", max_diff, COMPSET_CONSOLIDATE_DISTANCE);
@@ -2775,10 +2776,12 @@ __device__ bool remove_and_consolidate_phases(SystemSpecification* spec, SystemS
                            idx2, cs2->dof[3], cs2->dof[4]);
                 }
             }
+            #endif
             
             if (should_consolidate) {
                 
                 // DEBUG: Site fractions at consolidation moment
+                #ifdef VERBOSE_DEBUG
                 if (thread_id == 0 && state->iteration < 2) {
                     CompositionSet* cs1 = &state->compsets[idx1];
                     CompositionSet* cs2 = &state->compsets[idx2];
@@ -2787,6 +2790,7 @@ __device__ bool remove_and_consolidate_phases(SystemSpecification* spec, SystemS
                     printf("[AT CONSOLIDATION] Phase %d Y=[%.15e, %.15e], amt=%.15e\n",
                            idx2, cs2->dof[3], cs2->dof[4], state->phase_amt[idx2]);
                 }
+                #endif
                 if (num_to_remove < MAX_PHASES) compset_indices_to_remove_temp[num_to_remove++] = idx2;
                 
                 // CRITICAL FIX: Match CPU behavior - add phase amounts but account for normalization

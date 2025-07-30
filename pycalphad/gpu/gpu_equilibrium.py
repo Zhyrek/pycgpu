@@ -627,7 +627,8 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
         
         # FIX: For immiscibility gaps, we need to store which phase model to use,
         # but phases should be stored contiguously, not by model index
-        print(f"[GPU DEBUG] About to process {len(active_phases[:max_phases_per_condition])} active phases for condition {cond_idx}")
+        if wks_obj.verbose and cond_idx < 2:
+            print(f"[GPU DEBUG] About to process {len(active_phases[:max_phases_per_condition])} active phases for condition {cond_idx}")
         for i, (orig_phase_idx, phase_name, model_idx) in enumerate(active_phases[:max_phases_per_condition]):
             # Store the model index for this phase instance (can be duplicated for miscibility gaps)
             initial_phase_data_arrays['phase_indices'][cond_idx, i] = model_idx
@@ -642,28 +643,32 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
             
             # CRITICAL FIX: Normalize phase amounts for multi-sublattice phases by site ratio sum
             # This matches the CPU normalization in eqsolver.pyx lines 534-536
-            if cond_idx < 2:
+            if cond_idx < 2 and wks_obj.verbose:
                 print(f"[GPU DEBUG] Processing phase {phase_name} (cond_idx={cond_idx}, i={i}): np_amount={np_amount:.6f}")
             try:
                 phase_record = wks_obj.phase_record_factory[phase_name]
-                if cond_idx < 2:
+                if cond_idx < 2 and wks_obj.verbose:
                     print(f"[GPU DEBUG] Found phase record for {phase_name}, has site_ratios: {hasattr(phase_record, 'site_ratios')}")
                     if phase_name == 'ALCU_ZETA':
                         print(f"[GPU DEBUG] ALCU_ZETA phase_dof: {phase_record.phase_dof}")
                         # Try to get site ratios from workspace models
                         try:
                             model = wks_obj.models[phase_name]
-                            print(f"[GPU DEBUG] ALCU_ZETA model found, has site_ratios: {hasattr(model, 'site_ratios')}")
+                            if wks_obj.verbose:
+                                print(f"[GPU DEBUG] ALCU_ZETA model found, has site_ratios: {hasattr(model, 'site_ratios')}")
                             if hasattr(model, 'site_ratios'):
                                 site_ratios = model.site_ratios
-                                print(f"[GPU DEBUG] ALCU_ZETA model site_ratios: {site_ratios}")
+                                if wks_obj.verbose:
+                                    print(f"[GPU DEBUG] ALCU_ZETA model site_ratios: {site_ratios}")
                             # Try to get from dbf phase
                             if hasattr(model, '_phase') and hasattr(model._phase, 'sublattices'):
                                 sublattices = model._phase.sublattices
                                 site_ratios = [float(subl.site_ratio) for subl in sublattices]
-                                print(f"[GPU DEBUG] ALCU_ZETA sublattice site_ratios: {site_ratios}, sum: {sum(site_ratios)}")
+                                if wks_obj.verbose:
+                                    print(f"[GPU DEBUG] ALCU_ZETA sublattice site_ratios: {site_ratios}, sum: {sum(site_ratios)}")
                         except Exception as e:
-                            print(f"[GPU DEBUG] Error getting ALCU_ZETA model info: {e}")
+                            if wks_obj.verbose:
+                                print(f"[GPU DEBUG] Error getting ALCU_ZETA model info: {e}")
                 # Try to get site ratios - first from phase record, then from model
                 site_ratios = None
                 if hasattr(phase_record, 'site_ratios') and len(phase_record.site_ratios) > 1:

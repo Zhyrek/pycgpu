@@ -3744,8 +3744,10 @@ __device__ void solve_equilibrium_at_condition_global_mem(
         if (thread_id == 0) {{
             for (int j = 0; j < current_sys_state.num_compsets; ++j) {{
                 if (current_sys_state.compsets[j].phase_record == cs->phase_record) {{
+                    #ifdef VERBOSE_DEBUG
                     printf("WARNING: GPU found duplicate phase type (immiscibility gap). GPU results may be incorrect.\\n");
                     printf("  Phase %d and %d both use pr_idx=%d\\n", j, current_sys_state.num_compsets, pr_idx);
+                    #endif
                     break;
                 }}
             }}

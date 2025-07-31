@@ -806,13 +806,7 @@ typedef struct SystemState {
             }
             
             // Safety check
-            if (phase_sum_moles_atoms_per_formula < 1e-12) {
-                phase_sum_moles_atoms_per_formula = 1.0; // Safe fallback
-                #ifdef VERBOSE_DEBUG
-                printf("[GPU WARNING] Phase %d: phase_comp_sum too small (%.15e), using fallback 1.0\n", 
-                       idx, phase_sum_moles_atoms_per_formula);
-                #endif
-            }
+            // CPU doesn't have a fallback here - let it be what it is
 
             // Call compset update. NP is moles of formula units.
             // CRITICAL: Match CPU algorithm - multiply phase_amt by phase_sum_moles_atoms_per_formula
@@ -830,9 +824,7 @@ typedef struct SystemState {
             #endif
             
             // Additional safety check for update amount
-            if (update_amount < 1e-15 || update_amount > 1e6) {
-                update_amount = phase_amt[idx]; // Fallback to original amount
-            }
+            // CPU doesn't check update_amount bounds
             // CRITICAL FIX: Pass the actual workspace DOF to update, not the model DOF
             // The update function expects workspace state variables, not model state variables
             compset->update(&compset->dof[spec->num_statevars], update_amount, compset->dof, spec->num_statevars);
@@ -2766,17 +2758,8 @@ __device__ bool remove_and_consolidate_phases(SystemSpecification* spec, SystemS
                 double old_amt1 = state->phase_amt[idx1];
                 double old_amt2 = state->phase_amt[idx2];
                 
-                if (moles_norm1 < 1e-12 || moles_norm2 < 1e-12) {
-                    // Fallback - just add the phase amounts directly
-                    state->phase_amt[idx1] = fmax(state->phase_amt[idx1] + state->phase_amt[idx2], 1e-8);
-                    #ifdef VERBOSE_DEBUG
-                    if (thread_id == 0) {
-                        printf("[GPU CONSOLIDATION] Using direct addition due to zero moles_norm\n");
-                        printf("  Phase amounts: phase %d = %.15e + phase %d = %.15e -> %.15e\n",
-                               idx1, old_amt1, idx2, old_amt2, state->phase_amt[idx1]);
-                    }
-                    #endif
-                } else {
+                // No fallback - CPU doesn't check for zero moles_norm
+                {
                     // Convert phase amounts from formula units to moles
                     double moles1 = state->phase_amt[idx1] * moles_norm1;
                     double moles2 = state->phase_amt[idx2] * moles_norm2;

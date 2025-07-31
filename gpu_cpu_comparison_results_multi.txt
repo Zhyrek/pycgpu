@@ -48,4 +48,4 @@ X(TI)	T(K)	CPU_GM	GPU_GM	GM_DIFF	CPU_MU_NB	CPU_MU_TI	GPU_MU_NB	GPU_MU_TI	MU_NB_D
 # CPU time: 0.4 seconds
 # GPU time: 0.7 seconds
 # Speedup: 0.6x
-# Total time: 1.0 seconds
+# Total time: 1.1 seconds

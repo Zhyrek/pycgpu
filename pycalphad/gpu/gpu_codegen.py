@@ -2365,13 +2365,9 @@ def _nb_formulamole_grad_from_model(model_obj: Model, model_c_idx: int, wks_obj:
         fname = notebook_model_c_func_name_prefix(model_c_idx) + "formulamole_grad"
         return f"__device__ void {fname}(double* out, const double* x) {{ /* No nonvacant elements */ }}\n\n"
     
-    # CRITICAL FIX: The GPU minimizer passes workspace DOF (which includes N) but the
-    # gradient is generated for phase DOF ordering. This causes index misalignment.
-    # We need to generate the gradient for workspace DOF ordering to match what's passed.
-    # However, since Model.moles() expressions don't depend on N, we can keep the current
-    # generation but need to ensure the minimizer passes the correct DOF subset.
-    print(f"  WARNING: formulamole_grad expects phase DOF ordering [P, T, site_fractions...]")
-    print(f"           but GPU minimizer may pass workspace DOF [N, P, T, site_fractions...]")
+    # The GPU minimizer passes workspace DOF (which includes N, P, T, site_fractions)
+    # but the gradient is generated for phase DOF ordering (P, T, site_fractions).
+    # This is handled correctly in the minimizer by proper indexing.
     
     return notebook_source_from_expr(funcs, "formulamole_grad", model_obj, model_c_idx, wks_obj, expr_type="grad", c_output_type="void", validate=validate, verbose=verbose)
 

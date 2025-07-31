@@ -536,36 +536,7 @@ typedef struct SystemState {
         printf("[GPU MASS BALANCE] recompute() - iteration %d: sum(phase_amt) = %.15e\n", iteration, phase_amt_sum);
         #endif
         
-        // CRITICAL FIX: If this is the first recompute and phase amounts aren't normalized, fix them
-        if (iteration == 0 && phase_amt_sum > 0.9 && phase_amt_sum < 1.1) {
-            #ifdef VERBOSE_DEBUG
-            printf("[GPU FIX] Normalizing phase amounts in recompute (init normalization failed)\n");
-            #endif
-            
-            // Normalize each phase by its phase_comp_sum
-            for (int idx = 0; idx < num_compsets; ++idx) {
-                double comp_sum = 0.0;
-                for (int comp_idx = 0; comp_idx < spec->num_components; comp_idx++) {
-                    comp_sum += phase_compositions[idx * MAX_COMPONENTS + comp_idx];
-                }
-                
-                if (comp_sum > 1.5) { // Multi-sublattice phase like ALCU_ZETA
-                    #ifdef VERBOSE_DEBUG
-                    printf("[GPU FIX] Phase %d: normalizing by %.2f (multi-sublattice)\n", idx, comp_sum);
-                    #endif
-                    phase_amt[idx] /= comp_sum;
-                }
-            }
-            
-            // Recalculate sum after normalization
-            phase_amt_sum = 0.0;
-            for (int idx = 0; idx < num_compsets; ++idx) {
-                phase_amt_sum += phase_amt[idx];
-            }
-            #ifdef VERBOSE_DEBUG
-            printf("[GPU FIX] After normalization: sum(phase_amt) = %.15e\n", phase_amt_sum);
-            #endif
-        }
+        // REMOVED: Extraneous normalization not present in CPU code
         
 
         for (int idx = 0; idx < num_compsets; ++idx) {

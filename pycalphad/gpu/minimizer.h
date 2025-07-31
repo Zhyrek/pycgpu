@@ -1051,28 +1051,8 @@ typedef struct SystemState {
         #endif
 
                 // Completed formulahess
-            } else {
-                #ifdef VERBOSE_DEBUG
-                if (thread_id == 0 && iteration == 0) {
-                    printf("[GPU HESSIAN] Phase %d has NO Hessian function - using identity matrix\n", idx);
-                }
-                #endif
-                // CRITICAL FIX: Use identity matrix when Hessian is not available
-                // This allows the solver to make progress using gradient descent
-                // Zero out the entire hessian array first
-                for (int i = 0; i < csst->hess_rows * csst->hess_cols; ++i) {
-                    csst->hess[i] = 0.0;
-                }
-                // Set diagonal elements for site fraction block to 1.0
-                // CRITICAL: Use spec->num_statevars not pr->num_statevars!
-                // compute_phase_matrix expects hess[spec->num_statevars+i][spec->num_statevars+j]
-                for (int i = 0; i < pr->phase_dof; ++i) {
-                    // hess[spec->num_statevars+i][spec->num_statevars+i] = 1.0
-                    int row = spec->num_statevars + i;
-                    int col = spec->num_statevars + i;
-                    csst->hess[row * csst->hess_cols + col] = 1.0;
-                }
             }
+            // CPU doesn't have a fallback for missing Hessian
             
             // Removed debug prints for formulagrad to debug alignment issue
             
@@ -3102,13 +3082,7 @@ __device__ void invert_matrix(double* matrix, int dim, double* U, double* V,
     int svd_result = Singular_Value_Decomposition(work, dim, dim, U, singular_values, V, superdiag);
     
     if (svd_result != 0) {
-        // SVD failed, set matrix to identity (fallback)
-        for (int i = 0; i < dim * dim; ++i) {
-            matrix[i] = 0.0;
-        }
-        for (int i = 0; i < dim; ++i) {
-            matrix[i * dim + i] = 1.0;
-        }
+        // SVD failed - CPU doesn't have a fallback
         return;
     }
     
@@ -3147,10 +3121,7 @@ __device__ void lstsq(double* A, int nrows, int ncols, double* b, double toleran
     int svd_result = Singular_Value_Decomposition(A, nrows, ncols, U, singular_values, V, superdiag);
     
     if (svd_result != 0) {
-        // SVD failed, set solution to zero (fallback)
-        for (int i = 0; i < ncols; ++i) {
-            b[i] = 0.0;
-        }
+        // SVD failed - CPU doesn't have a fallback
         return;
     }
     

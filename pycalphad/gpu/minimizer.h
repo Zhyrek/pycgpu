@@ -1427,7 +1427,6 @@ typedef struct SystemState {
             if (idx >= num_out_df_max_cap) continue;
             CompositionSet* compset = &compsets[idx];
             if (compset->phase_record == nullptr) {
-                out_driving_forces[idx] = -1e30; // Error or invalid phase
                 continue;
             }
             const PhaseRecord* pr = compset->phase_record;

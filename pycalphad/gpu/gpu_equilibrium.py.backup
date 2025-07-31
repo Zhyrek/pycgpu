@@ -1819,6 +1819,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         if hasattr(cpu_style_properties, 'NP'):
             print(f"[GPU DEBUG] Starting NP shape: {cpu_style_properties.NP.shape}")
 
+    # Remove GPU-specific code generation debug - no CPU equivalent
     
     # 1. Generate C code for phase models with validation
     try:
@@ -1826,6 +1827,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             _generate_c_code_for_phase_models(wks_obj, include_hess=True, validate=validate_code)
         num_unique_models_for_gpu = len(unique_py_models)
         
+        # Remove GPU-specific debug - no CPU equivalent
     except Exception as e:
         if "CodeValidationError" in str(type(e)):
             if verbose:
@@ -1844,6 +1846,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     if verbose:
         print(f"[GPU] Generated C code for {num_unique_models_for_gpu} unique phase models.")
 
+    # Remove GPU-only debug - no CPU equivalent
     
     # 2. Assemble full GPU source and compile kernel (with caching)
     # Include dynamic sizes in cache key since they affect compilation
@@ -1852,6 +1855,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     cache_key_input = model_funcs_c + str(num_unique_models_for_gpu) + str(sorted(dynamic_sizes.items())) + "_HESSIAN_FIX_V2" + ("_VERBOSE" if verbose else "")
     cache_key = hashlib.md5(cache_key_input.encode()).hexdigest()
 
+    # Remove GPU-only debug - no CPU equivalent
 
     if cache_key not in _gpu_module_cache:
         if verbose:
@@ -1929,7 +1933,69 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             except:
                 pass
         raise
+    
+    # Test the GPU setup with a simple kernel first
+    try:
+        test_kernel = module.get_function("test_kernel")
+        test_input = cp.arange(10, dtype=cp.float64)
+        test_output = cp.zeros(10, dtype=cp.float64)
+        test_kernel((1,), (10,), (test_output.data.ptr, test_input.data.ptr, 10))
+        cp.cuda.runtime.deviceSynchronize()
+        test_result = cp.asnumpy(test_output)
+        expected = np.arange(10) * 2.0 + 1.0
+        if not np.allclose(test_result, expected):
+            if verbose:
+                print(f"[GPU] ✗ Test kernel failed! Expected {expected}, got {test_result}")
+    except Exception as e:
+        if verbose:
+            print(f"[GPU] Test kernel failed: {e}")
+    
+    # Test kernel argument passing with a struct-like test
+    if verbose:
+        print("\n[GPU] DEBUG: Testing struct-like argument passing...")
+    try:
+        if verbose:
+            print("[GPU] DEBUG: Getting test_struct_kernel function...")
+        test_struct_kernel = module.get_function("test_struct_kernel")
+        
+        # Create simple test data similar to our real kernel arguments
+        if verbose:
+            print("[GPU] DEBUG: Creating test struct data...")
+        test_data1 = cp.zeros(100, dtype=cp.uint8)  # Similar to our struct data
+        test_data2 = cp.zeros(200, dtype=cp.uint8)
+        test_output = cp.zeros(10, dtype=cp.float64)  # Output to check if kernel ran
+        test_data4 = cp.zeros(300, dtype=cp.uint8)
+        test_data5 = cp.zeros(400, dtype=cp.uint8)
+        
+        if verbose:
+            print("[GPU] DEBUG: Testing struct kernel with pointer arguments...")
+        test_struct_args = (
+            test_data1.data.ptr,
+            test_data2.data.ptr, 
+            test_output.data.ptr,
+            100,
+            test_data4.data.ptr,
+            test_data5.data.ptr
+        )
+        if verbose:
+            print(f"[GPU] DEBUG: Struct test args: {test_struct_args}")
+            print(f"[GPU] DEBUG: Struct test args types: {[type(arg) for arg in test_struct_args]}")
+        
+        # Try calling the test struct kernel
+        test_struct_kernel((1,), (1,), test_struct_args)
+        cp.cuda.runtime.deviceSynchronize()
+        
+        # Check if kernel executed by looking for magic number
+        result = cp.asnumpy(test_output)
+        if result[0] != 42.0:
+            if verbose:
+                print(f"[GPU] ✗ Struct test kernel failed. Expected 42.0, got {result[0]}")
+        
+    except Exception as e:
+        if verbose:
+            print(f"[GPU] Struct argument test failed: {e}")
 
+    # Remove GPU-specific numerical validation - no CPU equivalent numerical validation in this format
     
     # 3. Prepare data for GPU (pass dynamic sizes for proper array dimensioning)
     # Use properties from wks.eq to avoid duplicate calculations
@@ -2081,6 +2147,31 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             if verbose:
                 print(f"[GPU] DEBUG: After cp.asarray and flatten - GPU array shape: {initial_phase_data_gpu.shape}, dtype: {initial_phase_data_gpu.dtype}")
                 print(f"[GPU] DEBUG: GPU array sample values: [0]={float(initial_phase_data_gpu[0])}, [44]={float(initial_phase_data_gpu[44]) if len(initial_phase_data_gpu) > 44 else 'N/A'}")
+                
+                # MEMORY TRANSFER TEST: Create a simple test kernel to verify data transfer
+                test_kernel_code = '''
+                extern "C" __global__ void test_memory_transfer(const double* data, int size) {
+                    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+                    if (tid == 0) {
+                        printf("TEST KERNEL: Received data at %p\\n", data);
+                        printf("TEST KERNEL: First 10 values: ");
+                        for (int i = 0; i < 10 && i < size; ++i) {
+                            printf("[%d]=%.6f ", i, data[i]);
+                        }
+                        printf("\\n");
+                        printf("TEST KERNEL: Value at [44]: %.6f\\n", data[44]);
+                    }
+                }
+                '''
+                
+                try:
+                    test_module = cp.RawModule(code=test_kernel_code, backend='nvcc')
+                    test_kernel = test_module.get_function("test_memory_transfer")
+                    test_kernel((1,), (1,), (initial_phase_data_gpu.data.ptr, len(initial_phase_data_gpu)))
+                    cp.cuda.runtime.deviceSynchronize()
+                    print("[GPU] DEBUG: Memory transfer test completed")
+                except Exception as e:
+                    print(f"[GPU] DEBUG: Memory transfer test failed: {e}")
             results_gpu = cp.frombuffer(results_bytes, dtype=cp.uint8)
             
             # Ensure arrays are contiguous for proper pointer access
@@ -2191,6 +2282,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     if verbose:
         print(f"[GPU] Allocated {len(global_memory_arrays)} global memory arrays, total: {total_memory_mb:.1f} MB")
     
+    # Remove GPU-only debug - no CPU equivalent
     
     # 7. Launch kernel
     threads_per_block = 256
@@ -2347,6 +2439,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         )
     
     # Alternative: try passing arrays directly instead of pointers
+    # TODO: kernel_args_v2 and v3 also need global memory arrays added (similar to v1)
     if debug_enabled:
         kernel_args_v2 = (
             system_spec_gpu,                    # Pass array directly
@@ -2507,6 +2600,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                 print(f"[GPU] Debug processing failed: {debug_error}")
     
     # 7b. Transfer results back and process
+    # GPU-specific processing (no CPU equivalent, so no debug segment)
     
     try:
         # Process results from GPU execution

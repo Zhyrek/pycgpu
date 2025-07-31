@@ -2012,25 +2012,6 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             print(f"[GPU] DEBUG:   dtype: {initial_phase_data_struct.dtype}")
             print(f"[GPU] DEBUG:   BEFORE - first 45 values: {initial_phase_data_struct.flat[:45]}")
             
-            # Identify key values in the array
-            phase_amounts_found = []
-            chem_pots_found = []
-            num_phases_found = None
-            for i, val in enumerate(initial_phase_data_struct.flat[:45]):
-                if abs(val - 2.0) < 1e-10:  # num_phases = 2
-                    num_phases_found = (i, val)
-                elif abs(val - 0.17926814) < 1e-6:  # First phase amount
-                    phase_amounts_found.append((i, val, "phase_0"))
-                elif abs(val - 0.82073186) < 1e-6:  # Second phase amount  
-                    phase_amounts_found.append((i, val, "phase_1"))
-                elif abs(val + 25124.6722576) < 1e-3:  # Chemical potential
-                    chem_pots_found.append((i, val, "mu_0"))
-                elif abs(val + 19902.46889519) < 1e-3:  # Chemical potential
-                    chem_pots_found.append((i, val, "mu_1"))
-            
-            print(f"[GPU] DEBUG: BEFORE - phase_amounts: {phase_amounts_found}")
-            print(f"[GPU] DEBUG: BEFORE - chemical_potentials: {chem_pots_found}")
-            print(f"[GPU] DEBUG: BEFORE - num_phases: {num_phases_found}")
         
         initial_phase_data_bytes = initial_phase_data_struct.tobytes()
         results_bytes = results_flat.tobytes()  # Use flat array directly
@@ -2214,31 +2195,6 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                 condition_0_data = initial_phase_data_cpu.flat[:doubles_per_condition]
                 print(f"[GPU] DEBUG: AFTER - first 45 values: {condition_0_data}")
                 
-                # Identify key values in the received data 
-                phase_amounts_found = []
-                chem_pots_found = []
-                num_phases_found = None
-                for i, val in enumerate(condition_0_data):
-                    if abs(val - 2.0) < 1e-10:  # num_phases = 2
-                        num_phases_found = (i, val)
-                    elif abs(val - 0.17926814) < 1e-6:  # First phase amount
-                        phase_amounts_found.append((i, val, "phase_0"))
-                    elif abs(val - 0.82073186) < 1e-6:  # Second phase amount  
-                        phase_amounts_found.append((i, val, "phase_1"))
-                    elif abs(val + 25124.6722576) < 1e-3:  # Chemical potential
-                        chem_pots_found.append((i, val, "mu_0"))
-                    elif abs(val + 19902.46889519) < 1e-3:  # Chemical potential
-                        chem_pots_found.append((i, val, "mu_1"))
-                
-                print(f"[GPU] DEBUG: AFTER - phase_amounts: {phase_amounts_found}")
-                print(f"[GPU] DEBUG: AFTER - chemical_potentials: {chem_pots_found}")
-                print(f"[GPU] DEBUG: AFTER - num_phases: {num_phases_found}")
-                
-                # Compare with expected values
-                if len(phase_amounts_found) == 2 and len(chem_pots_found) == 2 and num_phases_found:
-                    print(f"[GPU] DEBUG: ✅ Data transfer SUCCESSFUL - all expected values found")
-                else:
-                    print(f"[GPU] DEBUG: ❌ Data transfer INCOMPLETE - missing some expected values")
             else:
                 print(f"[GPU] DEBUG: Array too small: {initial_phase_data_cpu.size} < {doubles_per_condition}")
                 
@@ -2482,18 +2438,6 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                         print(f"    num_free_chemical_potentials: {gm_vals[5] if len(gm_vals) > 5 else 'N/A'}")
                         print(f"    num_free_stable_compsets: {gm_vals[6] if len(gm_vals) > 6 else 'N/A'}")  
                         print(f"    num_free_statevars: {gm_vals[7] if len(gm_vals) > 7 else 'N/A'}")
-                        if len(gm_vals) > 8 and gm_vals[8] == 999.0:
-                            print(f"    ✓ Entered iteration loop")
-                        elif len(gm_vals) > 8:
-                            print(f"    ❌ Never entered iteration loop (marker: {gm_vals[8]})")
-                        if len(gm_vals) > 9 and gm_vals[9] == -100.0:
-                            print(f"    ❌ pre_solve_hook failed")
-                        if len(gm_vals) > 10:
-                            print(f"    eq_soln_len: {gm_vals[10]}")
-                        if len(gm_vals) > 11 and gm_vals[11] == -200.0:
-                            print(f"    ❌ eq_soln_len check failed")
-                        elif len(gm_vals) > 12 and gm_vals[12] == 888.0:
-                            print(f"    ✓ Passed eq_soln_len check")
                             
                 elif iteration_count[cond_idx] >= debug_step_count:
                     if verbose:

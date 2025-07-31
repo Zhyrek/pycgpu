@@ -419,18 +419,7 @@ typedef struct SystemState {
                     if (compset->phase_record->formulamole_obj != nullptr) {
                         
         compset->phase_record->formulamole_obj(formulamoles, compset->dof);
-                    } else {
-                        // Fallback: copy site fractions as formulamoles
-                        for (int i = 0; i < spec->num_components && i < compset->phase_record->phase_dof; ++i) {
-                            formulamoles[i] = compset->dof[spec->num_statevars + i];
-                        }
                     }
-                }
-            } else {
-                // If no formulamole_obj function, assume equal distribution
-                // This shouldn't happen but prevents crashes
-                for (int i = 0; i < spec->num_components; ++i) {
-                    formulamoles[i] = 1.0 / spec->num_components;
                 }
             }
             
@@ -576,11 +565,6 @@ typedef struct SystemState {
                     // With updated energy functions, use full workspace DOF
                     if (compset->phase_record->formulamole_obj != nullptr) {
                         compset->phase_record->formulamole_obj(formulamoles, compset->dof);
-                    } else {
-                        // Fallback: copy site fractions as formulamoles
-                        for (int i = 0; i < spec->num_components && i < compset->phase_record->phase_dof; ++i) {
-                            formulamoles[i] = compset->dof[spec->num_statevars + i];
-                        }
                     }
                     
                     // CRITICAL FIX: Calculate mass jacobians (missing from original GPU implementation)
@@ -653,11 +637,6 @@ typedef struct SystemState {
                         }
                         #endif
                     }
-                }
-            } else {
-                // If no formulamole_obj function, assume equal distribution
-                for (int i = 0; i < spec->num_components; ++i) {
-                    formulamoles[i] = 1.0 / spec->num_components;
                 }
             }
 

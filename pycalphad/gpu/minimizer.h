@@ -2903,49 +2903,6 @@ __device__ bool remove_and_consolidate_phases(SystemSpecification* spec, SystemS
             state->free_stable_compset_indices[i] = new_free_stable_indices[i];
         }
         
-        // CRITICAL FIX: When only one phase remains, reset its site fractions to match overall composition
-        // This ensures convergence to the same solution as CPU
-        if (new_count == 1 && spec->num_prescribed_mole_fraction_conditions > 0) {
-            int remaining_phase_idx = new_free_stable_indices[0];
-            CompositionSet* cs = &state->compsets[remaining_phase_idx];
-            
-            // Calculate site fractions that would give the prescribed mole fractions
-            // For a single sublattice binary system, the site fraction equals the mole fraction
-            // Y(TI) should equal X(TI) = prescribed_mole_fraction_rhs[0]
-            if (cs->phase_record->phase_dof == 2) {  // Binary single sublattice
-                // Assuming component ordering: [NB, TI, VA]
-                // and prescribed condition is X(TI) = prescribed_mole_fraction_rhs[0]
-                double target_x_ti = spec->prescribed_mole_fraction_rhs[0];
-                double target_x_nb = 1.0 - target_x_ti;  // Binary system
-                
-                // For BCC_A2 with single sublattice: Y(NB) + Y(TI) = 1
-                // and X(TI) = Y(TI), X(NB) = Y(NB)
-                cs->dof[spec->num_statevars + 0] = target_x_nb;  // Y(NB)
-                cs->dof[spec->num_statevars + 1] = target_x_ti;  // Y(TI)
-                
-                // CRITICAL: Update the composition set to recalculate energy with new site fractions
-                // This ensures the gradient and energy are consistent before the next iteration
-                cs->update(&cs->dof[spec->num_statevars], cs->NP, cs->dof, spec->num_statevars);
-                
-                // Update phase_compositions to reflect the new site fractions
-                // For single sublattice binary system, phase composition equals site fractions
-                state->phase_compositions[remaining_phase_idx * MAX_COMPONENTS + 0] = target_x_nb;  // X(NB)
-                state->phase_compositions[remaining_phase_idx * MAX_COMPONENTS + 1] = target_x_ti;  // X(TI)
-                
-                #ifdef VERBOSE_DEBUG
-                if (thread_id == 0) {
-                    printf("[GPU PHASE RESET] Single phase remaining - reset site fractions to match overall composition:\n");
-                    printf("  Phase %d: Y(NB)=%.15e, Y(TI)=%.15e (matching X(TI)=%.15e)\n",
-                           remaining_phase_idx, target_x_nb, target_x_ti, target_x_ti);
-                    printf("  Updated energy after reset: %.15e J/mol\n", cs->energy);
-                    printf("  Updated phase compositions: X(NB)=%.15e, X(TI)=%.15e\n", 
-                           state->phase_compositions[remaining_phase_idx * MAX_COMPONENTS + 0],
-                           state->phase_compositions[remaining_phase_idx * MAX_COMPONENTS + 1]);
-                }
-                #endif
-            }
-        }
-        
         // DEBUG: Print the updated free stable compsets
         #ifdef VERBOSE_DEBUG
         if (thread_id == 0) {

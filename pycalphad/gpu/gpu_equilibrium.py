@@ -1735,9 +1735,6 @@ def _process_gpu_results(results_cpu_flat: np.ndarray, wks_obj: Workspace,
         print("[GPU] Results processed into LightDataset.")
     return final_dataset
 
-
-
-
 def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=False, force_cpu=False):
     """
     Main GPU equilibrium calculation function - NO FALLBACK.

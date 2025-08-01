@@ -1801,9 +1801,9 @@ __device__ void write_row_fixed_mole_amount(double* out_row, double* out_rhs,
     int free_variable_column_offset = 0;
     int num_system_statevars = c_statevars_cols_cs;
     
-    // CRITICAL FIX: Normalize by moles_normalization to handle multi-sublattice phases correctly
-    // This ensures all phases contribute equally to the system amount constraint regardless of site ratios
-    double normalization_factor = (moles_normalization_cs > 1e-12) ? moles_normalization_cs : 1.0;
+    // FIX: CPU code does NOT normalize by moles_normalization (sum of site ratios)
+    // Setting normalization_factor to 1.0 to match CPU behavior
+    double normalization_factor = 1.0;
     
     // DEBUG: Print normalization factor for each phase
     #ifdef VERBOSE_DEBUG

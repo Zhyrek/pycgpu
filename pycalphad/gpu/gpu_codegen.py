@@ -4552,7 +4552,19 @@ __device__ void solve_equilibrium_at_condition_global_mem(
         {{
             // CRITICAL FIX: Normalize phase_amt to get mole fraction for GM calculation
             double phase_mole_fraction = current_sys_state.phase_amt[i] / sum_phase_amt;
-            final_gm_calc += phase_mole_fraction * current_sys_state.cs_states[i].energy;
+            
+            // CRITICAL FIX: Convert G (per formula unit) to GM (per mole of atoms)
+            // cs_states[i].energy contains G from formulaobj, but we need GM
+            // GM = G / (sum of site ratios) = G / (sum of moles in formula unit)
+            // The sum of moles in formula unit is the sum of phase_compositions for this phase
+            double moles_per_formula_unit = 0.0;
+            for (int c = 0; c < current_spec.num_components; ++c) {{
+                moles_per_formula_unit += current_sys_state.phase_compositions[i * MAX_COMPONENTS + c];
+            }}
+            if (moles_per_formula_unit < 1e-12) moles_per_formula_unit = 1.0;  // Avoid division by zero
+            
+            double gm_per_mole_atoms = current_sys_state.cs_states[i].energy / moles_per_formula_unit;
+            final_gm_calc += phase_mole_fraction * gm_per_mole_atoms;
             
             if (stable_phase_count < MAX_PHASES) {{
                 result->phase_ids[stable_phase_count] = -1;
@@ -5655,5 +5667,8 @@ __global__ void top_level_equilibrium_kernel(
 
     # Apply final cleanup to remove any spurious terms that slipped through
     full_source = _final_hessian_cleanup(full_source)
+    
+    # NOTE: We keep csst->energy = pr->formulaobj(compset->dof) because it's needed for final GM calculation
+    # The normalization issue is elsewhere
     
     return full_source

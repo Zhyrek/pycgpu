@@ -1,26 +1,28 @@
-#!/usr/bin/env python
-"""Check which phases are included by filter_phases."""
+#\!/usr/bin/env python
+"""
+Check available phases in AuBi database
+"""
 
-from pycalphad import Database
-from pycalphad.core.utils import filter_phases
+from pycalphad import Database, Model
 
 # Load database
-dbf = Database('NbTi.tdb')
-comps = ['NB', 'TI', 'VA']
+db = Database('/mnt/c/users/scott/Documents/pycalphad/AuBi-07Wan.tdb')
+components = ['AU', 'BI', 'VA']
 
-# Get all phases
-all_phases = filter_phases(dbf, comps)
-print(f"filter_phases returns: {all_phases}")
-
-# Compare with explicit list
-explicit_phases = ['BCC_A2', 'HCP_A3']
-print(f"Explicit phases: {explicit_phases}")
-
-# Show difference
-extra_phases = set(all_phases) - set(explicit_phases)
-if extra_phases:
-    print(f"\nExtra phases in filter_phases: {extra_phases}")
-    
-missing_phases = set(explicit_phases) - set(all_phases)
-if missing_phases:
-    print(f"\nMissing phases in filter_phases: {missing_phases}")
+print("Available phases in AuBi database:")
+for phase_name in sorted(db.phases.keys()):
+    print(f"\n{phase_name}:")
+    try:
+        mod = Model(db, components, phase_name)
+        print(f"  Site ratios: {mod.site_ratios}")
+        print(f"  Sum of site ratios: {sum(mod.site_ratios)}")
+        print(f"  Sublattices: {len(mod.site_ratios)}")
+        # Check if it has vacancy
+        has_vacancy = False
+        for const in db.phases[phase_name].constituents:
+            if any('VA' in str(species) for species in const):
+                has_vacancy = True
+                break
+        print(f"  Has vacancy: {has_vacancy}")
+    except Exception as e:
+        print(f"  Error: {e}")

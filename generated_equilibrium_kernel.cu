@@ -2278,7 +2278,7 @@ typedef struct SystemState {
             // The generated functions now expect workspace DOF format [N, P, T, Y1, Y2...]
             // CRITICAL FIX: Use pr->formulaobj() for equilibrium matrix (per formula unit, not per mole atoms)
             // This matches the CPU behavior where equilibrium matrix uses unnormalized energy values
-            csst->energy = pr->formulaobj(compset->dof);
+            csst->energy = 0.0;  // CRITICAL FIX: Match CPU behavior - energy not used in equilibrium matrix
             
             // Add numerical debug output for phase energy
             #ifdef VERBOSE_DEBUG
@@ -3245,9 +3245,9 @@ __device__ void write_row_fixed_mole_amount(double* out_row, double* out_rhs,
     int free_variable_column_offset = 0;
     int num_system_statevars = c_statevars_cols_cs;
     
-    // CRITICAL FIX: Normalize by moles_normalization to handle multi-sublattice phases correctly
-    // This ensures all phases contribute equally to the system amount constraint regardless of site ratios
-    double normalization_factor = (moles_normalization_cs > 1e-12) ? moles_normalization_cs : 1.0;
+    // FIX: CPU code does NOT normalize by moles_normalization (sum of site ratios)
+    // Setting normalization_factor to 1.0 to match CPU behavior
+    double normalization_factor = 1.0;
     
     // DEBUG: Print normalization factor for each phase
     #ifdef VERBOSE_DEBUG
@@ -5609,6 +5609,584 @@ __device__ void solve_equilibrium_at_condition(
 // --- Dynamically Generated __device__ Model Functions ---
 __device__ double pycgpu_model_0_obj(const double* x) {
     double x0 = pow(x[3] + x[4], -1);
+    double x1 = x[5]*x[4];
+    double x2 = pow(x[2], 3.0);
+    double x3 = pow(x[2], -1.0);
+    double x4 = x[2]*log(x[2]);
+    double x5 = pow(x[2], 2.0);
+    double x6 = 1.66309e+25*pow(x[2], -9.0);
+    return 1.0*x0*(x1*(9900.0 - 12.5*x[2] + ((x[2] < 544.55) ? (
+   -7817.776 + 128.418925*x[2] - 8.381598e-06*x2 - 28.4096529*x4 + 0.012338888*x5
+)
+: (((x[2] < 800.0 && 544.55 <= x[2])) ? (
+   29293.369 - 379.605174*x[2] + 1.3052833e-05*x2 - 3544705.0*x3 + 49.678*x4 - 0.0730245*x5 + x6
+)
+: (((x[2] < 1200.0 && 800.0 <= x[2])) ? (
+   -11085.609 + 182.955328*x[2] - 1.05047e-06*x2 + 5175.0*x3 - 36.041*x4 + 0.0074641*x5 + x6
+)
+: ((1200.0 <= x[2]) ? (
+   -7580.864 + 124.770814*x[2] - 27.196*x4 + x6
+)
+: (
+   0
+)))))) + x[5]*x[3]*((x[2] < 929.4) ? (
+   -6938.856 + 106.830098*x[2] + 3.79625e-07*x2 - 25097.0*x3 - 22.75455*x4 - 0.00385924*x5
+)
+: (((x[2] < 1337.33 && 929.4 <= x[2])) ? (
+   -93586.481 + 1021.69543*x[2] - 1.1518713e-05*x2 + 10637210.0*x3 - 155.706745*x4 + 0.08756015*x5
+)
+: (((x[2] < 1735.8 && 1337.33 <= x[2])) ? (
+   314067.829 - 2016.37825*x[2] + 8.923844e-06*x2 - 67999832.0*x3 + 263.252259*x4 - 0.118216828*x5
+)
+: ((1735.8 <= x[2]) ? (
+   -12133.783 + 165.272524*x[2] - 30.9616*x4
+)
+: (
+   0
+)))))) + 8.3145*x[2]*x0*(1.0*((1e-15 < x[3]) ? (
+   x[3]*log(x[3])
+)
+: (
+   0
+)) + 1.0*((1e-15 < x[4]) ? (
+   x[4]*log(x[4])
+)
+: (
+   0
+)) + 1.0*((1e-15 < x[5]) ? (
+   x[5]*log(x[5])
+)
+: (
+   0
+))) + 48000.0*x0*x1*x[3];
+}
+
+__device__ double pycgpu_model_0_formulaobj(const double* x) {
+    double x0 = x[3] + x[4];
+    double x1 = pow(x0, -1);
+    double x2 = x[5]*x[4];
+    double x3 = pow(x[2], 3.0);
+    double x4 = pow(x[2], -1.0);
+    double x5 = x[2]*log(x[2]);
+    double x6 = pow(x[2], 2.0);
+    double x7 = 1.66309e+25*pow(x[2], -9.0);
+    return 1.0*x0*(1.0*x1*(x2*(9900.0 - 12.5*x[2] + ((x[2] < 544.55) ? (
+   -7817.776 + 128.418925*x[2] - 8.381598e-06*x3 - 28.4096529*x5 + 0.012338888*x6
+)
+: (((x[2] < 800.0 && 544.55 <= x[2])) ? (
+   29293.369 - 379.605174*x[2] + 1.3052833e-05*x3 - 3544705.0*x4 + 49.678*x5 - 0.0730245*x6 + x7
+)
+: (((x[2] < 1200.0 && 800.0 <= x[2])) ? (
+   -11085.609 + 182.955328*x[2] - 1.05047e-06*x3 + 5175.0*x4 - 36.041*x5 + 0.0074641*x6 + x7
+)
+: ((1200.0 <= x[2]) ? (
+   -7580.864 + 124.770814*x[2] - 27.196*x5 + x7
+)
+: (
+   0
+)))))) + x[5]*x[3]*((x[2] < 929.4) ? (
+   -6938.856 + 106.830098*x[2] + 3.79625e-07*x3 - 25097.0*x4 - 22.75455*x5 - 0.00385924*x6
+)
+: (((x[2] < 1337.33 && 929.4 <= x[2])) ? (
+   -93586.481 + 1021.69543*x[2] - 1.1518713e-05*x3 + 10637210.0*x4 - 155.706745*x5 + 0.08756015*x6
+)
+: (((x[2] < 1735.8 && 1337.33 <= x[2])) ? (
+   314067.829 - 2016.37825*x[2] + 8.923844e-06*x3 - 67999832.0*x4 + 263.252259*x5 - 0.118216828*x6
+)
+: ((1735.8 <= x[2]) ? (
+   -12133.783 + 165.272524*x[2] - 30.9616*x5
+)
+: (
+   0
+)))))) + 8.3145*x[2]*x1*(1.0*((1e-15 < x[3]) ? (
+   x[3]*log(x[3])
+)
+: (
+   0
+)) + 1.0*((1e-15 < x[4]) ? (
+   x[4]*log(x[4])
+)
+: (
+   0
+)) + 1.0*((1e-15 < x[5]) ? (
+   x[5]*log(x[5])
+)
+: (
+   0
+))) + 48000.0*x2*x1*x[3]);
+}
+
+__device__ void pycgpu_model_0_formulagrad(double* out, const double* x) {
+    double x0 = pow(x[2], 1.0);
+    double x1 = log(x[2]);
+    double x2 = 28.4096529*x1;
+    double x3 = pow(x[2], 2.0);
+    double x4 = x[2] < 544.55;
+    double x5 = -1.496781e+26*pow(x[2], -10.0);
+    double x6 = 49.678*x1;
+    double x7 = pow(x3, -1);
+    double x8 = (x[2] < 800.0 && 544.55 <= x[2]);
+    double x9 = 36.041*x1;
+    double x10 = (x[2] < 1200.0 && 800.0 <= x[2]);
+    double x11 = 27.196*x1;
+    double x12 = 1200.0 <= x[2];
+    double x13 = x[5]*x[4];
+    double x14 = 22.75455*x1;
+    double x15 = x[2] < 929.4;
+    double x16 = 155.706745*x1;
+    double x17 = (x[2] < 1337.33 && 929.4 <= x[2]);
+    double x18 = 263.252259*x1;
+    double x19 = (x[2] < 1735.8 && 1337.33 <= x[2]);
+    double x20 = 30.9616*x1;
+    double x21 = 1735.8 <= x[2];
+    double x22 = x[5]*x[3];
+    double x23 = x[3] + x[4];
+    double x24 = pow(x23, -1);
+    double x25 = 1.0*x24;
+    double x26 = log(x[3]);
+    double x27 = 1e-15 < x[3];
+    double x28 = log(x[4]);
+    double x29 = 1e-15 < x[4];
+    double x30 = log(x[5]);
+    double x31 = 1e-15 < x[5];
+    double x32 = 1.0*((x27 == 1) ? (
+   x26*x[3]
+)
+: (
+   0
+)) + 1.0*((x29 == 1) ? (
+   x28*x[4]
+)
+: (
+   0
+)) + 1.0*((x31 == 1) ? (
+   x30*x[5]
+)
+: (
+   0
+));
+    double x33 = 8.3145*x24;
+    double x34 = x32*x33;
+    double x35 = 1.0*((x31 == 1) ? (
+   0
+)
+: (
+   0
+));
+    double x36 = 1.0*((x29 == 1) ? (
+   0
+)
+: (
+   0
+));
+    double x37 = 1.0*((x27 == 1) ? (
+   0
+)
+: (
+   0
+));
+    double x38 = x36 + x37;
+    double x39 = x[2]*x33;
+    double x40 = 1.0*x23;
+    double x41 = pow(x[2], 3.0);
+    double x42 = pow(x0, -1);
+    double x43 = ((x15 == 1) ? (
+   -6938.856 + 106.830098*x[2] - 0.00385924*x3 + 3.79625e-07*x41 - 25097.0*x42 - x[2]*x14
+)
+: ((x17 == 1) ? (
+   -93586.481 + 1021.69543*x[2] + 0.08756015*x3 - 1.1518713e-05*x41 + 10637210.0*x42 - x[2]*x16
+)
+: ((x19 == 1) ? (
+   314067.829 - 2016.37825*x[2] - 0.118216828*x3 + 8.923844e-06*x41 - 67999832.0*x42 + x[2]*x18
+)
+: ((x21 == 1) ? (
+   -12133.783 + 165.272524*x[2] - x[2]*x20
+)
+: (
+   0
+)))));
+    double x44 = x43*x[5];
+    double x45 = x13*((x4 == 1) ? (
+   0
+)
+: ((x8 == 1) ? (
+   0
+)
+: ((x10 == 1) ? (
+   0
+)
+: ((x12 == 1) ? (
+   0
+)
+: (
+   0
+))))) + x22*((x15 == 1) ? (
+   0
+)
+: ((x17 == 1) ? (
+   0
+)
+: ((x19 == 1) ? (
+   0
+)
+: ((x21 == 1) ? (
+   0
+)
+: (
+   0
+)))));
+    double x46 = 48000.0*x24;
+    double x47 = pow(x23, -2);
+    double x48 = 1.66309e+25*pow(x[2], -9.0);
+    double x49 = 9900.0 - 12.5*x[2] + ((x4 == 1) ? (
+   -7817.776 + 128.418925*x[2] + 0.012338888*x3 - 8.381598e-06*x41 - x[2]*x2
+)
+: ((x8 == 1) ? (
+   29293.369 - 379.605174*x[2] - 0.0730245*x3 + 1.3052833e-05*x41 - 3544705.0*x42 + x48 + x[2]*x6
+)
+: ((x10 == 1) ? (
+   -11085.609 + 182.955328*x[2] + 0.0074641*x3 - 1.05047e-06*x41 + 5175.0*x42 + x48 - x[2]*x9
+)
+: ((x12 == 1) ? (
+   -7580.864 + 124.770814*x[2] + x48 - x[2]*x11
+)
+: (
+   0
+)))));
+    double x50 = x49*x[4];
+    double x51 = x44*x[3] + x50*x[5];
+    double x52 = -1.0*x51*x47 - 8.3145*x[2]*x47*x32 - 48000.0*x47*x22*x[4];
+    double x53 = x46*x[4];
+    double x54 = 1.0*(x[2]*x34 + x51*x25 + x53*x22);
+    out[0] = x40*(x34 + x25*(x13*(-12.5 + ((x4 == 1) ? (
+   100.0092721 + 0.024677776*x0 - x2 - 2.5144794e-05*x3
+)
+: ((x8 == 1) ? (
+   -329.927174 - 0.146049*x0 + 3.9158499e-05*x3 + x5 + x6 + 3544705.0*x7
+)
+: ((x10 == 1) ? (
+   146.914328 + 0.0149282*x0 - 3.15141e-06*x3 + x5 - 5175.0*x7 - x9
+)
+: ((x12 == 1) ? (
+   97.574814 - x11 + x5
+)
+: (
+   0
+)))))) + x22*((x15 == 1) ? (
+   84.075548 - 0.00771848*x0 - x14 + 1.138875e-06*x3 + 25097.0*x7
+)
+: ((x17 == 1) ? (
+   865.988685 + 0.1751203*x0 - x16 - 3.4556139e-05*x3 - 10637210.0*x7
+)
+: ((x19 == 1) ? (
+   -1753.125991 - 0.236433656*x0 + x18 + 2.6771532e-05*x3 + 67999832.0*x7
+)
+: ((x21 == 1) ? (
+   134.310924 - x20
+)
+: (
+   0
+)))))) + (x35 + x38)*x39);
+    out[1] = x54 + x40*(x52 + x39*(x35 + x36 + 1.0*((x27 == 1) ? (
+   1 + x26
+)
+: (
+   0
+))) + x46*x13 + (x44 + x45)*x25);
+    out[2] = x54 + x40*(x52 + x25*(x45 + x49*x[5]) + x39*(x35 + x37 + 1.0*((x29 == 1) ? (
+   1 + x28
+)
+: (
+   0
+))) + x46*x22);
+    out[3] = x40*(x25*(x45 + x50 + x43*x[3]) + x39*(x38 + 1.0*((x31 == 1) ? (
+   1 + x30
+)
+: (
+   0
+))) + x53*x[3]);
+}
+
+__device__ void pycgpu_model_0_formulahess(double* out, const double* x) {
+    double x0 = 1e-15 < x[3];
+    double x1 = 1.0*((x0 == 1) ? 0
+: 0);
+    double x2 = 1e-15 < x[4];
+    double x3 = 1.0*((x2 == 1) ? 0
+: 0);
+    double x4 = 1e-15 < x[5];
+    double x5 = 1.0*((x4 == 1) ? 0
+: 0);
+    double x6 = x3 + x5;
+    double x7 = x1 + x6;
+    double x8 = x[3] + x[4];
+    double x9 = pow(x8, -1);
+    double x10 = 8.3145*x9;
+    double x11 = x[2]*x10;
+    double x12 = x7*x11;
+    double x13 = 16.629*x9;
+    double x14 = pow(x[2], 1.0);
+    double x15 = pow(x[2], 3.0);
+    double x16 = pow(x15, -1);
+    double x17 = pow(x[2], -1);
+    double x18 = x[2] < 929.4;
+    double x19 = (x[2] < 1337.33 && 929.4 <= x[2]);
+    double x20 = (x[2] < 1735.8 && 1337.33 <= x[2]);
+    double x21 = 1735.8 <= x[2];
+    double x22 = x[5]*x[3];
+    double x23 = x[2] < 544.55;
+    double x24 = 1.496781e+27*pow(x[2], -11.0);
+    double x25 = (x[2] < 800.0 && 544.55 <= x[2]);
+    double x26 = (x[2] < 1200.0 && 800.0 <= x[2]);
+    double x27 = 1200.0 <= x[2];
+    double x28 = x[5]*x[4];
+    double x29 = 1.0*x9;
+    double x30 = 1.0*x8;
+    double x31 = log(x[3]);
+    double x32 = x6 + 1.0*((x0 == 1) ? (
+   1 + x31
+)
+: 0);
+    double x33 = x32*x10;
+    double x34 = log(x[2]);
+    double x35 = 22.75455*x34;
+    double x36 = pow(x[2], 2.0);
+    double x37 = pow(x36, -1);
+    double x38 = 155.706745*x34;
+    double x39 = 263.252259*x34;
+    double x40 = 30.9616*x34;
+    double x41 = ((x18 == 1) ? (
+   84.075548 - 0.00771848*x14 - x35 + 1.138875e-06*x36 + 25097.0*x37
+)
+: ((x19 == 1) ? (
+   865.988685 + 0.1751203*x14 - 3.4556139e-05*x36 - 10637210.0*x37 - x38
+)
+: ((x20 == 1) ? (
+   -1753.125991 - 0.236433656*x14 + 2.6771532e-05*x36 + 67999832.0*x37 + x39
+)
+: ((x21 == 1) ? (
+   134.310924 - x40
+)
+: 0))));
+    double x42 = x41*x[5];
+    double x43 = ((x18 == 1) ? 0
+: ((x19 == 1) ? 0
+: ((x20 == 1) ? 0
+: ((x21 == 1) ? 0
+: 0))));
+    double x44 = x43*x[3];
+    double x45 = ((x23 == 1) ? 0
+: ((x25 == 1) ? 0
+: ((x26 == 1) ? 0
+: ((x27 == 1) ? 0
+: 0))));
+    double x46 = x45*x[4];
+    double x47 = x44*x[5] + x46*x[5];
+    double x48 = pow(x8, -2);
+    double x49 = x[2]*x48;
+    double x50 = 8.3145*x49;
+    double x51 = log(x[4]);
+    double x52 = log(x[5]);
+    double x53 = 1.0*((x0 == 1) ? (
+   x31*x[3]
+)
+: 0) + 1.0*((x2 == 1) ? (
+   x51*x[4]
+)
+: 0) + 1.0*((x4 == 1) ? (
+   x52*x[5]
+)
+: 0);
+    double x54 = 8.3145*x53;
+    double x55 = 28.4096529*x34;
+    double x56 = -1.496781e+26*pow(x[2], -10.0);
+    double x57 = 49.678*x34;
+    double x58 = 36.041*x34;
+    double x59 = 27.196*x34;
+    double x60 = -12.5 + ((x23 == 1) ? (
+   100.0092721 + 0.024677776*x14 - 2.5144794e-05*x36 - x55
+)
+: ((x25 == 1) ? (
+   -329.927174 - 0.146049*x14 + 3.9158499e-05*x36 + 3544705.0*x37 + x56 + x57
+)
+: ((x26 == 1) ? (
+   146.914328 + 0.0149282*x14 - 3.15141e-06*x36 - 5175.0*x37 + x56 - x58
+)
+: ((x27 == 1) ? (
+   97.574814 + x56 - x59
+)
+: 0))));
+    double x61 = x60*x[4];
+    double x62 = x42*x[3] + x61*x[5];
+    double x63 = 1.0*x48;
+    double x64 = x12 - x54*x48 - x63*x62 - x7*x50;
+    double x65 = x30*(x33 + x64 + (x42 + x47)*x29);
+    double x66 = x12 + x62*x29 + x9*x54;
+    double x67 = 1.0*x66;
+    double x68 = x1 + x5;
+    double x69 = x68 + 1.0*((x2 == 1) ? (
+   1 + x51
+)
+: 0);
+    double x70 = x69*x10;
+    double x71 = x30*(x64 + x70 + x29*(x47 + x60*x[5]));
+    double x72 = x1 + x3;
+    double x73 = x72 + 1.0*((x4 == 1) ? (
+   1 + x52
+)
+: 0);
+    double x74 = x73*x10;
+    double x75 = x30*(x12 + x74 + x29*(x47 + x61 + x41*x[3]));
+    double x76 = pow(x14, -1);
+    double x77 = ((x18 == 1) ? (
+   -6938.856 + 106.830098*x[2] + 3.79625e-07*x15 - 0.00385924*x36 - 25097.0*x76 - x[2]*x35
+)
+: ((x19 == 1) ? (
+   -93586.481 + 1021.69543*x[2] - 1.1518713e-05*x15 + 0.08756015*x36 + 10637210.0*x76 - x[2]*x38
+)
+: ((x20 == 1) ? (
+   314067.829 - 2016.37825*x[2] + 8.923844e-06*x15 - 0.118216828*x36 - 67999832.0*x76 + x[2]*x39
+)
+: ((x21 == 1) ? (
+   -12133.783 + 165.272524*x[2] - x[2]*x40
+)
+: 0))));
+    double x78 = x47 + x77*x[5];
+    double x79 = 2.0*x78;
+    double x80 = x[2]*x13;
+    double x81 = 96000.0*x28;
+    double x82 = x81*x48;
+    double x83 = x43*x[5];
+    double x84 = 16.629*x49;
+    double x85 = pow(x8, -3);
+    double x86 = x77*x[3];
+    double x87 = 1.66309e+25*pow(x[2], -9.0);
+    double x88 = 9900.0 - 12.5*x[2] + ((x23 == 1) ? (
+   -7817.776 + 128.418925*x[2] - 8.381598e-06*x15 + 0.012338888*x36 - x[2]*x55
+)
+: ((x25 == 1) ? (
+   29293.369 - 379.605174*x[2] + 1.3052833e-05*x15 - 0.0730245*x36 - 3544705.0*x76 + x87 + x[2]*x57
+)
+: ((x26 == 1) ? (
+   -11085.609 + 182.955328*x[2] - 1.05047e-06*x15 + 0.0074641*x36 + 5175.0*x76 + x87 - x[2]*x58
+)
+: ((x27 == 1) ? (
+   -7580.864 + 124.770814*x[2] + x87 - x[2]*x59
+)
+: 0))));
+    double x89 = x88*x[5];
+    double x90 = 2.0*(x86*x[5] + x89*x[4]);
+    double x91 = x85*x90 + 16.629*x[2]*x85*x53 + x81*x85*x[3];
+    double x92 = -x82*x[3] - x84*x53 - x90*x48;
+    double x93 = x47 + x89;
+    double x94 = 48000.0*x9;
+    double x95 = 48000.0*x48;
+    double x96 = x45*x[5];
+    double x97 = x47 + x83;
+    double x98 = x92 + x[2]*x33 + x[2]*x70 + x30*(x12 + x91 - x50*x32 - x63*x93 - x69*x50 - x78*x63 + x94*x[5] - x95*x22 - x95*x28 + (x96 + x97)*x29) + x78*x29 + x93*x29 + x94*x22 + x94*x28;
+    double x99 = x94*x[4];
+    double x100 = x44 + x46;
+    double x101 = x47 + x86 + x88*x[4];
+    double x102 = x12 - x63*x101 - x73*x50 - x95*x[4]*x[3];
+    double x103 = x30*(x102 + x99 + x29*(x100 + x77 + x97));
+    double x104 = x[2]*x74 + x29*x101 + x99*x[3];
+    double x105 = 2.0*x93;
+    double x106 = 96000.0*x22;
+    double x107 = x30*(x102 + x29*(x100 + x47 + x88 + x96) + x94*x[3]);
+    double x108 = 1.0*x104;
+    out[0] = x30*(x12 + x29*(x22*((x18 == 1) ? (
+   -0.00771848 + 2.27775e-06*x14 - 50194.0*x16 - 22.75455*x17
+)
+: ((x19 == 1) ? (
+   0.1751203 - 6.9112278e-05*x14 + 21274420.0*x16 - 155.706745*x17
+)
+: ((x20 == 1) ? (
+   -0.236433656 + 5.3543064e-05*x14 - 135999664.0*x16 + 263.252259*x17
+)
+: ((x21 == 1) ? (
+   -30.9616*x17
+)
+: 0)))) + x28*((x23 == 1) ? (
+   0.024677776 - 5.0289588e-05*x14 - 28.4096529*x17
+)
+: ((x25 == 1) ? (
+   -0.146049 + 7.8316998e-05*x14 - 7089410.0*x16 + 49.678*x17 + x24
+)
+: ((x26 == 1) ? (
+   0.0149282 - 6.30282e-06*x14 + 10350.0*x16 - 36.041*x17 + x24
+)
+: ((x27 == 1) ? (
+   -27.196*x17 + x24
+)
+: 0))))) + x7*x13);
+    out[1] = x65 + x67;
+    out[2] = x67 + x71;
+    out[3] = x75;
+    out[4] = x65 + x66;
+    out[5] = x92 + x30*(-x82 + x91 + x11*(x6 + 1.0*((x0 == 1) ? (
+   pow(x[3], -1)
+)
+: 0)) - x79*x48 - x84*x32 + (x47 + 2*x83)*x29) + x80*x32 + x9*x79 + x9*x81;
+    out[6] = x98;
+    out[7] = x103 + x104;
+    out[8] = x66 + x71;
+    out[9] = x98;
+    out[10] = x92 + x30*(x91 + x11*(x68 + 1.0*((x2 == 1) ? (
+   pow(x[4], -1)
+)
+: 0)) - x48*x105 - x48*x106 - x84*x69 + (x47 + 2*x96)*x29) + x80*x69 + x9*x105 + x9*x106;
+    out[11] = x104 + x107;
+    out[12] = x75;
+    out[13] = x103 + x108;
+    out[14] = x107 + x108;
+    out[15] = x30*(x11*(x72 + 1.0*((x4 == 1) ? (
+   pow(x[5], -1)
+)
+: 0)) + x29*(2*x44 + 2*x46 + x47));
+}
+
+__device__ void pycgpu_model_0_internal_cons_func(double* out, const double* x) {
+    out[0] = 1.0*(-1 + x[3] + x[4]);
+    out[1] = 1.0*(-1 + x[5]);
+}
+
+__device__ void pycgpu_model_0_internal_cons_jac(double* out, const double* x) {
+    out[0] = 0;
+    out[1] = 1.0;
+    out[2] = 1.0;
+    out[3] = 0;
+    out[4] = 0;
+    out[5] = 0;
+    out[6] = 0;
+    out[7] = 1.0;
+}
+
+__device__ void pycgpu_model_0_mass_obj(double* out, const double* x) {
+    double x0 = 1.0/(x[3] + x[4]);
+    out[0] = x0*x[3];
+    out[1] = x0*x[4];
+    out[2] = 0;
+}
+
+__device__ void pycgpu_model_0_formulamole_obj(double* out, const double* x) {
+    out[0] = 1.0*x[3];
+    out[1] = 1.0*x[4];
+    out[2] = 0.0;
+}
+
+__device__ void pycgpu_model_0_formulamole_grad(double* out, const double* x) {
+    out[0] = 0;
+    out[1] = 1.0;
+    out[2] = 0;
+    out[3] = 0;
+    out[4] = 0;
+    out[5] = 0;
+    out[6] = 1.0;
+    out[7] = 0;
+}
+
+__device__ double pycgpu_model_1_obj(const double* x) {
+    double x0 = pow(x[3] + x[4], -1);
     double x1 = x[2]*log(x[2]);
     double x2 = x[4]*x[3];
     double x3 = x[3] - x[4];
@@ -5679,7 +6257,7 @@ __device__ double pycgpu_model_0_obj(const double* x) {
 )));
 }
 
-__device__ double pycgpu_model_0_formulaobj(const double* x) {
+__device__ double pycgpu_model_1_formulaobj(const double* x) {
     double x0 = x[3] + x[4];
     double x1 = pow(x0, -1);
     double x2 = x[2]*log(x[2]);
@@ -5752,7 +6330,7 @@ __device__ double pycgpu_model_0_formulaobj(const double* x) {
 ))));
 }
 
-__device__ void pycgpu_model_0_formulagrad(double* out, const double* x) {
+__device__ void pycgpu_model_1_formulagrad(double* out, const double* x) {
     double x0 = pow(x[2], 1.0);
     double x1 = log(x[2]);
     double x2 = 28.4096529*x1;
@@ -5978,7 +6556,7 @@ __device__ void pycgpu_model_0_formulagrad(double* out, const double* x) {
 ))) + (x42 + x56)*x26);
 }
 
-__device__ void pycgpu_model_0_formulahess(double* out, const double* x) {
+__device__ void pycgpu_model_1_formulahess(double* out, const double* x) {
     double x0 = 1e-15 < x[4];
     double x1 = 1.0*((x0 == 1) ? 0
 : 0);
@@ -6245,497 +6823,6 @@ __device__ void pycgpu_model_0_formulahess(double* out, const double* x) {
 : 0)) - x96*x109 - x96*x110 + (2*x49 + x50)*x28 - x72*x51*x98) + x78*x109 + x78*x110;
 }
 
-__device__ void pycgpu_model_0_internal_cons_func(double* out, const double* x) {
-    out[0] = 1.0*(-1 + x[3] + x[4]);
-}
-
-__device__ void pycgpu_model_0_internal_cons_jac(double* out, const double* x) {
-    out[0] = 0;
-    out[1] = 1.0;
-    out[2] = 1.0;
-}
-
-__device__ void pycgpu_model_0_mass_obj(double* out, const double* x) {
-    double x0 = 1.0/(x[3] + x[4]);
-    out[0] = x0*x[3];
-    out[1] = x0*x[4];
-    out[2] = 0;
-}
-
-__device__ void pycgpu_model_0_formulamole_obj(double* out, const double* x) {
-    out[0] = 1.0*x[3];
-    out[1] = 1.0*x[4];
-    out[2] = 0.0;
-}
-
-__device__ void pycgpu_model_0_formulamole_grad(double* out, const double* x) {
-    out[0] = 0;
-    out[1] = 1.0;
-    out[2] = 0;
-    out[3] = 0;
-    out[4] = 0;
-    out[5] = 1.0;
-}
-
-__device__ double pycgpu_model_1_obj(const double* x) {
-    double x0 = pow(x[3] + x[4], -1);
-    double x1 = pow(x[2], 3.0);
-    double x2 = pow(x[2], -1.0);
-    double x3 = x[2]*log(x[2]);
-    double x4 = pow(x[2], 2.0);
-    double x5 = 1.66309e+25*pow(x[2], -9.0);
-    return 1.0*x0*((15000.0 + ((x[2] < 929.4) ? (
-   -6938.856 + 106.830098*x[2] + 3.79625e-07*x1 - 25097.0*x2 - 22.75455*x3 - 0.00385924*x4
-)
-: (((x[2] < 1337.33 && 929.4 <= x[2])) ? (
-   -93586.481 + 1021.69543*x[2] - 1.1518713e-05*x1 + 10637210.0*x2 - 155.706745*x3 + 0.08756015*x4
-)
-: (((x[2] < 1735.8 && 1337.33 <= x[2])) ? (
-   314067.829 - 2016.37825*x[2] + 8.923844e-06*x1 - 67999832.0*x2 + 263.252259*x3 - 0.118216828*x4
-)
-: ((1735.8 <= x[2]) ? (
-   -12133.783 + 165.272524*x[2] - 30.9616*x3
-)
-: (
-   0
-))))))*x[3] + ((x[2] < 544.55) ? (
-   -7817.776 + 128.418925*x[2] - 8.381598e-06*x1 - 28.4096529*x3 + 0.012338888*x4
-)
-: (((x[2] < 800.0 && 544.55 <= x[2])) ? (
-   29293.369 - 379.605174*x[2] + 1.3052833e-05*x1 - 3544705.0*x2 + 49.678*x3 - 0.0730245*x4 + x5
-)
-: (((x[2] < 1200.0 && 800.0 <= x[2])) ? (
-   -11085.609 + 182.955328*x[2] - 1.05047e-06*x1 + 5175.0*x2 - 36.041*x3 + 0.0074641*x4 + x5
-)
-: ((1200.0 <= x[2]) ? (
-   -7580.864 + 124.770814*x[2] - 27.196*x3 + x5
-)
-: (
-   0
-)))))*x[4]) + 8.3145*x[2]*x0*(1.0*((1e-15 < x[3]) ? (
-   x[3]*log(x[3])
-)
-: (
-   0
-)) + 1.0*((1e-15 < x[4]) ? (
-   x[4]*log(x[4])
-)
-: (
-   0
-))) + 8000.0*x0*x[3]*x[4];
-}
-
-__device__ double pycgpu_model_1_formulaobj(const double* x) {
-    double x0 = x[3] + x[4];
-    double x1 = pow(x0, -1);
-    double x2 = pow(x[2], 3.0);
-    double x3 = pow(x[2], -1.0);
-    double x4 = x[2]*log(x[2]);
-    double x5 = pow(x[2], 2.0);
-    double x6 = 1.66309e+25*pow(x[2], -9.0);
-    return 1.0*x0*(1.0*x1*(x[4]*((x[2] < 544.55) ? (
-   -7817.776 + 128.418925*x[2] - 8.381598e-06*x2 - 28.4096529*x4 + 0.012338888*x5
-)
-: (((x[2] < 800.0 && 544.55 <= x[2])) ? (
-   29293.369 - 379.605174*x[2] + 1.3052833e-05*x2 - 3544705.0*x3 + 49.678*x4 - 0.0730245*x5 + x6
-)
-: (((x[2] < 1200.0 && 800.0 <= x[2])) ? (
-   -11085.609 + 182.955328*x[2] - 1.05047e-06*x2 + 5175.0*x3 - 36.041*x4 + 0.0074641*x5 + x6
-)
-: ((1200.0 <= x[2]) ? (
-   -7580.864 + 124.770814*x[2] - 27.196*x4 + x6
-)
-: (
-   0
-))))) + (15000.0 + ((x[2] < 929.4) ? (
-   -6938.856 + 106.830098*x[2] + 3.79625e-07*x2 - 25097.0*x3 - 22.75455*x4 - 0.00385924*x5
-)
-: (((x[2] < 1337.33 && 929.4 <= x[2])) ? (
-   -93586.481 + 1021.69543*x[2] - 1.1518713e-05*x2 + 10637210.0*x3 - 155.706745*x4 + 0.08756015*x5
-)
-: (((x[2] < 1735.8 && 1337.33 <= x[2])) ? (
-   314067.829 - 2016.37825*x[2] + 8.923844e-06*x2 - 67999832.0*x3 + 263.252259*x4 - 0.118216828*x5
-)
-: ((1735.8 <= x[2]) ? (
-   -12133.783 + 165.272524*x[2] - 30.9616*x4
-)
-: (
-   0
-))))))*x[3]) + 8.3145*x[2]*x1*(1.0*((1e-15 < x[3]) ? (
-   x[3]*log(x[3])
-)
-: (
-   0
-)) + 1.0*((1e-15 < x[4]) ? (
-   x[4]*log(x[4])
-)
-: (
-   0
-))) + 8000.0*x1*x[3]*x[4]);
-}
-
-__device__ void pycgpu_model_1_formulagrad(double* out, const double* x) {
-    double x0 = pow(x[2], 1.0);
-    double x1 = log(x[2]);
-    double x2 = 28.4096529*x1;
-    double x3 = pow(x[2], 2.0);
-    double x4 = x[2] < 544.55;
-    double x5 = -1.496781e+26*pow(x[2], -10.0);
-    double x6 = 49.678*x1;
-    double x7 = pow(x3, -1);
-    double x8 = (x[2] < 800.0 && 544.55 <= x[2]);
-    double x9 = 36.041*x1;
-    double x10 = (x[2] < 1200.0 && 800.0 <= x[2]);
-    double x11 = 27.196*x1;
-    double x12 = 1200.0 <= x[2];
-    double x13 = 22.75455*x1;
-    double x14 = x[2] < 929.4;
-    double x15 = 155.706745*x1;
-    double x16 = (x[2] < 1337.33 && 929.4 <= x[2]);
-    double x17 = 263.252259*x1;
-    double x18 = (x[2] < 1735.8 && 1337.33 <= x[2]);
-    double x19 = 30.9616*x1;
-    double x20 = 1735.8 <= x[2];
-    double x21 = x[3] + x[4];
-    double x22 = pow(x21, -1);
-    double x23 = 1.0*x22;
-    double x24 = log(x[3]);
-    double x25 = 1e-15 < x[3];
-    double x26 = log(x[4]);
-    double x27 = 1e-15 < x[4];
-    double x28 = 1.0*((x25 == 1) ? (
-   x24*x[3]
-)
-: (
-   0
-)) + 1.0*((x27 == 1) ? (
-   x26*x[4]
-)
-: (
-   0
-));
-    double x29 = 8.3145*x22;
-    double x30 = x28*x29;
-    double x31 = 1.0*((x27 == 1) ? (
-   0
-)
-: (
-   0
-));
-    double x32 = 1.0*((x25 == 1) ? (
-   0
-)
-: (
-   0
-));
-    double x33 = x[2]*x29;
-    double x34 = 1.0*x21;
-    double x35 = pow(x[2], 3.0);
-    double x36 = pow(x0, -1);
-    double x37 = 15000.0 + ((x14 == 1) ? (
-   -6938.856 + 106.830098*x[2] - 0.00385924*x3 + 3.79625e-07*x35 - 25097.0*x36 - x[2]*x13
-)
-: ((x16 == 1) ? (
-   -93586.481 + 1021.69543*x[2] + 0.08756015*x3 - 1.1518713e-05*x35 + 10637210.0*x36 - x[2]*x15
-)
-: ((x18 == 1) ? (
-   314067.829 - 2016.37825*x[2] - 0.118216828*x3 + 8.923844e-06*x35 - 67999832.0*x36 + x[2]*x17
-)
-: ((x20 == 1) ? (
-   -12133.783 + 165.272524*x[2] - x[2]*x19
-)
-: (
-   0
-)))));
-    double x38 = ((x14 == 1) ? (
-   0
-)
-: ((x16 == 1) ? (
-   0
-)
-: ((x18 == 1) ? (
-   0
-)
-: ((x20 == 1) ? (
-   0
-)
-: (
-   0
-)))))*x[3] + ((x4 == 1) ? (
-   0
-)
-: ((x8 == 1) ? (
-   0
-)
-: ((x10 == 1) ? (
-   0
-)
-: ((x12 == 1) ? (
-   0
-)
-: (
-   0
-)))))*x[4];
-    double x39 = 8000.0*x22;
-    double x40 = x39*x[4];
-    double x41 = pow(x21, -2);
-    double x42 = 1.66309e+25*pow(x[2], -9.0);
-    double x43 = ((x4 == 1) ? (
-   -7817.776 + 128.418925*x[2] + 0.012338888*x3 - 8.381598e-06*x35 - x[2]*x2
-)
-: ((x8 == 1) ? (
-   29293.369 - 379.605174*x[2] - 0.0730245*x3 + 1.3052833e-05*x35 - 3544705.0*x36 + x42 + x[2]*x6
-)
-: ((x10 == 1) ? (
-   -11085.609 + 182.955328*x[2] + 0.0074641*x3 - 1.05047e-06*x35 + 5175.0*x36 + x42 - x[2]*x9
-)
-: ((x12 == 1) ? (
-   -7580.864 + 124.770814*x[2] + x42 - x[2]*x11
-)
-: (
-   0
-)))));
-    double x44 = x37*x[3] + x43*x[4];
-    double x45 = -1.0*x41*x44 - 8.3145*x[2]*x41*x28 - 8000.0*x41*x[3]*x[4];
-    double x46 = 1.0*(x[2]*x30 + x40*x[3] + x44*x23);
-    out[0] = x34*(x30 + x23*(x[4]*((x4 == 1) ? (
-   100.0092721 + 0.024677776*x0 - x2 - 2.5144794e-05*x3
-)
-: ((x8 == 1) ? (
-   -329.927174 - 0.146049*x0 + 3.9158499e-05*x3 + x5 + x6 + 3544705.0*x7
-)
-: ((x10 == 1) ? (
-   146.914328 + 0.0149282*x0 - 3.15141e-06*x3 + x5 - 5175.0*x7 - x9
-)
-: ((x12 == 1) ? (
-   97.574814 - x11 + x5
-)
-: (
-   0
-))))) + ((x14 == 1) ? (
-   84.075548 - 0.00771848*x0 - x13 + 1.138875e-06*x3 + 25097.0*x7
-)
-: ((x16 == 1) ? (
-   865.988685 + 0.1751203*x0 - x15 - 3.4556139e-05*x3 - 10637210.0*x7
-)
-: ((x18 == 1) ? (
-   -1753.125991 - 0.236433656*x0 + x17 + 2.6771532e-05*x3 + 67999832.0*x7
-)
-: ((x20 == 1) ? (
-   134.310924 - x19
-)
-: (
-   0
-)))))*x[3]) + (x31 + x32)*x33);
-    out[1] = x46 + x34*(x40 + x45 + x33*(x31 + 1.0*((x25 == 1) ? (
-   1 + x24
-)
-: (
-   0
-))) + (x37 + x38)*x23);
-    out[2] = x46 + x34*(x45 + x33*(x32 + 1.0*((x27 == 1) ? (
-   1 + x26
-)
-: (
-   0
-))) + x39*x[3] + (x38 + x43)*x23);
-}
-
-__device__ void pycgpu_model_1_formulahess(double* out, const double* x) {
-    double x0 = x[3] + x[4];
-    double x1 = pow(x0, -1);
-    double x2 = 1e-15 < x[4];
-    double x3 = 1.0*((x2 == 1) ? 0
-: 0);
-    double x4 = 1e-15 < x[3];
-    double x5 = 1.0*((x4 == 1) ? 0
-: 0);
-    double x6 = x3 + x5;
-    double x7 = x1*x6;
-    double x8 = 8.3145*x[2]*x7;
-    double x9 = pow(x[2], 1.0);
-    double x10 = pow(x[2], 3.0);
-    double x11 = pow(x10, -1);
-    double x12 = pow(x[2], -1);
-    double x13 = x[2] < 929.4;
-    double x14 = (x[2] < 1337.33 && 929.4 <= x[2]);
-    double x15 = (x[2] < 1735.8 && 1337.33 <= x[2]);
-    double x16 = 1735.8 <= x[2];
-    double x17 = x[2] < 544.55;
-    double x18 = 1.496781e+27*pow(x[2], -11.0);
-    double x19 = (x[2] < 800.0 && 544.55 <= x[2]);
-    double x20 = (x[2] < 1200.0 && 800.0 <= x[2]);
-    double x21 = 1200.0 <= x[2];
-    double x22 = 1.0*x1;
-    double x23 = 1.0*x0;
-    double x24 = log(x[3]);
-    double x25 = x3 + 1.0*((x4 == 1) ? (
-   1 + x24
-)
-: 0);
-    double x26 = 8.3145*x1;
-    double x27 = x25*x26;
-    double x28 = log(x[2]);
-    double x29 = 22.75455*x28;
-    double x30 = pow(x[2], 2.0);
-    double x31 = pow(x30, -1);
-    double x32 = 155.706745*x28;
-    double x33 = 263.252259*x28;
-    double x34 = 30.9616*x28;
-    double x35 = ((x13 == 1) ? (
-   84.075548 - x29 + 1.138875e-06*x30 + 25097.0*x31 - 0.00771848*x9
-)
-: ((x14 == 1) ? (
-   865.988685 - 3.4556139e-05*x30 - 10637210.0*x31 - x32 + 0.1751203*x9
-)
-: ((x15 == 1) ? (
-   -1753.125991 + 2.6771532e-05*x30 + 67999832.0*x31 + x33 - 0.236433656*x9
-)
-: ((x16 == 1) ? (
-   134.310924 - x34
-)
-: 0))));
-    double x36 = ((x17 == 1) ? 0
-: ((x19 == 1) ? 0
-: ((x20 == 1) ? 0
-: ((x21 == 1) ? 0
-: 0))));
-    double x37 = ((x13 == 1) ? 0
-: ((x14 == 1) ? 0
-: ((x15 == 1) ? 0
-: ((x16 == 1) ? 0
-: 0))));
-    double x38 = x36*x[4] + x37*x[3];
-    double x39 = pow(x0, -2);
-    double x40 = 8.3145*x39;
-    double x41 = x[2]*x40;
-    double x42 = log(x[4]);
-    double x43 = 1.0*((x4 == 1) ? (
-   x24*x[3]
-)
-: 0) + 1.0*((x2 == 1) ? (
-   x42*x[4]
-)
-: 0);
-    double x44 = 28.4096529*x28;
-    double x45 = -1.496781e+26*pow(x[2], -10.0);
-    double x46 = 49.678*x28;
-    double x47 = 36.041*x28;
-    double x48 = 27.196*x28;
-    double x49 = ((x17 == 1) ? (
-   100.0092721 - 2.5144794e-05*x30 - x44 + 0.024677776*x9
-)
-: ((x19 == 1) ? (
-   -329.927174 + 3.9158499e-05*x30 + 3544705.0*x31 + x45 + x46 - 0.146049*x9
-)
-: ((x20 == 1) ? (
-   146.914328 - 3.15141e-06*x30 - 5175.0*x31 + x45 - x47 + 0.0149282*x9
-)
-: ((x21 == 1) ? (
-   97.574814 + x45 - x48
-)
-: 0))));
-    double x50 = x35*x[3] + x49*x[4];
-    double x51 = 1.0*x39;
-    double x52 = x8 - x40*x43 - x50*x51 - x6*x41;
-    double x53 = x23*(x27 + x52 + (x35 + x38)*x22);
-    double x54 = x8 + x43*x26 + x50*x22;
-    double x55 = 1.0*x54;
-    double x56 = x5 + 1.0*((x2 == 1) ? (
-   1 + x42
-)
-: 0);
-    double x57 = x56*x26;
-    double x58 = x23*(x52 + x57 + (x38 + x49)*x22);
-    double x59 = pow(x9, -1);
-    double x60 = 15000.0 + ((x13 == 1) ? (
-   -6938.856 + 106.830098*x[2] + 3.79625e-07*x10 - 0.00385924*x30 - 25097.0*x59 - x[2]*x29
-)
-: ((x14 == 1) ? (
-   -93586.481 + 1021.69543*x[2] - 1.1518713e-05*x10 + 0.08756015*x30 + 10637210.0*x59 - x[2]*x32
-)
-: ((x15 == 1) ? (
-   314067.829 - 2016.37825*x[2] + 8.923844e-06*x10 - 0.118216828*x30 - 67999832.0*x59 + x[2]*x33
-)
-: ((x16 == 1) ? (
-   -12133.783 + 165.272524*x[2] - x[2]*x34
-)
-: 0))));
-    double x61 = x38 + x60;
-    double x62 = 2.0*x61;
-    double x63 = 16.629*x[2];
-    double x64 = x63*x25;
-    double x65 = 16000.0*x[4];
-    double x66 = x[2]*x26;
-    double x67 = x65*x39;
-    double x68 = pow(x0, -3);
-    double x69 = x63*x43;
-    double x70 = 1.66309e+25*pow(x[2], -9.0);
-    double x71 = ((x17 == 1) ? (
-   -7817.776 + 128.418925*x[2] - 8.381598e-06*x10 + 0.012338888*x30 - x[2]*x44
-)
-: ((x19 == 1) ? (
-   29293.369 - 379.605174*x[2] + 1.3052833e-05*x10 - 0.0730245*x30 - 3544705.0*x59 + x70 + x[2]*x46
-)
-: ((x20 == 1) ? (
-   -11085.609 + 182.955328*x[2] - 1.05047e-06*x10 + 0.0074641*x30 + 5175.0*x59 + x70 - x[2]*x47
-)
-: ((x21 == 1) ? (
-   -7580.864 + 124.770814*x[2] + x70 - x[2]*x48
-)
-: 0))));
-    double x72 = x60*x[3] + x71*x[4];
-    double x73 = x68*x69 + 2.0*x72*x68 + x68*x65*x[3];
-    double x74 = 2.0*x39;
-    double x75 = -x67*x[3] - x69*x39 - x72*x74;
-    double x76 = 8000.0*x1;
-    double x77 = x38 + x71;
-    double x78 = 1.0*x77;
-    double x79 = 8000.0*x39;
-    double x80 = x75 + x[2]*x27 + x[2]*x57 + x1*x78 + x23*(x73 + x76 + x8 + x22*(x36 + x37 + x38) - x41*x25 - x56*x41 - x61*x51 - x78*x39 - x79*x[3] - x79*x[4]) + x61*x22 + x76*x[3] + x76*x[4];
-    double x81 = 16000.0*x[3];
-    double x82 = x63*x56;
-    out[0] = x23*(16.629*x7 + x8 + x22*(((x17 == 1) ? (
-   0.024677776 - 28.4096529*x12 - 5.0289588e-05*x9
-)
-: ((x19 == 1) ? (
-   -0.146049 - 7089410.0*x11 + 49.678*x12 + x18 + 7.8316998e-05*x9
-)
-: ((x20 == 1) ? (
-   0.0149282 + 10350.0*x11 - 36.041*x12 + x18 - 6.30282e-06*x9
-)
-: ((x21 == 1) ? (
-   -27.196*x12 + x18
-)
-: 0))))*x[4] + ((x13 == 1) ? (
-   -0.00771848 - 50194.0*x11 - 22.75455*x12 + 2.27775e-06*x9
-)
-: ((x14 == 1) ? (
-   0.1751203 + 21274420.0*x11 - 155.706745*x12 - 6.9112278e-05*x9
-)
-: ((x15 == 1) ? (
-   -0.236433656 - 135999664.0*x11 + 263.252259*x12 + 5.3543064e-05*x9
-)
-: ((x16 == 1) ? (
-   -30.9616*x12
-)
-: 0))))*x[3]));
-    out[1] = x53 + x55;
-    out[2] = x55 + x58;
-    out[3] = x53 + x54;
-    out[4] = x75 + x1*x62 + x1*x64 + x1*x65 + x23*(-x67 + x73 - x62*x39 - x64*x39 + x66*(x3 + 1.0*((x4 == 1) ? (
-   pow(x[3], -1)
-)
-: 0)) + (2*x37 + x38)*x22);
-    out[5] = x80;
-    out[6] = x54 + x58;
-    out[7] = x80;
-    out[8] = x75 + 2.0*x1*x77 + x1*x81 + x1*x82 + x23*(x73 + x66*(x5 + 1.0*((x2 == 1) ? (
-   pow(x[4], -1)
-)
-: 0)) - x74*x77 - x81*x39 - x82*x39 + (2*x36 + x38)*x22);
-}
-
 __device__ void pycgpu_model_1_internal_cons_func(double* out, const double* x) {
     out[0] = 1.0*(-1 + x[3] + x[4]);
 }
@@ -6862,7 +6949,7 @@ __global__ void init_all_gpu_phase_records() {
         printf("GPU DEBUG: init_all_gpu_phase_records kernel called\n");
     }
     #endif
-        g_phase_records_array[0].init(&pycgpu_model_0_obj, &pycgpu_model_0_formulaobj, &pycgpu_model_0_formulagrad, &pycgpu_model_0_formulahess, &pycgpu_model_0_internal_cons_func, &pycgpu_model_0_internal_cons_jac, &pycgpu_model_0_mass_obj, &pycgpu_model_0_formulamole_obj, &pycgpu_model_0_formulamole_grad, 3, 2, 3, 1, 2);
+        g_phase_records_array[0].init(&pycgpu_model_0_obj, &pycgpu_model_0_formulaobj, &pycgpu_model_0_formulagrad, &pycgpu_model_0_formulahess, &pycgpu_model_0_internal_cons_func, &pycgpu_model_0_internal_cons_jac, &pycgpu_model_0_mass_obj, &pycgpu_model_0_formulamole_obj, &pycgpu_model_0_formulamole_grad, 3, 3, 3, 2, 2);
     g_phase_records_array[1].init(&pycgpu_model_1_obj, &pycgpu_model_1_formulaobj, &pycgpu_model_1_formulagrad, &pycgpu_model_1_formulahess, &pycgpu_model_1_internal_cons_func, &pycgpu_model_1_internal_cons_jac, &pycgpu_model_1_mass_obj, &pycgpu_model_1_formulamole_obj, &pycgpu_model_1_formulamole_grad, 3, 2, 3, 1, 2);
 
     #ifdef VERBOSE_DEBUG
@@ -8823,9 +8910,9 @@ __global__ void top_level_equilibrium_kernel(
         double* results_array = (double*)results_list_ptr_raw;
         
         // Use direct indexing - must match Python side calculation exactly
-        // Layout: GM, chemical_potentials[MAX_COMPONENTS], phase_amounts[MAX_PHASES], converged, num_stable_phases, temp, pressure, success_marker, Y_phases[MAX_PHASES * MAX_DOF_PER_PHASE], X_phases[MAX_PHASES * MAX_COMPONENTS]
+        // Layout: GM, chemical_potentials[MAX_COMPONENTS], phase_amounts[MAX_PHASES], converged, num_stable_phases, temp, pressure, success_marker, Y_phases[MAX_PHASES * MAX_DOF_PER_PHASE], X_phases[MAX_PHASES * MAX_COMPONENTS], phase_ids[MAX_PHASES]
         int condition_idx = tid;
-        int results_per_condition = 7 + MAX_COMPONENTS + MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * MAX_COMPONENTS);  // CRITICAL FIX: Include X_phases to match Python
+        int results_per_condition = 7 + MAX_COMPONENTS + MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * MAX_COMPONENTS) + MAX_PHASES;  // CRITICAL FIX: Include phase_ids
         int base_offset = condition_idx * results_per_condition;
         
         // Initialize all results to zero (safe default)

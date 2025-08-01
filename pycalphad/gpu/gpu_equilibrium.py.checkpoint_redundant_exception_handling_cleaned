@@ -610,8 +610,9 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
         if len(phase_names_in_condition) != len(unique_phase_names):
             # We have duplicate phase names - this is an immiscibility gap
             if wks_obj.verbose:
-                print(f"[GPU] INFO: Condition {cond_idx} has duplicate phase names: {phase_names_in_condition}")
-                print(f"[GPU] This indicates an immiscibility gap with multiple instances of the same phase type.")
+                print(f"[GPU] WARNING: Condition {cond_idx} has duplicate phase names: {phase_names_in_condition}")
+                print(f"[GPU] This indicates an immiscibility gap. GPU calculation may be incorrect.")
+                print(f"[GPU] Consider using CPU calculation for this case.")
             
             # Count occurrences of each phase
             phase_counts = {}
@@ -992,29 +993,7 @@ def _populate_system_specification(global_spec_np, global_spec_arrays, wks_obj, 
     num_fixed_stable_compsets = global_spec_np[9]
     global_spec_np[10] = num_components + num_free_statevars - num_fixed_stable_compsets  # max_num_free_stable_phases
     
-    # CRITICAL FIX: Use dynamic ALLOWED_MASS_RESIDUAL calculation like CPU
-    # CPU minimizer.pyx line 484: max(1e-12, min(1e-8, np.min(np.abs(prescribed_mole_fraction_rhs))/10.0))
-    prescribed_rhs = global_spec_arrays['prescribed_mole_fraction_rhs']
-    constraint_count = int(global_spec_np[3])  # num_prescribed_mole_fraction_conditions
-    
-    if constraint_count > 0:
-        # Get non-zero constraints (up to constraint_count)
-        active_rhs = prescribed_rhs[:constraint_count]
-        min_abs_rhs = np.min(np.abs(active_rhs[active_rhs != 0])) if np.any(active_rhs != 0) else 1e-8
-        dynamic_mass_residual = max(1e-12, min(1e-8, min_abs_rhs / 10.0))
-    else:
-        # No constraints, use default
-        dynamic_mass_residual = 1e-12
-    
-    global_spec_np[11] = dynamic_mass_residual  # ALLOWED_MASS_RESIDUAL
-    
-    if wks_obj.verbose:
-        print(f"[GPU] Dynamic ALLOWED_MASS_RESIDUAL calculation:")
-        print(f"  constraint_count: {constraint_count}")
-        if constraint_count > 0:
-            print(f"  active_rhs: {active_rhs}")
-            print(f"  min_abs_rhs: {min_abs_rhs:.15e}")
-        print(f"  dynamic_mass_residual: {dynamic_mass_residual:.15e}")
+    global_spec_np[11] = 1e-12  # ALLOWED_MASS_RESIDUAL
 
 
 def _prepare_grid_data_for_gpu_from_calculate_result(grid_data, py_phase_name_to_unique_idx_map: dict, max_phases: int, max_dof: int, max_components: int, verbose: bool):
@@ -1622,11 +1601,7 @@ def _process_gpu_results(results_cpu_flat: np.ndarray, wks_obj: Workspace,
     
     # CPU uses fixed vertex count of 3 for single-phase systems (phase_count + 2 rule)
     # This represents the maximum number of composition sets in equilibrium
-    # For GPU, we need to use the actual MAX_PHASES from the kernel
-    if dynamic_sizes is not None:
-        vertex_count = dynamic_sizes['MAX_PHASES']
-    else:
-        vertex_count = len(wks_obj.phases) + 2
+    vertex_count = len(wks_obj.phases) + 2
     final_coords['vertex'] = np.arange(vertex_count)
     
     # Internal DOF depends on the phase model structure
@@ -1646,17 +1621,6 @@ def _process_gpu_results(results_cpu_flat: np.ndarray, wks_obj: Workspace,
         y_flat = results_cpu_flat['Y_phases']
         num_output_components = len(non_va_components)  # Use non-VA component count
         
-        # Always extract phase_ids_flat from results for debugging
-        if results_cpu_flat.size > 0:
-            # Need to extract phase_ids_flat from the results
-            # They should be after Y and X phases in the structured array
-            phase_ids_flat = results_cpu_flat['phase_ids']
-            
-        if wks_obj.verbose:
-            print(f"[GPU DEBUG] phase_ids from GPU: {phase_ids_flat[0][:4] if 'phase_ids_flat' in locals() else 'Not extracted'}")  # First 4 phase IDs
-            print(f"[GPU DEBUG] phase amounts from GPU: {np_flat[0][:4]}")  # First 4 amounts
-            print(f"[GPU DEBUG] py_phase_name_to_unique_idx_map: {py_phase_name_to_unique_idx_map}")
-            
         if wks_obj.verbose:
             print(f"[GPU] Raw GPU results debug:")
             print(f"[GPU] x_flat shape: {x_flat.shape}")
@@ -1995,11 +1959,11 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         
         # Create results array - use simple double array for GPU compatibility
         # The kernel expects to write doubles per condition at offset condition_idx * results_per_condition
-        # Updated Layout: GM, chemical_potentials[MAX_COMPONENTS], phase_amounts[MAX_PHASES], converged, num_stable_phases, temp, pressure, success_marker, Y_phases[MAX_PHASES * MAX_DOF_PER_PHASE], X_phases[MAX_PHASES * MAX_COMPONENTS], phase_ids[MAX_PHASES]
+        # Updated Layout: GM, chemical_potentials[MAX_COMPONENTS], phase_amounts[MAX_PHASES], converged, num_stable_phases, temp, pressure, success_marker, Y_phases[MAX_PHASES * MAX_DOF_PER_PHASE], X_phases[MAX_PHASES * MAX_COMPONENTS]
         MAX_PHASES = dynamic_sizes['MAX_PHASES']
         MAX_DOF_PER_PHASE = dynamic_sizes['MAX_DOF_PER_PHASE']
-        # Updated to include ALL phase amounts AND X_phases AND phase_ids
-        results_per_condition = 7 + dynamic_sizes['MAX_COMPONENTS'] + MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * dynamic_sizes['MAX_COMPONENTS']) + MAX_PHASES
+        # Updated to include ALL phase amounts AND X_phases
+        results_per_condition = 7 + dynamic_sizes['MAX_COMPONENTS'] + MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * dynamic_sizes['MAX_COMPONENTS'])
         results_flat = np.zeros(num_total_conditions_pts * results_per_condition, dtype=np.float64)
         
         # Also create structured array for final result conversion (after GPU)
@@ -2526,11 +2490,6 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             x_end_idx = x_start_idx + (MAX_PHASES * MAX_COMPONENTS)
             x_phases_flat = results_array[:, x_start_idx:x_end_idx]  # Shape: (num_conditions, MAX_PHASES * MAX_COMPONENTS)
             
-            # Extract phase_ids - after X_phases
-            phase_ids_start_idx = x_end_idx
-            phase_ids_end_idx = phase_ids_start_idx + MAX_PHASES
-            phase_ids_flat = results_array[:, phase_ids_start_idx:phase_ids_end_idx]  # Shape: (num_conditions, MAX_PHASES)
-            
             # Count threads that completed calculations successfully
             non_zero_gm = np.sum(np.abs(gm_values) > 1e-6)  # Non-zero GM values
             converged_count = np.sum(converged_values > 0.5)  # Successfully converged
@@ -2612,14 +2571,6 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                     if len(results_cpu[i]['X_phases']) > 0:
                         copy_len = min(len(x_values_for_condition), len(results_cpu[i]['X_phases']))
                         results_cpu[i]['X_phases'][:copy_len] = x_values_for_condition[:copy_len]
-                
-                # Extract phase_ids from GPU results
-                if i < phase_ids_flat.shape[0]:
-                    # Copy phase IDs from flat array to structured array
-                    phase_ids_for_condition = phase_ids_flat[i, :].astype(np.int32)  # Shape: (MAX_PHASES,)
-                    if len(results_cpu[i]['phase_ids']) > 0:
-                        copy_len = min(len(phase_ids_for_condition), len(results_cpu[i]['phase_ids']))
-                        results_cpu[i]['phase_ids'][:copy_len] = phase_ids_for_condition[:copy_len]
             
             # Check the converted structured data
             if len(results_cpu) > 0 and verbose:

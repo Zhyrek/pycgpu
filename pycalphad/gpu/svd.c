@@ -702,8 +702,8 @@ __device__ void Singular_Value_Decomposition_Solve(double* U, double* D, double*
    if (tolerance < dum) tolerance = dum;
    
    // Determine effective rank using relative condition number threshold
-   // CRITICAL FIX: Changed from 1e-10 to 1e-15 to match LAPACK behavior
-   rcond = 1e-15;  // Match LAPACK's default tolerance for better handling of ill-conditioned systems
+   // CRITICAL FIX: Changed from 1e-10 to 1e-16 to match LAPACK behavior exactly
+   rcond = 1e-16;  // Match LAPACK's default tolerance for better handling of ill-conditioned systems
    s_max = D[0];   // Largest singular value
    effective_rank = 0;
    
@@ -747,8 +747,8 @@ __device__ void Singular_Value_Decomposition_SolveT(double* U, double* D, double
    if (tolerance < dum) tolerance = dum;
    
    // Determine effective rank using relative condition number threshold
-   // CRITICAL FIX: Changed from 1e-10 to 1e-15 to match LAPACK behavior
-   rcond = 1e-15;  // Match LAPACK's default tolerance for better handling of ill-conditioned systems
+   // CRITICAL FIX: Changed from 1e-10 to 1e-16 to match LAPACK behavior exactly
+   rcond = 1e-16;  // Match LAPACK's default tolerance for better handling of ill-conditioned systems
    s_max = D[0];   // Largest singular value
    effective_rank = 0;
    

@@ -93,7 +93,7 @@ __device__ bool identify_candidate_phase_to_add(
     // Process grid points sequentially or in chunks if too large for local static memory.
     // For now, assume we can iterate and find max on the fly.
 
-    double largest_df = -1e30; // Negative infinity
+    double largest_df = -INFINITY; // Negative infinity (matches CPU -np.inf)
     int best_grid_idx = -1;
 
     for (int i = 0; i < grid_data->num_grid_points_total; ++i) {
@@ -258,7 +258,7 @@ __device__ bool identify_nearly_stable_phases(
 
         if (num_points_for_this_phase <= 0) continue;
 
-        double largest_df_for_this_phase_type = -1e30;
+        double largest_df_for_this_phase_type = -INFINITY;
         int best_grid_idx_for_this_phase_type = -1;
 
         for (int i = 0; i < num_points_for_this_phase; ++i) {
@@ -567,15 +567,16 @@ __device__ void solve_equilibrium_at_condition(
     }
     #endif
     
-    // Only normalize if the sum is significantly different from 1.0
-    // This preserves the phase amounts from consolidation scenarios
-    if (phase_amt_sum > 1e-12 && fabs(phase_amt_sum - 1.0) > 1e-10) { // Avoid division by zero and preserve consolidation results
+    // CRITICAL FIX: Always normalize phase amounts to match CPU behavior exactly
+    // CPU eqsolver.pyx lines 290-295 always normalizes unconditionally
+    // The GPU was conditionally normalizing which caused differences
+    if (phase_amt_sum > 1e-12) { // Only check for non-zero sum to avoid division by zero
         for (int i = 0; i < current_sys_state.num_compsets; ++i) {
             current_sys_state.compsets[i].NP /= phase_amt_sum;
             current_sys_state.phase_amt[i] = current_sys_state.compsets[i].NP;
         }
     } else {
-        // Just sync phase_amt with NP without normalization
+        // Handle zero sum case (shouldn't happen in normal operation)
         for (int i = 0; i < current_sys_state.num_compsets; ++i) {
             current_sys_state.phase_amt[i] = current_sys_state.compsets[i].NP;
         }
@@ -702,7 +703,7 @@ __device__ void solve_equilibrium_at_condition(
         #ifdef VERBOSE_DEBUG
         if (thread_id == 0) {
             printf("[GPU]   max_driving_force: %.15e\n", candidate_df);
-            printf("[GPU]   min_driving_force: %.15e\n", -1e30); // hardcoded minimum
+            printf("[GPU]   min_driving_force: %.15e\n", -INFINITY); // hardcoded minimum (matches CPU -np.inf)
         }
         #endif
 
@@ -782,7 +783,8 @@ __device__ void solve_equilibrium_at_condition(
                 compsets_before_final_solve[i] = current_sys_state.compsets[i]; // Simple assignment copy
             }
             
-            converged = run_loop(&current_spec, &current_sys_state, 500);
+            // CRITICAL FIX: Use same iteration limit as CPU (1000) instead of 500
+            converged = run_loop(&current_spec, &current_sys_state, 1000);
             
             // Track any phases that were removed during final run_loop
             for (int before_idx = 0; before_idx < num_compsets_before_final; ++before_idx) {

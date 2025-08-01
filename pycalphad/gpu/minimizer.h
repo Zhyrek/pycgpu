@@ -367,7 +367,7 @@ typedef struct SystemState {
             }
         }
 
-        largest_chemical_potential_difference = -1e30;
+        largest_chemical_potential_difference = -INFINITY;
 
         delta_ms_rows = num_compsets; // Initial value, might change if num_compsets changes
         delta_ms_cols = spec->num_components;
@@ -2953,7 +2953,7 @@ __device__ bool change_phases(SystemSpecification* spec, SystemState* state) {
 
         if (num_to_add > max_allowed_to_add_now && max_allowed_to_add_now > 0) {
             int best_to_add_idx = -1;
-            double largest_df_for_best = -1e30;
+            double largest_df_for_best = -INFINITY;
             for(int i=0; i < num_to_add; ++i) { // Iterate over the *current* list of candidates to add
                 int candidate_idx = compsets_to_add_indices[i];
                 if (candidate_idx < 0 || candidate_idx >= state->num_compsets) continue;

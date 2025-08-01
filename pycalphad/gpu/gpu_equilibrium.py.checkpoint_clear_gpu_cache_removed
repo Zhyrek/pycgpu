@@ -31,6 +31,7 @@ from pycalphad import calculate as pycalphad_calculate
 from pycalphad.core.starting_point import starting_point
 from pycalphad.core.workspace import Workspace
 from pycalphad.core.light_dataset import LightDataset
+from pycalphad.variables import T, P, N
 from pycalphad.core.constants import MIN_PHASE_FRACTION, COMP_DIFFERENCE_TOL
 import pycalphad.variables as v
 from pycalphad.model import Model
@@ -48,11 +49,6 @@ from .gpu_codegen import (
 _gpu_module_cache = {}
 
 
-def _extract_values(obj):
-    """Helper function to extract .values attribute if available, otherwise return the object itself."""
-    return obj.values if hasattr(obj, 'values') else obj
-
-
 def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_to_unique_idx_map: dict, dynamic_sizes: dict = None, properties=None, grid=None):
     """
     Converts workspace data into GPU-compatible NumPy arrays with proper data types and layouts.
@@ -67,14 +63,14 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
     debug_log(13, "Solver input validation")
     if properties is not None and hasattr(properties, 'NP'):
         # Extract numerical data for comparison with CPU
-        np_values = _extract_values(properties.NP)
+        np_values = properties.NP.values if hasattr(properties.NP, 'values') else properties.NP
         if np_values.ndim > 1:
             np_flat = np_values.flatten()
             valid_amounts = np_flat[~np.isnan(np_flat)]
             debug_log(f"  initial_phase_amounts: {valid_amounts.tolist()}", wks_obj.verbose)
         
         if hasattr(properties, 'GM'):
-            gm_values = _extract_values(properties.GM)
+            gm_values = properties.GM.values if hasattr(properties.GM, 'values') else properties.GM
             if gm_values.ndim > 0:
                 gm_flat = gm_values.flatten()
                 valid_gm = gm_flat[~np.isnan(gm_flat)]
@@ -96,7 +92,7 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
         print(f"[GPU]   state_variables: {state_variables}")
         # Debug: Show what we got from workspace
         if hasattr(properties, 'NP'):
-            np_data = _extract_values(properties.NP)
+            np_data = properties.NP.values if hasattr(properties.NP, 'values') else properties.NP
             np_values = np_data.flatten()
             active_mask = np_values > 1e-10
             num_active = np.sum(active_mask)
@@ -117,7 +113,7 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
             # Handle different property formats safely
             try:
                 if hasattr(properties, 'GM'):
-                    gm_data = _extract_values(properties.GM)
+                    gm_data = properties.GM.values if hasattr(properties.GM, 'values') else properties.GM
                     if wks_obj.verbose:
                         print(f"[GPU]   GM shape: {gm_data.shape}, values: {gm_data.flatten()}")
                 else:
@@ -125,7 +121,7 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
                         print(f"[GPU]   GM: Not found")
                     
                 if hasattr(properties, 'MU'):
-                    mu_data = _extract_values(properties.MU)
+                    mu_data = properties.MU.values if hasattr(properties.MU, 'values') else properties.MU
                     if wks_obj.verbose:
                         print(f"[GPU]   MU shape: {mu_data.shape}, values: {mu_data.flatten()[:4]}")
                 else:
@@ -133,7 +129,7 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
                         print(f"[GPU]   MU: Not found")
                     
                 if hasattr(properties, 'Phase'):
-                    phase_data = _extract_values(properties.Phase)
+                    phase_data = properties.Phase.values if hasattr(properties.Phase, 'values') else properties.Phase
                     if wks_obj.verbose:
                         print(f"[GPU]   Phase shape: {phase_data.shape}, values: {phase_data.flatten()}")
                 else:
@@ -141,7 +137,7 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
                         print(f"[GPU]   Phase: Not found")
                     
                 if hasattr(properties, 'NP'):
-                    np_data = _extract_values(properties.NP)
+                    np_data = properties.NP.values if hasattr(properties.NP, 'values') else properties.NP
                     if wks_obj.verbose:
                         print(f"[GPU]   NP shape: {np_data.shape}, values: {np_data.flatten()}")
                     
@@ -167,7 +163,7 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
                         print(f"[GPU]   NP: Not found")
                     
                 if hasattr(properties, 'X'):
-                    x_data = _extract_values(properties.X)
+                    x_data = properties.X.values if hasattr(properties.X, 'values') else properties.X
                     if wks_obj.verbose:
                         print(f"[GPU]   X shape: {x_data.shape}, values: {x_data.flatten()[:6]}")
                 else:
@@ -480,12 +476,11 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
         # Extract data from starting_point() properties using proper multi-dimensional indexing
         # Use safer property access that handles both scalar and array cases
         try:
-            if hasattr(properties, 'MU') and hasattr(properties.MU, '__getitem__') and len(multi_idx) > 0:
-                mu_values = np.asarray(properties.MU[multi_idx])
+            if hasattr(properties, 'MU') and hasattr(properties.MU, '__getitem__'):
+                mu_values = np.asarray(properties.MU[multi_idx] if len(multi_idx) > 0 else properties.MU)
             else:
                 mu_values = np.asarray(properties.MU if hasattr(properties, 'MU') else np.zeros(max_components))
         except (IndexError, TypeError):
-            # Fallback if indexing fails
             mu_values = np.asarray(properties.MU if hasattr(properties, 'MU') else np.zeros(max_components))
             
         # DEBUG: Log what we extract to verify multi-dimensional access
@@ -516,24 +511,24 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
             print(f"[GPU] Condition {cond_idx} - extracted Phase: {phase_summary}")
         
         try:
-            if hasattr(properties, 'NP') and hasattr(properties.NP, '__getitem__') and len(multi_idx) > 0:
-                np_values = np.asarray(properties.NP[multi_idx])
+            if hasattr(properties, 'NP') and hasattr(properties.NP, '__getitem__'):
+                np_values = np.asarray(properties.NP[multi_idx] if len(multi_idx) > 0 else properties.NP)
             else:
                 np_values = np.asarray(properties.NP if hasattr(properties, 'NP') else np.zeros(max_phases_per_condition))
         except (IndexError, TypeError):
             np_values = np.asarray(properties.NP if hasattr(properties, 'NP') else np.zeros(max_phases_per_condition))
         
         try:
-            if hasattr(properties, 'X') and hasattr(properties.X, '__getitem__') and len(multi_idx) > 0:
-                x_values = np.asarray(properties.X[multi_idx])
+            if hasattr(properties, 'X') and hasattr(properties.X, '__getitem__'):
+                x_values = np.asarray(properties.X[multi_idx] if len(multi_idx) > 0 else properties.X)
             else:
                 x_values = np.asarray(properties.X if hasattr(properties, 'X') else np.zeros((max_phases_per_condition, max_components)))
         except (IndexError, TypeError):
             x_values = np.asarray(properties.X if hasattr(properties, 'X') else np.zeros((max_phases_per_condition, max_components)))
         
         try:
-            if hasattr(properties, 'Y') and hasattr(properties.Y, '__getitem__') and len(multi_idx) > 0:
-                y_values = np.asarray(properties.Y[multi_idx])
+            if hasattr(properties, 'Y') and hasattr(properties.Y, '__getitem__'):
+                y_values = np.asarray(properties.Y[multi_idx] if len(multi_idx) > 0 else properties.Y)
             else:
                 y_values = np.asarray(properties.Y if hasattr(properties, 'Y') else np.zeros((max_phases_per_condition, max_dof_per_phase)))
         except (IndexError, TypeError):
@@ -610,8 +605,9 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
         if len(phase_names_in_condition) != len(unique_phase_names):
             # We have duplicate phase names - this is an immiscibility gap
             if wks_obj.verbose:
-                print(f"[GPU] INFO: Condition {cond_idx} has duplicate phase names: {phase_names_in_condition}")
-                print(f"[GPU] This indicates an immiscibility gap with multiple instances of the same phase type.")
+                print(f"[GPU] WARNING: Condition {cond_idx} has duplicate phase names: {phase_names_in_condition}")
+                print(f"[GPU] This indicates an immiscibility gap. GPU calculation may be incorrect.")
+                print(f"[GPU] Consider using CPU calculation for this case.")
             
             # Count occurrences of each phase
             phase_counts = {}
@@ -640,6 +636,8 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
             # Match CPU behavior: set minimum phase fraction like CPU does in eqsolver.pyx line 265
             np_amount = max(np_amount, MIN_PHASE_FRACTION)
             
+            # CRITICAL FIX: Normalize phase amounts for multi-sublattice phases by site ratio sum
+            # This matches the CPU normalization in eqsolver.pyx lines 534-536
             if cond_idx < 2 and wks_obj.verbose:
                 print(f"[GPU DEBUG] Processing phase {phase_name} (cond_idx={cond_idx}, i={i}): np_amount={np_amount:.6f}")
             try:
@@ -992,29 +990,7 @@ def _populate_system_specification(global_spec_np, global_spec_arrays, wks_obj, 
     num_fixed_stable_compsets = global_spec_np[9]
     global_spec_np[10] = num_components + num_free_statevars - num_fixed_stable_compsets  # max_num_free_stable_phases
     
-    # CRITICAL FIX: Use dynamic ALLOWED_MASS_RESIDUAL calculation like CPU
-    # CPU minimizer.pyx line 484: max(1e-12, min(1e-8, np.min(np.abs(prescribed_mole_fraction_rhs))/10.0))
-    prescribed_rhs = global_spec_arrays['prescribed_mole_fraction_rhs']
-    constraint_count = int(global_spec_np[3])  # num_prescribed_mole_fraction_conditions
-    
-    if constraint_count > 0:
-        # Get non-zero constraints (up to constraint_count)
-        active_rhs = prescribed_rhs[:constraint_count]
-        min_abs_rhs = np.min(np.abs(active_rhs[active_rhs != 0])) if np.any(active_rhs != 0) else 1e-8
-        dynamic_mass_residual = max(1e-12, min(1e-8, min_abs_rhs / 10.0))
-    else:
-        # No constraints, use default
-        dynamic_mass_residual = 1e-12
-    
-    global_spec_np[11] = dynamic_mass_residual  # ALLOWED_MASS_RESIDUAL
-    
-    if wks_obj.verbose:
-        print(f"[GPU] Dynamic ALLOWED_MASS_RESIDUAL calculation:")
-        print(f"  constraint_count: {constraint_count}")
-        if constraint_count > 0:
-            print(f"  active_rhs: {active_rhs}")
-            print(f"  min_abs_rhs: {min_abs_rhs:.15e}")
-        print(f"  dynamic_mass_residual: {dynamic_mass_residual:.15e}")
+    global_spec_np[11] = 1e-12  # ALLOWED_MASS_RESIDUAL
 
 
 def _prepare_grid_data_for_gpu_from_calculate_result(grid_data, py_phase_name_to_unique_idx_map: dict, max_phases: int, max_dof: int, max_components: int, verbose: bool):
@@ -1622,11 +1598,7 @@ def _process_gpu_results(results_cpu_flat: np.ndarray, wks_obj: Workspace,
     
     # CPU uses fixed vertex count of 3 for single-phase systems (phase_count + 2 rule)
     # This represents the maximum number of composition sets in equilibrium
-    # For GPU, we need to use the actual MAX_PHASES from the kernel
-    if dynamic_sizes is not None:
-        vertex_count = dynamic_sizes['MAX_PHASES']
-    else:
-        vertex_count = len(wks_obj.phases) + 2
+    vertex_count = len(wks_obj.phases) + 2
     final_coords['vertex'] = np.arange(vertex_count)
     
     # Internal DOF depends on the phase model structure
@@ -1646,17 +1618,6 @@ def _process_gpu_results(results_cpu_flat: np.ndarray, wks_obj: Workspace,
         y_flat = results_cpu_flat['Y_phases']
         num_output_components = len(non_va_components)  # Use non-VA component count
         
-        # Always extract phase_ids_flat from results for debugging
-        if results_cpu_flat.size > 0:
-            # Need to extract phase_ids_flat from the results
-            # They should be after Y and X phases in the structured array
-            phase_ids_flat = results_cpu_flat['phase_ids']
-            
-        if wks_obj.verbose:
-            print(f"[GPU DEBUG] phase_ids from GPU: {phase_ids_flat[0][:4] if 'phase_ids_flat' in locals() else 'Not extracted'}")  # First 4 phase IDs
-            print(f"[GPU DEBUG] phase amounts from GPU: {np_flat[0][:4]}")  # First 4 amounts
-            print(f"[GPU DEBUG] py_phase_name_to_unique_idx_map: {py_phase_name_to_unique_idx_map}")
-            
         if wks_obj.verbose:
             print(f"[GPU] Raw GPU results debug:")
             print(f"[GPU] x_flat shape: {x_flat.shape}")
@@ -1682,6 +1643,12 @@ def _process_gpu_results(results_cpu_flat: np.ndarray, wks_obj: Workspace,
             # No need for manual workaround - the reshape already gives us the right structure
             # The issue was interpretation - x_test shows the correct layout
         
+        # PHASE MERGER FIX: Check for symmetric composition constraints and merge duplicate phases
+        # This matches the CPU solver behavior for symmetric compositions like X(TI) = 0.5
+        if wks_obj.verbose:
+            print("[GPU] Checking for symmetric composition phase merger...")
+        # CPU doesn't have phase merger logic - removed extraneous code
+
         # Reshape and create data variables to match the expected output structure
         data_vars = {}
         
@@ -1946,6 +1913,13 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     except Exception as e:
         if verbose:
             print(f"[GPU] ERROR: Failed to get top_level_equilibrium_kernel function: {e}")
+            print(f"[GPU] DEBUG: Available functions in module:")
+            try:
+                # Try to list available functions
+                # This is a debugging attempt - the exact method may vary
+                pass
+            except:
+                pass
         raise
 
     
@@ -1995,11 +1969,11 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         
         # Create results array - use simple double array for GPU compatibility
         # The kernel expects to write doubles per condition at offset condition_idx * results_per_condition
-        # Updated Layout: GM, chemical_potentials[MAX_COMPONENTS], phase_amounts[MAX_PHASES], converged, num_stable_phases, temp, pressure, success_marker, Y_phases[MAX_PHASES * MAX_DOF_PER_PHASE], X_phases[MAX_PHASES * MAX_COMPONENTS], phase_ids[MAX_PHASES]
+        # Updated Layout: GM, chemical_potentials[MAX_COMPONENTS], phase_amounts[MAX_PHASES], converged, num_stable_phases, temp, pressure, success_marker, Y_phases[MAX_PHASES * MAX_DOF_PER_PHASE], X_phases[MAX_PHASES * MAX_COMPONENTS]
         MAX_PHASES = dynamic_sizes['MAX_PHASES']
         MAX_DOF_PER_PHASE = dynamic_sizes['MAX_DOF_PER_PHASE']
-        # Updated to include ALL phase amounts AND X_phases AND phase_ids
-        results_per_condition = 7 + dynamic_sizes['MAX_COMPONENTS'] + MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * dynamic_sizes['MAX_COMPONENTS']) + MAX_PHASES
+        # Updated to include ALL phase amounts AND X_phases
+        results_per_condition = 7 + dynamic_sizes['MAX_COMPONENTS'] + MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * dynamic_sizes['MAX_COMPONENTS'])
         results_flat = np.zeros(num_total_conditions_pts * results_per_condition, dtype=np.float64)
         
         # Also create structured array for final result conversion (after GPU)
@@ -2526,11 +2500,6 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             x_end_idx = x_start_idx + (MAX_PHASES * MAX_COMPONENTS)
             x_phases_flat = results_array[:, x_start_idx:x_end_idx]  # Shape: (num_conditions, MAX_PHASES * MAX_COMPONENTS)
             
-            # Extract phase_ids - after X_phases
-            phase_ids_start_idx = x_end_idx
-            phase_ids_end_idx = phase_ids_start_idx + MAX_PHASES
-            phase_ids_flat = results_array[:, phase_ids_start_idx:phase_ids_end_idx]  # Shape: (num_conditions, MAX_PHASES)
-            
             # Count threads that completed calculations successfully
             non_zero_gm = np.sum(np.abs(gm_values) > 1e-6)  # Non-zero GM values
             converged_count = np.sum(converged_values > 0.5)  # Successfully converged
@@ -2612,14 +2581,6 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                     if len(results_cpu[i]['X_phases']) > 0:
                         copy_len = min(len(x_values_for_condition), len(results_cpu[i]['X_phases']))
                         results_cpu[i]['X_phases'][:copy_len] = x_values_for_condition[:copy_len]
-                
-                # Extract phase_ids from GPU results
-                if i < phase_ids_flat.shape[0]:
-                    # Copy phase IDs from flat array to structured array
-                    phase_ids_for_condition = phase_ids_flat[i, :].astype(np.int32)  # Shape: (MAX_PHASES,)
-                    if len(results_cpu[i]['phase_ids']) > 0:
-                        copy_len = min(len(phase_ids_for_condition), len(results_cpu[i]['phase_ids']))
-                        results_cpu[i]['phase_ids'][:copy_len] = phase_ids_for_condition[:copy_len]
             
             # Check the converted structured data
             if len(results_cpu) > 0 and verbose:

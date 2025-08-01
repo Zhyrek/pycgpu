@@ -198,7 +198,22 @@ def create_system_specifications_array(wks_obj, num_conditions: int, dynamic_siz
         # Final fields
         spec_data[offset] = float(max_phases)  # max_num_free_stable_phases
         offset += 1
-        spec_data[offset] = 1e-12  # ALLOWED_MASS_RESIDUAL
+        
+        # CRITICAL FIX: Use dynamic ALLOWED_MASS_RESIDUAL calculation like CPU
+        # CPU minimizer.pyx line 484: max(1e-12, min(1e-8, np.min(np.abs(prescribed_mole_fraction_rhs))/10.0))
+        if constraint_count > 0:
+            # Get prescribed RHS values for this condition
+            rhs_values = spec_data[pmf_rhs_start:pmf_rhs_start + constraint_count]
+            non_zero_rhs = rhs_values[rhs_values != 0]
+            if len(non_zero_rhs) > 0:
+                min_abs_rhs = np.min(np.abs(non_zero_rhs))
+                dynamic_mass_residual = max(1e-12, min(1e-8, min_abs_rhs / 10.0))
+            else:
+                dynamic_mass_residual = 1e-12
+        else:
+            dynamic_mass_residual = 1e-12
+            
+        spec_data[offset] = dynamic_mass_residual  # ALLOWED_MASS_RESIDUAL
         
         # Store in array
         system_specs_array[cond_idx] = spec_data

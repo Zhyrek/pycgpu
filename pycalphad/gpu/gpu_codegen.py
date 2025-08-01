@@ -3364,8 +3364,9 @@ __device__ void solve_state(
     }}
     
     // Call lstsq with correct signature
+    // CRITICAL FIX: Use same tolerance as CPU (1e-16) instead of 1e-12
     lstsq(A_lstsq_copy, equilibrium_matrix_rows, equilibrium_matrix_cols, 
-          equilibrium_rhs, 1e-12, 
+          equilibrium_rhs, 1e-16, 
           U_lstsq, V_lstsq, singular_values_lstsq, superdiag_lstsq);
     
     // The solution should be in equilibrium_rhs after lstsq completes
@@ -3403,7 +3404,7 @@ __device__ void solve_state(
     }}
     
     // Calculate largest chemical potential difference for convergence check
-    state->largest_chemical_potential_difference = -1e30;
+    state->largest_chemical_potential_difference = -INFINITY;
     for (int comp_idx = 0; comp_idx < spec->num_components; ++comp_idx) {{
         double diff = fabs(state->chemical_potentials[comp_idx] - state->previous_chemical_potentials[comp_idx]);
         if (diff > state->largest_chemical_potential_difference) {{
@@ -3751,20 +3752,6 @@ __device__ void solve_equilibrium_at_condition_global_mem(
         // CRITICAL FIX: Each composition set needs its own phase record instance
         // to avoid sharing memory between phases of the same type (immiscibility gap)
         cs->phase_record = &phase_data->phase_records_array[pr_idx];
-        
-        // WORKAROUND: For now, warn if we have duplicate phase types
-        // This indicates an immiscibility gap where GPU calculation may be incorrect
-        if (thread_id == 0) {{
-            for (int j = 0; j < current_sys_state.num_compsets; ++j) {{
-                if (current_sys_state.compsets[j].phase_record == cs->phase_record) {{
-                    #ifdef VERBOSE_DEBUG
-                    printf("WARNING: GPU found duplicate phase type (immiscibility gap). GPU results may be incorrect.\\n");
-                    printf("  Phase %d and %d both use pr_idx=%d\\n", j, current_sys_state.num_compsets, pr_idx);
-                    #endif
-                    break;
-                }}
-            }}
-        }}
         if (!cs->phase_record) continue;
         
         // DEBUG: Print all input data arrays for this phase
@@ -3976,66 +3963,9 @@ __device__ void solve_equilibrium_at_condition_global_mem(
             #endif
         }}
         
-        // CRITICAL: Implement exact CPU normalization methods
-        // CPU code: minimizer.pyx lines 529-536 and 592
-        
-        // Step 1: Calculate phase composition sum using formulamole_obj (CPU line 529-536)
-        double phase_comp_sum = 0.0;
-        double masses_tmp[MAX_COMPONENTS];
-        // Initialize masses array
-        for (int comp_idx = 0; comp_idx < MAX_COMPONENTS; ++comp_idx) {{
-            masses_tmp[comp_idx] = 0.0;
-        }}
-        
-        // Call formulamole_obj once to fill all components
-        if (cs->phase_record && cs->phase_record->formulamole_obj) {{
-            // CRITICAL FIX: Pass workspace DOF directly to functions
-            // The generated functions now expect workspace DOF format [N, P, T, Y1, Y2...]
-            
-            // DEBUG: Check before formulamole_obj call
-            if (thread_id == 0) {{
-                #ifdef VERBOSE_DEBUG
-                printf("GPU DEBUG: Before formulamole_obj - current_spec.num_statevars = %d\\n", current_spec.num_statevars);
-                printf("GPU DEBUG: Workspace DOF for formulamole_obj: [");
-                for (int i = 0; i < current_spec.num_statevars + cs->phase_record->phase_dof; i++) {{
-                    printf("%.6f", cs->dof[i]);
-                    if (i < current_spec.num_statevars + cs->phase_record->phase_dof - 1) printf(", ");
-                }}
-                printf("]\\n");
-                #endif
-            }}
-            
-            cs->phase_record->formulamole_obj(masses_tmp, cs->dof);
-            
-            // DEBUG: Check after formulamole_obj call
-            if (thread_id == 0) {{
-                #ifdef VERBOSE_DEBUG
-                printf("GPU DEBUG: After formulamole_obj - current_spec.num_statevars = %d\\n", current_spec.num_statevars);
-                printf("GPU DEBUG: formulamole_obj returned masses: [");
-                for (int i = 0; i < current_spec.num_components; i++) {{
-                    printf("%.6f", masses_tmp[i]);
-                    if (i < current_spec.num_components - 1) printf(", ");
-                }}
-                printf("]\\n");
-                #endif
-            }}
-            
-            // Sum up the masses for all active components
-            for (int comp_idx = 0; comp_idx < current_spec.num_components; ++comp_idx) {{
-                phase_comp_sum += masses_tmp[comp_idx];
-            }}
-        }}
-        
-        // CRITICAL: Phase amounts are now normalized at Python level - no need to normalize again
-        // The original GPU kernel normalization is disabled since Python does this properly
+        // Phase amounts are already normalized at Python level
+        // Unlike CPU which normalizes in recompute(), GPU receives pre-normalized values
         double original_phase_amt = cs->NP;  // This is already normalized by Python
-        
-        if (thread_id == 0 && current_sys_state.num_compsets < 2) {{
-            #ifdef VERBOSE_DEBUG
-            printf("[GPU DEBUG] Phase amount already normalized by Python: phase_comp_sum=%.6f, phase_amt=%.6f\\n",
-                   phase_comp_sum, cs->NP);
-            #endif
-        }}
         
         // CRITICAL FIX: Must call cs->update() to calculate energy and composition
         // The energy field is used in the equilibrium matrix RHS calculation
@@ -4098,13 +4028,14 @@ __device__ void solve_equilibrium_at_condition_global_mem(
         current_sys_state.num_compsets++;
     }}
     
-    // CRITICAL: Implement CPU phase amount normalization (eqsolver.pyx lines 231-235)
-    // Normalize all phase amounts so they sum to 1.0
+    // CRITICAL: Implement CPU phase amount normalization (eqsolver.pyx lines 290-295)
+    // CPU ALWAYS normalizes phase amounts unconditionally - GPU must match exactly
     double phase_amt_sum = 0.0;
     for (int i = 0; i < current_sys_state.num_compsets; ++i) {{
         phase_amt_sum += current_sys_state.compsets[i].NP;
     }}
-    if (phase_amt_sum > 1e-15) {{
+    // Always normalize to match CPU behavior exactly - no conditions
+    if (phase_amt_sum > 1e-12) {{ // Only check for non-zero to avoid division by zero
         for (int i = 0; i < current_sys_state.num_compsets; ++i) {{
             current_sys_state.compsets[i].NP /= phase_amt_sum;
         }}
@@ -4802,9 +4733,9 @@ __global__ void top_level_equilibrium_kernel(
         double* results_array = (double*)results_list_ptr_raw;
         
         // Use direct indexing - must match Python side calculation exactly
-        // Layout: GM, chemical_potentials[MAX_COMPONENTS], phase_amounts[MAX_PHASES], converged, num_stable_phases, temp, pressure, success_marker, Y_phases[MAX_PHASES * MAX_DOF_PER_PHASE], X_phases[MAX_PHASES * MAX_COMPONENTS]
+        // Layout: GM, chemical_potentials[MAX_COMPONENTS], phase_amounts[MAX_PHASES], converged, num_stable_phases, temp, pressure, success_marker, Y_phases[MAX_PHASES * MAX_DOF_PER_PHASE], X_phases[MAX_PHASES * MAX_COMPONENTS], phase_ids[MAX_PHASES]
         int condition_idx = tid;
-        int results_per_condition = 7 + MAX_COMPONENTS + MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * MAX_COMPONENTS);  // CRITICAL FIX: Include X_phases to match Python
+        int results_per_condition = 7 + MAX_COMPONENTS + MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * MAX_COMPONENTS) + MAX_PHASES;  // CRITICAL FIX: Include phase_ids
         int base_offset = condition_idx * results_per_condition;
         
         // Initialize all results to zero (safe default)
@@ -5690,6 +5621,13 @@ __global__ void top_level_equilibrium_kernel(
                         results_array[x_offset + x_index] = equilibrium_result.X_phases[x_index];
                     }}
                 }}
+            }}
+            
+            // CRITICAL FIX: Store phase_ids from equilibrium_result
+            // This was missing, causing all phases to be labeled with ID 0
+            int phase_ids_offset = x_offset + (MAX_PHASES * MAX_COMPONENTS);  // Start after X_phases
+            for (int phase_idx = 0; phase_idx < MAX_PHASES; ++phase_idx) {{
+                results_array[phase_ids_offset + phase_idx] = (double)equilibrium_result.phase_ids[phase_idx];
             }}
             
         }} else {{

@@ -994,6 +994,21 @@ typedef struct SystemState {
                 double temp_hess[(MAX_DOF_PER_PHASE + 1) * (MAX_DOF_PER_PHASE + 1)];
                 pr->formulahess(temp_hess, compset->dof);
                 
+                // DEBUG: Print raw Hessian output
+                #ifdef VERBOSE_DEBUG
+                if (idx == 0 && iteration < 2) {
+                    printf("GPU DEBUG: Raw Hessian output for phase %d:\n", idx);
+                    int reduced_dims = 1 + pr->phase_dof; // T + site fractions
+                    for (int i = 0; i < reduced_dims; ++i) {
+                        printf("  Row %d: ", i);
+                        for (int j = 0; j < reduced_dims; ++j) {
+                            printf("%.6e ", temp_hess[i * reduced_dims + j]);
+                        }
+                        printf("\n");
+                    }
+                }
+                #endif
+                
                 // Map the reduced Hessian (T + site fractions) to the full matrix (N, P, T + site fractions)
                 // The CSE Hessian functions output a (1 + phase_dof) x (1 + phase_dof) matrix:
                 // - temp_hess[0] corresponds to d²G/dT² (T,T element) 
@@ -1165,9 +1180,9 @@ typedef struct SystemState {
             #ifdef VERBOSE_DEBUG
             if (idx == 0 && iteration < 2) {
                 printf("GPU DEBUG: Phase matrix before inversion (dim=%d):\n", csst->full_e_matrix_dim);
-                for (int i = 0; i < csst->full_e_matrix_dim && i < 3; ++i) {
+                for (int i = 0; i < csst->full_e_matrix_dim; ++i) {
                     printf("  Row %d: ", i);
-                    for (int j = 0; j < csst->full_e_matrix_dim && j < 3; ++j) {
+                    for (int j = 0; j < csst->full_e_matrix_dim; ++j) {
                         printf("%e ", csst->phase_matrix[i * csst->full_e_matrix_dim + j]);
                     }
                     printf("\n");
@@ -1179,19 +1194,27 @@ typedef struct SystemState {
                 csst->full_e_matrix[i] = csst->phase_matrix[i];
             }
             
-            invert_matrix(csst->full_e_matrix, csst->full_e_matrix_dim,
-                          spec->U_inv, spec->V_inv, spec->singular_values_inv, spec->superdiag_inv, spec->work_inv);
+            // CRITICAL FIX: Use LU decomposition instead of SVD to match CPU behavior exactly
+            // CPU uses LAPACK's dgesv (LU decomposition with partial pivoting)
+            // GPU was using SVD which produces different results for constrained matrices
+            invert_matrix_lu(csst->full_e_matrix, csst->full_e_matrix_dim, spec->work_inv);
             
             // DEBUG: Check full_e_matrix after inversion for BOTH phases
             #ifdef VERBOSE_DEBUG
             if (iteration == 0) {
-                printf("GPU DEBUG: Phase %d Full E matrix after inversion:\n", idx);
-                for (int i = 0; i < csst->full_e_matrix_dim && i < 3; ++i) {
+                printf("GPU DEBUG: Phase %d Full E matrix after inversion (dim=%d):\n", idx, csst->full_e_matrix_dim);
+                for (int i = 0; i < csst->full_e_matrix_dim; ++i) {
                     printf("  Row %d: ", i);
-                    for (int j = 0; j < csst->full_e_matrix_dim && j < 3; ++j) {
+                    for (int j = 0; j < csst->full_e_matrix_dim; ++j) {
                         printf("%e ", csst->full_e_matrix[i * csst->full_e_matrix_dim + j]);
                     }
                     printf("\n");
+                }
+                
+                // Print diagonal values specifically
+                printf("GPU DEBUG: Phase %d diagonal values after inversion:\n", idx);
+                for (int i = 0; i < csst->full_e_matrix_dim; ++i) {
+                    printf("  [%d,%d] = %.15e\n", i, i, csst->full_e_matrix[i * csst->full_e_matrix_dim + i]);
                 }
             }
             #endif
@@ -1689,9 +1712,28 @@ __device__ void write_row_fixed_mole_fraction(double* out_row, double* out_rhs,
         int current_free_compset_original_sys_idx = free_stable_compset_indices[i];
         if (current_free_compset_original_sys_idx == compset_original_idx_sys) { // If this column is for the current phase
              if (fabs(current_system_amount_sys)>1e-12) {
-                out_row[free_variable_column_offset + i] += prefactor_for_this_component *
-                    (1.0 / current_system_amount_sys) *
-                    (masses_cs[component_idx_of_constraint] - system_mole_fractions_sys[component_idx_of_constraint] * moles_normalization_cs);
+                double coeff_value = (masses_cs[component_idx_of_constraint] - system_mole_fractions_sys[component_idx_of_constraint] * moles_normalization_cs);
+                double contribution = prefactor_for_this_component * (1.0 / current_system_amount_sys) * coeff_value;
+                
+                #ifdef VERBOSE_DEBUG
+                // Print debug info for mole fraction constraint calculations
+                if (component_idx_of_constraint == 1) {
+                    printf("[GPU MOLE FRAC COEFF] Phase %d, Component 1:\n", compset_original_idx_sys);
+                    printf("  masses[1] = %.15e\n", masses_cs[component_idx_of_constraint]);
+                    printf("  system_mole_fractions[1] = %.15e\n", system_mole_fractions_sys[component_idx_of_constraint]);
+                    printf("  moles_normalization = %.15e\n", moles_normalization_cs);
+                    printf("  coeff = masses[1] - sys_mole_frac[1] * moles_norm = %.15e - %.15e * %.15e = %.15e\n",
+                           masses_cs[component_idx_of_constraint], 
+                           system_mole_fractions_sys[component_idx_of_constraint],
+                           moles_normalization_cs,
+                           coeff_value);
+                    printf("  contribution to matrix = %.15e * (1.0 / %.15e) * %.15e = %.15e\n",
+                           prefactor_for_this_component, current_system_amount_sys, coeff_value, contribution);
+                    printf("  out_row[%d] += %.15e\n", free_variable_column_offset + i, contribution);
+                }
+                #endif
+                
+                out_row[free_variable_column_offset + i] += contribution;
              }
         }
     }

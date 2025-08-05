@@ -1,0 +1,41 @@
+Testing 8 compositions x 6 temperatures = 40 total conditions
+Running calculations with multiple conditions per call...
+Running CPU calculation...
+CPU calculation completed in 0.4 seconds
+Running GPU calculation...
+GPU calculation completed in 11.6 seconds
+
+Debug - Result shapes:
+  cpu_gm.shape: (1, 1, 5, 8)
+  gpu_gm.shape: (1, 1, 5, 8)
+  result_cpu.X shape: (1, 1, 5, 8, 3, 2)
+  result_cpu.T shape: (5,)
+  result_cpu dimensions: FrozenMappingWarningOnValuesAccess({'N': 1, 'P': 1, 'T': 5, 'X_TI': 8, 'vertex': 3, 'component': 2, 'internal_dof': 2})
+
+Extracting condition values from dataset...
+  Dimensions in order: ['N', 'P', 'T', 'X_TI', 'vertex', 'component', 'internal_dof']
+  Temperature coordinates: [500. 600. 700. 800. 900.]
+  X_TI coordinates: [0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8]
+  Constructed 40 condition pairs
+  cpu_gm flattened shape: (40,)
+
+Flattened array lengths:
+  cpu_gm_flat: 40
+  x_ti_flat: 40
+  temp_flat: 40
+
+Received 40 results (expected 40)
+
+Test completed in 12.0 seconds
+Results saved to gpu_cpu_comparison_results_multi.txt
+
+Summary:
+  Total conditions: 40
+  Passed: 40
+  Failed: 0
+  Pass rate: 100.0%
+
+Performance:
+  CPU time: 0.4 seconds
+  GPU time: 11.6 seconds
+  Speedup: 0.0x

@@ -1,0 +1,374 @@
+$
+$ Database for high Mn steels (Fe-Mn-Al-Si-V-Nb-Ti-C-N), Ver. 4.0
+$
+$ Compiled by Bengt Hallstedt, March 2014 (first version November 2010,
+$ second version December 2012, third version February 2014)
+$
+$ ------------------------------------------------------------------------------
+$
+$ Version information
+$ ===================
+$
+$ Changes from version 3.0 to 4.0:
+$
+$ Ti is added to the database. This includes the systems Fe-Ti, Ti-C, Ti-N,
+$ Mn-Ti, Al-Ti, Si-Ti, Nb-Ti, Ti-V, Fe-Ti-C, Fe-Ti-N, Ti-C-N, Nb-Ti-C,
+$ Nb-Ti-N, Ti-V-C and Ti-V-N.
+$
+$ Changes from version 2.1 to 3.0:
+$
+$ Al-Fe-Mn: Updated from Umino 2006 to Lindahl 2013.
+$ Fe-Nb-V:  Added from Khvan 2013.
+$
+$ Changes from version 1.0 to 2.1:
+$
+$ The Al-Fe-Mn-C system is still very much in work, but some more recent data
+$ have been added.
+$
+$ Al-Fe: Updated from Seierstein 1993 to Sundman 2009.
+$        The phase BCC_4SL was added (4SL-BCC). The disordered part is
+$        A2_BCC (as for BCC_2SL, which remains).
+$        The phase AL5FE4 was replaced by AL8FE5_D82.
+$ Al-Mn: Updated from Jansson 1998 to Du 2007 with ordering modelling added
+$        for fcc and bcc and modification of fcc and Al11Mn4_HT
+$        by Djurovic 2011.
+$        The phases AL4MN_LAMBDA and AL11MN4_HT were added.
+$        The model of AL8MN5_D810 was changed from 12:4:10 to 12:5:9.
+$ Fe-C:  Cementite modified.
+$ Fe-Mn: HCP_A3 interaction slightly modified.
+$ Fe-N:  Updated from Frisk 1991 to Du 1993.
+$ Fe-Nb: Updated from Lee 2001 to Liu 2012/Khvan 2013
+$ Mn-C:  Updated from Huang 1990 to Djurovic 2010.
+$ Mn-Nb: Added from Liu 2012.
+$ Nb-C:  Slight change of BCC_A2 (Khvan 2013).
+$ Nb-N:  BCC_A2 reoptimised (Khvan 2013).
+$ V-C:   Liquid interaction slightly modified.
+$ Al-Fe-Mn: Updated from Jansson 1998 to Umino 2006. However, Umino used
+$           older versions of Al-Fe and Al-Mn than included here, so more
+$           work will be necessary.
+$ Fe-C-N:   Updated from Du 1991 to Du 1993.
+$ Fe-Mn-Nb: Added from Liu 2012/Khvan 2013.
+$ Fe-Nb-C:  Updated from Lee 2001 to Khvan 2013.
+$ Fe-Nb-N:  Updated from Lee 2001 to Khvan 2013.
+$ Mn-Nb-C:  Added from Khvan 2012.
+$ Mn-Nb-N:  Added from Khvan 2013.
+$ Nb-C-N:   Updated from Lee 2001 to Khvan 2013.
+$ Fe-Mn-Nb-C:  Added from Khvan 2012.
+$ Fe-Mn-Nb-N:  Added from Khvan 2013.
+$
+ DATABASE_INFO '
+ Welcome to version 4.0 of the PrecHiMn database for cubic V(C,N) and'
+ Nb(C,N) carbides and carbonitrides in high-Mn steels.''
+ Created by Bengt Hallstedt in November 2010 and updated in December 2012'
+ and February and March 2014.''
+ The database contains the elements Fe, Mn, Al, Si, V, Nb, Ti, C and N.'''
+ A few notes on phases in the database:''
+ FCC_A1 is both austenite and cubic (Nb,Ti,V)(C,N). Thermo-Calc version S'
+ will create the necessary composition sets automatically. With older'
+ versions of Thermo-Calc this must be done manually in most cases.''
+ HCP_A3 is both the epsilon-phase (epsilon-martensite) and the M2X'
+ hexagonal carbide/nitride.''
+ At high contents of Al or Si the BCC_A2 phase (ferrite) may order.'
+ This is described by the BCC_2SL phase, which is deactivated by default.'
+ To activate it, the following commands are needed in the database module:'
+    RESTORE PHASE A2_BCC BCC_2SL'
+    REJECT PHASE BCC_A2'
+ All equilibria with BCC_A2 will be reproduced as before, but the phase'
+ name will now be BCC_2SL.''
+ CBCC_A12 is alpha-Mn and CUB_A13 is beta-Mn.''
+ If you suspend the GRAPHITE to calculate equilibria with CEMENTITE,'
+ you should also suspend DIAMOND. Otherwise DIAMOND may become more stable'
+ than CEMENTITE at low temperature.''
+ The GAS phase is deactivated by default, so if you need it activate it'
+ in the database module:
+    RESTORE PHASE GAS''
+ The database contains quite a large number of phases that will be of'
+ little interest in most cases. For calculations with several elements'
+ it is recommended to suspend all phases except those actually needed'
+ in order to speed up the calculations.'''
+ All binary systems are included in the database. The ternary systems'
+ Fe-Mn-C, Al-Fe-C, Fe-Si-C, Fe-V-C, Fe-Nb-C, Fe-Ti-C, Fe-C-N, Al-Fe-Mn,'
+ Fe-Mn-Si, Fe-Mn-V, Fe-Mn-Nb, Fe-Mn-N, Al-Fe-N, Fe-V-N, Fe-Nb-N, Fe-Ti-N,'
+ Al-Mn-C, Mn-V-C, Mn-Nb-C, Nb-V-C, Nb-Ti-C, Nb-Ti-N, Ti-V-C, Ti-V-N, V-C-N,
+ Nb-C-N and Ti-C-N are included.''
+ !
+$
+$ ------------------------------------------------------------------------------
+ TEMP-LIM 298.15 6000.00 !
+$
+$ELEMENT NAME  REF. STATE               ATOMIC MASS H298-H0    S298    !
+$
+ ELEMENT VA   VACUUM                      0.0          0.0      0.0    ! 
+ ELEMENT NB   BCC_A2                     92.9064    5220.0     36.27   ! 
+ ELEMENT TI   HCP_A3                     47.88      4824.      30.72   ! 
+$ ------------------------------------------------------------------------------
+$ Species
+$
+$ ------------------------------------------------------------------------------
+$ Phase definitions
+$
+ PHASE LIQUID:L % 1 1 !
+ CONST LIQUID:L : NB TI : !
+$
+$ Fcc (cF4, Fm-3m) and MeX (cF8, Fm-3m)
+$
+
+$
+$ Bcc (cI2, Im-3m)
+$
+ PHASE BCC_A2 %B 1 1 !
+ CONST BCC_A2 : NB% TI% : !
+
+$ ------------------------------------------------------------------------------
+$ Defaults
+$
+ FUNCTION R         298.15  +8.31451;                                  6000 N !
+$ ------------------------------------------------------------------------------
+$ Element data
+$ ------------------------------------------------------------------------------
+$ Nb
+$
+$ CBCC_A12 and CUB_A13 from 06Slu not included in unary
+$
+ PAR  G(BCC_A2,NB),,                 +GHSERNB;,,                   N 91Din !
+ PAR  G(LIQUID,NB),,                    +GLIQNB;,,                    N 91Din !
+$
+ FUNCTION GHSERNB   298.15  -8519.353+142.045475*T-26.4711*T*LN(T)
+       +2.03475E-04*T**2-3.5012E-07*T**3+93399*T**(-1);
+      2750.00  Y  -37669.3+271.720843*T-41.77*T*LN(T)+1.528238E+32*T**(-9);
+      6000.00  N !
+ FUNCTION GLIQNB    298.15  +29781.555-10.816418*T+GHSERNB-3.06098E-23*T**7;
+      2750.00  Y  -7499.398+260.756148*T-41.77*T*LN(T);
+      6000.00  N !
+$ ------------------------------------------------------------------------------
+$ Ti
+$
+$ BCT_A5 added in unary 3.0
+$
+ PAR  G(BCC_A2,TI),,                 +GBCCTI;                 4000 N 91Din !
+ PAR  G(LIQUID,TI),,                    +GLIQTI;                 4000 N 91Din !
+$
+ FUNCTION GHSERTI   298.15  -8059.921+133.615208*T-23.9933*T*LN(T)
+       -0.004777975*T**2+1.06716E-07*T**3+72636*T**(-1);
+       900.00  Y  -7811.815+132.988068*T-23.9887*T*LN(T)
+       -0.0042033*T**2-9.0876E-08*T**3+42680*T**(-1);
+      1155.00  Y  +908.837+66.976538*T-14.9466*T*LN(T)
+       -0.0081465*T**2+2.02715E-07*T**3-1477660*T**(-1);
+      1941.00  Y  -124526.786+638.806871*T-87.2182461*T*LN(T)
+       +0.008204849*T**2-3.04747E-07*T**3+36699805*T**(-1);
+      4000.00  N !
+ FUNCTION GBCCTI    298.15  -1272.064+134.71418*T-25.5768*T*LN(T)
+       -6.63845E-04*T**2-2.78803E-07*T**3+7208*T**(-1);
+      1155.00  Y  +6667.385+105.366379*T-22.3771*T*LN(T)
+       +0.00121707*T**2-8.4534E-07*T**3-2002750*T**(-1);
+      1941.00  Y  +26483.26-182.426471*T+19.0900905*T*LN(T)
+       -0.02200832*T**2+1.228863E-06*T**3+1400501*T**(-1);
+      4000.00  N !
+ FUNCTION GLIQTI    298.15  +12194.415-6.980938*T+GHSERTI;
+      1300.00  Y  +369519.198-2554.0225*T+342.059267*T*LN(T)
+       -0.163409355*T**2+1.2457117E-05*T**3-67034516*T**(-1);
+      1941.00  Y  -19887.066+298.7367*T-46.29*T*LN(T);
+      4000.00  N !
+ FUNCTION GFCCTI    298.15  +GHSERTI+6000-0.1*T;                       4000 N !
+$ ------------------------------------------------------------------------------
+$ Binary systems
+$ ------------------------------------------------------------------------------
+$ Nb-Ti
+$
+$ From Y. Zhang et al. 2001 (Included in LB Vol. 4)
+$
+$ Y. Zhang, H. Liu, Z. Jin, Calphad, 25, 305-17(2001).
+$
+$ Checked against LB. Checked at 6000K.
+$
+$ Original dataset includes the metastable (at normal pressure) omega phase.
+$
+ PAR  L(LIQUID,NB,TI;0),,               +7406.1;,,                    N 01Zha !
+$
+ PAR  L(BCC_A2,NB,TI;0),,            +13045.3;,,                   N 01Zha !
+$
+
+$ Phase field specific parameters
+
+$ Latent heat, J/cm^3 (could get this from pycalphad, but easier to just input for now!)
+FUNCTION NB_L 0 2435; 6000 N !
+FUNCTION TI_L 0 1755; 6000 N !
+
+$ Melting Point, K (could also get this from pycalphad)
+FUNCTION NB_TM 0 2750; 6000 N !
+FUNCTION TI_TM 0 1941; 6000 N !
+
+$ Surface energy, J/cm^2
+FUNCTION NB_S 0 0.0000190334; 6000 N !
+FUNCTION TI_S 0 0.0000135492; 6000 N !
+
+$ Linear kinetic coefficient, cm/(K*s)
+FUNCTION NB_B 0 0.4; 6000 N !
+FUNCTION TI_B 0 0.4; 6000 N !
+
+$ Molar Volume, cm^3/mol
+FUNCTION V_M 0 12.3479824568; 6000 N !
+
+$ Diffusion of solute, cm^2/s
+FUNCTION D_L 0 0.00001; 6000 N !
+FUNCTION D_S 0 0.000000001; 6000 N !
+
+$ Orientational Mobility, 1/(s*J)
+FUNCTION M_Q 0 400000000; 6000 N !
+
+$ Orientational energy, J/(K*cm)
+FUNCTION H 0 0.00000000001; 6000 N !
+
+$ Anisotropy
+FUNCTION Y_E 0 0.03; 6000 N !
+
+ LIST-OF-REFERENCE
+ NUMBER  SOURCE
+  Null   'Unknown source'
+  Lin    'Linear combination of lattice stabilities'
+  Same   'Same or similar interaction as in the corresponding stable phase'
+  REFLAV 'Laves phase convention: G(LAVES,X:X)=+3*GHSERXX+15000'
+  COST   'COST 507 database'
+  SGCOST 'COST 507 database, SGTE unary database V.3.0, 1996; Al, B, Nd, Ti, Zn'
+  NIST   'NIST-Ni0209 Database, Ursula Kattner, 2002'
+  83And  'J.-O. Andersson, Calphad, 7, 305-15(1983); Fe-V'
+  85Gus  'P. Gustafson, Scand. J. Metall., 14, 259-67(1985); Fe-C'
+  88And2 'J.-O. Andersson, Calphad, 12, 9-23(1988); Fe-Mo, Fe-Mo-C'
+  88And3 'J.-O. Andersson, Metall. Trans A, 19A, 627-36(1988); Cr-Fe-C'
+  89Hua2 'W. Huang, Calphad, 13, 243-52(1989); Fe-Mn'
+  89NPL  'NPL, unpublished, 1989; Mn-Si-C'
+  90Hua1 'W. Huang, Scand. J. Metall., 19, 26-32(1990); Mn-C,'
+  90Hua2 'W. Huang, Metall. Trans. A, 21A, 2115-23(1990); Fe-Mn-C'
+  90Hua3 'W. Huang, Z. Metallkd., 81, 397-404(1990); Fe-Nb, Fe-Nb-C'
+  90SUB  'SGTE Substance Database, version 1990'
+  91Ans  'I Ansara, unpublished, 1991; Cr-Si'
+  91Din  'A.T. Dinsdale, Calphad, 15, 317-425(1991).'
+  91Du   'H. Du, M. Hillert, Z. Metallkd., 82, 310-16(1991); Fe-C-N'
+  91Fer  'A. Fernandez Guillermet, W. Huang,
+          Int. J. Thermophys., 12, 1077-1102(1991); Mn-V-C'
+  91Fri1 'K. Frisk, Calphad, 15, 79-106(1991); Fe-N'
+  91Hua1 'W. Huang, Z. Metallkd., 82, 174-81(1991); V-C'
+  91Hua2 'W. Huang, Z. Metallkd., 82, 391-401(1991); Fe-V, Fe-V-C'
+  91Hua3 'W. Huang, Calphad, 15, 195-208(1991); Mn-V, Fe-Mn-V'
+  91Hua4 'W. Huang, Metall. Trans. A, 22A, 1911-20(1991); Fe-Mn-V-C'
+  91Lac  'J. Lacaze, B. Sundman,
+          Metall. Mater. Trans. A, 22A, 2211-23(1991); Fe-Si, Fe-Si-C'
+  91Oht1 'H. Ohtani, M. Hillert, Calphad, 15, 11-24(1991); V-N'
+  91Oht2 'H. Ohtani, M. Hillert, Calphad, 15, 25-39(1991); Fe-V-N'
+  91Tib  'J.E. Tibballs, SI-report 890221-5, 1991
+          (also COST 507 report, 1998); Mn-Si'
+  92Hil  'M. Hillert, S. Jonsson, Metall. Trans. A, 23A, 3141-49(1992);
+          Al-N, Al-Fe-N'
+  92Jan  'A. Jansson, Metall. Trans. A, 23A, 2953-62(1992); Al-Mn'
+  92Lee1 'B.-J. Lee, Calphad, 16, 121-49(1992);
+          Cr-C, Cr-Ni, Ni-C, Cr-Fe-C, Cr-Ni-C'
+  92Lee2 'B.-J. Lee, J. Phase Equilib., 13, 349-64(1992); Cr-Fe-V-C'
+  93Du   'H. Du, J. Phase Equilib., 14, 682-93(1993); Fe-N, Fe-C-N'
+  93For  'A. Forsberg, J. Agren, J. Phase Equilib., 14, 354-63(1993); Fe-Mn-Si'
+  93Lee2 'B.-J. Lee, Metall. Trans. A, 24A, 1017-25 (1993); Cr-Fe-Mn-C'
+  93Qiu1 'C. Qiu, A. Fernandez Guillermet, Z. Metallkd., 84, 11-22(1993); Mn-N'
+  93Qiu2 'C. Qiu, Metall. Trans. A, 24A, 629-45(1993); Fe-Mn-N'
+  93Sei  'M. Seiersten, SINTEF Report STF-28F93051, Oslo, 1993 and
+          COST 507, Final report round 2, 1998; Al-Fe'
+  94Cou  'C.A. Coughanowr, I. Ansara, H.L. Lukas,
+          Calphad, 18, 125-40(1994); Cr-Si'
+  94Har  'K.C. Hari Kumar, P. Wollants, L. Delaey,
+          Calphad, 18, 71-79(1994); Nb-V'
+  95Gro  'J. Groebner, H.L. Lukas, F. Aldinger,
+          J. Alloys Compd., 220, 8-14(1995); Al-C'
+  95Lee  'B.-J. Lee, unpublished, 1993-95; Cr-Si'
+  96Gro  'J. Groebner, H.L. Lukas, F. Aldinger,
+          Calphad, 20, 247-54(1996); Si-C, Al-Si-C'
+  96Hua  'W. Huang, Metall. Mater. Trans. A, 27A, 3591-3600(1996); Nb-N'
+  96Jon3 'S. Jonsson, Z. Metallkd., 87, 713-20(1996); Ti-C-N'
+  96Sei  'H.J. Seifert, H.L. Lukas, G. Petzow,
+          Z. Metallkd., 87, 2-13(1996); Si-Ti'
+  96Zen  'K. Zeng, R. Schmid-Fetzer, Z. Metallkd., 87, 540-54(1996); Ti-N'
+  97Feu  'H. Feufel, T. Goedecke, H.L. Lukas, F. Aldinger,
+          J. Alloys Compd., 247, 31-42(1997); Al-Si'
+  97Jan  'A. Jansson, PhD Thesis, Stockholm 1997; Al-Fe-Mn'
+  97Lin  'M. Lindholm, J. Phase Equilib., 18, 432-40(1997); Cr-Fe-Si'
+  97SUB  'SGTE substance database, version 1997'
+  97Zen  'K. Zeng, R. Schmid-Fetzer, Thermodynamics of Alloy Formation,
+          TMS, 1997; Al-Ti-N'
+  98Dum  'L.F.S. Dumitrescu, M. Hillert, N. Saunders,
+          J. Phase Equilib., 19, 441-48(1998); Fe-Ti'
+  98Har  'K.C. Hari Kumar, unpublished, 1998; Fe-Ti'
+  98Jan2 'A. Jansson, COST 507, database, 1998; Al-Fe-Mn'
+  98Luk4 'H.L. Lukas, COST 507, Final report round 2, 1998; Al-N'
+  98Mie  'J. Miettinen, Calphad 22, 231-56(1998); Fe-Si, Fe-Si-C'
+  98Ran  'M.H. Rand, N. Saunders, COST 507, Final report round 2, 1998; Si-V'
+  98Sau7 'N. Saunders, COST 507, Final report round 2, 1998; Al-V'
+  98Sau14 'N. Saunders, COST 507, Final report round 2, 1998; Mn-Ti'
+  98Zen  'K. Zeng, R. Schmid-Fetzer, Mater. Sci. Technol., 14, 1083-91(1998);
+          Ti-V-N'
+  99Du   'Y. Du, J.C. Schuster,
+          Metall. Mater. Trans. A, 30A, 2409-18(1999); Ni-Si'
+  99Dum1 'L.F.S. Dumitrescu, M. Hillert, B. Sundman,
+          Z. Metallkd., 90, 534-41(1999); Ti-C, Ti-C-N'
+  99Dum2 'L.F.S. Dumitrescu, M. Hillert, ISIJ Int., 39, 84-90(1999); Fe-Ti-C'
+  99Lee  'B.-J. Lee, unpublished, 1999'
+  99SGUN 'SGTE unary database V.4.1, 1999.'
+  99Sun  'B. Sundman, unpublished, 1999; Fe-Si-C'
+  00Du1  'Y. Du, J.C. Schuster, J. Phase Equilib., 21, 281-86(2000); Cr-Si'
+  00Du2  'Y. Du, J.C. Schuster, L. Perring,
+          J. Am. Ceram. Soc., 83, 2067-73(2000); Cr-Si-C'
+  00SUB  'SGTE substance database, version 2000'
+  00Wes  'S. Westman, unpublished, 2000; Fe-V, Mn-V'
+  01Lee  'B.-J. Lee, Metall. Mater. Trans. A, 32A, 2423-39(2001);
+          Fe-Nb, Nb-C, Fe-Nb-C, Fe-Ti-C, Fe-Ti-N, Fe-Nb-N, Nb-C-N, Nb-Ti-C,
+          Nb-Ti-N, Ti-C-N'
+  01Zha  'Y. Zhang, H. Liu, Z. Jin, Calphad, 25, 305-17(2001); Nb-Ti'
+  02Fer  'P.B. Fernandes, G.C. Coelho, F. Ferreira, C.A. Nunes, B. Sundman,
+          Intermetallics, 10, 993-99(2002); Nb-Si'
+  02Gho  'G. Ghosh, J. Phase Equilib., 23, 310-28(2002); Ti-V'
+  02Sun  'B. Sundman, modified sigma parameters, 2002; Fe-V, Mn-V'
+  03Ma   'X. Ma, C. Li, F. Wang, W. Zhang, Calphad, 27, 383-88(2003); Si-N'
+  05Can  'S. Canderyd, Report IM-2005-109, KIMAB, Stockholm, 2005; Fe-Nb-C'
+  06Slu  'M.H.F. Sluiter, Calphad, 30, 357-66(2006); Nb'
+  06Umi  'R. Umino, X.J. Liu, Y. Sutou, C.P. Wang, I. Ohnuma, R. Kainuma,
+          K. Ishida, J. Phase Equilib. Diffus., 27, 54-62(2006);
+          Al-Fe, Al-Fe-Mn'
+  07Du   'Y. Du, J. Wang, J. Zhao, J.C. Schuster, F. Weitzer, R. Schmid-Fetzer,
+          M. Ohno, H. Xu, Z.-K. Liu, S. Shang, W. Zhang,
+          Int. J. Mater. Res., 98, 855-71(2007); Al-Mn'
+  08Con  'D. Connetable, J. Lacaze, P. Maugis, B. Sundman,
+          Calphad, 32, 361-70(2008); Al-Fe, Al-Fe-C'
+  08Fri  'K. Frisk, Calphad, 32, 326-37(2008); Nb-V-C, V-C-N'
+  08Mar  'A. Markstroem, D. Andersson, K. Frisk, Calphad, 32, 615-23(2008);
+          Ti-V-C'
+  08Wit  'V.T. Witusiewicz, A.A. Bondar, U. Hecht, S. Rex, T.Ya. Velikanova,
+          J. Alloys Compd., 465, 64-77(2008); Al-Ti'
+  08Xio  'W. Xiong, Y. Du, J. Wang, W.-W. Zhang, X.-G. Lu,
+          Int. J. Mater. Res., 99, 598-612(2008); Al-Ni-Si'
+  08Zhu  'Z. Zhu, Y. Du, L. Zhang, H. Chen, H. Xu, C. Tang,
+          J. Alloys Compd., 460, 632-38(2008); Al-Nb'
+  09Sun  'B. Sundman, I. Ohnuma, N. Dupin, U.R. Kattner, S.G. Fries,
+          Acta Mater., 57, 2896-2908(2009); Al-Fe'
+  09Wit  'V.T. Witusiewicz, A.A. Bondar, U. Hecht, T.Ya. Velikanova,
+          J. Alloys Compd., 472, 133-61(2009); Al-Nb, Al-Nb-Ti'
+  10Chi  'K.-G. Chin, H.-J. Lee, J.-H. Kwak, J.-Y. Kang, B.-J. Lee,
+          J. Alloys Compd., 505, 217-23(2010); Al-Mn-C, Al-Fe-Mn-C'
+  10Dju  'D. Djurovic, B. Hallstedt, J. von Appen, R. Dronskowski,
+          Calphad, 34, 279-85(2010); Mn-C'
+  10Hal1 'B. Hallstedt, D. Djurovic, J. von Appen, R. Dronskowski, A. Dick,
+          F. Koermann, T. Hickel, J. Neugebauer,
+          Calphad, 34, 129-33(2010); Fe-C'
+  10Hal2 'B. Hallstedt, unpublished, 2010; Al-Fe-N'
+  10Hal3 'B. Hallstedt, correction of CUB_A13 and HCP_A3, 2010; Al-Fe-Mn'
+  11Dju  'D. Djurovic, B. Hallstedt, J. von Appen, R. Dronskowski,
+          Calphad, 35, 479-91(2011); Fe-Mn, Fe-Mn-C'
+  11Khv  'A.V. Khvan, slight modification of liquid interaction, 2011; V-C'
+  12Dju  'D. Djurovic, fcc and bcc ordering and Al11Mn4_HT mod., 2012; Al-Mn'
+  12Khv1 'A.V. Khvan, B. Hallstedt, K. Chang
+          Calphad, 39, 54-61(2012); Cr-Nb-C, Mn-Nb-C'
+  12Khv2 'A.V. Khvan, B. Hallstedt, Calphad, 39, 62-69(2012);
+          Fe-Nb, Fe-Nb-C, Fe-Mn-Nb-C'
+  12Liu  'S.H. Liu, B. Hallstedt, D. Music, Y. Du,
+          Calphad, 38, 43-58(2012); Fe-Nb, Mn-Nb, Fe-Mn-Nb'
+  13Khv1 'A.V. Khvan, B. Hallstedt, Calphad, 40, 10-15(2013); Fe-Nb, Nb-C, 
+          Nb-N, Fe-Mn-Nb, Fe-Nb-C, Fe-Nb-N, Nb-C-N, Fe-Mn-Nb-C, Fe-Mn-Nb-N'
+  13Khv2 'A.V. Khvan, K. Chang, B. Hallstedt,
+          Calphad, 43, 143-48(2013); Fe-Nb-V'
+  13Lin  'B.B. Lindahl, M. Selleby, Calphad, 43, 86-93(2013); Al-Fe-Mn'
+!

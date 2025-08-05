@@ -451,20 +451,20 @@ __device__ void solve_equilibrium_at_condition(
     SystemState current_sys_state;
     current_sys_state.init(&current_spec, initial_compsets_for_thread, actual_num_initial_compsets);
     
-    // CRITICAL: Call recompute to ensure phase_compositions are calculated
-    current_sys_state.recompute(&current_spec);
+    // CRITICAL FIX: Do NOT call recompute here - it should only be called after phase normalization
+    // The CPU doesn't call recompute until inside solve_state, after phase amounts are normalized
+    // Calling it here with unnormalized phase amounts causes different initial equilibrium matrices
     
     // Debug: Verify SystemState initialization
     #ifdef VERBOSE_DEBUG
     if (thread_id == 0) {
         printf("GPU DEBUG: SystemState initialized with num_compsets=%d\n", current_sys_state.num_compsets);
-        // Check all phases
+        // Check all phases - Note: phase_compositions won't be calculated yet without recompute
         for (int i = 0; i < current_sys_state.num_compsets && i < 3; ++i) {
             printf("[INITIAL PHASES] Phase %d:\n", i);
             printf("  Phase amount: %.15e\n", current_sys_state.phase_amt[i]);
-            printf("  Phase compositions: [%.15e, %.15e]\n",
-                   current_sys_state.phase_compositions[i * MAX_COMPONENTS + 0],
-                   current_sys_state.phase_compositions[i * MAX_COMPONENTS + 1]);
+            // Phase compositions are calculated in recompute, which we're delaying
+            printf("  Phase compositions: (not yet calculated - will be done after normalization)\n");
             // Also show site fractions
             CompositionSet* cs = &current_sys_state.compsets[i];
             if (cs->phase_record != nullptr) {
@@ -473,8 +473,6 @@ __device__ void solve_equilibrium_at_condition(
                        cs->dof[current_spec.num_statevars + 1]);
             }
         }
-        printf("GPU DEBUG: After recompute - phase_compositions for phase 0: [%.6f, %.6f]\n",
-               current_sys_state.phase_compositions[0], current_sys_state.phase_compositions[1]);
     }
     #endif
     
@@ -593,24 +591,10 @@ __device__ void solve_equilibrium_at_condition(
     }
     #endif
     
-    // CRITICAL FIX: Synchronize phase_amt with NP but don't normalize here
-    // The normalization should only happen in minimizer.h recompute() to match CPU
+    // CRITICAL FIX: Just synchronize phase_amt with normalized NP values
+    // Do NOT call update here - the CPU doesn't recalculate energies after normalization
+    // The first recompute in solve_state will handle all calculations with normalized amounts
     for (int i = 0; i < current_sys_state.num_compsets; ++i) {
-        CompositionSet* compset = &current_sys_state.compsets[i];
-        if (compset->phase_record == nullptr) continue;
-        
-        // Update compset to calculate X (moles of elements per formula unit)
-        double current_dof[MAX_STATEVARS + MAX_DOF_PER_PHASE];
-        for (int k = 0; k < current_spec.num_statevars; ++k) {
-            current_dof[k] = compset->dof[k];
-        }
-        for (int k = 0; k < compset->phase_record->phase_dof; ++k) {
-            current_dof[current_spec.num_statevars + k] = compset->dof[current_spec.num_statevars + k];
-        }
-        compset->update(&current_dof[current_spec.num_statevars], compset->NP, current_dof, current_spec.num_statevars);
-        
-        // CRITICAL FIX: Only synchronize phase_amt with NP - no normalization here
-        // The solver updates NP but phase_amt might be out of sync
         current_sys_state.phase_amt[i] = current_sys_state.compsets[i].NP;
         
         #ifdef VERBOSE_DEBUG

@@ -1,5 +1,5 @@
 === INTERLEAVED CPU-GPU EQUILIBRIUM DEBUG TRACE ===
-Started: 2025-08-01T14:20:28.717590
+Started: 2025-08-05T09:35:35.519802
 
 
 ================================================================================
@@ -14,8 +14,8 @@ SEGMENT 01 COMPARISON
 [SEGMENT 01] [GPU] Entry point and parameter validation
   gpu_mode: True
   components: ['AU', 'BI', 'VA']
-  phases: ['LIQUID', 'FCC_A1']
-  conditions: {'T': 400, 'P': 101325, 'X(BI)': 0.1}
+  phases: ['AU2BI_C15', 'BCC_A2', 'FCC_A1', 'HCP_A3', 'LIQUID', 'RHOMBOHEDRAL_A7']
+  conditions: {X_BI: 0.1, T: 400, P: 101325}
   output_requested: None
   verbose: True
   force_cpu: False
@@ -33,17 +33,17 @@ SEGMENT 02 COMPARISON
   database: Elements: ['AU', 'BI', 'VA']
 Species: [Species('AU', 'AU1'), Species('BI', 'BI1'), Species('VA', 'VA1')]
 Phase({'name': 'AU2BI_C15', 'constituents': (frozenset({Species('AU', 'AU1')}), frozenset({Species('BI', 'BI1')})), 'sublattices': (2.0, 1.0), 'model_hints': {}})
-Phase({'name': 'BCC_A2', 'constituents': (frozenset({Species('AU', 'AU1'), Species('BI', 'BI1')}), frozenset({Species('VA', 'VA1')})), 'sublattices': (1.0, 3.0), 'model_hints': {'ihj_magnetic_afm_factor': -1.0, 'ihj_magnetic_structure_factor': 0.4}})
-Phase({'name': 'FCC_A1', 'constituents': (frozenset({Species('AU', 'AU1'), Species('BI', 'BI1')}), frozenset({Species('VA', 'VA1')})), 'sublattices': (1.0, 1.0), 'model_hints': {'ihj_magnetic_afm_factor': -3.0, 'ihj_magnetic_structure_factor': 0.28}})
-Phase({'name': 'HCP_A3', 'constituents': (frozenset({Species('AU', 'AU1'), Species('BI', 'BI1')}), frozenset({Species('VA', 'VA1')})), 'sublattices': (1.0, 0.5), 'model_hints': {'ihj_magnetic_afm_factor': -3.0, 'ihj_magnetic_structure_factor': 0.28}})
-Phase({'name': 'LIQUID', 'constituents': (frozenset({Species('AU', 'AU1'), Species('BI', 'BI1')}),), 'sublattices': (1.0,), 'model_hints': {'liquid': True}})
-Phase({'name': 'RHOMBOHEDRAL_A7', 'constituents': (frozenset({Species('AU', 'AU1'), Species('BI', 'BI1')}),), 'sublattices': (1.0,), 'model_hints': {}})
+Phase({'name': 'BCC_A2', 'constituents': (frozenset({Species('BI', 'BI1'), Species('AU', 'AU1')}), frozenset({Species('VA', 'VA1')})), 'sublattices': (1.0, 3.0), 'model_hints': {'ihj_magnetic_afm_factor': -1.0, 'ihj_magnetic_structure_factor': 0.4}})
+Phase({'name': 'FCC_A1', 'constituents': (frozenset({Species('BI', 'BI1'), Species('AU', 'AU1')}), frozenset({Species('VA', 'VA1')})), 'sublattices': (1.0, 1.0), 'model_hints': {'ihj_magnetic_afm_factor': -3.0, 'ihj_magnetic_structure_factor': 0.28}})
+Phase({'name': 'HCP_A3', 'constituents': (frozenset({Species('BI', 'BI1'), Species('AU', 'AU1')}), frozenset({Species('VA', 'VA1')})), 'sublattices': (1.0, 0.5), 'model_hints': {'ihj_magnetic_afm_factor': -3.0, 'ihj_magnetic_structure_factor': 0.28}})
+Phase({'name': 'LIQUID', 'constituents': (frozenset({Species('BI', 'BI1'), Species('AU', 'AU1')}),), 'sublattices': (1.0,), 'model_hints': {'liquid': True}})
+Phase({'name': 'RHOMBOHEDRAL_A7', 'constituents': (frozenset({Species('BI', 'BI1'), Species('AU', 'AU1')}),), 'sublattices': (1.0,), 'model_hints': {}})
 6 symbols in database
 18 parameters in database
 
   models: None
   parameters: None
-  calc_opts: {'pdens': 1000}
+  calc_opts: None
   solver: None
   phase_records: None
 
@@ -62,7 +62,7 @@ SEGMENT 03 COMPARISON
 
 [SEGMENT 03] Workspace constructor complete
   components: [Component('AU', 'AU1'), Component('BI', 'BI1'), Component('VA', 'VA1')]
-  phases: ['FCC_A1', 'LIQUID']
+  phases: ['AU2BI_C15', 'BCC_A2', 'FCC_A1', 'HCP_A3', 'LIQUID', 'RHOMBOHEDRAL_A7']
   conditions: {N: array([1.]), P: array([101325.]), T: array([400.]), X_BI: array([0.1])}
 
 ================================================================================
@@ -77,11 +77,11 @@ SEGMENT 05 COMPARISON
 [SEGMENT 05] Phase record factory creation
   components: [Component('AU', 'AU1'), Component('BI', 'BI1'), Component('VA', 'VA1')]
   conditions: [N, P, T, X_BI]
-  models: ['FCC_A1', 'LIQUID']
+  models: ['AU2BI_C15', 'BCC_A2', 'FCC_A1', 'HCP_A3', 'LIQUID', 'RHOMBOHEDRAL_A7']
   parameters: OrderedDict()
 
 [SEGMENT 05] Phase record factory created
-  phases: ['FCC_A1', 'LIQUID']
+  phases: ['AU2BI_C15', 'BCC_A2', 'FCC_A1', 'HCP_A3', 'LIQUID', 'RHOMBOHEDRAL_A7']
 
 ================================================================================
 SEGMENT 08 COMPARISON
@@ -95,8 +95,8 @@ SEGMENT 08 COMPARISON
 [SEGMENT 08] Starting point calculation
   conditions: OrderedDict({N: array([1.]), P: array([101325.]), T: array([400.]), X_BI: array([0.1])})
   state_variables: [N, P, T]
-  phase_records: ['FCC_A1', 'LIQUID']
-  grid_shape: (1, 1, 1, 4006)
+  phase_records: ['AU2BI_C15', 'BCC_A2', 'FCC_A1', 'HCP_A3', 'LIQUID', 'RHOMBOHEDRAL_A7']
+  grid_shape: (1, 1, 1, 613)
 
 [SEGMENT 08] Global min check
   global_min_enabled: True
@@ -113,7 +113,7 @@ SEGMENT 09 COMPARISON
 [SEGMENT 09] Lower convex hull setup
   state_variables: [N, P, T]
   conds_keys: [N, P, T, X_BI]
-  global_grid_shape: (1, 1, 1, 4006)
+  global_grid_shape: (1, 1, 1, 613)
   result_array_shape: (1, 1, 1, 1)
 
 [SEGMENT 09] Lower convex hull arrays cached
@@ -150,10 +150,10 @@ SEGMENT 11 COMPARISON
   lincomb_rhs_shape: (2,)
 
 [SEGMENT 11] [CONDITION 0] Hyperplane result
-  GM: -1.949843516748273e+04
-  MU: [-19395.973544158966, -20420.589777396635]
-  NP: [0.891176470588244, 0.10882352941175598, 0.0]
-  points: [2, 2087, 0]
+  GM: -1.980583813478267e+04
+  MU: [-19395.973544158933, -23494.619450396243]
+  NP: [0.700000000000021, 0.299999999999979, 0.0]
+  points: [125, 2, 0]
 
 ================================================================================
 SEGMENT 12 COMPARISON
@@ -165,12 +165,12 @@ SEGMENT 12 COMPARISON
 --- GPU ---
 
 [SEGMENT 12] [CONDITION 0] Copy results from grid
-  points: [2, 2087, 0]
+  points: [125, 2, 0]
 
 [SEGMENT 12] [CONDITION 0] Copy results complete
-  phases: ['FCC_A1', 'LIQUID', '']
-  X: [[0.99999999999999, 9.9999999999999e-15], [0.08108108108108948, 0.9189189189189106]]
-  final_GM: -1.949843516748273e+04
+  phases: ['FCC_A1', 'AU2BI_C15', '']
+  X: [[0.99999999999999, 9.9999999999999e-15], [0.6666666666666666, 0.3333333333333333]]
+  final_GM: -1.980583813478267e+04
 
 ================================================================================
 SEGMENT 13 COMPARISON
@@ -217,8 +217,8 @@ SEGMENT 40 COMPARISON
 [SEGMENT 40] [GPU] Equilibrium calculation complete
   converged: True
   properties_shape: (1, 1, 1, 1)
-  final_GM: 0.000000000000000e+00
+  final_GM: -7.770000000000000e+02
 
 ================================================================================
-TRACE COMPLETE - 2025-08-01T14:20:28.717650
+TRACE COMPLETE - 2025-08-05T09:35:35.519848
 ================================================================================

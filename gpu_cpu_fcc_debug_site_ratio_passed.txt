@@ -1,0 +1,149 @@
+/mnt/c/users/scott/Documents/pycalphad/test_aubi_fcc_liquid_debug.py:26: DeprecationWarning: Conversion of an array with ndim > 0 to a scalar is deprecated, and will error in future. Ensure you extract a single element from your array before performing this operation. (Deprecated NumPy 1.25.)
+  cpu_gm = float(result_cpu.GM.values)
+Testing Au-Bi system with FCC_A1 + LIQUID phases
+FCC_A1 has vacancy sublattice: (AU,BI)(VA)
+
+============================================================
+Testing X(BI)=0.1, T=400K
+============================================================
+
+CPU Calculation:
+  GM = -19498.435987 J/mol
+  Active phases:
+    FCC_A1: NP = 0.891176, X(AU) = 1.000000, X(BI) = 0.000000
+    LIQUID: NP = 0.108824, X(AU) = 0.081086, X(BI) = 0.918914
+
+GPU Calculation:
+/mnt/c/users/scott/Documents/pycalphad/test_aubi_fcc_liquid_debug.py:52: DeprecationWarning: Conversion of an array with ndim > 0 to a scalar is deprecated, and will error in future. Ensure you extract a single element from your array before performing this operation. (Deprecated NumPy 1.25.)
+  gpu_gm = float(result_gpu.GM.values)
+/mnt/c/users/scott/Documents/pycalphad/test_aubi_fcc_liquid_debug.py:26: DeprecationWarning: Conversion of an array with ndim > 0 to a scalar is deprecated, and will error in future. Ensure you extract a single element from your array before performing this operation. (Deprecated NumPy 1.25.)
+  cpu_gm = float(result_cpu.GM.values)
+  GM = -10351.099432 J/mol
+  Active phases:
+    FCC_A1: NP = 0.938614, X(AU) = 1.000000, X(BI) = 0.000000
+    LIQUID: NP = 0.061386, X(AU) = 0.081086, X(BI) = 0.918914
+
+Comparison:
+  GM difference: 9147.336556 J/mol
+  ✓ Same phases found: {'FCC_A1', 'LIQUID'}
+
+============================================================
+Testing X(BI)=0.5, T=400K
+============================================================
+
+CPU Calculation:
+  GM = -19908.282080 J/mol
+  Active phases:
+    FCC_A1: NP = 0.455880, X(AU) = 1.000000, X(BI) = 0.000000
+    LIQUID: NP = 0.544120, X(AU) = 0.081086, X(BI) = 0.918914
+
+GPU Calculation:
+/mnt/c/users/scott/Documents/pycalphad/test_aubi_fcc_liquid_debug.py:52: DeprecationWarning: Conversion of an array with ndim > 0 to a scalar is deprecated, and will error in future. Ensure you extract a single element from your array before performing this operation. (Deprecated NumPy 1.25.)
+  gpu_gm = float(result_gpu.GM.values)
+/mnt/c/users/scott/Documents/pycalphad/test_aubi_fcc_liquid_debug.py:26: DeprecationWarning: Conversion of an array with ndim > 0 to a scalar is deprecated, and will error in future. Ensure you extract a single element from your array before performing this operation. (Deprecated NumPy 1.25.)
+  cpu_gm = float(result_cpu.GM.values)
+  GM = -13480.143949 J/mol
+  Active phases:
+    FCC_A1: NP = 0.644518, X(AU) = 1.000000, X(BI) = 0.000000
+    LIQUID: NP = 0.355482, X(AU) = 0.081086, X(BI) = 0.918914
+
+Comparison:
+  GM difference: 6428.138131 J/mol
+  ✓ Same phases found: {'FCC_A1', 'LIQUID'}
+
+============================================================
+Testing X(BI)=0.8, T=400K
+============================================================
+
+CPU Calculation:
+  GM = -20215.666650 J/mol
+  Active phases:
+    FCC_A1: NP = 0.129407, X(AU) = 1.000000, X(BI) = 0.000000
+    LIQUID: NP = 0.870593, X(AU) = 0.081086, X(BI) = 0.918914
+
+GPU Calculation:
+/mnt/c/users/scott/Documents/pycalphad/test_aubi_fcc_liquid_debug.py:52: DeprecationWarning: Conversion of an array with ndim > 0 to a scalar is deprecated, and will error in future. Ensure you extract a single element from your array before performing this operation. (Deprecated NumPy 1.25.)
+  gpu_gm = float(result_gpu.GM.values)
+/mnt/c/users/scott/Documents/pycalphad/test_aubi_fcc_liquid_debug.py:26: DeprecationWarning: Conversion of an array with ndim > 0 to a scalar is deprecated, and will error in future. Ensure you extract a single element from your array before performing this operation. (Deprecated NumPy 1.25.)
+  cpu_gm = float(result_cpu.GM.values)
+  GM = -17109.188706 J/mol
+  Active phases:
+    FCC_A1: NP = 0.303427, X(AU) = 1.000000, X(BI) = 0.000000
+    LIQUID: NP = 0.696573, X(AU) = 0.081086, X(BI) = 0.918914
+
+Comparison:
+  GM difference: 3106.477945 J/mol
+  ✓ Same phases found: {'FCC_A1', 'LIQUID'}
+
+============================================================
+Testing X(BI)=0.1, T=600K
+============================================================
+
+CPU Calculation:
+  GM = -32363.012260 J/mol
+  Active phases:
+    FCC_A1: NP = 0.865492, X(AU) = 0.999976, X(BI) = 0.000024
+    LIQUID: NP = 0.134508, X(AU) = 0.256703, X(BI) = 0.743297
+
+GPU Calculation:
+/mnt/c/users/scott/Documents/pycalphad/test_aubi_fcc_liquid_debug.py:52: DeprecationWarning: Conversion of an array with ndim > 0 to a scalar is deprecated, and will error in future. Ensure you extract a single element from your array before performing this operation. (Deprecated NumPy 1.25.)
+  gpu_gm = float(result_gpu.GM.values)
+/mnt/c/users/scott/Documents/pycalphad/test_aubi_fcc_liquid_debug.py:26: DeprecationWarning: Conversion of an array with ndim > 0 to a scalar is deprecated, and will error in future. Ensure you extract a single element from your array before performing this operation. (Deprecated NumPy 1.25.)
+  cpu_gm = float(result_cpu.GM.values)
+  GM = -17430.054090 J/mol
+  Active phases:
+    FCC_A1: NP = 0.924169, X(AU) = 1.000000, X(BI) = 0.000000
+    LIQUID: NP = 0.075831, X(AU) = 0.256709, X(BI) = 0.743291
+
+Comparison:
+  GM difference: 14932.958169 J/mol
+  ✓ Same phases found: {'FCC_A1', 'LIQUID'}
+
+============================================================
+Testing X(BI)=0.5, T=700K
+============================================================
+
+CPU Calculation:
+  GM = -44679.197445 J/mol
+  Active phases:
+    FCC_A1: NP = 0.187011, X(AU) = 0.999924, X(BI) = 0.000076
+    LIQUID: NP = 0.812989, X(AU) = 0.385003, X(BI) = 0.614997
+
+GPU Calculation:
+/mnt/c/users/scott/Documents/pycalphad/test_aubi_fcc_liquid_debug.py:52: DeprecationWarning: Conversion of an array with ndim > 0 to a scalar is deprecated, and will error in future. Ensure you extract a single element from your array before performing this operation. (Deprecated NumPy 1.25.)
+  gpu_gm = float(result_gpu.GM.values)
+/mnt/c/users/scott/Documents/pycalphad/test_aubi_fcc_liquid_debug.py:26: DeprecationWarning: Conversion of an array with ndim > 0 to a scalar is deprecated, and will error in future. Ensure you extract a single element from your array before performing this operation. (Deprecated NumPy 1.25.)
+  cpu_gm = float(result_cpu.GM.values)
+  GM = -35689.416430 J/mol
+  Active phases:
+    FCC_A1: NP = 0.387337, X(AU) = 1.000000, X(BI) = 0.000000
+    LIQUID: NP = 0.612663, X(AU) = 0.385037, X(BI) = 0.614963
+
+Comparison:
+  GM difference: 8989.781015 J/mol
+  ✓ Same phases found: {'FCC_A1', 'LIQUID'}
+
+============================================================
+Testing X(BI)=0.8, T=600K
+============================================================
+
+CPU Calculation:
+  GM = -38181.205536 J/mol
+  Active phases:
+    LIQUID: NP = 1.000000, X(AU) = 0.200000, X(BI) = 0.800000
+
+GPU Calculation:
+/mnt/c/users/scott/Documents/pycalphad/test_aubi_fcc_liquid_debug.py:52: DeprecationWarning: Conversion of an array with ndim > 0 to a scalar is deprecated, and will error in future. Ensure you extract a single element from your array before performing this operation. (Deprecated NumPy 1.25.)
+  gpu_gm = float(result_gpu.GM.values)
+[GPU] SUCCESS: Basic kernel execution - 1/1 threads converged!
+  GM = -38181.205536 J/mol
+  Active phases:
+    LIQUID: NP = 1.000000, X(AU) = 0.200000, X(BI) = 0.800000
+
+Comparison:
+  GM difference: 0.000000 J/mol
+  ✓ Same phases found: {'LIQUID'}
+
+============================================================
+Summary: 1/6 conditions passed
+============================================================

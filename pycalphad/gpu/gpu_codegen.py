@@ -3641,9 +3641,10 @@ __device__ void solve_equilibrium_at_condition_global_mem(
     
     // CRITICAL FIX: Access num_phases and phase_indices from flat array
     // NOTE: The initial_data pointer is already offset to this thread's data
-    // Layout: phase_indices[4] + phase_amounts[4] + site_fractions[16] + compositions[16] + chemical_potentials[4] + num_phases[1]
-    // Python debug shows: chemical_potentials at [40]-[41], so num_phases should be at [44]
-    int num_phases_offset = 4 + 4 + (4 * 4) + (4 * 4) + 4; // = 4 + 4 + 16 + 16 + 4 = 44
+    // Layout: phase_indices[MAX_PHASES] + phase_amounts[MAX_PHASES] + site_fractions[MAX_PHASES*MAX_DOF_PER_PHASE] + 
+    //         compositions[MAX_PHASES*MAX_COMPONENTS] + chemical_potentials[MAX_COMPONENTS] + num_phases[1]
+    int num_phases_offset = MAX_PHASES + MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + 
+                           (MAX_PHASES * MAX_COMPONENTS) + MAX_COMPONENTS;
     int num_phases = (int)initial_data_flat[num_phases_offset];
     
     // CRITICAL DEBUG: Test if the pointer issue is with multiple conditions or single condition
@@ -3685,6 +3686,9 @@ __device__ void solve_equilibrium_at_condition_global_mem(
     // DEBUG: Store initial phase setup info
     if (thread_id == 0) {{
         result->X_phases[16] = (double)num_phases;  // Number of phases in initial data
+        #ifdef VERBOSE_DEBUG
+        printf("GPU DEBUG: Setting up initial phases, num_phases=%d\\n", num_phases);
+        #endif
     }}
     
     for (int i = 0; i < num_phases && i < MAX_PHASES; ++i) {{
@@ -4028,29 +4032,8 @@ __device__ void solve_equilibrium_at_condition_global_mem(
         current_sys_state.num_compsets++;
     }}
     
-    // CRITICAL: Implement CPU phase amount normalization (eqsolver.pyx lines 290-295)
-    // CPU ALWAYS normalizes phase amounts unconditionally - GPU must match exactly
-    double phase_amt_sum = 0.0;
-    for (int i = 0; i < current_sys_state.num_compsets; ++i) {{
-        phase_amt_sum += current_sys_state.compsets[i].NP;
-    }}
-    // Always normalize to match CPU behavior exactly - no conditions
-    if (phase_amt_sum > 1e-12) {{ // Only check for non-zero to avoid division by zero
-        for (int i = 0; i < current_sys_state.num_compsets; ++i) {{
-            current_sys_state.compsets[i].NP /= phase_amt_sum;
-        }}
-    }}
-    
-    if (thread_id == 0) {{
-        #ifdef VERBOSE_DEBUG
-        printf("[GPU DEBUG] CPU phase amount normalization - sum was %.6f, normalized to 1.0\\n", phase_amt_sum);
-        // Print detailed phase amounts after normalization to match CPU debug format
-        for (int i = 0; i < current_sys_state.num_compsets; ++i) {{
-            printf("[GPU DEBUG] Phase %d: amount=%.6f, energy=%.6f J/mol\\n", 
-                   i, current_sys_state.compsets[i].NP, current_sys_state.cs_states[i].energy);
-        }}
-        #endif
-    }}
+    // NOTE: Phase amount normalization already done BEFORE phase composition calculation
+    // This ensures correct initial system mole fractions in recompute()
     
     // CRITICAL: Set up free_stable_compset_indices array
     // This tells the solver which composition sets are free to vary
@@ -4069,6 +4052,33 @@ __device__ void solve_equilibrium_at_condition_global_mem(
     current_sys_state.largest_chemical_potential_difference = 0.0;
     current_sys_state.delta_ms_rows = 0;
     current_sys_state.delta_ms_cols = 0;
+    // CRITICAL FIX: Normalize phase amounts BEFORE calculating phase compositions
+    // This matches CPU behavior exactly - phase amounts must be in formula units
+    // before we calculate system mole fractions in recompute()
+    double phase_amt_sum = 0.0;
+    for (int i = 0; i < current_sys_state.num_compsets; ++i) {{
+        phase_amt_sum += current_sys_state.compsets[i].NP;
+    }}
+    // Always normalize to match CPU behavior exactly - no conditions
+    if (phase_amt_sum > 1e-12) {{ // Only check for non-zero to avoid division by zero
+        for (int i = 0; i < current_sys_state.num_compsets; ++i) {{
+            current_sys_state.compsets[i].NP /= phase_amt_sum;
+            // CRITICAL: Also update phase_amt array to keep it synchronized
+            current_sys_state.phase_amt[i] = current_sys_state.compsets[i].NP;
+        }}
+    }}
+    
+    if (thread_id == 0) {{
+        #ifdef VERBOSE_DEBUG
+        printf("[GPU DEBUG] Early phase amount normalization - sum was %.6f, normalized to 1.0\\n", phase_amt_sum);
+        // Print detailed phase amounts after normalization to match CPU debug format
+        for (int i = 0; i < current_sys_state.num_compsets; ++i) {{
+            printf("[GPU DEBUG] Phase %d: amount=%.6f (normalized)\\n", 
+                   i, current_sys_state.compsets[i].NP);
+        }}
+        #endif
+    }}
+    
     current_sys_state.phase_compositions_rows = current_sys_state.num_compsets;
     current_sys_state.phase_compositions_cols = current_spec.num_components;
     
@@ -4134,39 +4144,52 @@ __device__ void solve_equilibrium_at_condition_global_mem(
         }}
         
         double phase_comp_sum = 0.0;
+        // First calculate the sum
         for (int comp_idx = 0; comp_idx < current_spec.num_components; ++comp_idx) {{
-            current_sys_state.phase_compositions[idx * MAX_COMPONENTS + comp_idx] = formulamoles[comp_idx];
             phase_comp_sum += formulamoles[comp_idx];
         }}
         
+        // CRITICAL FIX: Normalize phase compositions to mole fractions like CPU does
+        // The CPU uses normalized compositions (X values) for the equilibrium matrix
+        // For single-sublattice phases (e.g. LIQUID), sum=1 so no change
+        // For multi-sublattice phases (e.g. C15 with AU2BI), sum=3 so we get X(AU)=2/3, X(BI)=1/3
+        if (phase_comp_sum > 1e-12) {{
+            for (int comp_idx = 0; comp_idx < current_spec.num_components; ++comp_idx) {{
+                current_sys_state.phase_compositions[idx * MAX_COMPONENTS + comp_idx] = formulamoles[comp_idx] / phase_comp_sum;
+            }}
+        }} else {{
+            // Fallback if sum is zero
+            for (int comp_idx = 0; comp_idx < current_spec.num_components; ++comp_idx) {{
+                current_sys_state.phase_compositions[idx * MAX_COMPONENTS + comp_idx] = formulamoles[comp_idx];
+            }}
+        }}
+        
         // Debug output
-        if (thread_id == 0 && idx == 0) {{
+        if (thread_id == 0 && idx < 2) {{
             #ifdef VERBOSE_DEBUG
-            printf("GPU DEBUG: Phase %d phase_compositions: [%.6f, %.6f, %.6f], sum=%.6f\\n",
-                   idx, formulamoles[0], formulamoles[1], formulamoles[2], phase_comp_sum);
+            printf("GPU DEBUG: Phase %d normalized phase_compositions: [%.6f, %.6f, %.6f], original sum=%.6f\\n",
+                   idx, 
+                   current_sys_state.phase_compositions[idx * MAX_COMPONENTS + 0],
+                   current_sys_state.phase_compositions[idx * MAX_COMPONENTS + 1],
+                   current_sys_state.phase_compositions[idx * MAX_COMPONENTS + 2],
+                   phase_comp_sum);
             #endif
         }}
     }}
     
-    // CRITICAL: Call recompute to ensure all state is properly initialized
+    // CRITICAL FIX: Remove duplicate recompute call
+    // The SystemState::init function already calls recompute() after setting up
+    // phase amounts and compositions. Calling it again here was causing incorrect
+    // system mole fractions because it was using the already-normalized phase amounts
+    // combined with the already-calculated phase compositions.
+    // The CPU code only calls recompute once during initialization.
+    
+    // The SystemState::init has already called recompute, so we don't need to call it again
     if (thread_id == 0) {{
         #ifdef VERBOSE_DEBUG
-        printf("GPU DEBUG: About to call recompute()\\n");
+        printf("GPU DEBUG: SystemState init completed (recompute already called in init)\\n");
         printf("GPU DEBUG: current_spec num_components: %d\\n", current_spec.num_components);
         printf("GPU DEBUG: current_sys_state.num_compsets: %d\\n", current_sys_state.num_compsets);
-        #endif
-    }}
-    __syncthreads();  // Ensure all threads are synchronized before recompute
-    if (thread_id == 0) {{
-        #ifdef VERBOSE_DEBUG
-        printf("GPU DEBUG: Calling recompute\\n");
-        #endif
-        current_sys_state.recompute(&current_spec);
-    }}
-    __syncthreads();  // Sync after recompute
-    if (thread_id == 0) {{
-        #ifdef VERBOSE_DEBUG
-        printf("GPU DEBUG: recompute() completed successfully\\n");
         #endif
     }}
     
@@ -4240,11 +4263,23 @@ __device__ void solve_equilibrium_at_condition_global_mem(
                 for (int ph_idx = 0; ph_idx < phase_data->num_unique_phase_records; ++ph_idx) {{
                     if (&phase_data->phase_records_array[ph_idx] == current_sys_state.compsets[i].phase_record) {{
                         entered_phases[ph_idx] = true;
+                        #ifdef VERBOSE_DEBUG
+                        printf("GPU DEBUG: Marking phase %d as entered (compset %d)\\n", ph_idx, i);
+                        #endif
                         break;
                     }}
                 }}
             }}
         }}
+        
+        #ifdef VERBOSE_DEBUG
+        printf("GPU DEBUG: Entered phases: ");
+        for (int i = 0; i < phase_data->num_unique_phase_records; ++i) {{
+            if (entered_phases[i]) printf("%d ", i);
+        }}
+        printf("\\n");
+        printf("GPU DEBUG: current_sys_state.num_compsets = %d\\n", current_sys_state.num_compsets);
+        #endif
         
         // Calculate driving forces for all grid points
         // driving_forces = dot(grid.X, chemical_potentials) - grid.GM
@@ -4264,19 +4299,40 @@ __device__ void solve_equilibrium_at_condition_global_mem(
                     continue;
                 }}
                 
+                // Skip invalid grid points (fake points with GM > 1e9)
+                if (GM_ptr[grid_idx] > 1e9) {{
+                    continue;
+                }}
+                
                 // Calculate driving force for this grid point
                 double driving_force = 0.0;
+                bool valid_point = true;
                 
                 // dot product of X with chemical potentials
                 for (int comp_idx = 0; comp_idx < current_spec.num_components; ++comp_idx) {{
                     int x_idx = grid_idx * num_components_stride_X + comp_idx;
                     if (x_idx < num_grid_points_total * MAX_COMPONENTS) {{
-                        driving_force += X_ptr[x_idx] * current_sys_state.chemical_potentials[comp_idx];
+                        double x_val = X_ptr[x_idx];
+                        // Skip if X contains NaN or inf
+                        if (!isfinite(x_val)) {{
+                            valid_point = false;
+                            break;
+                        }}
+                        driving_force += x_val * current_sys_state.chemical_potentials[comp_idx];
                     }}
+                }}
+                
+                if (!valid_point) {{
+                    continue;
                 }}
                 
                 // Subtract GM
                 driving_force -= GM_ptr[grid_idx];
+                
+                // Skip if driving force is not finite
+                if (!isfinite(driving_force)) {{
+                    continue;
+                }}
                 
                 // Check if this is the best driving force for this phase
                 if (driving_force > max_driving_force) {{
@@ -4288,8 +4344,13 @@ __device__ void solve_equilibrium_at_condition_global_mem(
             // Add phase if driving force exceeds threshold
             if (best_grid_idx >= 0 && max_driving_force >= minimum_df) {{
                 #ifdef VERBOSE_DEBUG
-                printf("GPU DEBUG: Adding metastable phase %d with driving force %.15e\\n", 
-                       ph_idx, max_driving_force);
+                printf("GPU DEBUG: Adding metastable phase %d with driving force %.15e (threshold=%.1f)\\n", 
+                       ph_idx, max_driving_force, minimum_df);
+                printf("  Phase record index: %d\\n", ph_idx);
+                printf("  Best grid index: %d\\n", best_grid_idx);
+                printf("  Chemical potentials: [%.6f, %.6f]\\n", 
+                       current_sys_state.chemical_potentials[0], 
+                       current_sys_state.chemical_potentials[1]);
                 #endif
                 
                 // Create new CompositionSet for this phase
@@ -4964,14 +5025,10 @@ __global__ void top_level_equilibrium_kernel(
             
             // CRITICAL FIX: Read per-condition chemical potentials from initial_data array
             // Chemical potentials are stored after: phase_indices + phase_amounts + site_fractions + compositions
-            // Python uses MAX_PHASES=4, MAX_DOF_PER_PHASE=4, MAX_COMPONENTS=4 for layout
-            // But we need to use the Python layout constants, not our kernel constants
-            const int PYTHON_MAX_PHASES = 4;
-            const int PYTHON_MAX_DOF_PER_PHASE = 4; 
-            const int PYTHON_MAX_COMPONENTS = 4;
-            const int chem_pot_offset = PYTHON_MAX_PHASES + PYTHON_MAX_PHASES + 
-                                       (PYTHON_MAX_PHASES * PYTHON_MAX_DOF_PER_PHASE) + 
-                                       (PYTHON_MAX_PHASES * PYTHON_MAX_COMPONENTS);  // = 40
+            // Use the same MAX constants that Python used to create the data layout
+            const int chem_pot_offset = MAX_PHASES + MAX_PHASES + 
+                                       (MAX_PHASES * MAX_DOF_PER_PHASE) + 
+                                       (MAX_PHASES * MAX_COMPONENTS);
             
             for (int i = 0; i < MAX_COMPONENTS; ++i) {{
                 if (i < (int)my_spec_data[1]) {{ // num_components is at offset 1

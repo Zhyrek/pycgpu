@@ -261,8 +261,8 @@ def _solve_eq_at_conditions(properties, phase_records, grid, conds_keys, state_v
             sfx = prop_Y_values[it.multi_index + np.index_exp[phase_idx, :phase_record.phase_dof]]
             phase_amt = prop_NP_values[it.multi_index + np.index_exp[phase_idx]]
             
-            # DEBUG: Log initial phase data for first condition only
-            if verbose and debug_condition_counter == 1:
+            # DEBUG: Log initial phase data for first few conditions
+            if verbose and debug_condition_counter <= 3:
                 debug_log(f"  cpu_initial_phase_{phase_idx}_amount: {phase_amt:.15e}", verbose)
                 debug_log(f"  cpu_initial_phase_{phase_idx}_site_fractions: {np.array(sfx)}", verbose)
             phase_amt = max(phase_amt, MIN_PHASE_FRACTION)
@@ -274,6 +274,7 @@ def _solve_eq_at_conditions(properties, phase_records, grid, conds_keys, state_v
             if verbose and debug_condition_counter <= 3:
                 debug_log(f"  cpu_phase_{phase_idx}_energy: {compset.energy:.15e}", verbose)
                 debug_log(f"  cpu_phase_{phase_idx}_amount: {phase_amt:.15e}", verbose)
+                debug_log(f"  cpu_phase_{phase_idx}_X_after_update: {compset.X}", verbose)
         
         chemical_potentials = prop_MU_values[it.multi_index]
         energy = prop_GM_values[it.multi_index]

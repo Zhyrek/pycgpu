@@ -211,8 +211,20 @@ cdef void write_row_fixed_mole_fraction(double[:] out_row, double* out_rhs, int 
         compset_idx = free_stable_compset_indices[i]
         # Only fill this out if the current idx is equal to a free composition set
         if compset_idx == idx:
-            out_row[free_variable_column_offset + i] += prefactor * \
-                (1./current_system_amount)*(masses[component_idx, 0] - system_mole_fractions[component_idx] * moles_normalization)
+            coeff_value = masses[component_idx, 0] - system_mole_fractions[component_idx] * moles_normalization
+            contribution = prefactor * (1./current_system_amount) * coeff_value
+            
+            # DEBUG: Print coefficient calculation details
+            if DEBUG_MODE and component_idx == 1:
+                print(f"[CPU MOLE FRAC COEFF] Phase {idx}, Component 1:")
+                print(f"  masses[1] = {masses[component_idx, 0]:.15e}")
+                print(f"  system_mole_fractions[1] = {system_mole_fractions[component_idx]:.15e}")
+                print(f"  moles_normalization = {moles_normalization:.15e}")
+                print(f"  coeff = masses[1] - sys_mole_frac[1] * moles_norm = {masses[component_idx, 0]:.15e} - {system_mole_fractions[component_idx]:.15e} * {moles_normalization:.15e} = {coeff_value:.15e}")
+                print(f"  contribution to matrix = {prefactor:.15e} * (1.0 / {current_system_amount:.15e}) * {coeff_value:.15e} = {contribution:.15e}")
+                print(f"  out_row[{free_variable_column_offset + i}] += {contribution:.15e}")
+            
+            out_row[free_variable_column_offset + i] += contribution
     free_variable_column_offset += free_stable_compset_indices.shape[0]
     # 2a. This component row: free state variables
     for i in range(free_statevar_indices.shape[0]):

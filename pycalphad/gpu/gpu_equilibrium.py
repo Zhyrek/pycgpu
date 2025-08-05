@@ -526,6 +526,15 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
         try:
             if hasattr(properties, 'X') and hasattr(properties.X, '__getitem__') and len(multi_idx) > 0:
                 x_values = np.asarray(properties.X[multi_idx])
+                # DEBUG: Log the raw extraction
+                if wks_obj.verbose and cond_idx < 2:
+                    print(f"[GPU] DEBUG: Raw properties.X[{multi_idx}] shape: {x_values.shape}")
+                    print(f"[GPU] DEBUG: Raw properties.X[{multi_idx}] content: {x_values}")
+                    # Also check the full X array structure
+                    if cond_idx == 0:
+                        print(f"[GPU] DEBUG: Full properties.X shape: {properties.X.shape}")
+                        print(f"[GPU] DEBUG: properties.X.dims: {properties.X.dims if hasattr(properties.X, 'dims') else 'no dims'}")
+                        print(f"[GPU] DEBUG: properties.X.coords: {properties.X.coords if hasattr(properties.X, 'coords') else 'no coords'}")
             else:
                 x_values = np.asarray(properties.X if hasattr(properties, 'X') else np.zeros((max_phases_per_condition, max_components)))
         except (IndexError, TypeError):
@@ -582,8 +591,8 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
                 else:
                     np_value = 0.0
                     
-                # Match CPU behavior: include phases even with NP=0, will be set to MIN_PHASE_FRACTION
-                if phase_name in py_phase_name_to_unique_idx_map:  # Remove np_value check to match CPU
+                # Only include phases with non-zero NP from starting point
+                if phase_name in py_phase_name_to_unique_idx_map and np_value > 1e-10:
                     active_phases.append((phase_idx, phase_name, py_phase_name_to_unique_idx_map[phase_name]))
                     # DEBUG: Print phase mapping
                     if wks_obj.verbose and cond_idx < 5:
@@ -2151,10 +2160,12 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     MAX_PHASE_MATRIX_DIM = dynamic_sizes['MAX_DOF_PER_PHASE'] + dynamic_sizes['MAX_INTERNAL_CONSTRAINTS']  # 4+4=8
     MAX_DOF_SIZE = dynamic_sizes['MAX_STATEVARS'] + dynamic_sizes['MAX_DOF_PER_PHASE']  # 4+4=8
     # Size equilibrium matrix correctly to replace stack arrays
-    # Based on EQ_SYS_MAX_ROWS_LOCAL = 161, EQ_SYS_MAX_COLS_LOCAL = 104
-    MAX_EQ_MATRIX_ROWS = 161  # From EQ_SYS_MAX_ROWS_LOCAL
-    MAX_EQ_MATRIX_COLS = 104  # From EQ_SYS_MAX_COLS_LOCAL  
-    MAX_EQ_MATRIX_SIZE = MAX_EQ_MATRIX_ROWS * MAX_EQ_MATRIX_COLS  # 16,744 doubles
+    # Calculate dynamically based on problem size:
+    # Rows: 2 * MAX_PHASES + MAX_COMPONENTS + 1
+    # Cols: MAX_COMPONENTS + MAX_PHASES + MAX_STATEVARS
+    MAX_EQ_MATRIX_ROWS = 2 * dynamic_sizes['MAX_PHASES'] + dynamic_sizes['MAX_COMPONENTS'] + 1
+    MAX_EQ_MATRIX_COLS = dynamic_sizes['MAX_COMPONENTS'] + dynamic_sizes['MAX_PHASES'] + dynamic_sizes['MAX_STATEVARS']
+    MAX_EQ_MATRIX_SIZE = MAX_EQ_MATRIX_ROWS * MAX_EQ_MATRIX_COLS
     MAX_EQ_SOLN_LEN = MAX_EQ_MATRIX_COLS  # Solution vector size matches columns
     
     # Global memory arrays [num_conditions, array_size] for per-thread allocation
@@ -2178,6 +2189,14 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     global_memory_arrays['equilibrium_matrix'] = cp.zeros((num_total_conditions_pts, MAX_EQ_MATRIX_SIZE), dtype=cp.float64)
     global_memory_arrays['equilibrium_rhs'] = cp.zeros((num_total_conditions_pts, MAX_EQ_MATRIX_ROWS), dtype=cp.float64)
     global_memory_arrays['eq_soln'] = cp.zeros((num_total_conditions_pts, MAX_EQ_SOLN_LEN), dtype=cp.float64)
+    
+    # CRITICAL: CompositionSet arrays to prevent stack overflow
+    # Each CompositionSet needs space for DOF values and other data
+    # Estimate size: phase_record pointer (8) + NP (8) + dof array (MAX_STATEVARS + MAX_DOF_PER_PHASE)*8 + X array (MAX_COMPONENTS)*8 + etc
+    compset_size_doubles = 2 + dynamic_sizes['MAX_STATEVARS'] + dynamic_sizes['MAX_DOF_PER_PHASE'] + dynamic_sizes['MAX_COMPONENTS'] + 10  # Extra for other fields
+    global_memory_arrays['removed_compsets'] = cp.zeros((num_total_conditions_pts, dynamic_sizes['MAX_PHASES'] * compset_size_doubles), dtype=cp.float64)
+    global_memory_arrays['compsets_before_solve'] = cp.zeros((num_total_conditions_pts, dynamic_sizes['MAX_PHASES'] * compset_size_doubles), dtype=cp.float64)
+    global_memory_arrays['compsets_before_final_solve'] = cp.zeros((num_total_conditions_pts, dynamic_sizes['MAX_PHASES'] * compset_size_doubles), dtype=cp.float64)
     
     # CRITICAL: SystemState struct handling
     # SystemState contains pointers (phase_record*) and cannot be stored as a flat double array!
@@ -2210,11 +2229,14 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             print(f"[GPU] DEBUG: initial_phase_data_gpu dtype: {getattr(initial_phase_data_gpu, 'dtype', 'no dtype')}")
             
             # Since it's a flattened array, we need to manually parse the structure
-            # Based on the "All-double layout: 45 doubles per condition"
-            doubles_per_condition = 45
+            # Calculate doubles per condition based on dynamic sizes
+            MAX_PHASES = dynamic_sizes['MAX_PHASES']
+            MAX_DOF_PER_PHASE = dynamic_sizes['MAX_DOF_PER_PHASE']
+            MAX_COMPONENTS = dynamic_sizes['MAX_COMPONENTS']
+            doubles_per_condition = MAX_PHASES + MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * MAX_COMPONENTS) + MAX_COMPONENTS + 1
             if initial_phase_data_cpu.size >= doubles_per_condition:
                 condition_0_data = initial_phase_data_cpu.flat[:doubles_per_condition]
-                print(f"[GPU] DEBUG: AFTER - first 45 values: {condition_0_data}")
+                print(f"[GPU] DEBUG: AFTER - first {doubles_per_condition} values: {condition_0_data}")
                 
             else:
                 print(f"[GPU] DEBUG: Array too small: {initial_phase_data_cpu.size} < {doubles_per_condition}")

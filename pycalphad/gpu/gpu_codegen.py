@@ -2748,20 +2748,35 @@ __global__ void minimal_equilibrium_kernel(
     
     // Process conditions assigned to this thread using stride pattern
     for (int condition_idx = tid; condition_idx < num_conditions; condition_idx += total_threads) {{
-        // Simple placeholder calculation - just copy some values and mark as processed
-        int result_offset = condition_idx * 10; // Assume 10 doubles per result
+        // Calculate correct result offset based on actual results layout
+        int results_per_condition = 7 + MAX_COMPONENTS + MAX_PHASES + 
+                                   (MAX_PHASES * MAX_DOF_PER_PHASE) + 
+                                   (MAX_PHASES * MAX_COMPONENTS) + MAX_PHASES;
+        int result_offset = condition_idx * results_per_condition;
         int condition_offset = condition_idx * data_size_per_condition;
         
-        if (result_offset + 9 < num_conditions * 10) {{
+        if (result_offset + results_per_condition <= num_conditions * results_per_condition) {{
             // Mark this condition as processed with some dummy values
-            results_data[result_offset + 0] = 1000.0 + condition_idx; // Phase amount
-            results_data[result_offset + 1] = 500.0; // Temperature (dummy)
-            results_data[result_offset + 2] = 1.0; // Pressure (dummy)
-            results_data[result_offset + 3] = 0.5; // X composition (dummy)
-            results_data[result_offset + 4] = 1.0; // Status: success
-            // Fill remaining with zeros
-            for (int i = 5; i < 10; i++) {{
-                results_data[result_offset + i] = 0.0;
+            results_data[result_offset + 0] = 1000.0 + condition_idx; // GM
+            // Initialize chemical potentials
+            for (int i = 0; i < MAX_COMPONENTS; i++) {{
+                results_data[result_offset + 1 + i] = 0.0;
+            }}
+            // Initialize phase amounts
+            for (int i = 0; i < MAX_PHASES; i++) {{
+                results_data[result_offset + 1 + MAX_COMPONENTS + i] = 0.0;
+            }}
+            results_data[result_offset + 1 + MAX_COMPONENTS + MAX_PHASES] = 1.0; // converged
+            results_data[result_offset + 2 + MAX_COMPONENTS + MAX_PHASES] = 0.0; // num_stable_phases
+            results_data[result_offset + 3 + MAX_COMPONENTS + MAX_PHASES] = 500.0; // Temperature
+            results_data[result_offset + 4 + MAX_COMPONENTS + MAX_PHASES] = 1.0; // Pressure
+            results_data[result_offset + 5 + MAX_COMPONENTS + MAX_PHASES] = 1.0; // Status: success
+            // Fill remaining (Y_phases, X_phases, phase_ids) with zeros
+            int remaining_start = result_offset + 6 + MAX_COMPONENTS + MAX_PHASES;
+            int remaining_count = (MAX_PHASES * MAX_DOF_PER_PHASE) + 
+                                 (MAX_PHASES * MAX_COMPONENTS) + MAX_PHASES;
+            for (int i = 0; i < remaining_count; i++) {{
+                results_data[remaining_start + i] = 0.0;
             }}
         }}
     }}
@@ -3657,14 +3672,16 @@ __device__ void solve_equilibrium_at_condition_global_mem(
         printf("    [0]=%f, [1]=%f, [2]=%f, [44]=%f\\n", 
                initial_data_flat[0], initial_data_flat[1], initial_data_flat[2], initial_data_flat[44]);
         
-        // Test accessing as if it were condition_idx * 45 + offset
-        printf("  Accessing with condition offset (assuming 1 condition, 45 doubles each):\\n");
-        int condition_offset = 0 * 45;  // condition 0
+        // Test accessing with calculated doubles_per_struct
+        int doubles_per_struct = MAX_PHASES + MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + 
+                                (MAX_PHASES * MAX_COMPONENTS) + MAX_COMPONENTS + 1;
+        printf("  Accessing with condition offset (using calculated doubles_per_struct=%d):\\n", doubles_per_struct);
+        int condition_offset = 0 * doubles_per_struct;  // condition 0
         printf("    condition_offset=0: [%d]=%f, [%d]=%f, [%d]=%f, [%d]=%f\\n",
                condition_offset+0, initial_data_flat[condition_offset+0],
                condition_offset+1, initial_data_flat[condition_offset+1], 
                condition_offset+2, initial_data_flat[condition_offset+2],
-               condition_offset+44, initial_data_flat[condition_offset+44]);
+               condition_offset+doubles_per_struct-1, initial_data_flat[condition_offset+doubles_per_struct-1]);
         #endif
     }}
     
@@ -3811,8 +3828,8 @@ __device__ void solve_equilibrium_at_condition_global_mem(
         // Set site fractions from lower_convex_hull results
         // Site fractions start after the WORKSPACE's state variables
         // Layout: phase_indices[MAX_PHASES] + phase_amounts[MAX_PHASES] + site_fractions[MAX_PHASES*MAX_DOF_PER_PHASE] + ...
-        // site_fractions start at offset (MAX_PHASES + MAX_PHASES) = 8 for MAX_PHASES=4
-        int site_fractions_offset = 8;  // From Python debug: site_fractions start at [8]
+        // site_fractions start at offset (MAX_PHASES + MAX_PHASES)
+        int site_fractions_offset = MAX_PHASES + MAX_PHASES;  // phase_indices + phase_amounts
         const double* initial_data_flat = initial_data;
         
         // CRITICAL FIX: Map site fractions to ensure correct component order
@@ -4713,6 +4730,8 @@ __global__ void top_level_equilibrium_kernel(
     int python_max_statevars, // CRITICAL FIX: Python's MAX_STATEVARS value for proper offset calculation
     // DevicePhaseData contents are now implicitly g_phase_records_array and num_unique_models
     const void* initial_phase_data_ptr, // Array of InitialPhaseDataSingle structs from lower_convex_hull
+    int initial_phase_data_stride, // CRITICAL FIX: Python-provided stride for initial phase data
+    int system_spec_stride, // CRITICAL FIX: Python-provided stride for SystemSpec array
     const void* grid_data_ptr_raw, // Pointer to grid data (can be null if not using add_new/nearly_stable in kernel)
     // Debug arrays for step-by-step solver tracking (can be null if debug disabled)
     double* debug_gm_history,           // Array: [num_conditions, max_debug_steps]
@@ -4881,10 +4900,41 @@ __global__ void top_level_equilibrium_kernel(
         int spec_size_doubles = spec_core_doubles_calc + spec_work_doubles_calc;
         
         // Get pointer to this thread's SystemSpec data
-        const double* my_spec_data = &system_specs_array[condition_idx * spec_size_doubles];
+        // CRITICAL FIX: Use Python-provided stride instead of calculating it
+        const double* my_spec_data = &system_specs_array[condition_idx * system_spec_stride];
+        
+        if (tid < 2) {{
+            #ifdef VERBOSE_DEBUG
+            printf("GPU DEBUG: Thread %d - using system_spec_stride=%d, offset=%d\\n", 
+                   tid, system_spec_stride, condition_idx * system_spec_stride);
+            #endif
+        }}
         
         // Read num_statevars from the correct position (first field)
         int num_statevars = (int)my_spec_data[0];
+        int num_components = (int)my_spec_data[1];
+        
+        if (tid < 2) {{
+            #ifdef VERBOSE_DEBUG
+            printf("GPU DEBUG: Thread %d - SystemSpec: num_statevars=%d, num_components=%d\\n", 
+                   tid, num_statevars, num_components);
+            printf("GPU DEBUG: Thread %d - First 10 values from my_spec_data: ", tid);
+            for (int k = 0; k < 10; ++k) {{
+                printf("%f ", my_spec_data[k]);
+            }}
+            printf("\\n");
+            // Also check prescribed_mole_fraction_rhs value
+            int rhs_offset = 3 + MAX_COMPONENTS + (MAX_FIXED_MOLE_FRACTION_CONDITIONS * MAX_COMPONENTS);
+            printf("GPU DEBUG: Thread %d - prescribed_mole_fraction_rhs[0] at offset %d = %f\\n", 
+                   tid, rhs_offset, my_spec_data[rhs_offset]);
+            // Check initial chemical potentials
+            printf("GPU DEBUG: Thread %d - initial_chemical_potentials: ", tid);
+            for (int k = 0; k < MAX_COMPONENTS && k < 3; ++k) {{
+                printf("[%d]=%f ", k, my_spec_data[3 + k]);
+            }}
+            printf("\\n");
+            #endif
+        }}
         
         if (num_statevars == 2) {{
             // Most common case: [N, T] with no pressure variable
@@ -4943,6 +4993,10 @@ __global__ void top_level_equilibrium_kernel(
         
         // FIX: Use direct byte-level array access instead of struct casting to avoid alignment issues
         const double* initial_data_byte_array = (const double*)initial_phase_data_ptr;
+        
+        // Add memory fence to ensure all threads see the same data
+        __syncthreads();
+        
         if (initial_data_byte_array != nullptr && condition_idx < num_conditions_total) {{
             
             if (tid == 0) {{
@@ -4978,17 +5032,18 @@ __global__ void top_level_equilibrium_kernel(
             // Convert to all-double layout: 
             // doubles_per_struct = MAX_PHASES + MAX_PHASES + MAX_PHASES*MAX_DOF_PER_PHASE + MAX_PHASES*MAX_COMPONENTS + MAX_COMPONENTS + 1
             // where phase_indices and num_phases are stored as doubles for simplicity
-            int doubles_per_struct = MAX_PHASES + MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * MAX_COMPONENTS) + MAX_COMPONENTS + 1;
-            int struct_offset = condition_idx * doubles_per_struct;
+            // CRITICAL FIX: Use Python-provided stride instead of calculating it
+            int struct_offset = condition_idx * initial_phase_data_stride;
             
             // Extract num_phases (stored as double at the end of the struct)
-            debug_num_phases = (int)initial_data_byte_array[struct_offset + doubles_per_struct - 1];
+            // CRITICAL FIX: Use stride instead of calculating doubles_per_struct
+            debug_num_phases = (int)initial_data_byte_array[struct_offset + initial_phase_data_stride - 1];
             
             // DEBUG: Print struct_offset calculation for first few threads
             if (tid < 2) {{
                 #ifdef VERBOSE_DEBUG
-                printf("GPU DEBUG: Thread %d - condition_idx=%d, doubles_per_struct=%d, struct_offset=%d\\n", 
-                       tid, condition_idx, doubles_per_struct, struct_offset);
+                printf("GPU DEBUG: Thread %d - condition_idx=%d, initial_phase_data_stride=%d, struct_offset=%d\\n", 
+                       tid, condition_idx, initial_phase_data_stride, struct_offset);
                 #endif
             }}
             
@@ -5030,9 +5085,40 @@ __global__ void top_level_equilibrium_kernel(
                                        (MAX_PHASES * MAX_DOF_PER_PHASE) + 
                                        (MAX_PHASES * MAX_COMPONENTS);
             
+            // BOUNDS CHECK: Ensure we don't read beyond the array
+            const int total_array_size = num_conditions_total * initial_phase_data_stride;
+            const int chem_pot_read_offset = struct_offset + chem_pot_offset;
+            
+            if (tid < 2) {{
+                #ifdef VERBOSE_DEBUG
+                printf("GPU DEBUG: Thread %d bounds check - trying to read from offset %d, total array size is %d\\n",
+                       tid, chem_pot_read_offset, total_array_size);
+                // Direct test: Try to read the exact offsets we know should have data
+                if (tid == 1) {{
+                    printf("GPU DEBUG: Thread 1 direct read test:\\n");
+                    printf("  initial_data_byte_array[60] = %f (should be -31525.5 for cond 0)\\n", initial_data_byte_array[60]);
+                    printf("  initial_data_byte_array[125] = %f (should be -31525.5 for cond 1)\\n", initial_data_byte_array[125]);
+                    printf("  initial_data_byte_array[126] = %f (should be -40730.8 for cond 1)\\n", initial_data_byte_array[126]);
+                }}
+                #endif
+            }}
+            
             for (int i = 0; i < MAX_COMPONENTS; ++i) {{
-                if (i < (int)my_spec_data[1]) {{ // num_components is at offset 1
-                    chemical_potentials[i] = initial_data_byte_array[struct_offset + chem_pot_offset + i];
+                if (i < (int)my_spec_data[1] && (chem_pot_read_offset + i) < total_array_size) {{ // num_components is at offset 1
+                    chemical_potentials[i] = initial_data_byte_array[chem_pot_read_offset + i];
+                    if (tid == 1 && i < 2) {{
+                        #ifdef VERBOSE_DEBUG
+                        printf("GPU DEBUG: Thread 1 reading chem_pot[%d] from offset %d, value = %f\\n", 
+                               i, chem_pot_read_offset + i, initial_data_byte_array[chem_pot_read_offset + i]);
+                        // Also try reading some nearby values to see if there's an offset issue
+                        if (i == 0) {{
+                            printf("GPU DEBUG: Thread 1 - values at offsets 123-127: [%f, %f, %f, %f, %f]\\n",
+                                   initial_data_byte_array[123], initial_data_byte_array[124], 
+                                   initial_data_byte_array[125], initial_data_byte_array[126], 
+                                   initial_data_byte_array[127]);
+                        }}
+                        #endif
+                    }}
                 }} else {{
                     chemical_potentials[i] = 0.0;
                 }}
@@ -5041,8 +5127,15 @@ __global__ void top_level_equilibrium_kernel(
             if (tid < 3) {{
                 #ifdef VERBOSE_DEBUG
                 printf("GPU DEBUG: Thread %d reading chemical potentials from struct_offset=%d + chem_pot_offset=%d = %d\\n", 
-                       tid, struct_offset, chem_pot_offset, struct_offset + chem_pot_offset);
+                       tid, struct_offset, chem_pot_offset, chem_pot_read_offset);
                 printf("GPU DEBUG: Thread %d SystemSpecification check - num_components=%d\\n", tid, (int)my_spec_data[1]);
+                if (tid == 1) {{
+                    printf("GPU DEBUG: Thread 1 - my_spec_data[0]=%f (num_statevars), my_spec_data[1]=%f (num_components)\\n",
+                           my_spec_data[0], my_spec_data[1]);
+                }}
+                // Print the actual values being read
+                printf("GPU DEBUG: Thread %d chemical_potentials after reading: [%f, %f, %f, %f]\\n",
+                       tid, chemical_potentials[0], chemical_potentials[1], chemical_potentials[2], chemical_potentials[3]);
                 for (int i = 0; i < 3; ++i) {{
                     printf("  Thread %d chemical_potentials[%d] = %.6e (from initial_data offset %d)\\n", 
                            tid, i, chemical_potentials[i], struct_offset + chem_pot_offset + i);
@@ -5147,7 +5240,7 @@ __global__ void top_level_equilibrium_kernel(
                     // CRITICAL FIX: Access per-thread SystemSpec data instead of casting shared pointer
                     // global_spec_ptr_raw is an array of SystemSpecs in double format, not a single struct
                     const double* system_specs_array = (const double*)global_spec_ptr_raw;
-                    const double* my_spec_doubles = &system_specs_array[condition_idx * spec_size_doubles];
+                    const double* my_spec_doubles = &system_specs_array[condition_idx * system_spec_stride];
                     int actual_num_statevars = (int)my_spec_doubles[0];  // num_statevars is first field
                     
                     if (actual_num_statevars == 2) {{
@@ -5364,7 +5457,7 @@ __global__ void top_level_equilibrium_kernel(
                                    phase_matrix_dim_local + phase_matrix_dim_local + (phase_matrix_dim_local * phase_matrix_dim_local);
                                    
             int spec_size_doubles = spec_core_doubles + spec_work_doubles;
-            const double* my_spec_doubles = &system_specs_array[condition_idx * spec_size_doubles];
+            const double* my_spec_doubles = &system_specs_array[condition_idx * system_spec_stride];
             
             // CRITICAL FIX: Manually copy fields from double array to struct
             // Python stores everything as doubles in a flat array, we need to 
@@ -5401,7 +5494,7 @@ __global__ void top_level_equilibrium_kernel(
             if (condition_idx <= 2) {{
                 #ifdef VERBOSE_DEBUG
                 printf("GPU DEBUG: Thread %d - Copied from my_spec_doubles at offset %d:\\n", 
-                       condition_idx, condition_idx * spec_size_doubles);
+                       condition_idx, condition_idx * system_spec_stride);
                 printf("  First 10 doubles: ");
                 for (int i = 0; i < 10; ++i) {{
                     printf("%.3f ", my_spec_doubles[i]);

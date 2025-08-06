@@ -1490,16 +1490,25 @@ def _create_initial_phase_data_struct_array(initial_phase_data_arrays, num_condi
         
         # chemical_potentials (already doubles)
         initial_phase_data_flat[i, offset:offset+MAX_COMPONENTS] = initial_phase_data_arrays['chemical_potentials'][i, :]
+        if verbose and i < 2:
+            print(f"[GPU] Condition {i} - Storing chemical potentials at offset {offset}:")
+            print(f"  Values: {initial_phase_data_arrays['chemical_potentials'][i, :]}")
+            print(f"  Stored in flat array: {initial_phase_data_flat[i, offset:offset+MAX_COMPONENTS]}")
         offset += MAX_COMPONENTS
         
         # num_phases (stored as double)
         initial_phase_data_flat[i, offset] = float(initial_phase_data_arrays['num_phases'][i])
         
         # DOUBLE CHECK: Print the actual flat array being created
-        if i == 0 and verbose:
-            print(f"[GPU] PYTHON SIDE FLAT ARRAY DUMP - First 45 values:")
-            for idx in range(45):
-                print(f"  [{idx}]: {initial_phase_data_flat[i, idx]}")
+        if i < 2 and verbose:
+            print(f"[GPU] PYTHON SIDE FLAT ARRAY DUMP for condition {i}:")
+            # Print key offsets
+            print(f"  Chemical potentials (offset 60-63): {initial_phase_data_flat[i, 60:64]}")
+            print(f"  Num phases (offset 64): {initial_phase_data_flat[i, 64]}")
+            if i == 0:
+                print(f"  First 45 values:")
+                for idx in range(45):
+                    print(f"    [{idx}]: {initial_phase_data_flat[i, idx]}")
         
         # DEBUG: Log the struct data for first few conditions to verify transfer
         if i < 5 and verbose:
@@ -1985,10 +1994,15 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             wks_obj, num_total_conditions_pts, dynamic_sizes, properties, verbose
         )
         
+        # CRITICAL FIX: Calculate stride for SystemSpec array
+        # The array is returned flat, but we know it was created as (num_conditions, spec_size)
+        # So the stride is the total length divided by num_conditions
+        system_spec_stride = len(system_specs_array) // num_total_conditions_pts
+        
         # For backward compatibility, keep old single spec creation commented
         # system_spec_struct = _create_system_specification_struct(global_spec_scalars, global_spec_arrays, dynamic_sizes)
         if verbose:
-            print("[GPU] DEBUG: SystemSpecification array created")
+            print(f"[GPU] DEBUG: SystemSpecification array created, stride = {system_spec_stride} doubles per condition")
         
         # Create ConditionArgsSingle struct array
         condition_args_struct = _create_condition_args_struct_array(condition_args_np, verbose)
@@ -1997,9 +2011,12 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         
         # Create InitialPhaseDataSingle struct array
         initial_phase_data_struct = _create_initial_phase_data_struct_array(initial_phase_data_arrays, num_total_conditions_pts, dynamic_sizes, verbose)
+        # CRITICAL FIX: Calculate stride for initial phase data based on actual struct size
+        initial_phase_data_stride = initial_phase_data_struct.shape[1]  # doubles per condition
         if verbose:
             print(f"[GPU] DEBUG: InitialPhaseDataSingle struct array created with {len(initial_phase_data_struct)} conditions")
             print(f"[GPU] DEBUG: Array shape: {initial_phase_data_struct.shape}, dtype: {initial_phase_data_struct.dtype}")
+            print(f"[GPU] DEBUG: Initial phase data stride: {initial_phase_data_stride} doubles per condition")
             print(f"[GPU] DEBUG: Array sample values: [0]={initial_phase_data_struct[0,0]}, [44]={initial_phase_data_struct[0,44] if initial_phase_data_struct.shape[1] > 44 else 'N/A'}")
         
         # Create results array - use simple double array for GPU compatibility
@@ -2089,6 +2106,11 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             if verbose:
                 print(f"[GPU] DEBUG: After cp.asarray and flatten - GPU array shape: {initial_phase_data_gpu.shape}, dtype: {initial_phase_data_gpu.dtype}")
                 print(f"[GPU] DEBUG: GPU array sample values: [0]={float(initial_phase_data_gpu[0])}, [44]={float(initial_phase_data_gpu[44]) if len(initial_phase_data_gpu) > 44 else 'N/A'}")
+                # Check critical offsets for both conditions
+                print(f"[GPU] DEBUG: Condition 0 chemical potentials (60-63): {[float(initial_phase_data_gpu[i]) for i in range(60, 64)]}")
+                print(f"[GPU] DEBUG: Condition 1 chemical potentials (125-128): {[float(initial_phase_data_gpu[i]) for i in range(125, 129)] if len(initial_phase_data_gpu) > 128 else 'Out of bounds'}")
+                # Also check a few values before and after to see the pattern
+                print(f"[GPU] DEBUG: Values around condition 1 chem pot (120-130): {[float(initial_phase_data_gpu[i]) for i in range(120, min(130, len(initial_phase_data_gpu)))]}")
             results_gpu = cp.frombuffer(results_bytes, dtype=cp.uint8)
             
             # Ensure arrays are contiguous for proper pointer access
@@ -2280,6 +2302,8 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             condition_data_stride,              # int condition_stride - CRITICAL FIX for multi-condition support
             max_statevars_scalar,               # int python_max_statevars - Python's MAX_STATEVARS value
             initial_phase_data_gpu.data.ptr,    # const void* initial_phase_data_ptr
+            initial_phase_data_stride,          # int initial_phase_data_stride - CRITICAL FIX
+            system_spec_stride,                 # int system_spec_stride - CRITICAL FIX for SystemSpec array
             grid_data_ptr_for_kernel,           # const DeviceGrid* grid_data_ptr
             debug_arrays['gm_history'].data.ptr,    # double* debug_gm_history
             debug_arrays['mu_history'].data.ptr,    # double* debug_mu_history
@@ -2317,6 +2341,8 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             condition_data_stride,              # int condition_stride - CRITICAL FIX for multi-condition support
             max_statevars_scalar,               # int python_max_statevars - Python's MAX_STATEVARS value
             initial_phase_data_gpu.data.ptr,    # const void* initial_phase_data_ptr
+            initial_phase_data_stride,          # int initial_phase_data_stride - CRITICAL FIX
+            system_spec_stride,                 # int system_spec_stride - CRITICAL FIX for SystemSpec array
             grid_data_ptr_for_kernel,           # const DeviceGrid* grid_data_ptr
             0, 0, 0, 0, 0,                      # null debug arrays
             # Global memory arrays for solver stack overflow fix (always enabled)

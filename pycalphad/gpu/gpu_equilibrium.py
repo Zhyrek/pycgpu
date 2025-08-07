@@ -1896,6 +1896,8 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
 
     if verbose:
         print(f"[GPU] Generated C code for {num_unique_models_for_gpu} unique phase models.")
+        print(f"[GPU] Modular compilation threshold: 8 phases")
+        print(f"[GPU] Will use modular compilation: {num_unique_models_for_gpu > 8}")
 
     
     # 2. Assemble full GPU source and compile kernel (with caching)

@@ -233,9 +233,11 @@ class ModularGPUCompiler:
         
         for return_type, func_name in matches:
             # Determine the parameter list based on function type
-            if 'formula' in func_name and 'grad' not in func_name:
+            # Scalar functions (return double) have one parameter
+            # Array functions (return void) have two parameters
+            if return_type == 'double':
                 params = '(const double* x)'
-            else:
+            else:  # return_type == 'void'
                 params = '(double* out, const double* x)'
                 
             declarations.append(f'__device__ {return_type} {func_name}{params};')
@@ -250,9 +252,9 @@ class ModularGPUCompiler:
         source_file = os.path.join(tmpdir, f'phase_{index}.cu')
         with open(source_file, 'w') as f:
             f.write(f'#include "{header_file}"\n\n')
-            f.write('extern "C" {\n\n')
+            # Don't wrap in extern "C" - let the functions be C++ mangled
+            # The kernel expects C++ functions, not C functions
             f.write(phase_code)
-            f.write('\n\n}  // extern "C"\n')
             
         # Compile to object file
         obj_file = os.path.join(tmpdir, f'phase_{index}.o')

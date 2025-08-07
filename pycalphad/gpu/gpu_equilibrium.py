@@ -1508,12 +1508,14 @@ def _create_initial_phase_data_struct_array(initial_phase_data_arrays, num_condi
         # DOUBLE CHECK: Print the actual flat array being created
         if i < 2 and verbose:
             print(f"[GPU] PYTHON SIDE FLAT ARRAY DUMP for condition {i}:")
-            # Print key offsets
-            print(f"  Chemical potentials (offset 60-{60+MAX_COMPONENTS-1}): {initial_phase_data_flat[i, 60:60+MAX_COMPONENTS]}")
+            # Print key offsets - use actual offset, not hardcoded 60
+            chem_pot_offset = offset - MAX_COMPONENTS - 1  # offset is after chem pots and num_phases
+            if chem_pot_offset >= 0 and chem_pot_offset + MAX_COMPONENTS <= doubles_per_struct:
+                print(f"  Chemical potentials (offset {chem_pot_offset}-{chem_pot_offset+MAX_COMPONENTS-1}): {initial_phase_data_flat[i, chem_pot_offset:chem_pot_offset+MAX_COMPONENTS]}")
             print(f"  Num phases (offset {offset}): {initial_phase_data_flat[i, offset]}")
             if i == 0:
-                print(f"  First 45 values:")
-                for idx in range(45):
+                print(f"  First {min(45, doubles_per_struct)} values:")
+                for idx in range(min(45, doubles_per_struct)):
                     print(f"    [{idx}]: {initial_phase_data_flat[i, idx]}")
         
         # DEBUG: Log the struct data for first few conditions to verify transfer
@@ -1925,22 +1927,36 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             # by the kernel should be computed based on the phase records/models in pycalphad, and then passed 
             # to the kernel using the -D flag to define it in the kernel code."
             
-            # Create -D compiler flags for dynamic sizing
-            define_flags = []
-            for define_name, value in dynamic_sizes.items():
-                define_flags.append(f'-D{define_name}={value}')
+            # Check if modular compilation is needed
+            from .modular_compiler import ModularGPUCompiler
+            compiler = ModularGPUCompiler(verbose=verbose)
             
-            # Add VERBOSE_DEBUG flag if verbose mode is enabled
+            if compiler.needs_modular_compilation(num_unique_models_for_gpu):
+                if verbose:
+                    print(f"[GPU] System has {num_unique_models_for_gpu} phases, using modular compilation")
+                module = compiler.compile_kernel(full_kernel_source, num_unique_models_for_gpu, dynamic_sizes)
+            else:
+                # Standard compilation for smaller systems
+                if verbose:
+                    print(f"[GPU] System has {num_unique_models_for_gpu} phases, using standard compilation")
+                    
+                # Create -D compiler flags for dynamic sizing
+                define_flags = []
+                for define_name, value in dynamic_sizes.items():
+                    define_flags.append(f'-D{define_name}={value}')
+                
+                # Add VERBOSE_DEBUG flag if verbose mode is enabled
+                if verbose:
+                    define_flags.append('-DVERBOSE_DEBUG')
+                    print(f"[GPU] Using dynamic kernel sizing: {dynamic_sizes}")
+                    print(f"[GPU] Compiler defines: {define_flags}")
+                
+                # Compilation options with dynamic defines (must be tuple for CuPy)
+                compile_options = tuple(['-std=c++11'] + define_flags)
+                module = cp.RawModule(code=full_kernel_source, options=compile_options, backend='nvcc')
+                
             if verbose:
-                define_flags.append('-DVERBOSE_DEBUG')
-                print(f"[GPU] Using dynamic kernel sizing: {dynamic_sizes}")
-                print(f"[GPU] Compiler defines: {define_flags}")
-            
-            # Compilation options with dynamic defines (must be tuple for CuPy)
-            compile_options = tuple(['-std=c++11'] + define_flags)
-            module = cp.RawModule(code=full_kernel_source, options=compile_options, backend='nvcc')
-            if verbose:
-                print("[GPU] DEBUG: Kernel compilation successful with dynamic sizing")
+                print("[GPU] DEBUG: Kernel compilation successful")
         except Exception as e:
             if verbose:
                 print(f"[GPU] ERROR: Kernel compilation failed: {e}")
@@ -2114,11 +2130,10 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             if verbose:
                 print(f"[GPU] DEBUG: After cp.asarray and flatten - GPU array shape: {initial_phase_data_gpu.shape}, dtype: {initial_phase_data_gpu.dtype}")
                 print(f"[GPU] DEBUG: GPU array sample values: [0]={float(initial_phase_data_gpu[0])}, [44]={float(initial_phase_data_gpu[44]) if len(initial_phase_data_gpu) > 44 else 'N/A'}")
-                # Check critical offsets for both conditions
-                print(f"[GPU] DEBUG: Condition 0 chemical potentials (60-63): {[float(initial_phase_data_gpu[i]) for i in range(60, 64)]}")
-                print(f"[GPU] DEBUG: Condition 1 chemical potentials (125-128): {[float(initial_phase_data_gpu[i]) for i in range(125, 129)] if len(initial_phase_data_gpu) > 128 else 'Out of bounds'}")
-                # Also check a few values before and after to see the pattern
-                print(f"[GPU] DEBUG: Values around condition 1 chem pot (120-130): {[float(initial_phase_data_gpu[i]) for i in range(120, min(130, len(initial_phase_data_gpu)))]}")
+                # Fixed: Don't access out-of-bounds indices
+                # Chemical potentials are at offset 40-43 for first condition
+                if len(initial_phase_data_gpu) > 43:
+                    print(f"[GPU] DEBUG: Condition 0 chemical potentials (40-43): {[float(initial_phase_data_gpu[i]) for i in range(40, min(44, len(initial_phase_data_gpu)))]}")
             results_gpu = cp.frombuffer(results_bytes, dtype=cp.uint8)
             
             # Ensure arrays are contiguous for proper pointer access
@@ -2362,7 +2377,8 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             initial_phase_data_stride,          # int initial_phase_data_stride - CRITICAL FIX
             system_spec_stride,                 # int system_spec_stride - CRITICAL FIX for SystemSpec array
             grid_data_ptr_for_kernel,           # const DeviceGrid* grid_data_ptr
-            0, 0, 0, 0, 0,                      # null debug arrays
+            0, 0, 0, 0,                         # null debug arrays (4 pointers)
+            0,                                  # debug_max_steps = 0 when debug disabled
             # Global memory arrays for solver stack overflow fix (always enabled)
             global_memory_arrays['A_lstsq_copy'].data.ptr,
             global_memory_arrays['U_lstsq'].data.ptr,

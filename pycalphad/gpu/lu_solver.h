@@ -3,6 +3,13 @@
 // Simple LU decomposition with partial pivoting for GPU
 // Implements equivalent of LAPACK's dgetrf and dgetrs
 
+// Define maximum matrix dimension based on phase-related constants
+// This should be sufficient for matrices arising from phase equilibrium calculations
+// The maximum dimension comes from full_e_matrix which is (MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS)^2
+#ifndef MAX_LU_DIM
+#define MAX_LU_DIM (MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS)
+#endif
+
 __device__ void swap_rows(double* A, int row1, int row2, int ncols) {
     for (int j = 0; j < ncols; j++) {
         double temp = A[row1 * ncols + j];
@@ -70,7 +77,7 @@ __device__ void lu_solve(const double* LU, int n, const int* ipiv, double* b) {
     // b is the right-hand side on input, solution on output
     
     // Apply row permutations to b
-    double temp[32]; // Assuming n <= 32, adjust if needed
+    double temp[MAX_LU_DIM];
     for (int i = 0; i < n; i++) {
         temp[i] = b[i];
     }
@@ -103,7 +110,7 @@ __device__ void invert_matrix_lu(double* A, int n, double* work) {
         work[i] = A[i];
     }
     
-    int ipiv[32]; // Assuming n <= 32
+    int ipiv[MAX_LU_DIM];
     
     // LU decomposition
     int info = lu_decomposition(work, n, ipiv);
@@ -121,7 +128,7 @@ __device__ void invert_matrix_lu(double* A, int n, double* work) {
     // Process column by column
     for (int j = 0; j < n; j++) {
         // Set up unit vector for column j
-        double col[32]; // Assuming n <= 32
+        double col[MAX_LU_DIM];
         for (int i = 0; i < n; i++) {
             col[i] = (i == j) ? 1.0 : 0.0;
         }
@@ -143,7 +150,7 @@ __device__ void lstsq_lu(double* A, int nrows, int ncols, double* b, double* x) 
     
     if (nrows == ncols) {
         // Square system - solve directly
-        int ipiv[32]; // Assuming n <= 32
+        int ipiv[MAX_LU_DIM];
         
         // Copy b to x
         for (int i = 0; i < nrows; i++) {
@@ -167,7 +174,7 @@ __device__ void lstsq_lu(double* A, int nrows, int ncols, double* b, double* x) 
         // This is less numerically stable than SVD but simpler
         
         // Compute A^T A (symmetric positive semi-definite)
-        double ATA[32 * 32]; // Assuming ncols <= 32
+        double ATA[MAX_LU_DIM * MAX_LU_DIM];
         for (int i = 0; i < ncols; i++) {
             for (int j = 0; j < ncols; j++) {
                 double sum = 0.0;
@@ -179,7 +186,7 @@ __device__ void lstsq_lu(double* A, int nrows, int ncols, double* b, double* x) 
         }
         
         // Compute A^T b
-        double ATb[32]; // Assuming ncols <= 32
+        double ATb[MAX_LU_DIM];
         for (int i = 0; i < ncols; i++) {
             double sum = 0.0;
             for (int k = 0; k < nrows; k++) {
@@ -189,7 +196,7 @@ __device__ void lstsq_lu(double* A, int nrows, int ncols, double* b, double* x) 
         }
         
         // Solve ATA x = ATb
-        int ipiv[32];
+        int ipiv[MAX_LU_DIM];
         for (int i = 0; i < ncols; i++) {
             x[i] = ATb[i];
         }

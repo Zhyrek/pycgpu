@@ -3,7 +3,8 @@
 import numpy as np
 from .gpu_equilibrium import (_get_c_define, _populate_system_specification, 
                              _create_system_specification_struct)
-from .gpu_systemspec_flat import create_flat_system_specification
+from .gpu_systemspec_flat import create_flat_system_specification, apply_safe_padding
+from .gpu_properties_subset import PropertiesSubset
 
 
 def create_system_specifications_array(wks_obj, num_conditions, dynamic_sizes, properties, verbose=False):
@@ -63,10 +64,31 @@ def create_system_specifications_array(wks_obj, num_conditions, dynamic_sizes, p
         if verbose:
             print(f"[GPU] No mole fraction conditions found, creating {num_conditions} identical specs")
     
+    # Get temperature and composition arrays
+    temp_values = wks_obj.conditions[v.T]
+    if not hasattr(temp_values, '__len__'):
+        temp_values = [temp_values]
+    temp_values = np.asarray(temp_values).flatten()
+    
+    # Get composition array size (for X(BI) or similar)
+    comp_values_len = 1
+    for key in wks_obj.conditions:
+        if hasattr(key, 'species') and key.species != 'VA':
+            comp_array = np.asarray(wks_obj.conditions[key]).flatten()
+            comp_values_len = len(comp_array)
+            break
+    
     # Create one SystemSpecification per condition
     for condition_idx in range(num_conditions):
         if verbose:
             print(f"\n[GPU] Creating SystemSpecification for condition {condition_idx}")
+        
+        # Calculate temperature and composition indices for this condition
+        temp_idx = condition_idx // comp_values_len
+        comp_idx = condition_idx % comp_values_len
+        
+        if verbose:
+            print(f"  Condition {condition_idx}: temp_idx={temp_idx}, comp_idx={comp_idx} (comp_values_len={comp_values_len})")
         
         # Create base arrays for this condition
         global_spec_np = np.zeros(50, dtype=np.float64)  # Scalar fields
@@ -83,22 +105,29 @@ def create_system_specifications_array(wks_obj, num_conditions, dynamic_sizes, p
         
         # Create a temporary workspace object with single-point conditions
         class TempWorkspace:
-            def __init__(self, original_wks, condition_idx, x_ti_value):
+            def __init__(self, original_wks, condition_idx, x_ti_value, temp_idx, comp_idx):
                 self.components = original_wks.components
                 self.phase_record_factory = original_wks.phase_record_factory
                 self.verbose = original_wks.verbose
                 
-                # Copy conditions but use single-point values
+                # Copy conditions but use single-point values based on proper indices
                 self.conditions = {}
                 for key, value in original_wks.conditions.items():
                     value_array = np.asarray(value)
                     if value_array.size > 1:
-                        # Multi-point condition - extract the value for this condition
-                        if condition_idx < value_array.size:
-                            self.conditions[key] = float(value_array.flatten()[condition_idx])
+                        # Multi-point condition - use appropriate index based on variable type
+                        if key == v.T:
+                            # Temperature - use temp_idx
+                            self.conditions[key] = float(value_array.flatten()[temp_idx])
+                        elif hasattr(key, 'species') and key.species != 'VA':
+                            # Composition variable - use comp_idx
+                            self.conditions[key] = float(value_array.flatten()[comp_idx])
                         else:
-                            # If we have fewer values than conditions, use the last value
-                            self.conditions[key] = float(value_array.flatten()[-1])
+                            # Other multi-point conditions - use condition_idx as fallback
+                            if condition_idx < value_array.size:
+                                self.conditions[key] = float(value_array.flatten()[condition_idx])
+                            else:
+                                self.conditions[key] = float(value_array.flatten()[-1])
                     else:
                         # Single-point condition - use for all
                         self.conditions[key] = float(value_array.item())
@@ -111,30 +140,37 @@ def create_system_specifications_array(wks_obj, num_conditions, dynamic_sizes, p
         x_ti_value = x_ti_values[condition_idx] if condition_idx < len(x_ti_values) else x_ti_values[-1]
         
         # Create temporary workspace with single-point conditions
-        temp_wks = TempWorkspace(wks_obj, condition_idx, x_ti_value)
+        temp_wks = TempWorkspace(wks_obj, condition_idx, x_ti_value, temp_idx, comp_idx)
+        
+        # Create properties subset for this specific condition
+        properties_subset = PropertiesSubset(properties, condition_idx, temp_idx, comp_idx, verbose=verbose)
         
         # Populate the SystemSpecification for this condition
         _populate_system_specification(global_spec_np, global_spec_arrays, temp_wks, 
-                                     dynamic_sizes, properties)
+                                     dynamic_sizes, properties_subset)
         
         # Create flat double array instead of struct to avoid alignment issues
         spec_doubles = create_flat_system_specification(global_spec_np, global_spec_arrays, 
                                                        dynamic_sizes)
         
+        # Apply padding to avoid cache conflicts
+        spec_doubles_padded = apply_safe_padding(spec_doubles, verbose=verbose)
+        
         if verbose:
             print(f"[GPU] Condition {condition_idx} - SystemSpec fields from flat array:")
-            print(f"  num_statevars: {int(spec_doubles[0])}")
-            print(f"  num_components: {int(spec_doubles[1])}")
-            print(f"  prescribed_system_amount: {spec_doubles[2]}")
-            print(f"  initial_chemical_potentials[0]: {spec_doubles[3]}")
-            print(f"  initial_chemical_potentials[1]: {spec_doubles[4]}")
+            print(f"  temp_idx={temp_idx}, comp_idx={comp_idx}")
+            print(f"  num_statevars: {int(spec_doubles_padded[0])}")
+            print(f"  num_components: {int(spec_doubles_padded[1])}")
+            print(f"  prescribed_system_amount: {spec_doubles_padded[2]}")
+            print(f"  initial_chemical_potentials[0]: {spec_doubles_padded[3]}")
+            print(f"  initial_chemical_potentials[1]: {spec_doubles_padded[4]}")
             
             # Calculate offset to prescribed_mole_fraction_rhs
             offset = 3 + dynamic_sizes["MAX_COMPONENTS"] + (dynamic_sizes["MAX_FIXED_MOLE_FRACTION_CONDITIONS"] * dynamic_sizes["MAX_COMPONENTS"])
-            print(f"  prescribed_mole_fraction_rhs[0]: {spec_doubles[offset]} (should be X(TI) for this condition)")
-            print(f"  First 10 doubles: {spec_doubles[:10]}")
+            print(f"  prescribed_mole_fraction_rhs[0]: {spec_doubles_padded[offset]} (should be X(TI) for this condition)")
+            print(f"  First 10 doubles: {spec_doubles_padded[:10]}")
         
-        all_specs.append(spec_doubles)
+        all_specs.append(spec_doubles_padded)
     
     # Stack all specs into a single array
     # Shape: (num_conditions, spec_size_in_doubles)

@@ -1232,6 +1232,13 @@ struct CompositionSet {
 // Simple LU decomposition with partial pivoting for GPU
 // Implements equivalent of LAPACK's dgetrf and dgetrs
 
+// Define maximum matrix dimension based on phase-related constants
+// This should be sufficient for matrices arising from phase equilibrium calculations
+// The maximum dimension comes from full_e_matrix which is (MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS)^2
+#ifndef MAX_LU_DIM
+#define MAX_LU_DIM (MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS)
+#endif
+
 __device__ void swap_rows(double* A, int row1, int row2, int ncols) {
     for (int j = 0; j < ncols; j++) {
         double temp = A[row1 * ncols + j];
@@ -1299,7 +1306,7 @@ __device__ void lu_solve(const double* LU, int n, const int* ipiv, double* b) {
     // b is the right-hand side on input, solution on output
     
     // Apply row permutations to b
-    double temp[32]; // Assuming n <= 32, adjust if needed
+    double temp[MAX_LU_DIM];
     for (int i = 0; i < n; i++) {
         temp[i] = b[i];
     }
@@ -1332,7 +1339,7 @@ __device__ void invert_matrix_lu(double* A, int n, double* work) {
         work[i] = A[i];
     }
     
-    int ipiv[32]; // Assuming n <= 32
+    int ipiv[MAX_LU_DIM];
     
     // LU decomposition
     int info = lu_decomposition(work, n, ipiv);
@@ -1350,7 +1357,7 @@ __device__ void invert_matrix_lu(double* A, int n, double* work) {
     // Process column by column
     for (int j = 0; j < n; j++) {
         // Set up unit vector for column j
-        double col[32]; // Assuming n <= 32
+        double col[MAX_LU_DIM];
         for (int i = 0; i < n; i++) {
             col[i] = (i == j) ? 1.0 : 0.0;
         }
@@ -1372,7 +1379,7 @@ __device__ void lstsq_lu(double* A, int nrows, int ncols, double* b, double* x) 
     
     if (nrows == ncols) {
         // Square system - solve directly
-        int ipiv[32]; // Assuming n <= 32
+        int ipiv[MAX_LU_DIM];
         
         // Copy b to x
         for (int i = 0; i < nrows; i++) {
@@ -1396,7 +1403,7 @@ __device__ void lstsq_lu(double* A, int nrows, int ncols, double* b, double* x) 
         // This is less numerically stable than SVD but simpler
         
         // Compute A^T A (symmetric positive semi-definite)
-        double ATA[32 * 32]; // Assuming ncols <= 32
+        double ATA[MAX_LU_DIM * MAX_LU_DIM];
         for (int i = 0; i < ncols; i++) {
             for (int j = 0; j < ncols; j++) {
                 double sum = 0.0;
@@ -1408,7 +1415,7 @@ __device__ void lstsq_lu(double* A, int nrows, int ncols, double* b, double* x) 
         }
         
         // Compute A^T b
-        double ATb[32]; // Assuming ncols <= 32
+        double ATb[MAX_LU_DIM];
         for (int i = 0; i < ncols; i++) {
             double sum = 0.0;
             for (int k = 0; k < nrows; k++) {
@@ -1418,7 +1425,7 @@ __device__ void lstsq_lu(double* A, int nrows, int ncols, double* b, double* x) 
         }
         
         // Solve ATA x = ATb
-        int ipiv[32];
+        int ipiv[MAX_LU_DIM];
         for (int i = 0; i < ncols; i++) {
             x[i] = ATb[i];
         }
@@ -6282,37 +6289,37 @@ __device__ void pycgpu_model_1_formulagrad(double* out, const double* x) {
     double x23 = x[3] + x[4];
     double x24 = pow(x23, -1);
     double x25 = 1.0*x24;
-    double x26 = log(x[4]);
-    double x27 = 1e-15 < x[4];
-    double x28 = log(x[5]);
-    double x29 = 1e-15 < x[5];
-    double x30 = log(x[3]);
-    double x31 = 1e-15 < x[3];
+    double x26 = log(x[3]);
+    double x27 = 1e-15 < x[3];
+    double x28 = log(x[4]);
+    double x29 = 1e-15 < x[4];
+    double x30 = log(x[5]);
+    double x31 = 1e-15 < x[5];
     double x32 = 1.0*((x27 == 1) ? (
-   x26*x[4]
+   x26*x[3]
 )
 : (
    0
-)) + 3.0*((x29 == 1) ? (
-   x28*x[5]
+)) + 1.0*((x29 == 1) ? (
+   x28*x[4]
 )
 : (
    0
-)) + 1.0*((x31 == 1) ? (
-   x30*x[3]
+)) + 3.0*((x31 == 1) ? (
+   x30*x[5]
 )
 : (
    0
 ));
     double x33 = 8.3145*x24;
     double x34 = x32*x33;
-    double x35 = 3.0*((x29 == 1) ? (
+    double x35 = 3.0*((x31 == 1) ? (
    0
 )
 : (
    0
 ));
-    double x36 = 1.0*((x31 == 1) ? (
+    double x36 = 1.0*((x29 == 1) ? (
    0
 )
 : (
@@ -6426,20 +6433,20 @@ __device__ void pycgpu_model_1_formulagrad(double* out, const double* x) {
 : (
    0
 ))))))) + (x35 + x38)*x39);
-    out[1] = x54 + x40*(x52 + x39*(x35 + x37 + 1.0*((x31 == 1) ? (
-   1 + x30
-)
-: (
-   0
-))) + x46*x13 + (x44 + x45)*x25);
-    out[2] = x54 + x40*(x52 + x25*(x45 + x49*x[5]) + x39*(x35 + x36 + 1.0*((x27 == 1) ? (
+    out[1] = x54 + x40*(x52 + x39*(x35 + x36 + 1.0*((x27 == 1) ? (
    1 + x26
 )
 : (
    0
-))) + x46*x22);
-    out[3] = x40*(x25*(x45 + x50 + x43*x[3]) + x39*(x38 + 3.0*((x29 == 1) ? (
+))) + x46*x13 + (x44 + x45)*x25);
+    out[2] = x54 + x40*(x52 + x25*(x45 + x49*x[5]) + x39*(x35 + x37 + 1.0*((x29 == 1) ? (
    1 + x28
+)
+: (
+   0
+))) + x46*x22);
+    out[3] = x40*(x25*(x45 + x50 + x43*x[3]) + x39*(x38 + 3.0*((x31 == 1) ? (
+   1 + x30
 )
 : (
    0
@@ -6453,10 +6460,10 @@ __device__ void pycgpu_model_1_formulahess(double* out, const double* x) {
     double x3 = 1e-15 < x[5];
     double x4 = 3.0*((x3 == 1) ? 0
 : 0);
-    double x5 = 1e-15 < x[4];
+    double x5 = 1e-15 < x[3];
     double x6 = 1.0*((x5 == 1) ? 0
 : 0);
-    double x7 = 1e-15 < x[3];
+    double x7 = 1e-15 < x[4];
     double x8 = 1.0*((x7 == 1) ? 0
 : 0);
     double x9 = x6 + x8;
@@ -6482,8 +6489,8 @@ __device__ void pycgpu_model_1_formulahess(double* out, const double* x) {
     double x29 = 1.0*x1;
     double x30 = 1.0*x0;
     double x31 = log(x[3]);
-    double x32 = x4 + x6;
-    double x33 = x32 + 1.0*((x7 == 1) ? (
+    double x32 = x4 + x8;
+    double x33 = x32 + 1.0*((x5 == 1) ? (
    1 + x31
 )
 : 0);
@@ -6526,10 +6533,10 @@ __device__ void pycgpu_model_1_formulahess(double* out, const double* x) {
     double x50 = 8.3145*x49;
     double x51 = log(x[4]);
     double x52 = log(x[5]);
-    double x53 = 1.0*((x7 == 1) ? (
+    double x53 = 1.0*((x5 == 1) ? (
    x31*x[3]
 )
-: 0) + 1.0*((x5 == 1) ? (
+: 0) + 1.0*((x7 == 1) ? (
    x51*x[4]
 )
 : 0) + 3.0*((x3 == 1) ? (
@@ -6562,8 +6569,8 @@ __device__ void pycgpu_model_1_formulahess(double* out, const double* x) {
     double x65 = x30*(x34 + x64 + (x43 + x48)*x29);
     double x66 = x12 + x2*x53 + x62*x29;
     double x67 = 1.0*x66;
-    double x68 = x4 + x8;
-    double x69 = x68 + 1.0*((x5 == 1) ? (
+    double x68 = x4 + x6;
+    double x69 = x68 + 1.0*((x7 == 1) ? (
    1 + x51
 )
 : 0);
@@ -6664,7 +6671,7 @@ __device__ void pycgpu_model_1_formulahess(double* out, const double* x) {
     out[2] = x67 + x71;
     out[3] = x74;
     out[4] = x65 + x66;
-    out[5] = x93 + x1*x78 + x1*x80 + x30*(-x81 + x92 - x78*x49 + x82*(x32 + 1.0*((x7 == 1) ? (
+    out[5] = x93 + x1*x78 + x1*x80 + x30*(-x81 + x92 - x78*x49 + x82*(x32 + 1.0*((x5 == 1) ? (
    pow(x[3], -1)
 )
 : 0)) - x84*x33 + (x48 + 2*x85)*x29) + x79*x33;
@@ -6672,7 +6679,7 @@ __device__ void pycgpu_model_1_formulahess(double* out, const double* x) {
     out[7] = x104 + x106;
     out[8] = x66 + x71;
     out[9] = x100;
-    out[10] = x93 + x1*x107 + x1*x108 + x30*(x92 - x49*x107 - x49*x108 + x82*(x68 + 1.0*((x5 == 1) ? (
+    out[10] = x93 + x1*x107 + x1*x108 + x30*(x92 - x49*x107 - x49*x108 + x82*(x68 + 1.0*((x7 == 1) ? (
    pow(x[4], -1)
 )
 : 0)) - x84*x69 + (x48 + 2*x97)*x29) + x79*x69;
@@ -6862,19 +6869,19 @@ __device__ void pycgpu_model_2_formulagrad(double* out, const double* x) {
     double x23 = x[3] + x[4];
     double x24 = pow(x23, -1);
     double x25 = 1.0*x24;
-    double x26 = log(x[4]);
-    double x27 = 1e-15 < x[4];
-    double x28 = log(x[3]);
-    double x29 = 1e-15 < x[3];
+    double x26 = log(x[3]);
+    double x27 = 1e-15 < x[3];
+    double x28 = log(x[4]);
+    double x29 = 1e-15 < x[4];
     double x30 = log(x[5]);
     double x31 = 1e-15 < x[5];
     double x32 = 1.0*((x27 == 1) ? (
-   x26*x[4]
+   x26*x[3]
 )
 : (
    0
 )) + 1.0*((x29 == 1) ? (
-   x28*x[3]
+   x28*x[4]
 )
 : (
    0
@@ -7006,14 +7013,14 @@ __device__ void pycgpu_model_2_formulagrad(double* out, const double* x) {
 : (
    0
 )))))) + (x35 + x38)*x39);
-    out[1] = x54 + x40*(x52 + x39*(x35 + x37 + 1.0*((x29 == 1) ? (
-   1 + x28
+    out[1] = x54 + x40*(x52 + x39*(x35 + x36 + 1.0*((x27 == 1) ? (
+   1 + x26
 )
 : (
    0
 ))) + x46*x13 + (x44 + x45)*x25);
-    out[2] = x54 + x40*(x52 + x25*(x45 + x49*x[5]) + x39*(x35 + x36 + 1.0*((x27 == 1) ? (
-   1 + x26
+    out[2] = x54 + x40*(x52 + x25*(x45 + x49*x[5]) + x39*(x35 + x37 + 1.0*((x29 == 1) ? (
+   1 + x28
 )
 : (
    0
@@ -7440,19 +7447,19 @@ __device__ void pycgpu_model_3_formulagrad(double* out, const double* x) {
     double x23 = x[3] + x[4];
     double x24 = pow(x23, -1);
     double x25 = 1.0*x24;
-    double x26 = log(x[4]);
-    double x27 = 1e-15 < x[4];
-    double x28 = log(x[3]);
-    double x29 = 1e-15 < x[3];
+    double x26 = log(x[3]);
+    double x27 = 1e-15 < x[3];
+    double x28 = log(x[4]);
+    double x29 = 1e-15 < x[4];
     double x30 = log(x[5]);
     double x31 = 1e-15 < x[5];
     double x32 = 8.3145*(1.0*((x27 == 1) ? (
-   x26*x[4]
+   x26*x[3]
 )
 : (
    0
 )) + 1.0*((x29 == 1) ? (
-   x28*x[3]
+   x28*x[4]
 )
 : (
    0
@@ -7463,7 +7470,7 @@ __device__ void pycgpu_model_3_formulagrad(double* out, const double* x) {
    0
 )));
     double x33 = x32*x24;
-    double x34 = 1.0*((x29 == 1) ? (
+    double x34 = 1.0*((x27 == 1) ? (
    0
 )
 : (
@@ -7475,7 +7482,7 @@ __device__ void pycgpu_model_3_formulagrad(double* out, const double* x) {
 : (
    0
 ));
-    double x36 = 1.0*((x27 == 1) ? (
+    double x36 = 1.0*((x29 == 1) ? (
    0
 )
 : (
@@ -7583,14 +7590,14 @@ __device__ void pycgpu_model_3_formulagrad(double* out, const double* x) {
 : (
    0
 ))))))) + (x34 + x37)*x38);
-    out[1] = x53 + x39*(x45 + x52 + x25*(x43 + x42*x[5]) + x38*(x37 + 1.0*((x29 == 1) ? (
-   1 + x28
+    out[1] = x53 + x39*(x45 + x52 + x25*(x43 + x42*x[5]) + x38*(x37 + 1.0*((x27 == 1) ? (
+   1 + x26
 )
 : (
    0
 ))));
-    out[2] = x53 + x39*(x52 + x25*(x43 + x49*x[5]) + x38*(x34 + x35 + 1.0*((x27 == 1) ? (
-   1 + x26
+    out[2] = x53 + x39*(x52 + x25*(x43 + x49*x[5]) + x38*(x34 + x35 + 1.0*((x29 == 1) ? (
+   1 + x28
 )
 : (
    0
@@ -7607,10 +7614,10 @@ __device__ void pycgpu_model_3_formulahess(double* out, const double* x) {
     double x0 = 1e-15 < x[5];
     double x1 = 0.5*((x0 == 1) ? 0
 : 0);
-    double x2 = 1e-15 < x[4];
+    double x2 = 1e-15 < x[3];
     double x3 = 1.0*((x2 == 1) ? 0
 : 0);
-    double x4 = 1e-15 < x[3];
+    double x4 = 1e-15 < x[4];
     double x5 = 1.0*((x4 == 1) ? 0
 : 0);
     double x6 = x3 + x5;
@@ -7639,8 +7646,8 @@ __device__ void pycgpu_model_3_formulahess(double* out, const double* x) {
     double x29 = 1.0*x9;
     double x30 = 1.0*x8;
     double x31 = log(x[3]);
-    double x32 = x1 + x3;
-    double x33 = x32 + 1.0*((x4 == 1) ? (
+    double x32 = x1 + x5;
+    double x33 = x32 + 1.0*((x2 == 1) ? (
    1 + x31
 )
 : 0);
@@ -7681,10 +7688,10 @@ __device__ void pycgpu_model_3_formulahess(double* out, const double* x) {
     double x48 = x45*x[3] + x47*x[5];
     double x49 = log(x[4]);
     double x50 = log(x[5]);
-    double x51 = 1.0*((x4 == 1) ? (
+    double x51 = 1.0*((x2 == 1) ? (
    x31*x[3]
 )
-: 0) + 1.0*((x2 == 1) ? (
+: 0) + 1.0*((x4 == 1) ? (
    x49*x[4]
 )
 : 0) + 0.5*((x0 == 1) ? (
@@ -7719,8 +7726,8 @@ __device__ void pycgpu_model_3_formulahess(double* out, const double* x) {
     double x65 = x30*(x34 + x64 + (x43 + x48)*x29);
     double x66 = x12 + x51*x10 + x61*x29;
     double x67 = 1.0*x66;
-    double x68 = x1 + x5;
-    double x69 = x68 + 1.0*((x2 == 1) ? (
+    double x68 = x1 + x3;
+    double x69 = x68 + 1.0*((x4 == 1) ? (
    1 + x49
 )
 : 0);
@@ -7820,7 +7827,7 @@ __device__ void pycgpu_model_3_formulahess(double* out, const double* x) {
     out[2] = x67 + x71;
     out[3] = x74;
     out[4] = x65 + x66;
-    out[5] = x92 + x30*(x90 + x11*(x32 + 1.0*((x4 == 1) ? (
+    out[5] = x92 + x30*(x90 + x11*(x32 + 1.0*((x2 == 1) ? (
    pow(x[3], -1)
 )
 : 0)) - x79*x52 - x82*x28 - x84*x33 + (2*x45 + x48)*x29) + x80*x33 + x81*x28 + x9*x79;
@@ -7828,7 +7835,7 @@ __device__ void pycgpu_model_3_formulahess(double* out, const double* x) {
     out[7] = x104 + x106;
     out[8] = x66 + x71;
     out[9] = x99;
-    out[10] = x92 + x30*(x90 - x91 + x11*(x68 + 1.0*((x2 == 1) ? (
+    out[10] = x92 + x30*(x90 - x91 + x11*(x68 + 1.0*((x4 == 1) ? (
    pow(x[4], -1)
 )
 : 0)) - x52*x107 - x84*x69 + (x48 + 2*x97)*x29) + x80*x69 + x81*x22 + x9*x107;
@@ -8059,17 +8066,17 @@ __device__ void pycgpu_model_4_formulagrad(double* out, const double* x) {
     double x28 = x[4]*x[3];
     double x29 = x28*x27;
     double x30 = 3.835*x1;
-    double x31 = log(x[4]);
-    double x32 = 1e-15 < x[4];
-    double x33 = log(x[3]);
-    double x34 = 1e-15 < x[3];
+    double x31 = log(x[3]);
+    double x32 = 1e-15 < x[3];
+    double x33 = log(x[4]);
+    double x34 = 1e-15 < x[4];
     double x35 = 1.0*((x32 == 1) ? (
-   x31*x[4]
+   x31*x[3]
 )
 : (
    0
 )) + 1.0*((x34 == 1) ? (
-   x33*x[3]
+   x33*x[4]
 )
 : (
    0
@@ -8239,14 +8246,14 @@ __device__ void pycgpu_model_4_formulagrad(double* out, const double* x) {
 : (
    0
 )))))*x[4]) + (x38 + x39)*x40);
-    out[1] = x63 + x41*(x62 + x26*(-x46 + x49 - x47*x[4] + x50*x[4] + x51*x[4]) + x40*(x39 + 1.0*((x34 == 1) ? (
-   1 + x33
+    out[1] = x63 + x41*(x62 + x26*(-x46 + x49 - x47*x[4] + x50*x[4] + x51*x[4]) + x40*(x38 + 1.0*((x32 == 1) ? (
+   1 + x31
 )
 : (
    0
 ))) + (x42 + x45)*x26);
-    out[2] = x63 + x41*(x62 + x26*(x46 - x49 + x60 - x47*x[3] + x50*x[3]) + x40*(x38 + 1.0*((x32 == 1) ? (
-   1 + x31
+    out[2] = x63 + x41*(x62 + x26*(x46 - x49 + x60 - x47*x[3] + x50*x[3]) + x40*(x39 + 1.0*((x34 == 1) ? (
+   1 + x33
 )
 : (
    0
@@ -8254,10 +8261,10 @@ __device__ void pycgpu_model_4_formulagrad(double* out, const double* x) {
 }
 
 __device__ void pycgpu_model_4_formulahess(double* out, const double* x) {
-    double x0 = 1e-15 < x[3];
+    double x0 = 1e-15 < x[4];
     double x1 = 1.0*((x0 == 1) ? 0
 : 0);
-    double x2 = 1e-15 < x[4];
+    double x2 = 1e-15 < x[3];
     double x3 = 1.0*((x2 == 1) ? 0
 : 0);
     double x4 = x1 + x3;
@@ -8287,7 +8294,7 @@ __device__ void pycgpu_model_4_formulahess(double* out, const double* x) {
     double x28 = 1.0*x6;
     double x29 = 1.0*x5;
     double x30 = log(x[3]);
-    double x31 = x3 + 1.0*((x0 == 1) ? (
+    double x31 = x1 + 1.0*((x2 == 1) ? (
    1 + x30
 )
 : 0);
@@ -8339,10 +8346,10 @@ __device__ void pycgpu_model_4_formulahess(double* out, const double* x) {
     double x51 = pow(x5, -2);
     double x52 = 8.3145*x51;
     double x53 = log(x[4]);
-    double x54 = 1.0*((x0 == 1) ? (
+    double x54 = 1.0*((x2 == 1) ? (
    x30*x[3]
 )
-: 0) + 1.0*((x2 == 1) ? (
+: 0) + 1.0*((x0 == 1) ? (
    x53*x[4]
 )
 : 0);
@@ -8387,7 +8394,7 @@ __device__ void pycgpu_model_4_formulahess(double* out, const double* x) {
     double x69 = x29*(x32 + x68 + x28*(x36 + x37 + x40) + (x47 + x50)*x28);
     double x70 = x9 + x56*x28 + x6*x55 + x67*x28;
     double x71 = 1.0*x70;
-    double x72 = x1 + 1.0*((x2 == 1) ? (
+    double x72 = x3 + 1.0*((x0 == 1) ? (
    1 + x53
 )
 : 0);
@@ -8507,14 +8514,14 @@ __device__ void pycgpu_model_4_formulahess(double* out, const double* x) {
     out[1] = x69 + x71;
     out[2] = x71 + x74;
     out[3] = x69 + x70;
-    out[4] = x108 + x29*(x107 - 2.0*x95 + x28*(2*x91 + x92 - x93*x[4]) - 16.629*x51*x94 - x77*x96 + x8*(x3 + 1.0*((x0 == 1) ? (
+    out[4] = x108 + x29*(x107 - 2.0*x95 + x28*(2*x91 + x92 - x93*x[4]) - 16.629*x51*x94 - x77*x96 + x8*(x1 + 1.0*((x2 == 1) ? (
    pow(x[3], -1)
 )
 : 0)) + (2*x48 + x50)*x28) + x78*x77 + x78*x90 + x94*x10;
     out[5] = x112;
     out[6] = x70 + x74;
     out[7] = x112;
-    out[8] = x108 + x10*x111 + x29*(x107 + x28*(-2*x85 + x92 + x93*x[3]) + x8*(x1 + 1.0*((x2 == 1) ? (
+    out[8] = x108 + x10*x111 + x29*(x107 + x28*(-2*x85 + x92 + x93*x[3]) + x8*(x3 + 1.0*((x0 == 1) ? (
    pow(x[4], -1)
 )
 : 0)) - x96*x109 - x96*x110 + (2*x49 + x50)*x28 - x72*x51*x98) + x78*x109 + x78*x110;
@@ -8674,17 +8681,17 @@ __device__ void pycgpu_model_5_formulagrad(double* out, const double* x) {
     double x21 = x[3] + x[4];
     double x22 = pow(x21, -1);
     double x23 = 1.0*x22;
-    double x24 = log(x[4]);
-    double x25 = 1e-15 < x[4];
-    double x26 = log(x[3]);
-    double x27 = 1e-15 < x[3];
+    double x24 = log(x[3]);
+    double x25 = 1e-15 < x[3];
+    double x26 = log(x[4]);
+    double x27 = 1e-15 < x[4];
     double x28 = 1.0*((x25 == 1) ? (
-   x24*x[4]
+   x24*x[3]
 )
 : (
    0
 )) + 1.0*((x27 == 1) ? (
-   x26*x[3]
+   x26*x[4]
 )
 : (
    0
@@ -8802,14 +8809,14 @@ __device__ void pycgpu_model_5_formulagrad(double* out, const double* x) {
 : (
    0
 )))))*x[3]) + (x31 + x32)*x33);
-    out[1] = x46 + x34*(x40 + x45 + x33*(x32 + 1.0*((x27 == 1) ? (
-   1 + x26
+    out[1] = x46 + x34*(x40 + x45 + x33*(x31 + 1.0*((x25 == 1) ? (
+   1 + x24
 )
 : (
    0
 ))) + (x37 + x38)*x23);
-    out[2] = x46 + x34*(x45 + x33*(x31 + 1.0*((x25 == 1) ? (
-   1 + x24
+    out[2] = x46 + x34*(x45 + x33*(x32 + 1.0*((x27 == 1) ? (
+   1 + x26
 )
 : (
    0
@@ -8819,10 +8826,10 @@ __device__ void pycgpu_model_5_formulagrad(double* out, const double* x) {
 __device__ void pycgpu_model_5_formulahess(double* out, const double* x) {
     double x0 = x[3] + x[4];
     double x1 = pow(x0, -1);
-    double x2 = 1e-15 < x[3];
+    double x2 = 1e-15 < x[4];
     double x3 = 1.0*((x2 == 1) ? 0
 : 0);
-    double x4 = 1e-15 < x[4];
+    double x4 = 1e-15 < x[3];
     double x5 = 1.0*((x4 == 1) ? 0
 : 0);
     double x6 = x3 + x5;
@@ -8844,7 +8851,7 @@ __device__ void pycgpu_model_5_formulahess(double* out, const double* x) {
     double x22 = 1.0*x1;
     double x23 = 1.0*x0;
     double x24 = log(x[3]);
-    double x25 = x5 + 1.0*((x2 == 1) ? (
+    double x25 = x3 + 1.0*((x4 == 1) ? (
    1 + x24
 )
 : 0);
@@ -8885,10 +8892,10 @@ __device__ void pycgpu_model_5_formulahess(double* out, const double* x) {
     double x40 = 8.3145*x39;
     double x41 = x[2]*x40;
     double x42 = log(x[4]);
-    double x43 = 1.0*((x2 == 1) ? (
+    double x43 = 1.0*((x4 == 1) ? (
    x24*x[3]
 )
-: 0) + 1.0*((x4 == 1) ? (
+: 0) + 1.0*((x2 == 1) ? (
    x42*x[4]
 )
 : 0);
@@ -8916,7 +8923,7 @@ __device__ void pycgpu_model_5_formulahess(double* out, const double* x) {
     double x53 = x23*(x27 + x52 + (x35 + x38)*x22);
     double x54 = x8 + x43*x26 + x50*x22;
     double x55 = 1.0*x54;
-    double x56 = x3 + 1.0*((x4 == 1) ? (
+    double x56 = x5 + 1.0*((x2 == 1) ? (
    1 + x42
 )
 : 0);
@@ -8998,14 +9005,14 @@ __device__ void pycgpu_model_5_formulahess(double* out, const double* x) {
     out[1] = x53 + x55;
     out[2] = x55 + x58;
     out[3] = x53 + x54;
-    out[4] = x75 + x1*x62 + x1*x64 + x1*x65 + x23*(-x67 + x73 - x62*x39 - x64*x39 + x66*(x5 + 1.0*((x2 == 1) ? (
+    out[4] = x75 + x1*x62 + x1*x64 + x1*x65 + x23*(-x67 + x73 - x62*x39 - x64*x39 + x66*(x3 + 1.0*((x4 == 1) ? (
    pow(x[3], -1)
 )
 : 0)) + (2*x37 + x38)*x22);
     out[5] = x80;
     out[6] = x54 + x58;
     out[7] = x80;
-    out[8] = x75 + 2.0*x1*x77 + x1*x81 + x1*x82 + x23*(x73 + x66*(x3 + 1.0*((x4 == 1) ? (
+    out[8] = x75 + 2.0*x1*x77 + x1*x81 + x1*x82 + x23*(x73 + x66*(x5 + 1.0*((x2 == 1) ? (
    pow(x[4], -1)
 )
 : 0)) - x74*x77 - x81*x39 - x82*x39 + (2*x36 + x38)*x22);
@@ -9111,20 +9118,35 @@ __global__ void minimal_equilibrium_kernel(
     
     // Process conditions assigned to this thread using stride pattern
     for (int condition_idx = tid; condition_idx < num_conditions; condition_idx += total_threads) {
-        // Simple placeholder calculation - just copy some values and mark as processed
-        int result_offset = condition_idx * 10; // Assume 10 doubles per result
+        // Calculate correct result offset based on actual results layout
+        int results_per_condition = 7 + MAX_COMPONENTS + MAX_PHASES + 
+                                   (MAX_PHASES * MAX_DOF_PER_PHASE) + 
+                                   (MAX_PHASES * MAX_COMPONENTS) + MAX_PHASES;
+        int result_offset = condition_idx * results_per_condition;
         int condition_offset = condition_idx * data_size_per_condition;
         
-        if (result_offset + 9 < num_conditions * 10) {
+        if (result_offset + results_per_condition <= num_conditions * results_per_condition) {
             // Mark this condition as processed with some dummy values
-            results_data[result_offset + 0] = 1000.0 + condition_idx; // Phase amount
-            results_data[result_offset + 1] = 500.0; // Temperature (dummy)
-            results_data[result_offset + 2] = 1.0; // Pressure (dummy)
-            results_data[result_offset + 3] = 0.5; // X composition (dummy)
-            results_data[result_offset + 4] = 1.0; // Status: success
-            // Fill remaining with zeros
-            for (int i = 5; i < 10; i++) {
-                results_data[result_offset + i] = 0.0;
+            results_data[result_offset + 0] = 1000.0 + condition_idx; // GM
+            // Initialize chemical potentials
+            for (int i = 0; i < MAX_COMPONENTS; i++) {
+                results_data[result_offset + 1 + i] = 0.0;
+            }
+            // Initialize phase amounts
+            for (int i = 0; i < MAX_PHASES; i++) {
+                results_data[result_offset + 1 + MAX_COMPONENTS + i] = 0.0;
+            }
+            results_data[result_offset + 1 + MAX_COMPONENTS + MAX_PHASES] = 1.0; // converged
+            results_data[result_offset + 2 + MAX_COMPONENTS + MAX_PHASES] = 0.0; // num_stable_phases
+            results_data[result_offset + 3 + MAX_COMPONENTS + MAX_PHASES] = 500.0; // Temperature
+            results_data[result_offset + 4 + MAX_COMPONENTS + MAX_PHASES] = 1.0; // Pressure
+            results_data[result_offset + 5 + MAX_COMPONENTS + MAX_PHASES] = 1.0; // Status: success
+            // Fill remaining (Y_phases, X_phases, phase_ids) with zeros
+            int remaining_start = result_offset + 6 + MAX_COMPONENTS + MAX_PHASES;
+            int remaining_count = (MAX_PHASES * MAX_DOF_PER_PHASE) + 
+                                 (MAX_PHASES * MAX_COMPONENTS) + MAX_PHASES;
+            for (int i = 0; i < remaining_count; i++) {
+                results_data[remaining_start + i] = 0.0;
             }
         }
     }
@@ -10026,14 +10048,16 @@ __device__ void solve_equilibrium_at_condition_global_mem(
         printf("    [0]=%f, [1]=%f, [2]=%f, [44]=%f\n", 
                initial_data_flat[0], initial_data_flat[1], initial_data_flat[2], initial_data_flat[44]);
         
-        // Test accessing as if it were condition_idx * 45 + offset
-        printf("  Accessing with condition offset (assuming 1 condition, 45 doubles each):\n");
-        int condition_offset = 0 * 45;  // condition 0
+        // Test accessing with calculated doubles_per_struct
+        int doubles_per_struct = MAX_PHASES + MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + 
+                                (MAX_PHASES * MAX_COMPONENTS) + MAX_COMPONENTS + 1;
+        printf("  Accessing with condition offset (using calculated doubles_per_struct=%d):\n", doubles_per_struct);
+        int condition_offset = 0 * doubles_per_struct;  // condition 0
         printf("    condition_offset=0: [%d]=%f, [%d]=%f, [%d]=%f, [%d]=%f\n",
                condition_offset+0, initial_data_flat[condition_offset+0],
                condition_offset+1, initial_data_flat[condition_offset+1], 
                condition_offset+2, initial_data_flat[condition_offset+2],
-               condition_offset+44, initial_data_flat[condition_offset+44]);
+               condition_offset+doubles_per_struct-1, initial_data_flat[condition_offset+doubles_per_struct-1]);
         #endif
     }
     
@@ -10180,8 +10204,8 @@ __device__ void solve_equilibrium_at_condition_global_mem(
         // Set site fractions from lower_convex_hull results
         // Site fractions start after the WORKSPACE's state variables
         // Layout: phase_indices[MAX_PHASES] + phase_amounts[MAX_PHASES] + site_fractions[MAX_PHASES*MAX_DOF_PER_PHASE] + ...
-        // site_fractions start at offset (MAX_PHASES + MAX_PHASES) = 8 for MAX_PHASES=4
-        int site_fractions_offset = 8;  // From Python debug: site_fractions start at [8]
+        // site_fractions start at offset (MAX_PHASES + MAX_PHASES)
+        int site_fractions_offset = MAX_PHASES + MAX_PHASES;  // phase_indices + phase_amounts
         const double* initial_data_flat = initial_data;
         
         // CRITICAL FIX: Map site fractions to ensure correct component order
@@ -11082,6 +11106,8 @@ __global__ void top_level_equilibrium_kernel(
     int python_max_statevars, // CRITICAL FIX: Python's MAX_STATEVARS value for proper offset calculation
     // DevicePhaseData contents are now implicitly g_phase_records_array and num_unique_models
     const void* initial_phase_data_ptr, // Array of InitialPhaseDataSingle structs from lower_convex_hull
+    int initial_phase_data_stride, // CRITICAL FIX: Python-provided stride for initial phase data
+    int system_spec_stride, // CRITICAL FIX: Python-provided stride for SystemSpec array
     const void* grid_data_ptr_raw, // Pointer to grid data (can be null if not using add_new/nearly_stable in kernel)
     // Debug arrays for step-by-step solver tracking (can be null if debug disabled)
     double* debug_gm_history,           // Array: [num_conditions, max_debug_steps]
@@ -11250,10 +11276,41 @@ __global__ void top_level_equilibrium_kernel(
         int spec_size_doubles = spec_core_doubles_calc + spec_work_doubles_calc;
         
         // Get pointer to this thread's SystemSpec data
-        const double* my_spec_data = &system_specs_array[condition_idx * spec_size_doubles];
+        // CRITICAL FIX: Use Python-provided stride instead of calculating it
+        const double* my_spec_data = &system_specs_array[condition_idx * system_spec_stride];
+        
+        if (tid < 2) {
+            #ifdef VERBOSE_DEBUG
+            printf("GPU DEBUG: Thread %d - using system_spec_stride=%d, offset=%d\n", 
+                   tid, system_spec_stride, condition_idx * system_spec_stride);
+            #endif
+        }
         
         // Read num_statevars from the correct position (first field)
         int num_statevars = (int)my_spec_data[0];
+        int num_components = (int)my_spec_data[1];
+        
+        if (tid < 2) {
+            #ifdef VERBOSE_DEBUG
+            printf("GPU DEBUG: Thread %d - SystemSpec: num_statevars=%d, num_components=%d\n", 
+                   tid, num_statevars, num_components);
+            printf("GPU DEBUG: Thread %d - First 10 values from my_spec_data: ", tid);
+            for (int k = 0; k < 10; ++k) {
+                printf("%f ", my_spec_data[k]);
+            }
+            printf("\n");
+            // Also check prescribed_mole_fraction_rhs value
+            int rhs_offset = 3 + MAX_COMPONENTS + (MAX_FIXED_MOLE_FRACTION_CONDITIONS * MAX_COMPONENTS);
+            printf("GPU DEBUG: Thread %d - prescribed_mole_fraction_rhs[0] at offset %d = %f\n", 
+                   tid, rhs_offset, my_spec_data[rhs_offset]);
+            // Check initial chemical potentials
+            printf("GPU DEBUG: Thread %d - initial_chemical_potentials: ", tid);
+            for (int k = 0; k < MAX_COMPONENTS && k < 3; ++k) {
+                printf("[%d]=%f ", k, my_spec_data[3 + k]);
+            }
+            printf("\n");
+            #endif
+        }
         
         if (num_statevars == 2) {
             // Most common case: [N, T] with no pressure variable
@@ -11312,6 +11369,11 @@ __global__ void top_level_equilibrium_kernel(
         
         // FIX: Use direct byte-level array access instead of struct casting to avoid alignment issues
         const double* initial_data_byte_array = (const double*)initial_phase_data_ptr;
+        
+        // CRITICAL FIX: Remove __syncthreads() here - it causes undefined behavior when not all threads reach it
+        // Only threads with valid conditions (0-31) would reach this point, but all 256 threads in the block
+        // must reach __syncthreads() for correct behavior
+        
         if (initial_data_byte_array != nullptr && condition_idx < num_conditions_total) {
             
             if (tid == 0) {
@@ -11347,17 +11409,22 @@ __global__ void top_level_equilibrium_kernel(
             // Convert to all-double layout: 
             // doubles_per_struct = MAX_PHASES + MAX_PHASES + MAX_PHASES*MAX_DOF_PER_PHASE + MAX_PHASES*MAX_COMPONENTS + MAX_COMPONENTS + 1
             // where phase_indices and num_phases are stored as doubles for simplicity
-            int doubles_per_struct = MAX_PHASES + MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * MAX_COMPONENTS) + MAX_COMPONENTS + 1;
-            int struct_offset = condition_idx * doubles_per_struct;
+            // CRITICAL FIX: Use Python-provided stride instead of calculating it
+            int struct_offset = condition_idx * initial_phase_data_stride;
             
-            // Extract num_phases (stored as double at the end of the struct)
-            debug_num_phases = (int)initial_data_byte_array[struct_offset + doubles_per_struct - 1];
+            // Extract num_phases (stored as double at the correct offset)
+            // CRITICAL FIX: Calculate the actual offset for num_phases based on struct layout
+            // offset = 2*MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * MAX_COMPONENTS) + MAX_COMPONENTS
+            int num_phases_offset = 2*MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * MAX_COMPONENTS) + MAX_COMPONENTS;
+            debug_num_phases = (int)initial_data_byte_array[struct_offset + num_phases_offset];
             
-            // DEBUG: Print struct_offset calculation for first few threads
-            if (tid < 2) {
+            // DEBUG: Print struct_offset calculation for failing threads specifically
+            if (tid == 10 || tid == 17 || tid < 2) {
                 #ifdef VERBOSE_DEBUG
-                printf("GPU DEBUG: Thread %d - condition_idx=%d, doubles_per_struct=%d, struct_offset=%d\n", 
-                       tid, condition_idx, doubles_per_struct, struct_offset);
+                printf("GPU DEBUG: Thread %d - condition_idx=%d, initial_phase_data_stride=%d, struct_offset=%d\n", 
+                       tid, condition_idx, initial_phase_data_stride, struct_offset);
+                printf("  Memory address for chem pots: base=%p + offset=%d\n", 
+                       initial_data_byte_array, struct_offset + 60);
                 #endif
             }
             
@@ -11399,9 +11466,40 @@ __global__ void top_level_equilibrium_kernel(
                                        (MAX_PHASES * MAX_DOF_PER_PHASE) + 
                                        (MAX_PHASES * MAX_COMPONENTS);
             
+            // BOUNDS CHECK: Ensure we don't read beyond the array
+            const int total_array_size = num_conditions_total * initial_phase_data_stride;
+            const int chem_pot_read_offset = struct_offset + chem_pot_offset;
+            
+            if (tid < 2) {
+                #ifdef VERBOSE_DEBUG
+                printf("GPU DEBUG: Thread %d bounds check - trying to read from offset %d, total array size is %d\n",
+                       tid, chem_pot_read_offset, total_array_size);
+                // Direct test: Try to read the exact offsets we know should have data
+                if (tid == 1) {
+                    printf("GPU DEBUG: Thread 1 direct read test:\n");
+                    printf("  initial_data_byte_array[60] = %f (should be -31525.5 for cond 0)\n", initial_data_byte_array[60]);
+                    printf("  initial_data_byte_array[125] = %f (should be -31525.5 for cond 1)\n", initial_data_byte_array[125]);
+                    printf("  initial_data_byte_array[126] = %f (should be -40730.8 for cond 1)\n", initial_data_byte_array[126]);
+                }
+                #endif
+            }
+            
             for (int i = 0; i < MAX_COMPONENTS; ++i) {
-                if (i < (int)my_spec_data[1]) { // num_components is at offset 1
-                    chemical_potentials[i] = initial_data_byte_array[struct_offset + chem_pot_offset + i];
+                if (i < (int)my_spec_data[1] && (chem_pot_read_offset + i) < total_array_size) { // num_components is at offset 1
+                    chemical_potentials[i] = initial_data_byte_array[chem_pot_read_offset + i];
+                    if (tid == 1 && i < 2) {
+                        #ifdef VERBOSE_DEBUG
+                        printf("GPU DEBUG: Thread 1 reading chem_pot[%d] from offset %d, value = %f\n", 
+                               i, chem_pot_read_offset + i, initial_data_byte_array[chem_pot_read_offset + i]);
+                        // Also try reading some nearby values to see if there's an offset issue
+                        if (i == 0) {
+                            printf("GPU DEBUG: Thread 1 - values at offsets 123-127: [%f, %f, %f, %f, %f]\n",
+                                   initial_data_byte_array[123], initial_data_byte_array[124], 
+                                   initial_data_byte_array[125], initial_data_byte_array[126], 
+                                   initial_data_byte_array[127]);
+                        }
+                        #endif
+                    }
                 } else {
                     chemical_potentials[i] = 0.0;
                 }
@@ -11410,8 +11508,15 @@ __global__ void top_level_equilibrium_kernel(
             if (tid < 3) {
                 #ifdef VERBOSE_DEBUG
                 printf("GPU DEBUG: Thread %d reading chemical potentials from struct_offset=%d + chem_pot_offset=%d = %d\n", 
-                       tid, struct_offset, chem_pot_offset, struct_offset + chem_pot_offset);
+                       tid, struct_offset, chem_pot_offset, chem_pot_read_offset);
                 printf("GPU DEBUG: Thread %d SystemSpecification check - num_components=%d\n", tid, (int)my_spec_data[1]);
+                if (tid == 1) {
+                    printf("GPU DEBUG: Thread 1 - my_spec_data[0]=%f (num_statevars), my_spec_data[1]=%f (num_components)\n",
+                           my_spec_data[0], my_spec_data[1]);
+                }
+                // Print the actual values being read
+                printf("GPU DEBUG: Thread %d chemical_potentials after reading: [%f, %f, %f, %f]\n",
+                       tid, chemical_potentials[0], chemical_potentials[1], chemical_potentials[2], chemical_potentials[3]);
                 for (int i = 0; i < 3; ++i) {
                     printf("  Thread %d chemical_potentials[%d] = %.6e (from initial_data offset %d)\n", 
                            tid, i, chemical_potentials[i], struct_offset + chem_pot_offset + i);
@@ -11516,7 +11621,7 @@ __global__ void top_level_equilibrium_kernel(
                     // CRITICAL FIX: Access per-thread SystemSpec data instead of casting shared pointer
                     // global_spec_ptr_raw is an array of SystemSpecs in double format, not a single struct
                     const double* system_specs_array = (const double*)global_spec_ptr_raw;
-                    const double* my_spec_doubles = &system_specs_array[condition_idx * spec_size_doubles];
+                    const double* my_spec_doubles = &system_specs_array[condition_idx * system_spec_stride];
                     int actual_num_statevars = (int)my_spec_doubles[0];  // num_statevars is first field
                     
                     if (actual_num_statevars == 2) {
@@ -11733,7 +11838,7 @@ __global__ void top_level_equilibrium_kernel(
                                    phase_matrix_dim_local + phase_matrix_dim_local + (phase_matrix_dim_local * phase_matrix_dim_local);
                                    
             int spec_size_doubles = spec_core_doubles + spec_work_doubles;
-            const double* my_spec_doubles = &system_specs_array[condition_idx * spec_size_doubles];
+            const double* my_spec_doubles = &system_specs_array[condition_idx * system_spec_stride];
             
             // CRITICAL FIX: Manually copy fields from double array to struct
             // Python stores everything as doubles in a flat array, we need to 
@@ -11770,7 +11875,7 @@ __global__ void top_level_equilibrium_kernel(
             if (condition_idx <= 2) {
                 #ifdef VERBOSE_DEBUG
                 printf("GPU DEBUG: Thread %d - Copied from my_spec_doubles at offset %d:\n", 
-                       condition_idx, condition_idx * spec_size_doubles);
+                       condition_idx, condition_idx * system_spec_stride);
                 printf("  First 10 doubles: ");
                 for (int i = 0; i < 10; ++i) {
                     printf("%.3f ", my_spec_doubles[i]);
@@ -11929,6 +12034,28 @@ __global__ void top_level_equilibrium_kernel(
             
             // REFACTORED: Call sophisticated solver with global memory arrays
             // This is the full equilibrium solver using global memory to avoid stack overflow
+            
+            // CRITICAL DEBUG: Special monitoring for failing conditions 10 and 17
+            if (condition_idx == 10 || condition_idx == 17) {
+                printf("\n=== CRITICAL DEBUG: Condition %d (thread %d %% 7 = %d) ===\n", 
+                       condition_idx, condition_idx, condition_idx % 7);
+                printf("Initial conditions:\n");
+                printf("  T=%f, P=%f\n", condition_args_single.state_variables_values[2], condition_args_single.state_variables_values[1]);
+                printf("  Initial GM=%f\n", system_gm);
+                printf("  Initial phases: %d\n", safe_num_phases);
+                for (int i = 0; i < safe_num_phases && i < 3; ++i) {
+                    printf("    Phase %d: idx=%d, amount=%f\n", i, phase_indices[i], phase_amounts[i]);
+                }
+                printf("  Phase assemblage: ");
+                if (safe_num_phases == 2 && phase_indices[0] == 2 && phase_indices[1] == 0) {
+                    printf("FCC_A1 + AU2BI_C15\n");
+                } else if (safe_num_phases == 2 && phase_indices[0] == 0 && phase_indices[1] == 2) {
+                    printf("AU2BI_C15 + FCC_A1\n");
+                } else {
+                    printf("Other\n");
+                }
+            }
+            
             if (condition_idx == 0 || condition_idx == 1 || condition_idx == 2) {
                 #ifdef VERBOSE_DEBUG
                 printf("GPU DEBUG: CALLING solve_equilibrium_at_condition_global_mem for condition %d\n", condition_idx);
@@ -11996,6 +12123,23 @@ __global__ void top_level_equilibrium_kernel(
                 }
                 debug_convergence_history[debug_idx] = equilibrium_result.converged ? 1 : 0;
                 debug_iteration_count[condition_idx] = 6;  // Start + before + solver call + after
+            }
+            
+            // CRITICAL DEBUG: Monitor failing conditions 10 and 17 after solver
+            if (condition_idx == 10 || condition_idx == 17) {
+                printf("\n=== AFTER SOLVER: Condition %d ===\n", condition_idx);
+                printf("  Final GM=%f (was %f)\n", equilibrium_result.final_system_gm, system_gm);
+                printf("  Converged: %s\n", equilibrium_result.converged ? "YES" : "NO");
+                printf("  Final phases: %d\n", equilibrium_result.num_stable_phases);
+                for (int i = 0; i < equilibrium_result.num_stable_phases && i < 3; ++i) {
+                    printf("    Phase %d: idx=%d, amount=%f\n", i, 
+                           equilibrium_result.phase_ids[i], equilibrium_result.NP[i]);
+                }
+                printf("  Final chemical potentials: [%f, %f, %f]\n",
+                       equilibrium_result.final_chemical_potentials[0],
+                       equilibrium_result.final_chemical_potentials[1],
+                       equilibrium_result.final_chemical_potentials[2]);
+                printf("  Delta GM = %f\n", equilibrium_result.final_system_gm - system_gm);
             }
             
             // SAFETY CHECK: Validate solver results

@@ -38,6 +38,6 @@ X(BI)	T(K)	CPU_GM	GPU_GM	GM_DIFF	CPU_Phases	GPU_Phases	Phases_Match	STATUS
 # Failed: 0
 # Pass rate: 100.0%
 # CPU time: 0.4 seconds
-# GPU time: 0.6 seconds
-# Speedup: 0.6x
-# Total time: 1.1 seconds
+# GPU time: 8.0 seconds
+# Speedup: 0.1x
+# Total time: 8.5 seconds

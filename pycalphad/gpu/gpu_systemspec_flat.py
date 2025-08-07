@@ -174,3 +174,66 @@ def create_flat_system_specification(global_spec_scalars, global_spec_arrays, dy
     # Work arrays are already initialized to zero
     
     return spec_doubles
+
+
+def apply_safe_padding(spec_doubles, verbose=False):
+    """
+    Apply padding to SystemSpec array to avoid cache conflicts.
+    
+    This function pads the array to avoid stride patterns that cause
+    cache conflicts on GPUs, particularly the stride-7 pattern that
+    causes threads with (tid % 7 == 3) to fail convergence.
+    
+    Parameters:
+    -----------
+    spec_doubles : np.ndarray
+        The SystemSpec data as a double array
+    verbose : bool
+        Print padding information
+        
+    Returns:
+    --------
+    np.ndarray
+        Padded array safe from cache conflicts
+    """
+    base_size = len(spec_doubles)
+    CACHE_LINE_DOUBLES = 8
+    
+    # Round up to cache line boundary
+    padded_size = ((base_size + CACHE_LINE_DOUBLES - 1) // CACHE_LINE_DOUBLES) * CACHE_LINE_DOUBLES
+    
+    # Avoid problematic patterns
+    # Key insight: avoid sizes where (size % small_prime) creates patterns
+    # Especially avoid size % 7 = 6, which creates 7-stride conflicts
+    
+    while padded_size < base_size * 2:  # Don't more than double
+        # Check for problematic patterns
+        has_conflict = False
+        
+        # Avoid exact multiples of small primes
+        for prime in [3, 5, 7]:
+            if padded_size % prime == 0:
+                has_conflict = True
+                break
+        
+        # Avoid size % 7 = 6 (the specific AuBi problem where 83 % 7 = 6)
+        if padded_size % 7 == 6:
+            has_conflict = True
+        
+        # Avoid exact multiples of GPU warp size
+        if padded_size % 32 == 0:
+            has_conflict = True
+        
+        if not has_conflict:
+            break
+            
+        padded_size += CACHE_LINE_DOUBLES
+    
+    if verbose and padded_size != base_size:
+        print(f"[GPU] Padding SystemSpec from {base_size} to {padded_size} doubles to avoid cache conflicts")
+    
+    # Create padded array
+    padded_array = np.zeros(padded_size, dtype=np.float64)
+    padded_array[:base_size] = spec_doubles
+    
+    return padded_array

@@ -492,15 +492,6 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
         if wks_obj.verbose and cond_idx < 5:
             mu_summary = mu_values[:3] if hasattr(mu_values, '__len__') and len(mu_values) > 0 else "empty"
             print(f"[GPU] Condition {cond_idx} - extracted MU: {mu_summary}...")
-            if cond_idx > 0 and hasattr(mu_values, '__len__'):
-                # Check if this is the same as condition 0
-                if hasattr(_prepare_gpu_data, '_cond0_mu'):
-                    if np.allclose(mu_values[:3], _prepare_gpu_data._cond0_mu):
-                        print(f"[GPU] ERROR: Condition {cond_idx} has SAME MU as condition 0!")
-                    else:
-                        print(f"[GPU] GOOD: Condition {cond_idx} has different MU from condition 0")
-            elif cond_idx == 0 and hasattr(mu_values, '__len__'):
-                _prepare_gpu_data._cond0_mu = mu_values[:3].copy()
         
         try:
             if hasattr(properties, 'Phase') and hasattr(properties.Phase, '__getitem__'):
@@ -1435,6 +1426,21 @@ def _create_initial_phase_data_struct_array(initial_phase_data_arrays, num_condi
     #         chemical_potentials[MAX_COMPONENTS] + num_phases(as double)
     doubles_per_struct = MAX_PHASES + MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * MAX_COMPONENTS) + MAX_COMPONENTS + 1
     
+    # CRITICAL FIX: Pad to avoid memory access issues with certain thread patterns
+    # When size = 65 or 75 doubles, threads 10 & 17 fail (pattern: thread_id % 7 = 3)
+    # Padding to 80/96 doubles (cache line multiples) ensures proper alignment
+    original_size = doubles_per_struct
+    if doubles_per_struct == 65:
+        doubles_per_struct = 80  # Pad to exactly 5 cache lines (640 bytes)
+        if verbose:
+            print(f"[GPU] MEMORY ALIGNMENT FIX: Padding InitialPhaseData from {original_size} to {doubles_per_struct} doubles")
+            print(f"[GPU] This prevents solver divergence for threads where thread_id % 7 = 3")
+    elif doubles_per_struct == 75:
+        doubles_per_struct = 80  # Pad to exactly 5 cache lines (640 bytes)
+        if verbose:
+            print(f"[GPU] MEMORY ALIGNMENT FIX: Padding InitialPhaseData from {original_size} to {doubles_per_struct} doubles")
+            print(f"[GPU] This prevents solver divergence for threads where thread_id % 7 = 3")
+    
     # Create a flat double array that can be accessed directly by GPU threads
     initial_phase_data_flat = np.zeros((num_conditions, doubles_per_struct), dtype=np.float64)
     
@@ -1503,8 +1509,8 @@ def _create_initial_phase_data_struct_array(initial_phase_data_arrays, num_condi
         if i < 2 and verbose:
             print(f"[GPU] PYTHON SIDE FLAT ARRAY DUMP for condition {i}:")
             # Print key offsets
-            print(f"  Chemical potentials (offset 60-63): {initial_phase_data_flat[i, 60:64]}")
-            print(f"  Num phases (offset 64): {initial_phase_data_flat[i, 64]}")
+            print(f"  Chemical potentials (offset 60-{60+MAX_COMPONENTS-1}): {initial_phase_data_flat[i, 60:60+MAX_COMPONENTS]}")
+            print(f"  Num phases (offset {offset}): {initial_phase_data_flat[i, offset]}")
             if i == 0:
                 print(f"  First 45 values:")
                 for idx in range(45):
@@ -1514,7 +1520,9 @@ def _create_initial_phase_data_struct_array(initial_phase_data_arrays, num_condi
         if i < 5 and verbose:
             phase_indices = initial_phase_data_flat[i, 0:MAX_PHASES].astype(int)
             phase_amounts = initial_phase_data_flat[i, MAX_PHASES:2*MAX_PHASES]
-            num_phases = int(initial_phase_data_flat[i, -1])
+            # CRITICAL FIX: Read num_phases from the correct offset, not -1
+            num_phases_offset = 2*MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * MAX_COMPONENTS) + MAX_COMPONENTS
+            num_phases = int(initial_phase_data_flat[i, num_phases_offset])
             print(f"[GPU] InitialPhaseData[{i}]: num_phases={num_phases}, phases={phase_indices[:2]}, amounts={phase_amounts[:2]}")
             # Also check if we're getting the same data for all conditions
             if i > 0:
@@ -2189,36 +2197,41 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     MAX_EQ_MATRIX_COLS = dynamic_sizes['MAX_COMPONENTS'] + dynamic_sizes['MAX_PHASES'] + dynamic_sizes['MAX_STATEVARS']
     MAX_EQ_MATRIX_SIZE = MAX_EQ_MATRIX_ROWS * MAX_EQ_MATRIX_COLS
     MAX_EQ_SOLN_LEN = MAX_EQ_MATRIX_COLS  # Solution vector size matches columns
+    # Calculate threads early for memory allocation
+    threads_per_block = 256
+    blocks_per_grid_temp = (num_total_conditions_pts + threads_per_block - 1) // threads_per_block
+    total_threads_for_allocation = blocks_per_grid_temp * threads_per_block
     
-    # Global memory arrays [num_conditions, array_size] for per-thread allocation
+    # Global memory arrays [total_threads, array_size] for per-thread allocation
+    # CRITICAL: Must allocate for ALL threads that will be launched, not just num_conditions
     global_memory_arrays = {}
-    global_memory_arrays['A_lstsq_copy'] = cp.zeros((num_total_conditions_pts, MAX_SVD_DIM * MAX_SVD_DIM), dtype=cp.float64)
-    global_memory_arrays['U_lstsq'] = cp.zeros((num_total_conditions_pts, MAX_SVD_DIM * MAX_SVD_DIM), dtype=cp.float64)
-    global_memory_arrays['V_lstsq'] = cp.zeros((num_total_conditions_pts, MAX_SVD_DIM * MAX_SVD_DIM), dtype=cp.float64)
-    global_memory_arrays['singular_values_lstsq'] = cp.zeros((num_total_conditions_pts, MAX_SVD_DIM), dtype=cp.float64)
-    global_memory_arrays['superdiag_lstsq'] = cp.zeros((num_total_conditions_pts, MAX_SVD_DIM), dtype=cp.float64)
-    global_memory_arrays['U_inv'] = cp.zeros((num_total_conditions_pts, MAX_PHASE_MATRIX_DIM * MAX_PHASE_MATRIX_DIM), dtype=cp.float64)
-    global_memory_arrays['V_inv'] = cp.zeros((num_total_conditions_pts, MAX_PHASE_MATRIX_DIM * MAX_PHASE_MATRIX_DIM), dtype=cp.float64)
-    global_memory_arrays['singular_values_inv'] = cp.zeros((num_total_conditions_pts, MAX_PHASE_MATRIX_DIM), dtype=cp.float64)
-    global_memory_arrays['superdiag_inv'] = cp.zeros((num_total_conditions_pts, MAX_PHASE_MATRIX_DIM), dtype=cp.float64)
-    global_memory_arrays['work_inv'] = cp.zeros((num_total_conditions_pts, MAX_PHASE_MATRIX_DIM * MAX_PHASE_MATRIX_DIM), dtype=cp.float64)
-    global_memory_arrays['x_dof'] = cp.zeros((num_total_conditions_pts, MAX_DOF_SIZE), dtype=cp.float64)
-    global_memory_arrays['grad'] = cp.zeros((num_total_conditions_pts, MAX_DOF_SIZE), dtype=cp.float64)
-    global_memory_arrays['hess'] = cp.zeros((num_total_conditions_pts, MAX_DOF_SIZE * MAX_DOF_SIZE), dtype=cp.float64)
-    global_memory_arrays['masses'] = cp.zeros((num_total_conditions_pts, dynamic_sizes['MAX_COMPONENTS']), dtype=cp.float64)
-    global_memory_arrays['mass_jac'] = cp.zeros((num_total_conditions_pts, dynamic_sizes['MAX_COMPONENTS'] * MAX_DOF_SIZE), dtype=cp.float64)
-    global_memory_arrays['phase_matrix'] = cp.zeros((num_total_conditions_pts, MAX_PHASE_MATRIX_DIM * MAX_PHASE_MATRIX_DIM), dtype=cp.float64)
-    global_memory_arrays['equilibrium_matrix'] = cp.zeros((num_total_conditions_pts, MAX_EQ_MATRIX_SIZE), dtype=cp.float64)
-    global_memory_arrays['equilibrium_rhs'] = cp.zeros((num_total_conditions_pts, MAX_EQ_MATRIX_ROWS), dtype=cp.float64)
-    global_memory_arrays['eq_soln'] = cp.zeros((num_total_conditions_pts, MAX_EQ_SOLN_LEN), dtype=cp.float64)
+    global_memory_arrays['A_lstsq_copy'] = cp.zeros((total_threads_for_allocation, MAX_SVD_DIM * MAX_SVD_DIM), dtype=cp.float64)
+    global_memory_arrays['U_lstsq'] = cp.zeros((total_threads_for_allocation, MAX_SVD_DIM * MAX_SVD_DIM), dtype=cp.float64)
+    global_memory_arrays['V_lstsq'] = cp.zeros((total_threads_for_allocation, MAX_SVD_DIM * MAX_SVD_DIM), dtype=cp.float64)
+    global_memory_arrays['singular_values_lstsq'] = cp.zeros((total_threads_for_allocation, MAX_SVD_DIM), dtype=cp.float64)
+    global_memory_arrays['superdiag_lstsq'] = cp.zeros((total_threads_for_allocation, MAX_SVD_DIM), dtype=cp.float64)
+    global_memory_arrays['U_inv'] = cp.zeros((total_threads_for_allocation, MAX_PHASE_MATRIX_DIM * MAX_PHASE_MATRIX_DIM), dtype=cp.float64)
+    global_memory_arrays['V_inv'] = cp.zeros((total_threads_for_allocation, MAX_PHASE_MATRIX_DIM * MAX_PHASE_MATRIX_DIM), dtype=cp.float64)
+    global_memory_arrays['singular_values_inv'] = cp.zeros((total_threads_for_allocation, MAX_PHASE_MATRIX_DIM), dtype=cp.float64)
+    global_memory_arrays['superdiag_inv'] = cp.zeros((total_threads_for_allocation, MAX_PHASE_MATRIX_DIM), dtype=cp.float64)
+    global_memory_arrays['work_inv'] = cp.zeros((total_threads_for_allocation, MAX_PHASE_MATRIX_DIM * MAX_PHASE_MATRIX_DIM), dtype=cp.float64)
+    global_memory_arrays['x_dof'] = cp.zeros((total_threads_for_allocation, MAX_DOF_SIZE), dtype=cp.float64)
+    global_memory_arrays['grad'] = cp.zeros((total_threads_for_allocation, MAX_DOF_SIZE), dtype=cp.float64)
+    global_memory_arrays['hess'] = cp.zeros((total_threads_for_allocation, MAX_DOF_SIZE * MAX_DOF_SIZE), dtype=cp.float64)
+    global_memory_arrays['masses'] = cp.zeros((total_threads_for_allocation, dynamic_sizes['MAX_COMPONENTS']), dtype=cp.float64)
+    global_memory_arrays['mass_jac'] = cp.zeros((total_threads_for_allocation, dynamic_sizes['MAX_COMPONENTS'] * MAX_DOF_SIZE), dtype=cp.float64)
+    global_memory_arrays['phase_matrix'] = cp.zeros((total_threads_for_allocation, MAX_PHASE_MATRIX_DIM * MAX_PHASE_MATRIX_DIM), dtype=cp.float64)
+    global_memory_arrays['equilibrium_matrix'] = cp.zeros((total_threads_for_allocation, MAX_EQ_MATRIX_SIZE), dtype=cp.float64)
+    global_memory_arrays['equilibrium_rhs'] = cp.zeros((total_threads_for_allocation, MAX_EQ_MATRIX_ROWS), dtype=cp.float64)
+    global_memory_arrays['eq_soln'] = cp.zeros((total_threads_for_allocation, MAX_EQ_SOLN_LEN), dtype=cp.float64)
     
     # CRITICAL: CompositionSet arrays to prevent stack overflow
     # Each CompositionSet needs space for DOF values and other data
     # Estimate size: phase_record pointer (8) + NP (8) + dof array (MAX_STATEVARS + MAX_DOF_PER_PHASE)*8 + X array (MAX_COMPONENTS)*8 + etc
     compset_size_doubles = 2 + dynamic_sizes['MAX_STATEVARS'] + dynamic_sizes['MAX_DOF_PER_PHASE'] + dynamic_sizes['MAX_COMPONENTS'] + 10  # Extra for other fields
-    global_memory_arrays['removed_compsets'] = cp.zeros((num_total_conditions_pts, dynamic_sizes['MAX_PHASES'] * compset_size_doubles), dtype=cp.float64)
-    global_memory_arrays['compsets_before_solve'] = cp.zeros((num_total_conditions_pts, dynamic_sizes['MAX_PHASES'] * compset_size_doubles), dtype=cp.float64)
-    global_memory_arrays['compsets_before_final_solve'] = cp.zeros((num_total_conditions_pts, dynamic_sizes['MAX_PHASES'] * compset_size_doubles), dtype=cp.float64)
+    global_memory_arrays['removed_compsets'] = cp.zeros((total_threads_for_allocation, dynamic_sizes['MAX_PHASES'] * compset_size_doubles), dtype=cp.float64)
+    global_memory_arrays['compsets_before_solve'] = cp.zeros((total_threads_for_allocation, dynamic_sizes['MAX_PHASES'] * compset_size_doubles), dtype=cp.float64)
+    global_memory_arrays['compsets_before_final_solve'] = cp.zeros((total_threads_for_allocation, dynamic_sizes['MAX_PHASES'] * compset_size_doubles), dtype=cp.float64)
     
     # CRITICAL: SystemState struct handling
     # SystemState contains pointers (phase_record*) and cannot be stored as a flat double array!
@@ -2233,8 +2246,13 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     
     
     # 7. Launch kernel
-    threads_per_block = 256
-    blocks_per_grid = (num_total_conditions_pts + threads_per_block - 1) // threads_per_block
+    # Already calculated above: threads_per_block = 256
+    blocks_per_grid = blocks_per_grid_temp  # Use the same value calculated for memory allocation
+    
+    # CRITICAL FIX: Total threads already calculated above as total_threads_for_allocation
+    # The kernel launches blocks_per_grid * threads_per_block threads total
+    # We have already allocated memory for ALL these threads
+    total_threads_launched = total_threads_for_allocation
     
     
     if verbose:

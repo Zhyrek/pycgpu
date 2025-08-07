@@ -4772,7 +4772,9 @@ __global__ void top_level_equilibrium_kernel(
     
     // GLOBAL MEMORY SETUP: Calculate thread-specific offsets for global memory arrays
     // Each thread gets its own slice of the global memory arrays
-    int thread_idx = tid;  // Use thread ID as the first dimension index
+    // CRITICAL: We must check that tid < num_conditions before using it as array index
+    // For now, use tid but ensure bounds checking happens before any array access
+    int thread_idx = tid;  // Will be bounded by condition_idx check later
     
     // Define missing constants for global memory array sizing
     #ifndef MAX_EQ_MATRIX_SIZE
@@ -4827,28 +4829,32 @@ __global__ void top_level_equilibrium_kernel(
         // Use direct indexing - must match Python side calculation exactly
         // Layout: GM, chemical_potentials[MAX_COMPONENTS], phase_amounts[MAX_PHASES], converged, num_stable_phases, temp, pressure, success_marker, Y_phases[MAX_PHASES * MAX_DOF_PER_PHASE], X_phases[MAX_PHASES * MAX_COMPONENTS], phase_ids[MAX_PHASES]
         int condition_idx = tid;
+        
+        // CRITICAL FIX: Check bounds BEFORE any memory access
+        // This prevents threads beyond num_conditions from writing to unallocated memory
+        if (condition_idx >= num_conditions_total) {{
+            return;  // Exit early for threads that don't have valid conditions
+        }}
+        
         int results_per_condition = 7 + MAX_COMPONENTS + MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * MAX_COMPONENTS) + MAX_PHASES;  // CRITICAL FIX: Include phase_ids
         int base_offset = condition_idx * results_per_condition;
         
         // Initialize all results to zero (safe default)
+        // Now safe because we've already checked condition_idx < num_conditions_total
         for (int i = 0; i < results_per_condition; ++i) {{
             results_array[base_offset + i] = 0.0;
         }}
         
         // Step 1: Get condition data using safe byte-level access instead of struct casting
         const double* condition_data_array = (const double*)condition_args_list_ptr_raw;
-        if (condition_data_array == nullptr || condition_idx >= num_conditions_total) {{
+        if (condition_data_array == nullptr) {{
             if (tid == 0) {{
                 #ifdef VERBOSE_DEBUG
-                printf("GPU DEBUG: Early return - condition_data_array=%p, condition_idx=%d, num_conditions=%d\\n", 
-                       condition_data_array, condition_idx, num_conditions_total);
+                printf("GPU DEBUG: condition_data_array is null\\n");
                 #endif
             }}
-            // CRITICAL FIX: Set safe defaults for invalid threads instead of leaving garbage values
+            // Set error marker for null data
             results_array[base_offset + 0] = -999999.0;  // Invalid GM marker
-            for (int j = 1; j < results_per_condition; ++j) {{
-                results_array[base_offset + j] = 0.0;  // Zero out all other values
-            }}
             return;
         }}
         
@@ -4994,8 +5000,9 @@ __global__ void top_level_equilibrium_kernel(
         // FIX: Use direct byte-level array access instead of struct casting to avoid alignment issues
         const double* initial_data_byte_array = (const double*)initial_phase_data_ptr;
         
-        // Add memory fence to ensure all threads see the same data
-        __syncthreads();
+        // CRITICAL FIX: Remove __syncthreads() here - it causes undefined behavior when not all threads reach it
+        // Only threads with valid conditions (0-31) would reach this point, but all 256 threads in the block
+        // must reach __syncthreads() for correct behavior
         
         if (initial_data_byte_array != nullptr && condition_idx < num_conditions_total) {{
             
@@ -5035,15 +5042,19 @@ __global__ void top_level_equilibrium_kernel(
             // CRITICAL FIX: Use Python-provided stride instead of calculating it
             int struct_offset = condition_idx * initial_phase_data_stride;
             
-            // Extract num_phases (stored as double at the end of the struct)
-            // CRITICAL FIX: Use stride instead of calculating doubles_per_struct
-            debug_num_phases = (int)initial_data_byte_array[struct_offset + initial_phase_data_stride - 1];
+            // Extract num_phases (stored as double at the correct offset)
+            // CRITICAL FIX: Calculate the actual offset for num_phases based on struct layout
+            // offset = 2*MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * MAX_COMPONENTS) + MAX_COMPONENTS
+            int num_phases_offset = 2*MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * MAX_COMPONENTS) + MAX_COMPONENTS;
+            debug_num_phases = (int)initial_data_byte_array[struct_offset + num_phases_offset];
             
-            // DEBUG: Print struct_offset calculation for first few threads
-            if (tid < 2) {{
+            // DEBUG: Print struct_offset calculation for failing threads specifically
+            if (tid == 10 || tid == 17 || tid < 2) {{
                 #ifdef VERBOSE_DEBUG
                 printf("GPU DEBUG: Thread %d - condition_idx=%d, initial_phase_data_stride=%d, struct_offset=%d\\n", 
                        tid, condition_idx, initial_phase_data_stride, struct_offset);
+                printf("  Memory address for chem pots: base=%p + offset=%d\\n", 
+                       initial_data_byte_array, struct_offset + 60);
                 #endif
             }}
             
@@ -5653,6 +5664,28 @@ __global__ void top_level_equilibrium_kernel(
             
             // REFACTORED: Call sophisticated solver with global memory arrays
             // This is the full equilibrium solver using global memory to avoid stack overflow
+            
+            // CRITICAL DEBUG: Special monitoring for failing conditions 10 and 17
+            if (condition_idx == 10 || condition_idx == 17) {{
+                printf("\\n=== CRITICAL DEBUG: Condition %d (thread %d %% 7 = %d) ===\\n", 
+                       condition_idx, condition_idx, condition_idx % 7);
+                printf("Initial conditions:\\n");
+                printf("  T=%f, P=%f\\n", condition_args_single.state_variables_values[2], condition_args_single.state_variables_values[1]);
+                printf("  Initial GM=%f\\n", system_gm);
+                printf("  Initial phases: %d\\n", safe_num_phases);
+                for (int i = 0; i < safe_num_phases && i < 3; ++i) {{
+                    printf("    Phase %d: idx=%d, amount=%f\\n", i, phase_indices[i], phase_amounts[i]);
+                }}
+                printf("  Phase assemblage: ");
+                if (safe_num_phases == 2 && phase_indices[0] == 2 && phase_indices[1] == 0) {{
+                    printf("FCC_A1 + AU2BI_C15\\n");
+                }} else if (safe_num_phases == 2 && phase_indices[0] == 0 && phase_indices[1] == 2) {{
+                    printf("AU2BI_C15 + FCC_A1\\n");
+                }} else {{
+                    printf("Other\\n");
+                }}
+            }}
+            
             if (condition_idx == 0 || condition_idx == 1 || condition_idx == 2) {{
                 #ifdef VERBOSE_DEBUG
                 printf("GPU DEBUG: CALLING solve_equilibrium_at_condition_global_mem for condition %d\\n", condition_idx);
@@ -5720,6 +5753,23 @@ __global__ void top_level_equilibrium_kernel(
                 }}
                 debug_convergence_history[debug_idx] = equilibrium_result.converged ? 1 : 0;
                 debug_iteration_count[condition_idx] = 6;  // Start + before + solver call + after
+            }}
+            
+            // CRITICAL DEBUG: Monitor failing conditions 10 and 17 after solver
+            if (condition_idx == 10 || condition_idx == 17) {{
+                printf("\\n=== AFTER SOLVER: Condition %d ===\\n", condition_idx);
+                printf("  Final GM=%f (was %f)\\n", equilibrium_result.final_system_gm, system_gm);
+                printf("  Converged: %s\\n", equilibrium_result.converged ? "YES" : "NO");
+                printf("  Final phases: %d\\n", equilibrium_result.num_stable_phases);
+                for (int i = 0; i < equilibrium_result.num_stable_phases && i < 3; ++i) {{
+                    printf("    Phase %d: idx=%d, amount=%f\\n", i, 
+                           equilibrium_result.phase_ids[i], equilibrium_result.NP[i]);
+                }}
+                printf("  Final chemical potentials: [%f, %f, %f]\\n",
+                       equilibrium_result.final_chemical_potentials[0],
+                       equilibrium_result.final_chemical_potentials[1],
+                       equilibrium_result.final_chemical_potentials[2]);
+                printf("  Delta GM = %f\\n", equilibrium_result.final_system_gm - system_gm);
             }}
             
             // SAFETY CHECK: Validate solver results

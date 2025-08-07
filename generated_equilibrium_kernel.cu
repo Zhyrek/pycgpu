@@ -10713,10 +10713,10 @@ __device__ void pycgpu_model_8_formulagrad(double* out, const double* x) {
     double x29 = 1e-15 < x[3];
     double x30 = log(x[4]);
     double x31 = 1e-15 < x[4];
-    double x32 = log(x[5]);
-    double x33 = 1e-15 < x[5];
-    double x34 = log(x[6]);
-    double x35 = 1e-15 < x[6];
+    double x32 = log(x[6]);
+    double x33 = 1e-15 < x[6];
+    double x34 = log(x[5]);
+    double x35 = 1e-15 < x[5];
     double x36 = 2.0*((x29 == 1) ? (
    x28*x[3]
 )
@@ -10728,12 +10728,12 @@ __device__ void pycgpu_model_8_formulagrad(double* out, const double* x) {
 : (
    0
 )) + 1.0*((x33 == 1) ? (
-   x32*x[5]
+   x32*x[6]
 )
 : (
    0
 )) + 1.0*((x35 == 1) ? (
-   x34*x[6]
+   x34*x[5]
 )
 : (
    0
@@ -10875,14 +10875,14 @@ __device__ void pycgpu_model_8_formulagrad(double* out, const double* x) {
 : (
    0
 ))) + x65*x24 + (x51 + x64)*x27);
-    out[3] = x69 + x0*(x68 + x44*(x40 + x70 + 1.0*((x33 == 1) ? (
-   1 + x32
+    out[3] = x69 + x0*(x68 + x44*(x41 + x70 + 1.0*((x35 == 1) ? (
+   1 + x34
 )
 : (
    0
 ))) + x65*x25 + (x54 + x64)*x27);
-    out[4] = x69 + x0*(x68 + x27*(x64 + x55*x[3]) + x44*(x41 + x70 + 1.0*((x35 == 1) ? (
-   1 + x34
+    out[4] = x69 + x0*(x68 + x27*(x64 + x55*x[3]) + x44*(x40 + x70 + 1.0*((x33 == 1) ? (
+   1 + x32
 )
 : (
    0
@@ -10896,10 +10896,10 @@ __device__ void pycgpu_model_8_formulahess(double* out, const double* x) {
     double x2 = 1e-15 < x[4];
     double x3 = 1.0*((x2 == 1) ? 0
 : 0);
-    double x4 = 1e-15 < x[5];
+    double x4 = 1e-15 < x[6];
     double x5 = 1.0*((x4 == 1) ? 0
 : 0);
-    double x6 = 1e-15 < x[6];
+    double x6 = 1e-15 < x[5];
     double x7 = 1.0*((x6 == 1) ? 0
 : 0);
     double x8 = x3 + x5 + x7;
@@ -10940,8 +10940,8 @@ __device__ void pycgpu_model_8_formulahess(double* out, const double* x) {
     double x34 = pow(x10, -2);
     double x35 = log(x[3]);
     double x36 = log(x[4]);
-    double x37 = log(x[5]);
-    double x38 = log(x[6]);
+    double x37 = log(x[6]);
+    double x38 = log(x[5]);
     double x39 = 2.0*((x0 == 1) ? (
    x35*x[3]
 )
@@ -10949,10 +10949,10 @@ __device__ void pycgpu_model_8_formulahess(double* out, const double* x) {
    x36*x[4]
 )
 : 0) + 1.0*((x4 == 1) ? (
-   x37*x[5]
+   x37*x[6]
 )
 : 0) + 1.0*((x6 == 1) ? (
-   x38*x[6]
+   x38*x[5]
 )
 : 0);
     double x40 = 16.629*x39;
@@ -11040,16 +11040,16 @@ __device__ void pycgpu_model_8_formulahess(double* out, const double* x) {
     double x88 = x10*(x83 + x87 + (x72 + x74)*x11);
     double x89 = 1.0*x80;
     double x90 = x1 + x3;
-    double x91 = x7 + x90;
-    double x92 = x91 + 1.0*((x4 == 1) ? (
-   1 + x37
+    double x91 = x5 + x90;
+    double x92 = x91 + 1.0*((x6 == 1) ? (
+   1 + x38
 )
 : 0);
     double x93 = x92*x12;
     double x94 = x10*(x87 + x93 + (x72 + x73)*x11);
-    double x95 = x5 + x90;
-    double x96 = x95 + 1.0*((x6 == 1) ? (
-   1 + x38
+    double x95 = x7 + x90;
+    double x96 = x95 + 1.0*((x4 == 1) ? (
+   1 + x37
 )
 : 0);
     double x97 = x96*x12;
@@ -11193,7 +11193,7 @@ __device__ void pycgpu_model_8_formulahess(double* out, const double* x) {
     out[15] = x157 + x94;
     out[16] = x150 + x163 + 2.0*x176;
     out[17] = x166 + x169 + x177;
-    out[18] = x171 + x177 + x10*(x149 + x165 + x13*(x91 + 1.0*((x4 == 1) ? (
+    out[18] = x171 + x177 + x10*(x149 + x165 + x13*(x91 + 1.0*((x6 == 1) ? (
    pow(x[5], -1)
 )
 : 0)) + (2*x67 + x72)*x11);
@@ -11202,7 +11202,7 @@ __device__ void pycgpu_model_8_formulahess(double* out, const double* x) {
     out[21] = x156 + x163 + 2.0*x179;
     out[22] = x166 + x173 + x180;
     out[23] = x171 + x178 + x180;
-    out[24] = x175 + x180 + x10*(x155 + x165 + x13*(x95 + 1.0*((x6 == 1) ? (
+    out[24] = x175 + x180 + x10*(x155 + x165 + x13*(x95 + 1.0*((x4 == 1) ? (
    pow(x[6], -1)
 )
 : 0)) + (2*x71 + x72)*x11);
@@ -11407,35 +11407,35 @@ __device__ void pycgpu_model_9_formulagrad(double* out, const double* x) {
     double x24 = pow(x23, -1);
     double x25 = log(x[3]);
     double x26 = 1e-15 < x[3];
-    double x27 = log(x[4]);
-    double x28 = 1e-15 < x[4];
-    double x29 = log(x[5]);
-    double x30 = 1e-15 < x[5];
+    double x27 = log(x[5]);
+    double x28 = 1e-15 < x[5];
+    double x29 = log(x[4]);
+    double x30 = 1e-15 < x[4];
     double x31 = 9.0*((x26 == 1) ? (
    x25*x[3]
 )
 : (
    0
 )) + 11.0*((x28 == 1) ? (
-   x27*x[4]
+   x27*x[5]
 )
 : (
    0
 )) + 11.0*((x30 == 1) ? (
-   x29*x[5]
+   x29*x[4]
 )
 : (
    0
 ));
     double x32 = 8.3145*x24;
     double x33 = x32*x31;
-    double x34 = 11.0*((x28 == 1) ? (
+    double x34 = 11.0*((x30 == 1) ? (
    0
 )
 : (
    0
 ));
-    double x35 = 11.0*((x30 == 1) ? (
+    double x35 = 11.0*((x28 == 1) ? (
    0
 )
 : (
@@ -11544,14 +11544,14 @@ __device__ void pycgpu_model_9_formulagrad(double* out, const double* x) {
 : (
    0
 ))));
-    out[2] = x55 + x23*(x56 + x38*(x37 + 11.0*((x28 == 1) ? (
-   1 + x27
+    out[2] = x55 + x23*(x56 + x38*(x37 + 11.0*((x30 == 1) ? (
+   1 + x29
 )
 : (
    0
 ))) + (x45 + x51)*x24);
-    out[3] = x55 + x23*(x56 + x38*(x34 + x36 + 11.0*((x30 == 1) ? (
-   1 + x29
+    out[3] = x55 + x23*(x56 + x38*(x34 + x36 + 11.0*((x28 == 1) ? (
+   1 + x27
 )
 : (
    0
@@ -11564,10 +11564,10 @@ __device__ void pycgpu_model_9_formulahess(double* out, const double* x) {
     double x2 = 1e-15 < x[3];
     double x3 = 9.0*((x2 == 1) ? 0
 : 0);
-    double x4 = 1e-15 < x[4];
+    double x4 = 1e-15 < x[5];
     double x5 = 11.0*((x4 == 1) ? 0
 : 0);
-    double x6 = 1e-15 < x[5];
+    double x6 = 1e-15 < x[4];
     double x7 = 11.0*((x6 == 1) ? 0
 : 0);
     double x8 = x5 + x7;
@@ -11639,16 +11639,16 @@ __device__ void pycgpu_model_9_formulahess(double* out, const double* x) {
     double x44 = x39*x[5] + x43*x[4];
     double x45 = x1*x44;
     double x46 = log(x[3]);
-    double x47 = log(x[4]);
-    double x48 = log(x[5]);
+    double x47 = log(x[5]);
+    double x48 = log(x[4]);
     double x49 = 9.0*((x2 == 1) ? (
    x46*x[3]
 )
 : 0) + 11.0*((x4 == 1) ? (
-   x47*x[4]
+   x47*x[5]
 )
 : 0) + 11.0*((x6 == 1) ? (
-   x48*x[5]
+   x48*x[4]
 )
 : 0);
     double x50 = x1*x49;
@@ -11680,9 +11680,9 @@ __device__ void pycgpu_model_9_formulahess(double* out, const double* x) {
     double x66 = x52*x44;
     double x67 = x0*(x12 + x57 - x59 - 9.0*x66 + x1*(x65 + x38*x[5] + x42*x[4]) - x54*x53);
     double x68 = 11.0*x51;
-    double x69 = x3 + x7;
-    double x70 = x69 + 11.0*((x4 == 1) ? (
-   1 + x47
+    double x69 = x3 + x5;
+    double x70 = x69 + 11.0*((x6 == 1) ? (
+   1 + x48
 )
 : 0);
     double x71 = x70*x56;
@@ -11690,9 +11690,9 @@ __device__ void pycgpu_model_9_formulahess(double* out, const double* x) {
     double x73 = 91.4595*x58;
     double x74 = x12 - 11.0*x66 - x73 - x72*x53;
     double x75 = x0*(x71 + x74 + (x43 + x65)*x1);
-    double x76 = x3 + x5;
-    double x77 = x76 + 11.0*((x6 == 1) ? (
-   1 + x48
+    double x76 = x3 + x7;
+    double x77 = x76 + 11.0*((x4 == 1) ? (
+   1 + x47
 )
 : 0);
     double x78 = x77*x56;
@@ -11799,7 +11799,7 @@ __device__ void pycgpu_model_9_formulahess(double* out, const double* x) {
     out[7] = x112 + 9.0*x119 + x1*x113 + (x104 + x118)*x0;
     out[8] = x120 + x75;
     out[9] = 9.0*x123 + x125 + (x109 + x121)*x0;
-    out[10] = x128 + x131 + x0*(-22.0*x108 + x127 - x70*x126 + x99*(x69 + 11.0*((x4 == 1) ? (
+    out[10] = x128 + x131 + x0*(-22.0*x108 + x127 - x70*x126 + x99*(x69 + 11.0*((x6 == 1) ? (
    pow(x[4], -1)
 )
 : 0)) + (2*x62 + x65)*x1);
@@ -11807,7 +11807,7 @@ __device__ void pycgpu_model_9_formulahess(double* out, const double* x) {
     out[12] = x120 + x79;
     out[13] = x125 + 9.0*x134 + (x118 + x121)*x0;
     out[14] = x128 + x132 + x135;
-    out[15] = x133 + x135 + x0*(-22.0*x115 + x127 + x1*(2*x116 + x65) - x77*x126 + x99*(x76 + 11.0*((x6 == 1) ? (
+    out[15] = x133 + x135 + x0*(-22.0*x115 + x127 + x1*(2*x116 + x65) - x77*x126 + x99*(x76 + 11.0*((x4 == 1) ? (
    pow(x[5], -1)
 )
 : 0)));
@@ -12956,10 +12956,10 @@ __device__ void pycgpu_model_11_formulagrad(double* out, const double* x) {
     double x37 = 1e-15 < x[4];
     double x38 = log(x[5]);
     double x39 = 1e-15 < x[5];
-    double x40 = log(x[6]);
-    double x41 = 1e-15 < x[6];
-    double x42 = log(x[7]);
-    double x43 = 1e-15 < x[7];
+    double x40 = log(x[7]);
+    double x41 = 1e-15 < x[7];
+    double x42 = log(x[6]);
+    double x43 = 1e-15 < x[6];
     double x44 = 4.0*((x35 == 1) ? (
    x34*x[3]
 )
@@ -12976,12 +12976,12 @@ __device__ void pycgpu_model_11_formulagrad(double* out, const double* x) {
 : (
    0
 )) + 8.0*((x41 == 1) ? (
-   x40*x[6]
+   x40*x[7]
 )
 : (
    0
 )) + 8.0*((x43 == 1) ? (
-   x42*x[7]
+   x42*x[6]
 )
 : (
    0
@@ -13000,13 +13000,13 @@ __device__ void pycgpu_model_11_formulagrad(double* out, const double* x) {
 : (
    0
 ));
-    double x49 = 8.0*((x43 == 1) ? (
+    double x49 = 8.0*((x41 == 1) ? (
    0
 )
 : (
    0
 ));
-    double x50 = 8.0*((x41 == 1) ? (
+    double x50 = 8.0*((x43 == 1) ? (
    0
 )
 : (
@@ -13130,14 +13130,14 @@ __device__ void pycgpu_model_11_formulagrad(double* out, const double* x) {
 : (
    0
 ))));
-    out[4] = x90 + x0*(x89 + x33*(x77 + x79 + x80*x[4]) + x54*(x51 + x78 + 8.0*((x41 == 1) ? (
-   1 + x40
+    out[4] = x90 + x0*(x89 + x33*(x77 + x79 + x80*x[4]) + x54*(x51 + x78 + 8.0*((x43 == 1) ? (
+   1 + x42
 )
 : (
    0
 ))));
-    out[5] = x90 + x0*(x89 + x33*(x77 + x63*x[3] + x69*x28) + x54*(x47 + x48 + x50 + x51 + 8.0*((x43 == 1) ? (
-   1 + x42
+    out[5] = x90 + x0*(x89 + x33*(x77 + x63*x[3] + x69*x28) + x54*(x47 + x48 + x50 + x51 + 8.0*((x41 == 1) ? (
+   1 + x40
 )
 : (
    0
@@ -13157,10 +13157,10 @@ __device__ void pycgpu_model_11_formulahess(double* out, const double* x) {
     double x7 = 1e-15 < x[3];
     double x8 = 4.0*((x7 == 1) ? 0
 : 0);
-    double x9 = 1e-15 < x[6];
+    double x9 = 1e-15 < x[7];
     double x10 = 8.0*((x9 == 1) ? 0
 : 0);
-    double x11 = 1e-15 < x[7];
+    double x11 = 1e-15 < x[6];
     double x12 = 8.0*((x11 == 1) ? 0
 : 0);
     double x13 = x10 + x12 + x8;
@@ -13214,8 +13214,8 @@ __device__ void pycgpu_model_11_formulahess(double* out, const double* x) {
     double x40 = pow(x0, -2);
     double x41 = x40*x16;
     double x42 = log(x[3]);
-    double x43 = x10 + x4 + x6;
-    double x44 = x12 + x43;
+    double x43 = x12 + x4 + x6;
+    double x44 = x10 + x43;
     double x45 = x44 + 4.0*((x7 == 1) ? (
    1 + x42
 )
@@ -13223,8 +13223,8 @@ __device__ void pycgpu_model_11_formulahess(double* out, const double* x) {
     double x46 = x2*x45;
     double x47 = log(x[4]);
     double x48 = log(x[5]);
-    double x49 = log(x[6]);
-    double x50 = log(x[7]);
+    double x49 = log(x[7]);
+    double x50 = log(x[6]);
     double x51 = 4.0*((x7 == 1) ? (
    x42*x[3]
 )
@@ -13235,10 +13235,10 @@ __device__ void pycgpu_model_11_formulahess(double* out, const double* x) {
    x48*x[5]
 )
 : 0) + 8.0*((x9 == 1) ? (
-   x49*x[6]
+   x49*x[7]
 )
 : 0) + 8.0*((x11 == 1) ? (
-   x50*x[7]
+   x50*x[6]
 )
 : 0);
     double x52 = 33.258*x51;
@@ -13335,9 +13335,9 @@ __device__ void pycgpu_model_11_formulahess(double* out, const double* x) {
 : 0);
     double x110 = x2*x109;
     double x111 = x0*(x106 + x110 + x1*(x91 + x69*x38 + x74*x36));
-    double x112 = x12 + x4 + x6 + x8;
-    double x113 = x112 + 8.0*((x9 == 1) ? (
-   1 + x49
+    double x112 = x10 + x4 + x6 + x8;
+    double x113 = x112 + 8.0*((x11 == 1) ? (
+   1 + x50
 )
 : 0);
     double x114 = x2*x113;
@@ -13348,8 +13348,8 @@ __device__ void pycgpu_model_11_formulahess(double* out, const double* x) {
     double x119 = x0*(x114 + x118 + x1*(x91 + x67*x39 + x70*x[3]));
     double x120 = 8.0*x99;
     double x121 = x43 + x8;
-    double x122 = x121 + 8.0*((x11 == 1) ? (
-   1 + x50
+    double x122 = x121 + 8.0*((x9 == 1) ? (
+   1 + x49
 )
 : 0);
     double x123 = x2*x122;
@@ -13547,7 +13547,7 @@ __device__ void pycgpu_model_11_formulahess(double* out, const double* x) {
     out[25] = x199 + 4.0*x243 + x244;
     out[26] = x226 + x246 + x247;
     out[27] = x240 + x247 + x248;
-    out[28] = x252 + x253 + x0*(x249 + x1*(2*x193 + 2*x194 + x91) - x126*x187 + x160*(x112 + 8.0*((x9 == 1) ? (
+    out[28] = x252 + x253 + x0*(x249 + x1*(2*x193 + 2*x194 + x91) - x126*x187 + x160*(x112 + 8.0*((x11 == 1) ? (
    pow(x[6], -1)
 )
 : 0)) - x191*x148);
@@ -13557,7 +13557,7 @@ __device__ void pycgpu_model_11_formulahess(double* out, const double* x) {
     out[32] = x232 + x246 + x258;
     out[33] = x241 + x248 + x258;
     out[34] = x253 + x255 + x259;
-    out[35] = x256 + x259 + x0*(x249 + x1*(2*x205 + 2*x206 + x91) + x160*(x121 + 8.0*((x11 == 1) ? (
+    out[35] = x256 + x259 + x0*(x249 + x1*(2*x205 + 2*x206 + x91) + x160*(x121 + 8.0*((x9 == 1) ? (
    pow(x[7], -1)
 )
 : 0)) - x203*x148 - x230*x126);
@@ -13851,35 +13851,35 @@ __device__ void pycgpu_model_12_formulagrad(double* out, const double* x) {
     double x27 = 1.0*x26;
     double x28 = log(x[3]);
     double x29 = 1e-15 < x[3];
-    double x30 = log(x[4]);
-    double x31 = 1e-15 < x[4];
-    double x32 = log(x[5]);
-    double x33 = 1e-15 < x[5];
+    double x30 = log(x[5]);
+    double x31 = 1e-15 < x[5];
+    double x32 = log(x[4]);
+    double x33 = 1e-15 < x[4];
     double x34 = 1.0*((x29 == 1) ? (
    x28*x[3]
 )
 : (
    0
 )) + 1.0*((x31 == 1) ? (
-   x30*x[4]
+   x30*x[5]
 )
 : (
    0
 )) + 1.0*((x33 == 1) ? (
-   x32*x[5]
+   x32*x[4]
 )
 : (
    0
 ));
     double x35 = 8.3145*x26;
     double x36 = x34*x35;
-    double x37 = 1.0*((x31 == 1) ? (
+    double x37 = 1.0*((x33 == 1) ? (
    0
 )
 : (
    0
 ));
-    double x38 = 1.0*((x33 == 1) ? (
+    double x38 = 1.0*((x31 == 1) ? (
    0
 )
 : (
@@ -14081,14 +14081,14 @@ __device__ void pycgpu_model_12_formulagrad(double* out, const double* x) {
 : (
    0
 ))) + (x66 + x69)*x27);
-    out[2] = x109 + x59*(x108 + x27*(x105 + x106 + x110 + x111 + x112 + x76 + (2.0/3.0)*x79 - x83 + x96 + x99 + x101*x[5] + x104*x[5] - x75*x[3] + x82*x52) + x41*(x40 + 1.0*((x31 == 1) ? (
-   1 + x30
+    out[2] = x109 + x59*(x108 + x27*(x105 + x106 + x110 + x111 + x112 + x76 + (2.0/3.0)*x79 - x83 + x96 + x99 + x101*x[5] + x104*x[5] - x75*x[3] + x82*x52) + x41*(x40 + 1.0*((x33 == 1) ? (
+   1 + x32
 )
 : (
    0
 ))) + (x69 + x89)*x27);
-    out[3] = x109 + x59*(x108 + x27*(x100 + x102 - x110 - x111 + x112 + x80 - x84 - x86 + x104*x[4] + x71*x58 + x74*x[3] + x78*x58 + x87*x[3] + x98*x[4]) + x41*(x37 + x39 + 1.0*((x33 == 1) ? (
-   1 + x32
+    out[3] = x109 + x59*(x108 + x27*(x100 + x102 - x110 - x111 + x112 + x80 - x84 - x86 + x104*x[4] + x71*x58 + x74*x[3] + x78*x58 + x87*x[3] + x98*x[4]) + x41*(x37 + x39 + 1.0*((x31 == 1) ? (
+   1 + x30
 )
 : (
    0
@@ -14265,16 +14265,16 @@ __device__ void pycgpu_model_12_formulahess(double* out, const double* x) {
 )
 : 0));
     double x95 = x68*x[3] + x91*x[5] + x94*x[4];
-    double x96 = log(x[4]);
-    double x97 = log(x[5]);
+    double x96 = log(x[5]);
+    double x97 = log(x[4]);
     double x98 = 1.0*((x9 == 1) ? (
    x55*x[3]
 )
-: 0) + 1.0*((x7 == 1) ? (
-   x96*x[4]
-)
 : 0) + 1.0*((x5 == 1) ? (
-   x97*x[5]
+   x96*x[5]
+)
+: 0) + 1.0*((x7 == 1) ? (
+   x97*x[4]
 )
 : 0);
     double x99 = x15 - x83*x85 - x85*x95 - x86*x98 - x[2]*x86*x12;
@@ -14286,14 +14286,14 @@ __device__ void pycgpu_model_12_formulahess(double* out, const double* x) {
     double x105 = 7.20594*x104;
     double x106 = x10 + x6;
     double x107 = x106 + 1.0*((x7 == 1) ? (
-   1 + x96
+   1 + x97
 )
 : 0);
     double x108 = x13*x107;
     double x109 = x35*(x108 + x99 + x34*(8.1*x[3] - 2.32968*x[5] - x103 - x105 - x50 + 4.50112662333333*x54 - x81 + x4*x48 + x40*x41 + x53*x41 - x77*x[5]) + (x74 + x94)*x34);
     double x110 = x[4]*x[3];
     double x111 = x11 + 1.0*((x5 == 1) ? (
-   1 + x97
+   1 + x96
 )
 : 0);
     double x112 = x13*x111;

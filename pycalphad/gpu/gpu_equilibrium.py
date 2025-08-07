@@ -1929,13 +1929,13 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             # by the kernel should be computed based on the phase records/models in pycalphad, and then passed 
             # to the kernel using the -D flag to define it in the kernel code."
             
-            # Check if modular compilation is needed
-            from .modular_compiler import ModularGPUCompiler
-            compiler = ModularGPUCompiler(verbose=verbose)
+            # Check if optimized compilation is needed
+            from .modular_compiler_v3 import ModularGPUCompilerV3
+            compiler = ModularGPUCompilerV3(verbose=verbose)
             
             if compiler.needs_modular_compilation(num_unique_models_for_gpu):
                 if verbose:
-                    print(f"[GPU] System has {num_unique_models_for_gpu} phases, using modular compilation")
+                    print(f"[GPU] System has {num_unique_models_for_gpu} phases, using optimized compilation")
                 module = compiler.compile_kernel(full_kernel_source, num_unique_models_for_gpu, dynamic_sizes)
             else:
                 # Standard compilation for smaller systems

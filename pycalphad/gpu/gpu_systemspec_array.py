@@ -47,16 +47,24 @@ def create_system_specifications_array(wks_obj, num_conditions, dynamic_sizes, p
     # Extract condition arrays
     import pycalphad.variables as v
     
-    # Get the X(TI) condition values
-    x_ti_values = None
+    # Collect ALL X() conditions for multi-component systems
+    x_conditions = {}  # Will map component name to array of values
+    x_components = []  # Ordered list of components with X() conditions
+    
     for comp in wks_obj.components:
+        if comp == 'VA':
+            continue  # Skip vacancy
         x_var = v.X(comp)
         if x_var in wks_obj.conditions:
             condition_value = wks_obj.conditions[x_var]
-            x_ti_values = np.asarray(condition_value).flatten()
+            comp_str = str(comp) if not isinstance(comp, str) else comp
+            x_conditions[comp_str] = np.asarray(condition_value).flatten()
+            x_components.append(comp_str)
             if verbose:
-                print(f"[GPU] Found X({comp}) condition with {len(x_ti_values)} values: {x_ti_values}")
-            break
+                print(f"[GPU] Found X({comp}) condition with {len(x_conditions[comp_str])} values: {x_conditions[comp_str]}")
+    
+    # For backward compatibility, keep x_ti_values as the first composition condition found
+    x_ti_values = x_conditions[x_components[0]] if x_components else None
     
     if x_ti_values is None:
         # No mole fraction conditions, create single spec for all conditions
@@ -70,25 +78,39 @@ def create_system_specifications_array(wks_obj, num_conditions, dynamic_sizes, p
         temp_values = [temp_values]
     temp_values = np.asarray(temp_values).flatten()
     
-    # Get composition array size (for X(BI) or similar)
-    comp_values_len = 1
-    for key in wks_obj.conditions:
-        if hasattr(key, 'species') and key.species != 'VA':
-            comp_array = np.asarray(wks_obj.conditions[key]).flatten()
-            comp_values_len = len(comp_array)
-            break
+    # For multi-dimensional grids (e.g., T × X_CU × X_FE for ternary)
+    # We need to properly calculate indices for each dimension
+    grid_shape = [len(temp_values)]
+    for comp in x_components:
+        grid_shape.append(len(x_conditions[comp]))
+    
+    if verbose:
+        print(f"[GPU] Grid shape: {grid_shape} (T × {' × '.join(['X('+c+')' for c in x_components])})")
     
     # Create one SystemSpecification per condition
     for condition_idx in range(num_conditions):
         if verbose:
             print(f"\n[GPU] Creating SystemSpecification for condition {condition_idx}")
         
-        # Calculate temperature and composition indices for this condition
-        temp_idx = condition_idx // comp_values_len
-        comp_idx = condition_idx % comp_values_len
+        # Calculate multi-dimensional indices
+        indices = []
+        remaining = condition_idx
+        for dim_size in reversed(grid_shape[1:]):  # Process dimensions in reverse order
+            indices.append(remaining % dim_size)
+            remaining //= dim_size
+        indices.append(remaining)  # Temperature index
+        indices.reverse()  # Put back in correct order: [temp_idx, x_cu_idx, x_fe_idx, ...]
+        
+        temp_idx = indices[0]
+        x_indices = {comp: indices[i+1] for i, comp in enumerate(x_components)}
+        
+        # For backward compatibility with binary systems
+        comp_idx = x_indices[x_components[0]] if x_components else 0
         
         if verbose:
-            print(f"  Condition {condition_idx}: temp_idx={temp_idx}, comp_idx={comp_idx} (comp_values_len={comp_values_len})")
+            print(f"  Condition {condition_idx}: temp_idx={temp_idx}")
+            for comp in x_components:
+                print(f"    X({comp})_idx={x_indices[comp]}")
         
         # Create base arrays for this condition
         global_spec_np = np.zeros(50, dtype=np.float64)  # Scalar fields
@@ -105,12 +127,12 @@ def create_system_specifications_array(wks_obj, num_conditions, dynamic_sizes, p
         
         # Create a temporary workspace object with single-point conditions
         class TempWorkspace:
-            def __init__(self, original_wks, condition_idx, x_ti_value, temp_idx, comp_idx):
+            def __init__(self, original_wks, condition_idx, temp_idx, x_indices):
                 self.components = original_wks.components
                 self.phase_record_factory = original_wks.phase_record_factory
                 self.verbose = original_wks.verbose
                 
-                # Copy conditions but use single-point values based on proper indices
+                # Copy conditions but use single-point values based on calculated indices
                 self.conditions = {}
                 for key, value in original_wks.conditions.items():
                     value_array = np.asarray(value)
@@ -120,8 +142,14 @@ def create_system_specifications_array(wks_obj, num_conditions, dynamic_sizes, p
                             # Temperature - use temp_idx
                             self.conditions[key] = float(value_array.flatten()[temp_idx])
                         elif hasattr(key, 'species') and key.species != 'VA':
-                            # Composition variable - use comp_idx
-                            self.conditions[key] = float(value_array.flatten()[comp_idx])
+                            # Composition variable - find which component and use its index
+                            comp_str = str(key.species) if not isinstance(key.species, str) else key.species
+                            if comp_str in x_indices:
+                                idx = x_indices[comp_str]
+                                self.conditions[key] = float(value_array.flatten()[idx])
+                            else:
+                                # Fallback for unexpected composition variables
+                                self.conditions[key] = float(value_array.flatten()[0])
                         else:
                             # Other multi-point conditions - use condition_idx as fallback
                             if condition_idx < value_array.size:
@@ -133,17 +161,22 @@ def create_system_specifications_array(wks_obj, num_conditions, dynamic_sizes, p
                         self.conditions[key] = float(value_array.item())
                 
                 if verbose:
-                    print(f"[GPU] Condition {condition_idx} - X(TI) = {x_ti_value}")
-                    print(f"[GPU] Full conditions: {self.conditions}")
-        
-        # Get the X(TI) value for this condition
-        x_ti_value = x_ti_values[condition_idx] if condition_idx < len(x_ti_values) else x_ti_values[-1]
+                    for comp in x_components:
+                        x_var = v.X(comp)
+                        if x_var in self.conditions:
+                            print(f"  X({comp}) = {self.conditions[x_var]}")
+                    print(f"  T = {self.conditions[v.T]}")
         
         # Create temporary workspace with single-point conditions
-        temp_wks = TempWorkspace(wks_obj, condition_idx, x_ti_value, temp_idx, comp_idx)
+        temp_wks = TempWorkspace(wks_obj, condition_idx, temp_idx, x_indices)
         
         # Create properties subset for this specific condition
-        properties_subset = PropertiesSubset(properties, condition_idx, temp_idx, comp_idx, verbose=verbose)
+        # For ternary systems, pass the composition indices dictionary instead of single comp_idx
+        if len(x_components) > 1:
+            properties_subset = PropertiesSubset(properties, condition_idx, temp_idx, x_indices, verbose=verbose)
+        else:
+            # Binary system - maintain backward compatibility
+            properties_subset = PropertiesSubset(properties, condition_idx, temp_idx, comp_idx, verbose=verbose)
         
         # Populate the SystemSpecification for this condition
         _populate_system_specification(global_spec_np, global_spec_arrays, temp_wks, 

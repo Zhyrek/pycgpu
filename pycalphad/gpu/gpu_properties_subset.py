@@ -18,15 +18,25 @@ class PropertiesSubset:
             The flat condition index
         temp_idx : int
             Temperature index in the temperature array
-        comp_idx : int  
-            Composition index in the composition array
+        comp_idx : int or dict
+            Composition index in the composition array (int for binary, dict for ternary+)
         verbose : bool
             Enable verbose output
         """
         self.properties = properties
         self.condition_idx = condition_idx
         self.temp_idx = temp_idx
-        self.comp_idx = comp_idx
+        
+        # Handle both single index (binary) and dict of indices (ternary+)
+        if isinstance(comp_idx, dict):
+            self.comp_indices = comp_idx  # Dictionary mapping component names to indices
+            self.comp_idx = list(comp_idx.values())[0] if comp_idx else 0  # For backward compat
+            self.is_ternary = True
+        else:
+            self.comp_idx = comp_idx
+            self.comp_indices = None
+            self.is_ternary = False
+            
         self.verbose = verbose
         
         # Copy scalar attributes
@@ -50,13 +60,26 @@ class PropertiesSubset:
         if self.verbose:
             print(f"[PropertiesSubset] MU shape: {mu_full.shape}, extracting for temp_idx={self.temp_idx}, comp_idx={self.comp_idx}")
         
-        if mu_full.ndim >= 5:
-            # Multi-dimensional case
+        if mu_full.ndim == 6:
+            # Ternary system: [N, P, T, X_comp1, X_comp2, component]
+            if self.is_ternary:
+                comp_idx_list = list(self.comp_indices.values())
+                if len(comp_idx_list) == 2:
+                    x_cu_idx = comp_idx_list[0]
+                    x_fe_idx = comp_idx_list[1]
+                    result = mu_full[0, 0, self.temp_idx, x_cu_idx, x_fe_idx, :]
+                    if self.verbose:
+                        print(f"[PropertiesSubset] Extracted MU from 6D: {result}")
+                    return result
+            # Fallback for unexpected 6D case
+            return mu_full[0, 0, 0, 0, 0, :]
+        elif mu_full.ndim >= 5:
+            # Binary system or simpler multi-dimensional case
             # Typical indexing: [N, P, T, X, component]
             if mu_full.shape[2] > self.temp_idx and mu_full.shape[3] > self.comp_idx:
                 result = mu_full[0, 0, self.temp_idx, self.comp_idx, :]
                 if self.verbose:
-                    print(f"[PropertiesSubset] Extracted MU: {result}")
+                    print(f"[PropertiesSubset] Extracted MU from 5D: {result}")
                 return result
             else:
                 if self.verbose:
@@ -76,8 +99,18 @@ class PropertiesSubset:
             
         gm_full = self.properties.GM
         
-        if gm_full.ndim >= 4:
-            # Multi-dimensional case
+        if gm_full.ndim == 5:
+            # Ternary system: [N, P, T, X_comp1, X_comp2]
+            if self.is_ternary:
+                comp_idx_list = list(self.comp_indices.values())
+                if len(comp_idx_list) == 2:
+                    x_cu_idx = comp_idx_list[0]
+                    x_fe_idx = comp_idx_list[1]
+                    return float(gm_full[0, 0, self.temp_idx, x_cu_idx, x_fe_idx])
+            # Fallback for unexpected 5D case
+            return float(gm_full[0, 0, 0, 0, 0])
+        elif gm_full.ndim >= 4:
+            # Binary system: [N, P, T, X]
             if gm_full.shape[2] > self.temp_idx and gm_full.shape[3] > self.comp_idx:
                 return float(gm_full[0, 0, self.temp_idx, self.comp_idx])
             else:
@@ -94,8 +127,18 @@ class PropertiesSubset:
             
         np_full = self.properties.NP
         
-        if np_full.ndim >= 5:
-            # Multi-dimensional case
+        if np_full.ndim == 6:
+            # Ternary system: [N, P, T, X_comp1, X_comp2, phase]
+            if self.is_ternary:
+                comp_idx_list = list(self.comp_indices.values())
+                if len(comp_idx_list) == 2:
+                    x_cu_idx = comp_idx_list[0]
+                    x_fe_idx = comp_idx_list[1]
+                    return np_full[0, 0, self.temp_idx, x_cu_idx, x_fe_idx, :]
+            # Fallback for unexpected 6D case
+            return np_full[0, 0, 0, 0, 0, :]
+        elif np_full.ndim >= 5:
+            # Binary system: [N, P, T, X, phase]
             if np_full.shape[2] > self.temp_idx and np_full.shape[3] > self.comp_idx:
                 return np_full[0, 0, self.temp_idx, self.comp_idx, :]
             else:

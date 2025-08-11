@@ -29,8 +29,8 @@ def run_comprehensive_test(verbose=False):
     # Define test conditions using the range syntax
     # This will create a grid of all combinations automatically
     conditions = {
-        v.X('BI'): (0.1, 0.9, 0.1),  # 0.1 to 0.9 in 0.1 increments
-        v.T: (400, 800, 100),        # 400 to 800 in 100 increments  
+        v.X('BI'): (0.1, 0.9, 0.03),  # 0.1 to 0.9 in 0.1 increments
+        v.T: (300, 1400, 30),        # 400 to 800 in 100 increments  
         v.P: 101325
     }
     

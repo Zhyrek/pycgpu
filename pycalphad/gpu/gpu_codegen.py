@@ -5665,26 +5665,6 @@ __global__ void top_level_equilibrium_kernel(
             // REFACTORED: Call sophisticated solver with global memory arrays
             // This is the full equilibrium solver using global memory to avoid stack overflow
             
-            // CRITICAL DEBUG: Special monitoring for failing conditions 10 and 17
-            if (condition_idx == 10 || condition_idx == 17) {{
-                printf("\\n=== CRITICAL DEBUG: Condition %d (thread %d %% 7 = %d) ===\\n", 
-                       condition_idx, condition_idx, condition_idx % 7);
-                printf("Initial conditions:\\n");
-                printf("  T=%f, P=%f\\n", condition_args_single.state_variables_values[2], condition_args_single.state_variables_values[1]);
-                printf("  Initial GM=%f\\n", system_gm);
-                printf("  Initial phases: %d\\n", safe_num_phases);
-                for (int i = 0; i < safe_num_phases && i < 3; ++i) {{
-                    printf("    Phase %d: idx=%d, amount=%f\\n", i, phase_indices[i], phase_amounts[i]);
-                }}
-                printf("  Phase assemblage: ");
-                if (safe_num_phases == 2 && phase_indices[0] == 2 && phase_indices[1] == 0) {{
-                    printf("FCC_A1 + AU2BI_C15\\n");
-                }} else if (safe_num_phases == 2 && phase_indices[0] == 0 && phase_indices[1] == 2) {{
-                    printf("AU2BI_C15 + FCC_A1\\n");
-                }} else {{
-                    printf("Other\\n");
-                }}
-            }}
             
             if (condition_idx == 0 || condition_idx == 1 || condition_idx == 2) {{
                 #ifdef VERBOSE_DEBUG
@@ -5755,22 +5735,6 @@ __global__ void top_level_equilibrium_kernel(
                 debug_iteration_count[condition_idx] = 6;  // Start + before + solver call + after
             }}
             
-            // CRITICAL DEBUG: Monitor failing conditions 10 and 17 after solver
-            if (condition_idx == 10 || condition_idx == 17) {{
-                printf("\\n=== AFTER SOLVER: Condition %d ===\\n", condition_idx);
-                printf("  Final GM=%f (was %f)\\n", equilibrium_result.final_system_gm, system_gm);
-                printf("  Converged: %s\\n", equilibrium_result.converged ? "YES" : "NO");
-                printf("  Final phases: %d\\n", equilibrium_result.num_stable_phases);
-                for (int i = 0; i < equilibrium_result.num_stable_phases && i < 3; ++i) {{
-                    printf("    Phase %d: idx=%d, amount=%f\\n", i, 
-                           equilibrium_result.phase_ids[i], equilibrium_result.NP[i]);
-                }}
-                printf("  Final chemical potentials: [%f, %f, %f]\\n",
-                       equilibrium_result.final_chemical_potentials[0],
-                       equilibrium_result.final_chemical_potentials[1],
-                       equilibrium_result.final_chemical_potentials[2]);
-                printf("  Delta GM = %f\\n", equilibrium_result.final_system_gm - system_gm);
-            }}
             
             // SAFETY CHECK: Validate solver results
             if (isnan(equilibrium_result.final_system_gm) || isinf(equilibrium_result.final_system_gm)) {{

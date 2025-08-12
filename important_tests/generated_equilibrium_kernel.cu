@@ -1232,6 +1232,13 @@ struct CompositionSet {
 // Simple LU decomposition with partial pivoting for GPU
 // Implements equivalent of LAPACK's dgetrf and dgetrs
 
+// Define maximum matrix dimension based on phase-related constants
+// This should be sufficient for matrices arising from phase equilibrium calculations
+// The maximum dimension comes from full_e_matrix which is (MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS)^2
+#ifndef MAX_LU_DIM
+#define MAX_LU_DIM (MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS)
+#endif
+
 __device__ void swap_rows(double* A, int row1, int row2, int ncols) {
     for (int j = 0; j < ncols; j++) {
         double temp = A[row1 * ncols + j];
@@ -1299,7 +1306,7 @@ __device__ void lu_solve(const double* LU, int n, const int* ipiv, double* b) {
     // b is the right-hand side on input, solution on output
     
     // Apply row permutations to b
-    double temp[32]; // Assuming n <= 32, adjust if needed
+    double temp[MAX_LU_DIM];
     for (int i = 0; i < n; i++) {
         temp[i] = b[i];
     }
@@ -1332,7 +1339,7 @@ __device__ void invert_matrix_lu(double* A, int n, double* work) {
         work[i] = A[i];
     }
     
-    int ipiv[32]; // Assuming n <= 32
+    int ipiv[MAX_LU_DIM];
     
     // LU decomposition
     int info = lu_decomposition(work, n, ipiv);
@@ -1350,7 +1357,7 @@ __device__ void invert_matrix_lu(double* A, int n, double* work) {
     // Process column by column
     for (int j = 0; j < n; j++) {
         // Set up unit vector for column j
-        double col[32]; // Assuming n <= 32
+        double col[MAX_LU_DIM];
         for (int i = 0; i < n; i++) {
             col[i] = (i == j) ? 1.0 : 0.0;
         }
@@ -1372,7 +1379,7 @@ __device__ void lstsq_lu(double* A, int nrows, int ncols, double* b, double* x) 
     
     if (nrows == ncols) {
         // Square system - solve directly
-        int ipiv[32]; // Assuming n <= 32
+        int ipiv[MAX_LU_DIM];
         
         // Copy b to x
         for (int i = 0; i < nrows; i++) {
@@ -1396,7 +1403,7 @@ __device__ void lstsq_lu(double* A, int nrows, int ncols, double* b, double* x) 
         // This is less numerically stable than SVD but simpler
         
         // Compute A^T A (symmetric positive semi-definite)
-        double ATA[32 * 32]; // Assuming ncols <= 32
+        double ATA[MAX_LU_DIM * MAX_LU_DIM];
         for (int i = 0; i < ncols; i++) {
             for (int j = 0; j < ncols; j++) {
                 double sum = 0.0;
@@ -1408,7 +1415,7 @@ __device__ void lstsq_lu(double* A, int nrows, int ncols, double* b, double* x) 
         }
         
         // Compute A^T b
-        double ATb[32]; // Assuming ncols <= 32
+        double ATb[MAX_LU_DIM];
         for (int i = 0; i < ncols; i++) {
             double sum = 0.0;
             for (int k = 0; k < nrows; k++) {
@@ -1418,7 +1425,7 @@ __device__ void lstsq_lu(double* A, int nrows, int ncols, double* b, double* x) 
         }
         
         // Solve ATA x = ATb
-        int ipiv[32];
+        int ipiv[MAX_LU_DIM];
         for (int i = 0; i < ncols; i++) {
             x[i] = ATb[i];
         }
@@ -1944,7 +1951,12 @@ typedef struct SystemState {
             printf("[GPU] SEGMENT 22 DEBUG: iteration=%d, num_components=%d\n", iteration, spec->num_components);
             printf("[GPU]   chemical_potentials: [%.15e, %.15e]\n", chemical_potentials[0], chemical_potentials[1]);
             printf("[GPU]   system_amount: %.15e\n", system_amount);
-            printf("[GPU]   mole_fractions: [%.6f, %.6f]\n", mole_fractions[0], mole_fractions[1]);
+            printf("[GPU]   mole_fractions: [");
+            for (int comp_i = 0; comp_i < spec->num_components; comp_i++) {
+                printf("%.6f", mole_fractions[comp_i]);
+                if (comp_i < spec->num_components - 1) printf(", ");
+            }
+            printf("]\n");
             gpu_debug_log_array("chemical_potentials", chemical_potentials, spec->num_components);
             gpu_debug_log_value("system_amount", system_amount);
             gpu_debug_log_array("mole_fractions", mole_fractions, spec->num_components);
@@ -2544,6 +2556,27 @@ typedef struct SystemState {
                     csst->grad[spec->num_statevars + i] = temp_grad[1 + i];
                 }
                 
+                // DEBUG: Print gradient values for first few phases at iteration 0
+                #ifdef VERBOSE_DEBUG
+                if (spec->num_statevars == 3 && (pr->phase_dof == 2 || pr->phase_dof == 3)) {
+                    printf("[GPU GRAD DEBUG] Phase formulagrad results (phase_dof=%d):\n", pr->phase_dof);
+                    if (pr->phase_dof == 2) {
+                        printf("  temp_grad: [%e, %e, %e] (T, Y1, Y2)\n", temp_grad[0], temp_grad[1], temp_grad[2]);
+                        printf("  mapped to grad[2]=%e, grad[3]=%e, grad[4]=%e\n", 
+                               csst->grad[2], csst->grad[3], csst->grad[4]);
+                        printf("  DOF values: T=%e, Y1=%e, Y2=%e\n", 
+                               compset->dof[2], compset->dof[3], compset->dof[4]);
+                    } else if (pr->phase_dof == 3) {
+                        printf("  temp_grad: [%e, %e, %e, %e] (T, Y1, Y2, Y3)\n", 
+                               temp_grad[0], temp_grad[1], temp_grad[2], temp_grad[3]);
+                        printf("  mapped to grad[2]=%e, grad[3]=%e, grad[4]=%e, grad[5]=%e\n", 
+                               csst->grad[2], csst->grad[3], csst->grad[4], csst->grad[5]);
+                        printf("  DOF values: T=%e, Y1=%e, Y2=%e, Y3=%e\n", 
+                               compset->dof[2], compset->dof[3], compset->dof[4], compset->dof[5]);
+                    }
+                }
+                #endif
+                
                 // N and P derivatives (indices 0, 1) remain zero as CSE doesn't compute them
             }
             // Completed formulagrad
@@ -2689,6 +2722,25 @@ typedef struct SystemState {
             }
             #endif
             
+            // DEBUG: Print matrix and gradient values for problematic phases
+            #ifdef VERBOSE_DEBUG
+            if (iteration == 0 && condition_idx == 0 && idx <= 2) {
+                printf("[GPU c_G CALC] Phase %d matrix inversion and c_G calculation:\n", idx);
+                printf("  Inverted matrix (full_e_matrix):\n");
+                for (int i = 0; i < num_phase_dof_for_csst; i++) {
+                    printf("    Row %d: ", i);
+                    for (int j = 0; j < num_phase_dof_for_csst; j++) {
+                        printf("%e ", csst->full_e_matrix[i * csst->full_e_matrix_dim + j]);
+                    }
+                    printf("\n");
+                }
+                printf("  Gradient values (grad[num_statevars+j]):\n");
+                for (int j = 0; j < num_phase_dof_for_csst; j++) {
+                    printf("    grad[%d] = %e\n", spec->num_statevars + j, csst->grad[spec->num_statevars + j]);
+                }
+            }
+            #endif
+            
             for (int i = 0; i < num_phase_dof_for_csst; ++i) {
                 for (int j = 0; j < num_phase_dof_for_csst; ++j) {
                     // With updated energy functions, grad array is now in Workspace format [N, P, T, Y1, Y2, ...]
@@ -2705,6 +2757,17 @@ typedef struct SystemState {
                     #endif
                 }
             }
+            
+            // DEBUG: Print final c_G values  
+            #ifdef VERBOSE_DEBUG
+            if (iteration == 0 && condition_idx == 0 && idx <= 2) {
+                printf("  Final c_G values: ");
+                for (int i = 0; i < num_phase_dof_for_csst; i++) {
+                    printf("c_G[%d]=%e ", i, csst->c_G[i]);
+                }
+                printf("\n");
+            }
+            #endif
             
             // DEBUG: Print c_G values after calculation
             #ifdef VERBOSE_DEBUG
@@ -3006,9 +3069,13 @@ __device__ void write_row_stable_phase(double* out_row, double* out_rhs,
     int free_variable_column_offset = 0;
     int chempot_idx, statevar_idx, i;
 
+    // CRITICAL FIX: Write masses for ALL components in free_chemical_potential_indices
+    // CPU includes ALL non-VA components as free chemical potentials, even when
+    // mole fractions are prescribed. The constraints are handled separately.
+    // This matches the CPU behavior of having columns for all non-VA components.
     for (i = 0; i < num_free_chemical_potentials; i++) {
         chempot_idx = free_chemical_potential_indices[i];
-        // masses_for_compset is 1D array for the current compset
+        // Write mass for each free chemical potential component
         out_row[free_variable_column_offset + i] = masses_for_compset[chempot_idx];
     }
     free_variable_column_offset += num_free_chemical_potentials;
@@ -3205,6 +3272,25 @@ __device__ void write_row_fixed_mole_fraction(double* out_row, double* out_rhs,
     // 3. Contributions to RHS (from c_G_cs)
     double rhs_term1 = 0.0;
     double rhs_term2 = 0.0;
+    
+    // DEBUG: Print c_G values for iteration 0
+    #ifdef VERBOSE_DEBUG
+    if (component_idx_of_constraint == 1 && compset_original_idx_sys < 3) {
+        printf("[GPU c_G DEBUG] Phase %d, constraint component %d:\n", 
+               compset_original_idx_sys, component_idx_of_constraint);
+        printf("  c_G values: ");
+        for (int j = 0; j < c_G_length_cs && j < 5; j++) {
+            printf("[%d]=%e ", j, c_G_cs[j]);
+        }
+        printf("\n");
+        printf("  mass_jac[%d,3+j]: ", component_idx_of_constraint);
+        for (int j = 0; j < c_G_length_cs && j < 5; j++) {
+            printf("%e ", mass_jac_cs[component_idx_of_constraint * mass_jac_cols_cs + (num_system_statevars + j)]);
+        }
+        printf("\n");
+    }
+    #endif
+    
     for (int j = 0; j < c_G_length_cs; j++) { // j is index over phase_dof
         // CRITICAL FIX: Use workspace indexing for mass_jac and moles_normalization_grad
         rhs_term1 += mass_jac_cs[component_idx_of_constraint * mass_jac_cols_cs + (num_system_statevars + j)] * c_G_cs[j];
@@ -3212,6 +3298,16 @@ __device__ void write_row_fixed_mole_fraction(double* out_row, double* out_rhs,
     }
     if (fabs(current_system_amount_sys)>1e-12) {
         out_rhs[0] += -prefactor_for_this_component * (phase_amt_sys[compset_original_idx_sys] / current_system_amount_sys) * (rhs_term1 + rhs_term2);
+        
+        // DEBUG: Print RHS contribution
+        #ifdef VERBOSE_DEBUG
+        if (component_idx_of_constraint == 1) {
+            printf("[GPU RHS] Phase %d adds %e to constraint %d RHS (term1=%e, term2=%e)\n",
+                   compset_original_idx_sys, 
+                   -prefactor_for_this_component * (phase_amt_sys[compset_original_idx_sys] / current_system_amount_sys) * (rhs_term1 + rhs_term2),
+                   component_idx_of_constraint, rhs_term1, rhs_term2);
+        }
+        #endif
     }
     
     // DEBUG: Print RHS contribution for both phases and first constraint
@@ -3379,6 +3475,8 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
     int num_fixed_mole_frac_conds = spec->num_prescribed_mole_fraction_conditions;
     double prefactor;
 
+    // CRITICAL FIX: Add +1 back to match CPU matrix dimensions exactly
+    // CPU DOES include a system amount constraint row (with [1,1,1] for phase amounts)
     int total_rows = num_free_stable_phases + num_fixed_stable_cs + num_fixed_mole_frac_conds + 1;
     if (state->condition_idx < 3) {
         gpu_debug_log_value("matrix_dimensions", (double)(total_rows * equilibrium_matrix_cols));
@@ -3407,8 +3505,8 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
                 if (i < cs->phase_record->phase_dof - 1) printf(", ");
             }
             printf("]\n");
-            printf("  Target X(TI) = %.10f\n", spec->prescribed_mole_fraction_rhs[0]);
-            printf("  Current X(TI) = %.10f\n", state->phase_compositions[phase_idx * MAX_COMPONENTS + 1]);
+            printf("  Target X[1] = %.10f\n", spec->prescribed_mole_fraction_rhs[0]);
+            printf("  Current X[1] = %.10f\n", state->phase_compositions[phase_idx * MAX_COMPONENTS + 1]);
             printf("  Mass residual = %.10e\n", state->mass_residual);
         }
     }
@@ -3609,6 +3707,33 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
     // After accumulating all phase contributions, subtract the residual from RHS
     for (int mole_frac_cond_row_idx = 0; mole_frac_cond_row_idx < num_fixed_mole_frac_conds; mole_frac_cond_row_idx++) {
         double component_residual = 0.0;
+        
+        // DEBUG: Print what we're calculating
+        #ifdef VERBOSE_DEBUG
+        if (state->condition_idx == 0 && state->iteration == 0) {
+            printf("[GPU CONSTRAINT DEBUG] Calculating residual for constraint row %d:\n", mole_frac_cond_row_idx);
+            printf("  System mole fractions: [");
+            for (int comp_i = 0; comp_i < spec->num_prescribed_mole_fraction_coefficients_cols; comp_i++) {
+                printf("%e", state->mole_fractions[comp_i]);
+                if (comp_i < spec->num_prescribed_mole_fraction_coefficients_cols - 1) printf(", ");
+            }
+            printf("]\n");
+            printf("  Coefficients for this constraint:");
+            for (int i = 0; i < spec->num_prescribed_mole_fraction_coefficients_cols; i++) {
+                printf(" [%d]=%e", i, spec->prescribed_mole_fraction_coefficients[mole_frac_cond_row_idx][i]);
+            }
+            printf("\n");
+            printf("  Target value (prescribed_mole_fraction_rhs[%d]) = %e\n", 
+                   mole_frac_cond_row_idx, spec->prescribed_mole_fraction_rhs[mole_frac_cond_row_idx]);
+            printf("  EXPECTED: For AL constraint (row 0): X_AL should be ~0.575559, target=0.5, residual=+0.075559\n");
+            if (mole_frac_cond_row_idx == 0) {
+                printf("  ANALYSIS: AL mole fraction = %e, target = %e\n", 
+                       state->mole_fractions[0], spec->prescribed_mole_fraction_rhs[0]);
+                printf("  ANALYSIS: If this shows X_AL = 0.275559 instead of 0.575559, then AL/FE indices are swapped!\n");
+            }
+        }
+        #endif
+        
         for (current_component_idx = 0; current_component_idx < spec->num_prescribed_mole_fraction_coefficients_cols; current_component_idx++) {
             component_residual += spec->prescribed_mole_fraction_coefficients[mole_frac_cond_row_idx][current_component_idx] *
                                   state->mole_fractions[current_component_idx];
@@ -3622,8 +3747,12 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
                    mole_frac_cond_row_idx, component_residual, 
                    component_residual + spec->prescribed_mole_fraction_rhs[mole_frac_cond_row_idx],
                    spec->prescribed_mole_fraction_rhs[mole_frac_cond_row_idx]);
-            printf("  state->mole_fractions: [%e, %e]\n", 
-                   state->mole_fractions[0], state->mole_fractions[1]);
+            printf("  state->mole_fractions: [");
+            for (int comp_i = 0; comp_i < spec->num_prescribed_mole_fraction_coefficients_cols; comp_i++) {
+                printf("%e", state->mole_fractions[comp_i]);
+                if (comp_i < spec->num_prescribed_mole_fraction_coefficients_cols - 1) printf(", ");
+            }
+            printf("]\n");
         }
         #endif
         
@@ -3644,92 +3773,23 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
         }
         #endif
     }
-    int system_amount_row_true_idx = current_row_offset + num_fixed_mole_frac_conds;
+    // CRITICAL FIX: Add system amount constraint row to match CPU exactly
+    // CPU DOES include an explicit N=1 constraint row in the equilibrium matrix
+    // This is the last row with [0,0,0,1,1,1] for phase amounts
     
-    // DEBUG: Check row index
-    #ifdef VERBOSE_DEBUG
-    if (state->iteration < 5) {
-        printf("[GPU SYSTEM AMOUNT] Row index calculation: current_row_offset=%d + num_fixed_mole_frac_conds=%d = %d\n",
-               current_row_offset, num_fixed_mole_frac_conds, system_amount_row_true_idx);
-        printf("[GPU SYSTEM AMOUNT] Total rows = %d\n", total_rows);
-    }
-    #endif
+    // SYSTEM AMOUNT CONSTRAINT ROW - Simple version matching CPU
+    int system_amount_row_idx = current_row_offset + num_fixed_mole_frac_conds;
     
-    // CRITICAL FIX: Write system amount constraint ONCE with ALL phases contributing
-    // This matches CPU behavior where all phases contribute to a single system amount row
-    // CPU minimizer.pyx lines 369-376 and 400-407 show this pattern
-    
-    // Loop over ALL active phases (both free and fixed) to build the system amount constraint
-    for (int stable_idx = 0; stable_idx < num_free_stable_phases; stable_idx++) {
-        int compset_original_idx = state->free_stable_compset_indices[stable_idx];
-        if (compset_original_idx < 0 || compset_original_idx >= state->num_compsets) continue;
-        CompositionSet* current_compset = &state->compsets[compset_original_idx];
-        CompsetState* current_cs_state = &state->cs_states[compset_original_idx];
-        if (current_compset->phase_record == nullptr) continue;
-        
-        for (current_component_idx = 0; current_component_idx < num_total_components; current_component_idx++) {
-            write_row_fixed_mole_amount(
-                &equilibrium_matrix[system_amount_row_true_idx * equilibrium_matrix_cols],
-                &equilibrium_rhs[system_amount_row_true_idx], current_component_idx,
-                spec->free_chemical_potential_indices, spec->num_free_chemical_potentials,
-                state->free_stable_compset_indices, state->num_free_stable_compsets,
-                spec->free_statevar_indices, spec->num_free_statevars,
-                spec->fixed_chemical_potential_indices, spec->num_fixed_chemical_potentials,
-                state->chemical_potentials, current_cs_state->mass_jac, current_cs_state->mass_jac_cols,
-                current_cs_state->c_component, current_cs_state->c_component_cols,
-                current_cs_state->c_statevars, current_cs_state->c_statevars_cols,
-                current_cs_state->c_G, current_cs_state->c_G_length, current_cs_state->masses,
-                current_cs_state->moles_normalization, current_cs_state->moles_normalization_grad,
-                state->phase_amt, compset_original_idx);
-        }
+    // Set all chemical potential columns to 0 (already zeroed)
+    // Set phase amount columns to 1
+    int phase_col_offset = spec->num_free_chemical_potentials;  // Skip chemical potential columns
+    for (int i = 0; i < num_free_stable_phases; i++) {
+        equilibrium_matrix[system_amount_row_idx * equilibrium_matrix_cols + phase_col_offset + i] = 1.0;
     }
     
-    // Also add fixed stable phases
-    for (int fixed_idx = 0; fixed_idx < spec->num_fixed_stable_compsets; fixed_idx++) {
-        int compset_original_idx = spec->fixed_stable_compset_indices[fixed_idx];
-        if (compset_original_idx < 0 || compset_original_idx >= state->num_compsets) continue;
-        CompositionSet* current_compset = &state->compsets[compset_original_idx];
-        CompsetState* current_cs_state = &state->cs_states[compset_original_idx];
-        if (current_compset->phase_record == nullptr) continue;
-        
-        for (current_component_idx = 0; current_component_idx < num_total_components; current_component_idx++) {
-            write_row_fixed_mole_amount(
-                &equilibrium_matrix[system_amount_row_true_idx * equilibrium_matrix_cols],
-                &equilibrium_rhs[system_amount_row_true_idx], current_component_idx,
-                spec->free_chemical_potential_indices, spec->num_free_chemical_potentials,
-                state->free_stable_compset_indices, state->num_free_stable_compsets,
-                spec->free_statevar_indices, spec->num_free_statevars,
-                spec->fixed_chemical_potential_indices, spec->num_fixed_chemical_potentials,
-                state->chemical_potentials, current_cs_state->mass_jac, current_cs_state->mass_jac_cols,
-                current_cs_state->c_component, current_cs_state->c_component_cols,
-                current_cs_state->c_statevars, current_cs_state->c_statevars_cols,
-                current_cs_state->c_G, current_cs_state->c_G_length, current_cs_state->masses,
-                current_cs_state->moles_normalization, current_cs_state->moles_normalization_grad,
-                state->phase_amt, compset_original_idx);
-        }
-    }
-    
-    // After accumulating all phase contributions, subtract the residual from RHS
-    double system_amount_residual = state->system_amount - spec->prescribed_system_amount;
-    equilibrium_rhs[system_amount_row_true_idx] -= system_amount_residual;
-    
-    // DEBUG: Check system amount constraint
-    #ifdef VERBOSE_DEBUG
-    if (state->iteration < 5) {
-        printf("[GPU SYSTEM AMOUNT] iteration %d: state->system_amount = %.15e, spec->prescribed_system_amount = %.15e\n", 
-               state->iteration, state->system_amount, spec->prescribed_system_amount);
-        printf("[GPU SYSTEM AMOUNT] system_residual = %.15e, RHS[%d] = %.15e\n", 
-               system_amount_residual, system_amount_row_true_idx, equilibrium_rhs[system_amount_row_true_idx]);
-        
-        // DEBUG: Print the system amount constraint row
-        printf("[GPU SYSTEM AMOUNT] Row %d coefficients: ", system_amount_row_true_idx);
-        for (int col = 0; col < equilibrium_matrix_cols && col < 10; col++) {
-            printf("%.3e ", equilibrium_matrix[system_amount_row_true_idx * equilibrium_matrix_cols + col]);
-        }
-        if (equilibrium_matrix_cols > 10) printf("...");
-        printf("\n");
-    }
-    #endif
+    // RHS is the residual: prescribed_system_amount - current_system_amount
+    double system_residual = spec->prescribed_system_amount - state->system_amount;
+    equilibrium_rhs[system_amount_row_idx] = system_residual;
     
     // DEBUG: Print the complete equilibrium matrix for iteration 0
     #ifdef VERBOSE_DEBUG
@@ -4179,9 +4239,9 @@ __device__ bool remove_and_consolidate_phases(SystemSpecification* spec, SystemS
                 if (should_consolidate && state->iteration == 0) {
                     CompositionSet* cs1 = &state->compsets[idx1];
                     CompositionSet* cs2 = &state->compsets[idx2];
-                    printf("    [CONSOLIDATION] Phase %d site fractions: Y(NB)=%.15e, Y(TI)=%.15e\n",
+                    printf("    [CONSOLIDATION] Phase %d site fractions: Y[0]=%.15e, Y[1]=%.15e\n",
                            idx1, cs1->dof[3], cs1->dof[4]);
-                    printf("    [CONSOLIDATION] Phase %d site fractions: Y(NB)=%.15e, Y(TI)=%.15e\n",
+                    printf("    [CONSOLIDATION] Phase %d site fractions: Y[0]=%.15e, Y[1]=%.15e\n",
                            idx2, cs2->dof[3], cs2->dof[4]);
                 }
             }
@@ -4542,8 +4602,8 @@ __device__ bool change_phases(SystemSpecification* spec, SystemState* state) {
     return phases_changed;
 }
 
-// Forward declaration of run_loop - implementation in gpu_codegen.py
-__device__ bool run_loop(SystemSpecification* spec, SystemState* state, int max_iterations);
+
+// run_loop function removed - using run_loop_global_mem from gpu_codegen.py instead
 
 // SVD-based matrix functions using svd.c
 
@@ -5136,7 +5196,7 @@ __device__ void solve_equilibrium_at_condition(
             // Also show site fractions
             CompositionSet* cs = &current_sys_state.compsets[i];
             if (cs->phase_record != nullptr) {
-                printf("  Site fractions: Y(NB)=%.15e, Y(TI)=%.15e\n",
+                printf("  Site fractions: Y[0]=%.15e, Y[1]=%.15e\n",
                        cs->dof[current_spec.num_statevars + 0],
                        cs->dof[current_spec.num_statevars + 1]);
             }
@@ -5488,13 +5548,13 @@ __device__ void solve_equilibrium_at_condition(
             int idx = current_sys_state.free_stable_compset_indices[i];
             printf("  Phase %d:\n", idx);
             printf("    Amount: %.15e\n", current_sys_state.phase_amt[idx]);
-            printf("    X(NB): %.15e\n", current_sys_state.phase_compositions[idx * MAX_COMPONENTS + 0]);
-            printf("    X(TI): %.15e\n", current_sys_state.phase_compositions[idx * MAX_COMPONENTS + 1]);
+            printf("    X[0]: %.15e\n", current_sys_state.phase_compositions[idx * MAX_COMPONENTS + 0]);
+            printf("    X[1]: %.15e\n", current_sys_state.phase_compositions[idx * MAX_COMPONENTS + 1]);
             CompositionSet* cs = &current_sys_state.compsets[idx];
-            printf("    Y(NB): %.15e\n", cs->dof[current_spec.num_statevars + 0]);
-            printf("    Y(TI): %.15e\n", cs->dof[current_spec.num_statevars + 1]);
+            printf("    Y[0]: %.15e\n", cs->dof[current_spec.num_statevars + 0]);
+            printf("    Y[1]: %.15e\n", cs->dof[current_spec.num_statevars + 1]);
         }
-        printf("  System mole fractions: X(NB)=%.15e, X(TI)=%.15e\n",
+        printf("  System mole fractions: X[0]=%.15e, X[1]=%.15e\n",
                current_sys_state.mole_fractions[0], current_sys_state.mole_fractions[1]);
     }
     #endif
@@ -5634,159 +5694,198 @@ __device__ void solve_equilibrium_at_condition(
 
 // --- Dynamically Generated __device__ Model Functions ---
 __device__ double pycgpu_model_0_obj(const double* x) {
-    double x0 = pow(0.235*x[5] + 0.1375*x[6] + 0.6275*(x[3] + x[4]), -1);
-    double x1 = pow(x[2], 3.0);
-    double x2 = pow(x[2], -1.0);
-    double x3 = 74092.0*x2;
-    double x4 = x[2]*log(x[2]);
-    double x5 = pow(x[2], 2.0);
-    double x6 = pow(x[2], -9.0);
-    double x7 = ((x[2] < 700.0) ? (
-   -7976.15 + 137.093038*x[2] - 8.77664e-07*x1 + x3 - 24.3671976*x4 - 0.001884662*x5
+    double x0 = x[4]*x[3];
+    double x1 = -x[5];
+    double x2 = x[3] + x1;
+    double x3 = x[3]*x[5];
+    double x4 = x[3] - x[4];
+    double x5 = x[2]*log(x[2]);
+    double x6 = x[4] + x1;
+    double x7 = x[4]*x[5];
+    double x8 = x[3] + x[4] + x[5];
+    double x9 = (1.0/3.0)*(1 - x8);
+    double x10 = x7*x[3];
+    double x11 = pow(x8, -1);
+    double x12 = 1.0*x11;
+    double x13 = pow(x[2], 7.0);
+    double x14 = pow(x[2], 3.0);
+    double x15 = pow(x[2], -1.0);
+    double x16 = 74092.0*x15;
+    double x17 = pow(x[2], 2.0);
+    double x18 = pow(x[2], -9.0);
+    double x19 = 933.47 <= x[2];
+    double x20 = ((x[2] < 700.0) ? (
+   -7976.15 + 137.093038*x[2] - 8.77664e-07*x14 + x16 - 0.001884662*x17 - 24.3671976*x5
 )
 : (((x[2] < 933.47 && 700.0 <= x[2])) ? (
-   -11276.24 + 223.048446*x[2] - 5.764227e-06*x1 + x3 - 38.5844296*x4 + 0.018531982*x5
+   -11276.24 + 223.048446*x[2] - 5.764227e-06*x14 + x16 + 0.018531982*x17 - 38.5844296*x5
 )
-: ((933.47 <= x[2]) ? (
-   -11278.378 + 188.684153*x[2] - 31.748192*x4 - 1.230524e+28*x6
+: ((x19 == 1) ? (
+   -11278.378 + 188.684153*x[2] - 1.230524e+28*x18 - 31.748192*x5
 )
 : (
    0
 ))));
-    double x8 = 0.235*((x[2] < 1811.0) ? (
-   1225.7 + 124.134*x[2] - 5.8927e-08*x1 + 77359.0*x2 - 23.5143*x4 - 0.00439752*x5
+    double x21 = x[2] < 933.47;
+    double x22 = x[2] < 1811.0;
+    double x23 = 2.29603e+31*x18;
+    double x24 = 1811.0 <= x[2];
+    double x25 = ((x22 == 1) ? (
+   1225.7 + 124.134*x[2] - 5.8927e-08*x14 + 77359.0*x15 - 0.00439752*x17 - 23.5143*x5
 )
-: ((1811.0 <= x[2]) ? (
-   -25383.581 + 299.31255*x[2] - 46.0*x4 + 2.29603e+31*x6
+: ((x24 == 1) ? (
+   -25383.581 + 299.31255*x[2] + x23 - 46.0*x5
 )
 : (
    0
 )));
-    double x9 = x[5]*x[6];
-    double x10 = x8 + 0.6275*((x[2] < 1357.77) ? (
-   -7770.458 + 130.485235*x[2] + 1.29223e-07*x1 + 52478.0*x2 - 24.112392*x4 - 0.00265684*x5
+    return x12*(x[3]*((x21 == 1) ? (
+   11005.029 - 11.841867*x[2] + 7.934e-20*x13 + x20
+)
+: ((x19 == 1) ? (
+   10482.382 - 11.253974*x[2] + 1.231e+28*x18 + x20
+)
+: (
+   0
+))) + x[4]*((x[2] < 1357.77) ? (
+   5194.277 + 120.973331*x[2] - 5.8489e-21*x13 + 1.29223e-07*x14 + 52478.0*x15 - 0.00265684*x17 - 24.112392*x5
 )
 : ((1357.77 <= x[2]) ? (
-   -13542.026 + 183.803828*x[2] - 31.38*x4 + 3.64167e+29*x6
+   -46.545 + 173.881484*x[2] - 31.38*x5
 )
 : (
    0
-)));
-    double x11 = x[5]*x[7];
-    return x0*(x11*x[3]*(-27781.3 + 7.2566*x[2] + 0.6275*x7 + x8) + x11*x10*x[4] + x9*x[3]*(-30814.4 + 7.44*x[2] + 0.765*x7 + x8) + x9*x[4]*(-7524.93486 + x10 + 0.1375*x7)) + 8.3145*x[2]*x0*(0.6275*((1e-15 < x[3]) ? (
+))) + x[5]*((x22 == 1) ? (
+   12040.17 - 6.55843*x[2] - 3.67516e-21*x13 + x25
+)
+: ((x24 == 1) ? (
+   14544.751 - 8.01055*x[2] - x23 + x25
+)
+: (
+   0
+)))) + x12*(-2812.0*x0*pow(x4, 2) + x0*(-66622.0 + 8.1*x[2]) + 121.9*pow(x2, 2)*x3 + x3*(-91976.5 + 22.1314*x[2]) + x7*(36088.0 - 2.32968*x[2]) + x0*x4*(46800.0 - 90.8*x[2] + 10.0*x5) + x10*(x[3] + x9)*(-24637.8886 + 9.12034153*x[2]) + x10*(x[4] + x9)*(-47262.3591 + 11.3118607*x[2]) + x2*x3*(-5672.58 + 4.8728*x[2]) + x6*x7*(324.53 - 0.0327*x[2]) + pow(x6, 2)*x7*(10355.4 - 3.60297*x[2])) + 8.3145*x[2]*x11*(1.0*((1e-15 < x[3]) ? (
    x[3]*log(x[3])
 )
 : (
    0
-)) + 0.6275*((1e-15 < x[4]) ? (
+)) + 1.0*((1e-15 < x[4]) ? (
    x[4]*log(x[4])
 )
 : (
    0
-)) + 0.235*((1e-15 < x[5]) ? (
+)) + 1.0*((1e-15 < x[5]) ? (
    x[5]*log(x[5])
 )
 : (
    0
-)) + 0.1375*((1e-15 < x[6]) ? (
-   x[6]*log(x[6])
-)
-: (
-   0
-)) + 0.1375*((1e-15 < x[7]) ? (
-   x[7]*log(x[7])
-)
-: (
-   0
-))) - 14845.2615*(x[6] + x[7])*x0*x[4]*x[3]*x[5];
+)));
 }
 
 __device__ double pycgpu_model_0_formulaobj(const double* x) {
-    double x0 = 0.235*x[5] + 0.1375*x[6] + 0.6275*(x[3] + x[4]);
-    double x1 = pow(x0, -1);
-    double x2 = x[3]*x[5];
-    double x3 = pow(x[2], 3.0);
-    double x4 = pow(x[2], -1.0);
-    double x5 = 74092.0*x4;
+    double x0 = x[3] + x[4] + x[5];
+    double x1 = x[4]*x[3];
+    double x2 = -x[5];
+    double x3 = x[3] + x2;
+    double x4 = x[3]*x[5];
+    double x5 = x[3] - x[4];
     double x6 = x[2]*log(x[2]);
-    double x7 = pow(x[2], 2.0);
-    double x8 = pow(x[2], -9.0);
-    double x9 = ((x[2] < 700.0) ? (
-   -7976.15 + 137.093038*x[2] - 8.77664e-07*x3 + x5 - 24.3671976*x6 - 0.001884662*x7
+    double x7 = x[4] + x2;
+    double x8 = x[4]*x[5];
+    double x9 = (1.0/3.0)*(1 - x0);
+    double x10 = x8*x[3];
+    double x11 = pow(x0, -1);
+    double x12 = 1.0*x11;
+    double x13 = pow(x[2], 7.0);
+    double x14 = pow(x[2], 3.0);
+    double x15 = pow(x[2], -1.0);
+    double x16 = 74092.0*x15;
+    double x17 = pow(x[2], 2.0);
+    double x18 = pow(x[2], -9.0);
+    double x19 = 933.47 <= x[2];
+    double x20 = ((x[2] < 700.0) ? (
+   -7976.15 + 137.093038*x[2] - 8.77664e-07*x14 + x16 - 0.001884662*x17 - 24.3671976*x6
 )
 : (((x[2] < 933.47 && 700.0 <= x[2])) ? (
-   -11276.24 + 223.048446*x[2] - 5.764227e-06*x3 + x5 - 38.5844296*x6 + 0.018531982*x7
+   -11276.24 + 223.048446*x[2] - 5.764227e-06*x14 + x16 + 0.018531982*x17 - 38.5844296*x6
 )
-: ((933.47 <= x[2]) ? (
-   -11278.378 + 188.684153*x[2] - 31.748192*x6 - 1.230524e+28*x8
+: ((x19 == 1) ? (
+   -11278.378 + 188.684153*x[2] - 1.230524e+28*x18 - 31.748192*x6
 )
 : (
    0
 ))));
-    double x10 = 0.235*((x[2] < 1811.0) ? (
-   1225.7 + 124.134*x[2] - 5.8927e-08*x3 + 77359.0*x4 - 23.5143*x6 - 0.00439752*x7
+    double x21 = x[2] < 933.47;
+    double x22 = x[2] < 1811.0;
+    double x23 = 2.29603e+31*x18;
+    double x24 = 1811.0 <= x[2];
+    double x25 = ((x22 == 1) ? (
+   1225.7 + 124.134*x[2] - 5.8927e-08*x14 + 77359.0*x15 - 0.00439752*x17 - 23.5143*x6
 )
-: ((1811.0 <= x[2]) ? (
-   -25383.581 + 299.31255*x[2] - 46.0*x6 + 2.29603e+31*x8
+: ((x24 == 1) ? (
+   -25383.581 + 299.31255*x[2] + x23 - 46.0*x6
 )
 : (
    0
 )));
-    double x11 = x10 + 0.6275*((x[2] < 1357.77) ? (
-   -7770.458 + 130.485235*x[2] + 1.29223e-07*x3 + 52478.0*x4 - 24.112392*x6 - 0.00265684*x7
+    return 1.0*x0*(x12*(x[3]*((x21 == 1) ? (
+   11005.029 - 11.841867*x[2] + 7.934e-20*x13 + x20
+)
+: ((x19 == 1) ? (
+   10482.382 - 11.253974*x[2] + 1.231e+28*x18 + x20
+)
+: (
+   0
+))) + x[4]*((x[2] < 1357.77) ? (
+   5194.277 + 120.973331*x[2] - 5.8489e-21*x13 + 1.29223e-07*x14 + 52478.0*x15 - 0.00265684*x17 - 24.112392*x6
 )
 : ((1357.77 <= x[2]) ? (
-   -13542.026 + 183.803828*x[2] - 31.38*x6 + 3.64167e+29*x8
+   -46.545 + 173.881484*x[2] - 31.38*x6
 )
 : (
    0
-)));
-    double x12 = x[4]*x[5];
-    return x0*(x1*(x12*x[6]*(-7524.93486 + x11 + 0.1375*x9) + x12*x11*x[7] + x2*x[6]*(-30814.4 + 7.44*x[2] + x10 + 0.765*x9) + x2*x[7]*(-27781.3 + 7.2566*x[2] + x10 + 0.6275*x9)) + 8.3145*x[2]*x1*(0.6275*((1e-15 < x[3]) ? (
+))) + x[5]*((x22 == 1) ? (
+   12040.17 - 6.55843*x[2] - 3.67516e-21*x13 + x25
+)
+: ((x24 == 1) ? (
+   14544.751 - 8.01055*x[2] - x23 + x25
+)
+: (
+   0
+)))) + x12*(-2812.0*x1*pow(x5, 2) + x1*(-66622.0 + 8.1*x[2]) + 121.9*x4*pow(x3, 2) + x4*(-91976.5 + 22.1314*x[2]) + x8*(36088.0 - 2.32968*x[2]) + x1*x5*(46800.0 - 90.8*x[2] + 10.0*x6) + x10*(x[3] + x9)*(-24637.8886 + 9.12034153*x[2]) + x10*(x[4] + x9)*(-47262.3591 + 11.3118607*x[2]) + x4*x3*(-5672.58 + 4.8728*x[2]) + x8*x7*(324.53 - 0.0327*x[2]) + x8*pow(x7, 2)*(10355.4 - 3.60297*x[2])) + 8.3145*x[2]*x11*(1.0*((1e-15 < x[3]) ? (
    x[3]*log(x[3])
 )
 : (
    0
-)) + 0.6275*((1e-15 < x[4]) ? (
+)) + 1.0*((1e-15 < x[4]) ? (
    x[4]*log(x[4])
 )
 : (
    0
-)) + 0.235*((1e-15 < x[5]) ? (
+)) + 1.0*((1e-15 < x[5]) ? (
    x[5]*log(x[5])
 )
 : (
    0
-)) + 0.1375*((1e-15 < x[6]) ? (
-   x[6]*log(x[6])
-)
-: (
-   0
-)) + 0.1375*((1e-15 < x[7]) ? (
-   x[7]*log(x[7])
-)
-: (
-   0
-))) - 14845.2615*(x[6] + x[7])*x2*x1*x[4]);
+))));
 }
 
 __device__ void pycgpu_model_0_formulagrad(double* out, const double* x) {
-    double x0 = 0.235*x[5] + 0.1375*x[6] + 0.6275*(x[3] + x[4]);
-    double x1 = pow(x0, -1);
-    double x2 = pow(x[2], 1.0);
+    double x0 = pow(x[2], 6.0);
+    double x1 = pow(x[2], 2.0);
+    double x2 = pow(x1, -1);
     double x3 = log(x[2]);
     double x4 = 23.5143*x3;
-    double x5 = pow(x[2], 2.0);
-    double x6 = pow(x5, -1);
-    double x7 = x[2] < 1811.0;
+    double x5 = pow(x[2], 1.0);
+    double x6 = x[2] < 1811.0;
+    double x7 = 46.0*x3;
     double x8 = pow(x[2], -10.0);
-    double x9 = 46.0*x3;
+    double x9 = 2.066427e+32*x8;
     double x10 = 1811.0 <= x[2];
-    double x11 = 0.235*((x7 == 1) ? (
-   100.6197 - 0.00879504*x2 - x4 - 1.76781e-07*x5 - 77359.0*x6
+    double x11 = ((x6 == 1) ? (
+   100.6197 - 1.76781e-07*x1 - 77359.0*x2 - x4 - 0.00879504*x5
 )
 : ((x10 == 1) ? (
-   253.31255 - 2.066427e+32*x8 - x9
+   253.31255 - x7 - x9
 )
 : (
    0
@@ -5795,142 +5894,118 @@ __device__ void pycgpu_model_0_formulagrad(double* out, const double* x) {
     double x13 = x[2] < 1357.77;
     double x14 = 31.38*x3;
     double x15 = 1357.77 <= x[2];
-    double x16 = x11 + 0.6275*((x13 == 1) ? (
-   106.372843 - x12 - 0.00531368*x2 + 3.87669e-07*x5 - 52478.0*x6
+    double x16 = 24.3671976*x3;
+    double x17 = -74092.0*x2;
+    double x18 = x[2] < 700.0;
+    double x19 = 38.5844296*x3;
+    double x20 = (x[2] < 933.47 && 700.0 <= x[2]);
+    double x21 = 31.748192*x3;
+    double x22 = 933.47 <= x[2];
+    double x23 = ((x18 == 1) ? (
+   112.7258404 - 2.632992e-06*x1 - x16 + x17 - 0.003769324*x5
 )
-: ((x15 == 1) ? (
-   152.423828 - x14 - 3.277503e+30*x8
+: ((x20 == 1) ? (
+   184.4640164 - 1.7292681e-05*x1 + x17 - x19 + 0.037063964*x5
 )
-: (
-   0
-)));
-    double x17 = x[5]*x[7];
-    double x18 = x17*x[4];
-    double x19 = 24.3671976*x3;
-    double x20 = -74092.0*x6;
-    double x21 = x[2] < 700.0;
-    double x22 = 38.5844296*x3;
-    double x23 = (x[2] < 933.47 && 700.0 <= x[2]);
-    double x24 = 31.748192*x3;
-    double x25 = 933.47 <= x[2];
-    double x26 = ((x21 == 1) ? (
-   112.7258404 - x19 - 0.003769324*x2 + x20 - 2.632992e-06*x5
-)
-: ((x23 == 1) ? (
-   184.4640164 + 0.037063964*x2 + x20 - x22 - 1.7292681e-05*x5
-)
-: ((x25 == 1) ? (
-   156.935961 - x24 + 1.1074716e+29*x8
+: ((x22 == 1) ? (
+   156.935961 - x21 + 1.1074716e+29*x8
 )
 : (
    0
 ))));
-    double x27 = x[3]*x[5];
-    double x28 = x27*x[7];
-    double x29 = x[4]*x[5];
-    double x30 = x29*x[6];
-    double x31 = x27*x[6];
-    double x32 = log(x[4]);
-    double x33 = 1e-15 < x[4];
-    double x34 = log(x[3]);
-    double x35 = 1e-15 < x[3];
-    double x36 = log(x[5]);
-    double x37 = 1e-15 < x[5];
-    double x38 = log(x[6]);
-    double x39 = 1e-15 < x[6];
-    double x40 = log(x[7]);
-    double x41 = 1e-15 < x[7];
-    double x42 = 0.6275*((x33 == 1) ? (
-   x32*x[4]
+    double x24 = x[2] < 933.47;
+    double x25 = x[3] + x[4] + x[5];
+    double x26 = pow(x25, -1);
+    double x27 = 1.0*x26;
+    double x28 = log(x[4]);
+    double x29 = 1e-15 < x[4];
+    double x30 = log(x[5]);
+    double x31 = 1e-15 < x[5];
+    double x32 = log(x[3]);
+    double x33 = 1e-15 < x[3];
+    double x34 = 1.0*((x29 == 1) ? (
+   x28*x[4]
 )
 : (
    0
-)) + 0.6275*((x35 == 1) ? (
-   x34*x[3]
+)) + 1.0*((x31 == 1) ? (
+   x30*x[5]
 )
 : (
    0
-)) + 0.235*((x37 == 1) ? (
-   x36*x[5]
-)
-: (
-   0
-)) + 0.1375*((x39 == 1) ? (
-   x38*x[6]
-)
-: (
-   0
-)) + 0.1375*((x41 == 1) ? (
-   x40*x[7]
+)) + 1.0*((x33 == 1) ? (
+   x32*x[3]
 )
 : (
    0
 ));
-    double x43 = 8.3145*x1;
-    double x44 = x42*x43;
-    double x45 = 0.1375*((x41 == 1) ? (
+    double x35 = 8.3145*x26;
+    double x36 = x34*x35;
+    double x37 = 1.0*((x29 == 1) ? (
    0
 )
 : (
    0
 ));
-    double x46 = 0.1375*((x39 == 1) ? (
+    double x38 = 1.0*((x33 == 1) ? (
    0
 )
 : (
    0
 ));
-    double x47 = 0.235*((x37 == 1) ? (
+    double x39 = 1.0*((x31 == 1) ? (
    0
 )
 : (
    0
 ));
-    double x48 = 0.6275*((x35 == 1) ? (
-   0
+    double x40 = x38 + x39;
+    double x41 = x[2]*x35;
+    double x42 = -x[5];
+    double x43 = x[4] + x42;
+    double x44 = pow(x43, 2);
+    double x45 = x[4]*x[5];
+    double x46 = (1.0/3.0)*(1 - x25);
+    double x47 = x[4] + x46;
+    double x48 = x[3]*x[5];
+    double x49 = x48*x[4];
+    double x50 = x43*x45;
+    double x51 = 10.0*x3;
+    double x52 = x[3] - x[4];
+    double x53 = x52*x[4];
+    double x54 = x53*x[3];
+    double x55 = x[3] + x42;
+    double x56 = x55*x48;
+    double x57 = x[3] + x46;
+    double x58 = x[4]*x[3];
+    double x59 = 1.0*x25;
+    double x60 = pow(x[2], 7.0);
+    double x61 = pow(x[2], 3.0);
+    double x62 = pow(x5, -1);
+    double x63 = 74092.0*x62;
+    double x64 = pow(x[2], -9.0);
+    double x65 = ((x18 == 1) ? (
+   -7976.15 + 137.093038*x[2] - 0.001884662*x1 - 8.77664e-07*x61 + x63 - x[2]*x16
 )
-: (
-   0
-));
-    double x49 = 0.6275*((x33 == 1) ? (
-   0
+: ((x20 == 1) ? (
+   -11276.24 + 223.048446*x[2] + 0.018531982*x1 - 5.764227e-06*x61 + x63 - x[2]*x19
 )
-: (
-   0
-));
-    double x50 = x47 + x48 + x49;
-    double x51 = x46 + x50;
-    double x52 = x[2]*x43;
-    double x53 = pow(x[2], 3.0);
-    double x54 = pow(x2, -1);
-    double x55 = 74092.0*x54;
-    double x56 = pow(x[2], -9.0);
-    double x57 = ((x21 == 1) ? (
-   -7976.15 + 137.093038*x[2] - 0.001884662*x5 - 8.77664e-07*x53 + x55 - x[2]*x19
-)
-: ((x23 == 1) ? (
-   -11276.24 + 223.048446*x[2] + 0.018531982*x5 - 5.764227e-06*x53 + x55 - x[2]*x22
-)
-: ((x25 == 1) ? (
-   -11278.378 + 188.684153*x[2] - 1.230524e+28*x56 - x[2]*x24
+: ((x22 == 1) ? (
+   -11278.378 + 188.684153*x[2] - 1.230524e+28*x64 - x[2]*x21
 )
 : (
    0
 ))));
-    double x58 = 0.235*((x7 == 1) ? (
-   1225.7 + 124.134*x[2] - 0.00439752*x5 - 5.8927e-08*x53 + 77359.0*x54 - x[2]*x4
+    double x66 = ((x24 == 1) ? (
+   11005.029 - 11.841867*x[2] + 7.934e-20*x60 + x65
 )
-: ((x10 == 1) ? (
-   -25383.581 + 299.31255*x[2] + 2.29603e+31*x56 - x[2]*x9
+: ((x22 == 1) ? (
+   10482.382 - 11.253974*x[2] + 1.231e+28*x64 + x65
 )
 : (
    0
 )));
-    double x59 = -27781.3 + 7.2566*x[2] + 0.6275*x57 + x58;
-    double x60 = -30814.4 + 7.44*x[2] + 0.765*x57 + x58;
-    double x61 = x60*x[6];
-    double x62 = x61*x[5];
-    double x63 = 0.235*((x7 == 1) ? (
+    double x67 = ((x6 == 1) ? (
    0
 )
 : ((x10 == 1) ? (
@@ -5939,19 +6014,27 @@ __device__ void pycgpu_model_0_formulagrad(double* out, const double* x) {
 : (
    0
 )));
-    double x64 = ((x21 == 1) ? (
+    double x68 = ((x18 == 1) ? (
    0
 )
-: ((x23 == 1) ? (
+: ((x20 == 1) ? (
    0
 )
-: ((x25 == 1) ? (
+: ((x22 == 1) ? (
    0
 )
 : (
    0
 ))));
-    double x65 = x63 + 0.6275*((x13 == 1) ? (
+    double x69 = x[3]*((x24 == 1) ? (
+   x68
+)
+: ((x22 == 1) ? (
+   x68
+)
+: (
+   0
+))) + x[4]*((x13 == 1) ? (
    0
 )
 : ((x15 == 1) ? (
@@ -5959,2777 +6042,541 @@ __device__ void pycgpu_model_0_formulagrad(double* out, const double* x) {
 )
 : (
    0
+))) + x[5]*((x6 == 1) ? (
+   x67
+)
+: ((x10 == 1) ? (
+   x67
+)
+: (
+   0
 )));
-    double x66 = x28*(x63 + 0.6275*x64) + x30*(0.1375*x64 + x65) + x31*(x63 + 0.765*x64) + x65*x18;
-    double x67 = x45 + x46 + x47;
-    double x68 = x[6] + x[7];
-    double x69 = 14845.2615*x1;
-    double x70 = x68*x69;
-    double x71 = pow(x0, -2);
-    double x72 = x27*x[4];
-    double x73 = x71*x72*x68;
-    double x74 = x58 + 0.6275*((x13 == 1) ? (
-   -7770.458 + 130.485235*x[2] - 0.00265684*x5 + 1.29223e-07*x53 + 52478.0*x54 - x[2]*x12
+    double x70 = -47262.3591 + 11.3118607*x[2];
+    double x71 = x70*x47;
+    double x72 = -66622.0 + 8.1*x[2];
+    double x73 = -5672.58 + 4.8728*x[2];
+    double x74 = x73*x55;
+    double x75 = 2812.0*pow(x52, 2);
+    double x76 = 5624.0*x54;
+    double x77 = -24637.8886 + 9.12034153*x[2];
+    double x78 = x77*x57;
+    double x79 = x70*x49;
+    double x80 = (-1.0/3.0)*x79;
+    double x81 = 46800.0 - 90.8*x[2] + x[2]*x51;
+    double x82 = x81*x[3];
+    double x83 = x82*x[4];
+    double x84 = x73*x48;
+    double x85 = -91976.5 + 22.1314*x[2];
+    double x86 = 243.8*x56;
+    double x87 = 121.9*pow(x55, 2);
+    double x88 = x77*x49;
+    double x89 = ((x13 == 1) ? (
+   5194.277 + 120.973331*x[2] - 0.00265684*x1 - 5.8489e-21*x60 + 1.29223e-07*x61 + 52478.0*x62 - x[2]*x12
 )
 : ((x15 == 1) ? (
-   -13542.026 + 183.803828*x[2] + 3.64167e+29*x56 - x[2]*x14
+   -46.545 + 173.881484*x[2] - x[2]*x14
 )
 : (
    0
 )));
-    double x75 = -7524.93486 + 0.1375*x57 + x74;
-    double x76 = x75*x[6];
-    double x77 = x76*x[4];
-    double x78 = x59*x[3];
-    double x79 = x78*x[7];
-    double x80 = x74*x[4];
-    double x81 = x62*x[3] + x77*x[5] + x79*x[5] + x80*x17;
-    double x82 = x81*x71;
-    double x83 = x[2]*x71*x42;
-    double x84 = 9315.40159125*x73 - 0.6275*x82 - 5.21734875*x83;
-    double x85 = x72*x69;
-    double x86 = x[2]*x44 + x1*x81 - x85*x68;
-    double x87 = 0.6275*x86;
-    double x88 = -x85;
-    out[0] = x0*(x44 + x1*(x18*x16 + x28*(7.2566 + x11 + 0.6275*x26) + x30*(x16 + 0.1375*x26) + x31*(7.44 + x11 + 0.765*x26)) + (x45 + x51)*x52);
-    out[1] = x87 + x0*(x84 + x1*(x62 + x66 + x59*x17) + x52*(x49 + x67 + 0.6275*((x35 == 1) ? (
-   1 + x34
+    double x90 = 2.29603e+31*x64;
+    double x91 = ((x6 == 1) ? (
+   1225.7 + 124.134*x[2] - 0.00439752*x1 - 5.8927e-08*x61 + 77359.0*x62 - x[2]*x4
+)
+: ((x10 == 1) ? (
+   -25383.581 + 299.31255*x[2] + x90 - x[2]*x7
 )
 : (
    0
-))) - x70*x29);
-    out[2] = x87 + x0*(x84 + x1*(x66 + x74*x17 + x76*x[5]) + x52*(x48 + x67 + 0.6275*((x33 == 1) ? (
+)));
+    double x92 = ((x6 == 1) ? (
+   12040.17 - 6.55843*x[2] - 3.67516e-21*x60 + x91
+)
+: ((x10 == 1) ? (
+   14544.751 - 8.01055*x[2] - x90 + x91
+)
+: (
+   0
+)));
+    double x93 = x66*x[3] + x89*x[4] + x92*x[5];
+    double x94 = pow(x25, -2);
+    double x95 = 1.0*x94;
+    double x96 = x72*x[3];
+    double x97 = 324.53 - 0.0327*x[2];
+    double x98 = x97*x43;
+    double x99 = x98*x[5];
+    double x100 = x85*x[3];
+    double x101 = 36088.0 - 2.32968*x[2];
+    double x102 = x101*x[4];
+    double x103 = 10355.4 - 3.60297*x[2];
+    double x104 = x44*x103;
+    double x105 = x78*x48;
+    double x106 = x71*x48;
+    double x107 = x100*x[5] + x102*x[5] + x105*x[4] + x106*x[4] + x45*x104 - x75*x58 + x83*x52 + x84*x55 + x87*x48 + x96*x[4] + x99*x[4];
+    double x108 = -x93*x95 - x95*x107 - 8.3145*x[2]*x94*x34;
+    double x109 = 1.0*(x[2]*x36 + x27*x107 + x93*x27);
+    double x110 = 2*x50*x103;
+    double x111 = x97*x45;
+    double x112 = (-1.0/3.0)*x88;
+    out[0] = x59*(x36 + x27*(x[3]*((x24 == 1) ? (
+   -11.841867 + 5.5538e-19*x0 + x23
+)
+: ((x22 == 1) ? (
+   -11.253974 + x23 - 1.1079e+29*x8
+)
+: (
+   0
+))) + ((x6 == 1) ? (
+   -6.55843 - 2.572612e-20*x0 + x11
+)
+: ((x10 == 1) ? (
+   -8.01055 + x11 + x9
+)
+: (
+   0
+)))*x[5] + ((x13 == 1) ? (
+   96.860939 - 4.09423e-20*x0 + 3.87669e-07*x1 - x12 - 52478.0*x2 - 0.00531368*x5
+)
+: ((x15 == 1) ? (
+   142.501484 - x14
+)
+: (
+   0
+)))*x[4]) + x27*(-2.32968*x45 + 22.1314*x48 - 0.0327*x50 + 4.8728*x56 + 8.1*x58 - 3.60297*x44*x45 + 11.3118607*x47*x49 + x54*(-80.8 + x51) + 9.12034153*x57*x49) + (x37 + x40)*x41);
+    out[1] = x109 + x59*(x108 + x27*(-x76 + x80 + x83 + x84 + x86 + (2.0/3.0)*x88 + x71*x45 + x72*x[4] + x74*x[5] - x75*x[4] + x78*x45 + x81*x53 + x85*x[5] + x87*x[5]) + x41*(x37 + x39 + 1.0*((x33 == 1) ? (
    1 + x32
 )
 : (
    0
-))) - x70*x27);
-    out[3] = 0.235*x86 + x0*(3488.6364525*x73 - 0.235*x82 - 1.9539075*x83 + x1*(x66 + x77 + x79 + x61*x[3] + x80*x[7]) + x52*(x45 + x46 + x48 + x49 + 0.235*((x37 == 1) ? (
-   1 + x36
+))) + (x66 + x69)*x27);
+    out[2] = x109 + x59*(x108 + x27*(x105 + x106 + x110 + x111 + x112 + x76 + (2.0/3.0)*x79 - x83 + x96 + x99 + x101*x[5] + x104*x[5] - x75*x[3] + x82*x52) + x41*(x40 + 1.0*((x29 == 1) ? (
+   1 + x28
 )
 : (
    0
-))) - x70*x[4]*x[3]);
-    out[4] = 0.1375*x86 + x0*(2041.22345625*x73 - 0.1375*x82 - 1.14324375*x83 + x88 + x1*(x66 + x60*x27 + x75*x29) + x52*(x45 + x50 + 0.1375*((x39 == 1) ? (
-   1 + x38
+))) + (x69 + x89)*x27);
+    out[3] = x109 + x59*(x108 + x27*(x100 + x102 - x110 - x111 + x112 + x80 - x84 - x86 + x104*x[4] + x71*x58 + x74*x[3] + x78*x58 + x87*x[3] + x98*x[4]) + x41*(x37 + x38 + 1.0*((x31 == 1) ? (
+   1 + x30
 )
 : (
    0
-))));
-    out[5] = x0*(x88 + x1*(x66 + x74*x29 + x78*x[5]) + x52*(x51 + 0.1375*((x41 == 1) ? (
-   1 + x40
-)
-: (
-   0
-))));
+))) + (x69 + x92)*x27);
 }
 
 __device__ void pycgpu_model_0_formulahess(double* out, const double* x) {
-    double x0 = 0.235*x[5] + 0.1375*x[6] + 0.6275*(x[3] + x[4]);
-    double x1 = 1e-15 < x[5];
-    double x2 = 0.235*((x1 == 1) ? 0
+    double x0 = pow(x[2], -1);
+    double x1 = x[3] + x[4] + x[5];
+    double x2 = pow(x1, -1);
+    double x3 = x[3] - x[4];
+    double x4 = x3*x[3];
+    double x5 = 1e-15 < x[5];
+    double x6 = 1.0*((x5 == 1) ? 0
 : 0);
-    double x3 = 1e-15 < x[4];
-    double x4 = 0.6275*((x3 == 1) ? 0
+    double x7 = 1e-15 < x[3];
+    double x8 = 1.0*((x7 == 1) ? 0
 : 0);
-    double x5 = 1e-15 < x[3];
-    double x6 = 0.6275*((x5 == 1) ? 0
+    double x9 = 1e-15 < x[4];
+    double x10 = 1.0*((x9 == 1) ? 0
 : 0);
-    double x7 = 1e-15 < x[6];
-    double x8 = 0.1375*((x7 == 1) ? 0
-: 0);
-    double x9 = 1e-15 < x[7];
-    double x10 = 0.1375*((x9 == 1) ? 0
-: 0);
-    double x11 = x10 + x6 + x8;
-    double x12 = x11 + x4;
-    double x13 = x12 + x2;
-    double x14 = pow(x0, -1);
-    double x15 = 8.3145*x14;
-    double x16 = x[2]*x15;
-    double x17 = x13*x16;
-    double x18 = x14*x13;
-    double x19 = pow(x[2], 1.0);
-    double x20 = pow(x[2], 3.0);
-    double x21 = pow(x20, -1);
-    double x22 = 148184.0*x21;
-    double x23 = pow(x[2], -1);
-    double x24 = x[2] < 700.0;
-    double x25 = (x[2] < 933.47 && 700.0 <= x[2]);
-    double x26 = pow(x[2], -11.0);
-    double x27 = 933.47 <= x[2];
-    double x28 = ((x24 == 1) ? (
-   -0.003769324 - 5.265984e-06*x19 + x22 - 24.3671976*x23
+    double x11 = x10 + x8;
+    double x12 = x11 + x6;
+    double x13 = 8.3145*x2;
+    double x14 = x[2]*x13;
+    double x15 = x14*x12;
+    double x16 = 16.629*x2;
+    double x17 = pow(x[2], 5.0);
+    double x18 = pow(x[2], 1.0);
+    double x19 = pow(x[2], 3.0);
+    double x20 = pow(x19, -1);
+    double x21 = 148184.0*x20;
+    double x22 = x[2] < 700.0;
+    double x23 = (x[2] < 933.47 && 700.0 <= x[2]);
+    double x24 = pow(x[2], -11.0);
+    double x25 = 933.47 <= x[2];
+    double x26 = ((x22 == 1) ? (
+   -0.003769324 - 24.3671976*x0 - 5.265984e-06*x18 + x21
+)
+: ((x23 == 1) ? (
+   0.037063964 - 38.5844296*x0 - 3.4585362e-05*x18 + x21
 )
 : ((x25 == 1) ? (
-   0.037063964 - 3.4585362e-05*x19 + x22 - 38.5844296*x23
-)
-: ((x27 == 1) ? (
-   -31.748192*x23 - 1.1074716e+30*x26
+   -31.748192*x0 - 1.1074716e+30*x24
 )
 : 0)));
-    double x29 = x[2] < 1811.0;
-    double x30 = 1811.0 <= x[2];
-    double x31 = 0.235*((x29 == 1) ? (
-   -0.00879504 - 3.53562e-07*x19 + 154718.0*x21 - 23.5143*x23
+    double x27 = x[2] < 933.47;
+    double x28 = x[2] < 1357.77;
+    double x29 = 1357.77 <= x[2];
+    double x30 = x[2] < 1811.0;
+    double x31 = 2.066427e+33*x24;
+    double x32 = 1811.0 <= x[2];
+    double x33 = ((x30 == 1) ? (
+   -0.00879504 - 23.5143*x0 - 3.53562e-07*x18 + 154718.0*x20
 )
-: ((x30 == 1) ? (
-   -46.0*x23 + 2.066427e+33*x26
-)
-: 0));
-    double x32 = x[3]*x[6];
-    double x33 = x[2] < 1357.77;
-    double x34 = 1357.77 <= x[2];
-    double x35 = x31 + 0.6275*((x33 == 1) ? (
-   -0.00531368 + 7.75338e-07*x19 + 104956.0*x21 - 24.112392*x23
-)
-: ((x34 == 1) ? (
-   -31.38*x23 + 3.277503e+31*x26
+: ((x32 == 1) ? (
+   -46.0*x0 + x31
 )
 : 0));
-    double x36 = x[4]*x[5];
-    double x37 = x[3]*x[7];
-    double x38 = log(x[3]);
-    double x39 = x2 + x4 + x8;
-    double x40 = x10 + x39;
-    double x41 = x40 + 0.6275*((x5 == 1) ? (
-   1 + x38
+    double x34 = 1.0*x2;
+    double x35 = 1.0*x1;
+    double x36 = 8.1*x[4];
+    double x37 = x[4]*x[5];
+    double x38 = (1.0/3.0)*(1 - x1);
+    double x39 = x[3] + x38;
+    double x40 = 9.12034153*x39;
+    double x41 = x[3]*x[5];
+    double x42 = 4.8728*x41;
+    double x43 = -x[5];
+    double x44 = x[3] + x43;
+    double x45 = 4.8728*x44;
+    double x46 = log(x[2]);
+    double x47 = 10.0*x46;
+    double x48 = -80.8 + x47;
+    double x49 = x48*x[4];
+    double x50 = x49*x[3];
+    double x51 = x3*x49;
+    double x52 = x[4] + x38;
+    double x53 = 11.3118607*x52;
+    double x54 = x41*x[4];
+    double x55 = log(x[3]);
+    double x56 = x10 + x6;
+    double x57 = x56 + 1.0*((x7 == 1) ? (
+   1 + x55
 )
 : 0);
-    double x42 = x41*x15;
-    double x43 = log(x[2]);
-    double x44 = 23.5143*x43;
-    double x45 = pow(x[2], 2.0);
-    double x46 = pow(x45, -1);
-    double x47 = pow(x[2], -10.0);
-    double x48 = 46.0*x43;
-    double x49 = 0.235*((x29 == 1) ? (
-   100.6197 - 0.00879504*x19 - x44 - 1.76781e-07*x45 - 77359.0*x46
+    double x58 = x57*x13;
+    double x59 = 24.3671976*x46;
+    double x60 = pow(x[2], 2.0);
+    double x61 = pow(x60, -1);
+    double x62 = -74092.0*x61;
+    double x63 = 38.5844296*x46;
+    double x64 = pow(x[2], -10.0);
+    double x65 = 31.748192*x46;
+    double x66 = ((x22 == 1) ? (
+   112.7258404 - 0.003769324*x18 - x59 - 2.632992e-06*x60 + x62
 )
-: ((x30 == 1) ? (
-   253.31255 - 2.066427e+32*x47 - x48
-)
-: 0));
-    double x50 = 24.3671976*x43;
-    double x51 = -74092.0*x46;
-    double x52 = 38.5844296*x43;
-    double x53 = 31.748192*x43;
-    double x54 = ((x24 == 1) ? (
-   112.7258404 - 0.003769324*x19 - 2.632992e-06*x45 - x50 + x51
+: ((x23 == 1) ? (
+   184.4640164 + 0.037063964*x18 - 1.7292681e-05*x60 + x62 - x63
 )
 : ((x25 == 1) ? (
-   184.4640164 + 0.037063964*x19 - 1.7292681e-05*x45 + x51 - x52
-)
-: ((x27 == 1) ? (
-   156.935961 + 1.1074716e+29*x47 - x53
+   156.935961 + 1.1074716e+29*x64 - x65
 )
 : 0)));
-    double x55 = 7.44 + x49 + 0.765*x54;
-    double x56 = x55*x[5];
-    double x57 = 7.2566 + x49 + 0.6275*x54;
-    double x58 = x[5]*x[7];
-    double x59 = 0.235*((x29 == 1) ? 0
-: ((x30 == 1) ? 0
+    double x67 = pow(x[2], 6.0);
+    double x68 = ((x27 == 1) ? (
+   -11.841867 + x66 + 5.5538e-19*x67
+)
+: ((x25 == 1) ? (
+   -11.253974 - 1.1079e+29*x64 + x66
+)
 : 0));
-    double x60 = ((x24 == 1) ? 0
+    double x69 = ((x30 == 1) ? 0
+: ((x32 == 1) ? 0
+: 0));
+    double x70 = ((x30 == 1) ? (
+   x69
+)
+: ((x32 == 1) ? (
+   x69
+)
+: 0));
+    double x71 = ((x28 == 1) ? 0
+: ((x29 == 1) ? 0
+: 0));
+    double x72 = ((x22 == 1) ? 0
+: ((x23 == 1) ? 0
 : ((x25 == 1) ? 0
-: ((x27 == 1) ? 0
 : 0)));
-    double x61 = x59 + 0.6275*x60;
-    double x62 = x61*x[5];
-    double x63 = x62*x[7];
-    double x64 = x59 + 0.6275*((x33 == 1) ? 0
-: ((x34 == 1) ? 0
-: 0));
-    double x65 = 0.1375*x60 + x64;
-    double x66 = x65*x[6];
-    double x67 = x64*x36;
-    double x68 = x59 + 0.765*x60;
-    double x69 = x68*x[5];
-    double x70 = x69*x[6];
-    double x71 = x63*x[3] + x66*x36 + x67*x[7] + x70*x[3];
-    double x72 = pow(x0, -2);
-    double x73 = x[2]*x72;
-    double x74 = x73*x13;
-    double x75 = log(x[4]);
-    double x76 = log(x[5]);
-    double x77 = log(x[6]);
-    double x78 = log(x[7]);
-    double x79 = 0.6275*((x5 == 1) ? (
-   x38*x[3]
-)
-: 0) + 0.6275*((x3 == 1) ? (
-   x75*x[4]
-)
-: 0) + 0.235*((x1 == 1) ? (
-   x76*x[5]
-)
-: 0) + 0.1375*((x7 == 1) ? (
-   x77*x[6]
-)
-: 0) + 0.1375*((x9 == 1) ? (
-   x78*x[7]
-)
-: 0);
-    double x80 = 5.21734875*x79;
-    double x81 = x80*x72;
-    double x82 = 24.112392*x43;
-    double x83 = 31.38*x43;
-    double x84 = x49 + 0.6275*((x33 == 1) ? (
-   106.372843 - 0.00531368*x19 + 3.87669e-07*x45 - 52478.0*x46 - x82
-)
-: ((x34 == 1) ? (
-   152.423828 - 3.277503e+30*x47 - x83
-)
-: 0));
-    double x85 = x84*x36;
-    double x86 = x57*x37;
-    double x87 = 0.1375*x54 + x84;
-    double x88 = x87*x[6];
-    double x89 = x88*x[5];
-    double x90 = x56*x32 + x85*x[7] + x86*x[5] + x89*x[4];
-    double x91 = 0.6275*x72;
-    double x92 = x17 - 5.21734875*x74 - x81 - x91*x90;
-    double x93 = x0*(x42 + x92 + x14*(x71 + x56*x[6] + x58*x57));
-    double x94 = x90*x14;
-    double x95 = x17 + x94 + x79*x15;
-    double x96 = 0.6275*x95;
-    double x97 = x11 + x2;
-    double x98 = x97 + 0.6275*((x3 == 1) ? (
-   1 + x75
-)
-: 0);
-    double x99 = x98*x15;
-    double x100 = x84*x[7];
-    double x101 = x0*(x92 + x99 + x14*(x71 + x89 + x100*x[5]));
-    double x102 = 1.9539075*x79;
-    double x103 = x72*x102;
-    double x104 = x12 + 0.235*((x1 == 1) ? (
-   1 + x76
-)
-: 0);
-    double x105 = x15*x104;
-    double x106 = 0.235*x72;
-    double x107 = x0*(-x103 + x105 + x17 - 1.9539075*x74 + x14*(x71 + x86 + x100*x[4] + x55*x32 + x88*x[4]) - x90*x106);
-    double x108 = x10 + x2 + x4 + x6;
-    double x109 = x108 + 0.1375*((x7 == 1) ? (
-   1 + x77
-)
-: 0);
-    double x110 = x15*x109;
-    double x111 = 1.14324375*x79;
-    double x112 = x72*x111;
-    double x113 = 0.1375*x72;
-    double x114 = x0*(x110 - x112 + x17 - 1.14324375*x74 + x14*(x71 + x56*x[3] + x87*x36) - x90*x113);
-    double x115 = x39 + x6;
-    double x116 = x115 + 0.1375*((x9 == 1) ? (
-   1 + x78
-)
-: 0);
-    double x117 = x15*x116;
-    double x118 = x[3]*x[5];
-    double x119 = x0*(x117 + x17 + x14*(x71 + x85 + x57*x118));
-    double x120 = x[2]*x18;
-    double x121 = 5.21734875*x120 + 0.6275*x94 + x80*x14;
-    double x122 = pow(x19, -1);
-    double x123 = 74092.0*x122;
-    double x124 = pow(x[2], -9.0);
-    double x125 = ((x24 == 1) ? (
-   -7976.15 + 137.093038*x[2] + x123 - 8.77664e-07*x20 - 0.001884662*x45 - x[2]*x50
+    double x73 = ((x27 == 1) ? (
+   x72
 )
 : ((x25 == 1) ? (
-   -11276.24 + 223.048446*x[2] + x123 - 5.764227e-06*x20 + 0.018531982*x45 - x[2]*x52
+   x72
 )
-: ((x27 == 1) ? (
-   -11278.378 + 188.684153*x[2] - 1.230524e+28*x124 - x[2]*x53
+: 0));
+    double x74 = x70*x[5] + x71*x[4] + x73*x[3];
+    double x75 = x[4] + x43;
+    double x76 = pow(x75, 2);
+    double x77 = 3.60297*x76;
+    double x78 = x77*x[4];
+    double x79 = 2.32968*x[4];
+    double x80 = 0.0327*x75;
+    double x81 = x80*x[5];
+    double x82 = 22.1314*x[3];
+    double x83 = x36*x[3] + x42*x44 + x51*x[3] + x54*x40 + x54*x53 - x78*x[5] - x79*x[5] - x81*x[4] + x82*x[5];
+    double x84 = pow(x1, -2);
+    double x85 = 1.0*x84;
+    double x86 = 8.3145*x84;
+    double x87 = 23.5143*x46;
+    double x88 = 46.0*x46;
+    double x89 = 2.066427e+32*x64;
+    double x90 = ((x30 == 1) ? (
+   100.6197 - 0.00879504*x18 - 1.76781e-07*x60 - 77359.0*x61 - x87
+)
+: ((x32 == 1) ? (
+   253.31255 - x88 - x89
+)
+: 0));
+    double x91 = ((x30 == 1) ? (
+   -6.55843 - 2.572612e-20*x67 + x90
+)
+: ((x32 == 1) ? (
+   -8.01055 + x89 + x90
+)
+: 0));
+    double x92 = 24.112392*x46;
+    double x93 = 31.38*x46;
+    double x94 = ((x28 == 1) ? (
+   96.860939 - 0.00531368*x18 + 3.87669e-07*x60 - 52478.0*x61 - 4.09423e-20*x67 - x92
+)
+: ((x29 == 1) ? (
+   142.501484 - x93
+)
+: 0));
+    double x95 = x68*x[3] + x91*x[5] + x94*x[4];
+    double x96 = log(x[4]);
+    double x97 = log(x[5]);
+    double x98 = 1.0*((x7 == 1) ? (
+   x55*x[3]
+)
+: 0) + 1.0*((x9 == 1) ? (
+   x96*x[4]
+)
+: 0) + 1.0*((x5 == 1) ? (
+   x97*x[5]
+)
+: 0);
+    double x99 = x15 - x83*x85 - x85*x95 - x86*x98 - x[2]*x86*x12;
+    double x100 = x35*(x58 + x99 + x34*(22.1314*x[5] + x36 + x42 + x50 + x51 + 2.30960745333333*x54 + x40*x37 + x45*x[5] + x53*x37) + (x68 + x74)*x34);
+    double x101 = x15 + x83*x34 + x95*x34 + x98*x13;
+    double x102 = 1.0*x101;
+    double x103 = 0.0327*x37;
+    double x104 = x75*x37;
+    double x105 = 7.20594*x104;
+    double x106 = x6 + x8;
+    double x107 = x106 + 1.0*((x9 == 1) ? (
+   1 + x96
+)
+: 0);
+    double x108 = x13*x107;
+    double x109 = x35*(x108 + x99 + x34*(8.1*x[3] - 2.32968*x[5] - x103 - x105 - x50 + 4.50112662333333*x54 - x81 + x4*x48 + x40*x41 + x53*x41 - x77*x[5]) + (x74 + x94)*x34);
+    double x110 = x[4]*x[3];
+    double x111 = x11 + 1.0*((x5 == 1) ? (
+   1 + x97
+)
+: 0);
+    double x112 = x13*x111;
+    double x113 = x35*(x112 + x99 + x34*(x103 + x105 - x42 - 6.81073407666667*x54 - x78 - x79 + x82 + x40*x110 + x45*x[3] + x53*x110 - x80*x[4]) + (x74 + x91)*x34);
+    double x114 = pow(x[2], 7.0);
+    double x115 = pow(x18, -1);
+    double x116 = 74092.0*x115;
+    double x117 = pow(x[2], -9.0);
+    double x118 = ((x22 == 1) ? (
+   -7976.15 + 137.093038*x[2] + x116 - 8.77664e-07*x19 - 0.001884662*x60 - x[2]*x59
+)
+: ((x23 == 1) ? (
+   -11276.24 + 223.048446*x[2] + x116 - 5.764227e-06*x19 + 0.018531982*x60 - x[2]*x63
+)
+: ((x25 == 1) ? (
+   -11278.378 + 188.684153*x[2] - 1.230524e+28*x117 - x[2]*x65
 )
 : 0)));
-    double x126 = 0.235*((x29 == 1) ? (
-   1225.7 + 124.134*x[2] + 77359.0*x122 - 5.8927e-08*x20 - 0.00439752*x45 - x[2]*x44
+    double x119 = ((x27 == 1) ? (
+   11005.029 - 11.841867*x[2] + 7.934e-20*x114 + x118
 )
-: ((x30 == 1) ? (
-   -25383.581 + 299.31255*x[2] + 2.29603e+31*x124 - x[2]*x48
-)
-: 0));
-    double x127 = -27781.3 + 7.2566*x[2] + 0.6275*x125 + x126;
-    double x128 = x127*x[5];
-    double x129 = -30814.4 + 7.44*x[2] + 0.765*x125 + x126;
-    double x130 = x129*x[5];
-    double x131 = x130*x[6];
-    double x132 = x131 + x71 + x128*x[7];
-    double x133 = x14*x132;
-    double x134 = x[6] + x[7];
-    double x135 = 14845.2615*x14;
-    double x136 = x36*x135;
-    double x137 = x72*x134;
-    double x138 = x36*x[3];
-    double x139 = x137*x138;
-    double x140 = x126 + 0.6275*((x33 == 1) ? (
-   -7770.458 + 130.485235*x[2] + 52478.0*x122 + 1.29223e-07*x20 - 0.00265684*x45 - x[2]*x82
-)
-: ((x34 == 1) ? (
-   -13542.026 + 183.803828*x[2] + 3.64167e+29*x124 - x[2]*x83
+: ((x25 == 1) ? (
+   10482.382 - 11.253974*x[2] + 1.231e+28*x117 + x118
 )
 : 0));
-    double x141 = -7524.93486 + 0.1375*x125 + x140;
-    double x142 = x141*x[5];
-    double x143 = x142*x[6];
-    double x144 = x140*x[4];
+    double x120 = x119 + x74;
+    double x121 = 2.0*x2;
+    double x122 = x[2]*x57;
+    double x123 = -47262.3591 + 11.3118607*x[2];
+    double x124 = x52*x123;
+    double x125 = x124*x[4];
+    double x126 = -66622.0 + 8.1*x[2];
+    double x127 = -5672.58 + 4.8728*x[2];
+    double x128 = x44*x127;
+    double x129 = 2812.0*pow(x3, 2);
+    double x130 = x129*x[4];
+    double x131 = 5624.0*x[4];
+    double x132 = x4*x131;
+    double x133 = -24637.8886 + 9.12034153*x[2];
+    double x134 = x39*x133;
+    double x135 = x134*x[4];
+    double x136 = (1.0/3.0)*x123;
+    double x137 = x41*x136;
+    double x138 = -x137*x[4];
+    double x139 = 46800.0 - 90.8*x[2] + x[2]*x47;
+    double x140 = x3*x139;
+    double x141 = x140*x[4];
+    double x142 = x139*x[4];
+    double x143 = x142*x[3];
+    double x144 = x127*x[3];
     double x145 = x144*x[5];
-    double x146 = x131*x[3] + x143*x[4] + x145*x[7] + x37*x128;
-    double x147 = 9315.40159125*x139 - x[2]*x81 - x91*x146;
-    double x148 = x133 + x147 + x[2]*x42 - x134*x136;
-    double x149 = 0.6275*x148;
-    double x150 = x36*x137;
-    double x151 = x[2]*x41;
-    double x152 = 10.4346975*x72;
-    double x153 = 1.255*x72;
-    double x154 = pow(x0, -3);
-    double x155 = x134*x138*x154;
-    double x156 = x[2]*x79;
-    double x157 = x154*x156;
-    double x158 = x146*x154;
-    double x159 = -11690.8289970187*x155 + 6.54777268125*x157 + 0.7875125*x158;
-    double x160 = x14*x134;
-    double x161 = 9315.40159125*x160;
-    double x162 = 5.21734875*x151;
-    double x163 = 0.6275*x133 + x14*x162 - x36*x161;
-    double x164 = x72*x156;
-    double x165 = -3.273886340625*x164;
-    double x166 = x72*x146;
-    double x167 = -0.39375625*x166;
-    double x168 = 5845.41449850937*x139;
-    double x169 = x165 + x167 + x168;
-    double x170 = x134*x135;
-    double x171 = x118*x137;
-    double x172 = x[2]*x98;
-    double x173 = 5.21734875*x172;
-    double x174 = x140*x[5];
-    double x175 = x143 + x71 + x174*x[7];
-    double x176 = x66*x[5];
-    double x177 = x64*x58;
-    double x178 = x176 + x177 + x71;
-    double x179 = x63 + x70;
-    double x180 = x165 + x167 + x168 + x0*(9315.40159125*x150 + x159 + x17 + 9315.40159125*x171 - x170*x[5] - x72*x162 - x72*x173 - x91*x132 - x91*x175 + (x178 + x179)*x14);
-    double x181 = x14*x175;
-    double x182 = 0.6275*x181 - x118*x161 + x14*x173;
-    double x183 = x[4]*x[3];
-    double x184 = x160*x183;
-    double x185 = x[2]*x14;
-    double x186 = 5.21734875*x185;
-    double x187 = x141*x[4];
-    double x188 = x127*x[3];
-    double x189 = x129*x[6];
-    double x190 = x71 + x144*x[7] + x187*x[6] + x188*x[7] + x189*x[3];
-    double x191 = x14*x190;
-    double x192 = -9315.40159125*x184 + 0.6275*x191 + x104*x186;
-    double x193 = 1.9539075*x151;
-    double x194 = x179 + x71;
-    double x195 = x66*x[4];
-    double x196 = x61*x37;
-    double x197 = x68*x32;
-    double x198 = x64*x[4]*x[7];
-    double x199 = x195 + x196 + x197 + x198;
-    double x200 = x183*x137;
-    double x201 = x73*x104;
-    double x202 = -4378.2387478875*x155 + 2.4521539125*x157 + 0.294925*x158 + x17 + 9315.40159125*x200 - 5.21734875*x201 - x91*x190;
-    double x203 = 2189.11937394375*x139 - 1.22607695625*x164 - 0.1474625*x166;
-    double x204 = x203 + x0*(3488.6364525*x150 + x202 - x106*x132 + x14*(x189 + x194 + x199 + x127*x[7]) - x170*x[4] - x72*x193);
-    double x205 = x73*x109;
-    double x206 = x71 + x130*x[3] + x142*x[4];
-    double x207 = -2561.73543759375*x155 + 0.1725625*x158 - 5.21734875*x205 - x91*x206;
-    double x208 = 1.43477090625*x157 + x207;
-    double x209 = 1.14324375*x151;
-    double x210 = x65*x36;
-    double x211 = x69*x[3];
-    double x212 = x210 + x211;
-    double x213 = x72*x138;
-    double x214 = x17 + 9315.40159125*x213;
-    double x215 = -x136 + x214;
-    double x216 = 2041.22345625*x150 + x215 - x113*x132 + x14*(x130 + x194 + x212) - x72*x209;
-    double x217 = x14*x138;
-    double x218 = -9315.40159125*x217;
-    double x219 = x14*x206;
-    double x220 = 1280.86771879688*x139 - 0.08628125*x166;
-    double x221 = -0.717385453125*x164 + x218 + 0.6275*x219 + x220 + x109*x186;
-    double x222 = x62*x[3];
-    double x223 = x222 + x67;
-    double x224 = x223 + x71;
-    double x225 = x73*x116;
-    double x226 = x145 + x71 + x128*x[3];
-    double x227 = -5.21734875*x225 - x91*x226;
-    double x228 = x0*(x215 + x227 + x14*(x128 + x179 + x224));
-    double x229 = x14*x226;
-    double x230 = x218 + 0.6275*x229 + x116*x186;
-    double x231 = x118*x135;
-    double x232 = x147 + x181 + x[2]*x99 - x231*x134;
-    double x233 = 0.6275*x232;
-    double x234 = 3488.6364525*x118;
-    double x235 = x135*x[3];
-    double x236 = 1.9539075*x172;
-    double x237 = x203 + x0*(x202 - x106*x175 + x234*x137 - x235*x134 - x72*x236 + (x178 + x199 + x140*x[7] + x141*x[6])*x14);
-    double x238 = 1.14324375*x172;
-    double x239 = x214 - x231;
-    double x240 = 2041.22345625*x171 + x239 - x113*x175 + x14*(x142 + x178 + x212) - x72*x238;
-    double x241 = x0*(x227 + x239 + x14*(x174 + x178 + x223));
-    double x242 = x235*x[4];
-    double x243 = 3488.6364525*x139 - 0.235*x166 + x191 - x[2]*x103 + x[2]*x105 - x242*x134;
-    double x244 = 0.6275*x243;
-    double x245 = 1.9539075*x185;
-    double x246 = -3488.6364525*x217;
-    double x247 = x17 + 3488.6364525*x213 - x242;
-    double x248 = 479.68751221875*x139 - 0.26866228125*x164 - 0.0323125*x166 + x0*(-959.3750244375*x155 + 0.5373245625*x157 + 0.064625*x158 + 2041.22345625*x200 - 1.14324375*x201 - 1.9539075*x205 + x247 - x113*x190 + x14*(x187 + x199 + x212 + x71 + x129*x[3]) - x206*x106);
-    double x249 = x0*(-1.9539075*x225 + x247 - x226*x106 + (x144 + x188 + x199 + x224)*x14);
-    double x250 = 2041.22345625*x160;
-    double x251 = 1.43477090625*x157 + x207;
-    double x252 = -x36*x235;
-    double x253 = 2041.22345625*x139 - 0.1375*x166 + x219 + x252 + x[2]*x110 - x[2]*x112;
-    double x254 = -0.717385453125*x164 + x220 + 0.6275*x253;
-    double x255 = 1.14324375*x185;
-    double x256 = -2041.22345625*x217;
-    double x257 = 1.14324375*x116;
-    double x258 = x0*(x17 + 2041.22345625*x213 - x226*x113 - x73*x257 + (x212 + x224)*x14);
-    double x259 = x229 + x252 + x[2]*x117;
-    double x260 = 0.6275*x259;
-    out[0] = x0*(x17 + 16.629*x18 + x14*(x32*(0.765*x28 + x31)*x[5] + x36*x35*x[7] + x36*(0.1375*x28 + x35)*x[6] + x37*(0.6275*x28 + x31)*x[5]));
-    out[1] = x93 + x96;
-    out[2] = x101 + x96;
-    out[3] = x107 + 0.235*x95;
-    out[4] = x114 + 0.1375*x95;
-    out[5] = x119;
-    out[6] = x121 + x93;
-    out[7] = x149 + x163 + x169 + x0*(18630.8031825*x150 + x159 - x132*x153 + x14*(2*x63 + 2*x70 + x71) - x151*x152 + x16*(x40 + 0.6275*((x5 == 1) ? (
+    double x146 = -91976.5 + 22.1314*x[2];
+    double x147 = 243.8*x41;
+    double x148 = x44*x147;
+    double x149 = 121.9*pow(x44, 2);
+    double x150 = (2.0/3.0)*x133;
+    double x151 = x41*x150;
+    double x152 = -x130 - x132 + x138 + x141 + x143 + x145 + x148 + x125*x[5] + x126*x[4] + x128*x[5] + x135*x[5] + x146*x[5] + x149*x[5] + x151*x[4];
+    double x153 = 2.0*x152;
+    double x154 = 487.6*x44;
+    double x155 = x131*x[3];
+    double x156 = -x155;
+    double x157 = x127*x[5];
+    double x158 = (2.0/3.0)*x123;
+    double x159 = x37*x158;
+    double x160 = 16.629*x84;
+    double x161 = 2.0*x84;
+    double x162 = x126*x[3];
+    double x163 = 324.53 - 0.0327*x[2];
+    double x164 = x75*x163;
+    double x165 = x164*x[4];
+    double x166 = x146*x[3];
+    double x167 = 36088.0 - 2.32968*x[2];
+    double x168 = x167*x[5];
+    double x169 = 10355.4 - 3.60297*x[2];
+    double x170 = x76*x169;
+    double x171 = x170*x[4];
+    double x172 = -x130*x[3] + x141*x[3] + x162*x[4] + x165*x[5] + x166*x[5] + x168*x[4] + x171*x[5] + x41*x125 + x41*x128 + x41*x135 + x41*x149;
+    double x173 = pow(x1, -3);
+    double x174 = 2.0*x173;
+    double x175 = x[2]*x98;
+    double x176 = ((x28 == 1) ? (
+   5194.277 + 120.973331*x[2] - 5.8489e-21*x114 + 52478.0*x115 + 1.29223e-07*x19 - 0.00265684*x60 - x[2]*x92
+)
+: ((x29 == 1) ? (
+   -46.545 + 173.881484*x[2] - x[2]*x93
+)
+: 0));
+    double x177 = 2.29603e+31*x117;
+    double x178 = ((x30 == 1) ? (
+   1225.7 + 124.134*x[2] + 77359.0*x115 - 5.8927e-08*x19 - 0.00439752*x60 - x[2]*x87
+)
+: ((x32 == 1) ? (
+   -25383.581 + 299.31255*x[2] + x177 - x[2]*x88
+)
+: 0));
+    double x179 = ((x30 == 1) ? (
+   12040.17 - 6.55843*x[2] - 3.67516e-21*x114 + x178
+)
+: ((x32 == 1) ? (
+   14544.751 - 8.01055*x[2] - x177 + x178
+)
+: 0));
+    double x180 = x119*x[3] + x176*x[4] + x179*x[5];
+    double x181 = x174*x172 + x174*x180 + 16.629*x175*x173;
+    double x182 = -x160*x175 - x161*x172 - x161*x180;
+    double x183 = x139*x[3];
+    double x184 = (1.0/3.0)*x133;
+    double x185 = -x37*x184;
+    double x186 = -x137;
+    double x187 = x73 + x74;
+    double x188 = x15 + x181 - x85*x120 - x85*x152 - x86*x122;
+    double x189 = x[2]*x107;
+    double x190 = 2*x169;
+    double x191 = x104*x190;
+    double x192 = x163*x[4];
+    double x193 = x192*x[5];
+    double x194 = x41*x184;
+    double x195 = -x194*x[4];
+    double x196 = x132 - x143 + x162 + x168 + x191 + x193 + x195 - x129*x[3] + x140*x[3] + x164*x[5] + x170*x[5] + x41*x124 + x41*x134 + x54*x158;
+    double x197 = x176 + x74;
+    double x198 = -x85*x196 - x85*x197 - x86*x189;
+    double x199 = x182 + x[2]*x108 + x34*x196 + x34*x197;
+    double x200 = x[2]*x58 + x34*x120 + x34*x152;
+    double x201 = x199 + x200 + x35*(x188 + x198 + x34*(x187 + x71) + x34*(x126 - x129 + x140 - x142 + x151 + x155 + x159 + x183 + x185 + x186 - 5624.0*x4 + x124*x[5] + x134*x[5] + x3*x131));
+    double x202 = x110*x150;
+    double x203 = (1.0/3.0)*x110;
+    double x204 = 243.8*x44;
+    double x205 = x124*x[3];
+    double x206 = x134*x[3];
+    double x207 = x138 - x145 - x148 + x165 + x166 + x171 - x191 - x193 + x195 + x128*x[3] + x149*x[3] + x167*x[4] + x205*x[4] + x206*x[4];
+    double x208 = x[2]*x111;
+    double x209 = x179 + x74;
+    double x210 = -x85*x207 - x85*x209 - x86*x208;
+    double x211 = x[2]*x112 + x34*x207 + x34*x209;
+    double x212 = x182 + x200 + x211 + x35*(x188 + x210 + x34*(x187 + x70) + x34*(x125 + x128 + x135 + x144 + x146 - x147 + x149 - x157 + x185 + x202 - x203*x123 + x204*x[3] - x204*x[5] - x37*x136));
+    double x213 = x163*x[5];
+    double x214 = x37*x190;
+    double x215 = x75*x169;
+    double x216 = x215*x[5];
+    double x217 = x215*x[4];
+    double x218 = x110*x158;
+    double x219 = x199 + x211 + x35*(x15 + x181 + x198 + x210 + x34*(x70 + x71 + x74) + x34*(x164 + x167 + x170 + x186 + x192 - x194 + x205 + x206 - x213 - x214 - 2*x216 + 2*x217 + x218 - x203*x133));
+    out[0] = x35*(x15 + x12*x16 + x34*(x[3]*((x27 == 1) ? (
+   3.33228e-18*x17 + x26
+)
+: ((x25 == 1) ? (
+   1.1079e+30*x24 + x26
+)
+: 0)) + x[4]*((x28 == 1) ? (
+   -0.00531368 - 24.112392*x0 - 2.456538e-19*x17 + 7.75338e-07*x18 + 104956.0*x20
+)
+: ((x29 == 1) ? (
+   -31.38*x0
+)
+: 0)) + x[5]*((x30 == 1) ? (
+   -1.5435672e-19*x17 + x33
+)
+: ((x32 == 1) ? (
+   -x31 + x33
+)
+: 0))) + 10.0*x0*x2*x4*x[4]);
+    out[1] = x100 + x102;
+    out[2] = x102 + x109;
+    out[3] = x102 + x113;
+    out[4] = x100 + x101;
+    out[5] = x182 + x120*x121 + x16*x122 + x2*x153 + x35*(x181 - x120*x161 - x122*x160 + x14*(x56 + 1.0*((x7 == 1) ? (
    pow(x[3], -1)
 )
-: 0)));
-    out[8] = x149 + x180 + x182;
-    out[9] = 0.235*x148 + x192 + x204;
-    out[10] = 0.1375*x148 + x221 + (x208 + x216)*x0;
-    out[11] = x228 + x230;
-    out[12] = x101 + x121;
-    out[13] = x163 + x180 + x233;
-    out[14] = x169 + x182 + x233 + x0*(x159 + 18630.8031825*x171 + x14*(2*x176 + 2*x177 + x71) + x16*(x97 + 0.6275*((x3 == 1) ? (
+: 0)) + x34*(2*x142 + x147 + x156 + 2*x157 - x159 + x154*x[5] - 11248.0*x3*x[4] + (4.0/3.0)*x37*x133) - x84*x153 + (2*x73 + x74)*x34);
+    out[6] = x201;
+    out[7] = x212;
+    out[8] = x101 + x109;
+    out[9] = x201;
+    out[10] = x182 + x121*x196 + x121*x197 + x16*x189 + x35*(x181 + x14*(x106 + 1.0*((x9 == 1) ? (
    pow(x[4], -1)
 )
-: 0)) - x172*x152 - x175*x153);
-    out[15] = x192 + 0.235*x232 + x237;
-    out[16] = x221 + 0.1375*x232 + (x208 + x240)*x0;
-    out[17] = x230 + x241;
-    out[18] = x107 + 1.9539075*x120 + 0.235*x94 + x14*x102;
-    out[19] = 0.235*x133 + x204 + x244 + x14*x193 - 3488.6364525*x36*x160;
-    out[20] = 0.235*x181 + x237 + x244 + x14*x236 - x234*x160;
-    out[21] = 819.8295663375*x139 - 0.4591682625*x164 - 0.055225*x166 - 3488.6364525*x184 + 0.235*x191 + 0.235*x243 + x0*(-1639.659132675*x155 + 0.918336525*x157 + 0.11045*x158 + 6977.272905*x200 - 3.907815*x201 + x14*(2*x195 + 2*x196 + 2*x197 + 2*x198 + x71) + x16*(x12 + 0.235*((x1 == 1) ? (
+: 0)) - x160*x189 - x161*x196 - x161*x197 + x34*(-x151 + x156 - 2*x183 + 2*x213 + x214 + 4*x216 + 11248.0*x4 + (4.0/3.0)*x41*x123) + (2*x71 + x74)*x34);
+    out[11] = x219;
+    out[12] = x101 + x113;
+    out[13] = x212;
+    out[14] = x219;
+    out[15] = x182 + x16*x208 + x207*x121 + x209*x121 + x35*(x181 + x14*(x11 + 1.0*((x5 == 1) ? (
    pow(x[5], -1)
 )
-: 0)) - 0.47*x72*x190) + x245*x104;
-    out[22] = 0.235*x219 + 0.1375*x243 + x246 + x248 + x245*x109;
-    out[23] = 0.235*x229 + x246 + x249 + x245*x116;
-    out[24] = x114 + 1.14324375*x120 + 0.1375*x94 + x14*x111;
-    out[25] = 0.1375*x133 + x254 + x14*x209 - x36*x250 + (x216 + x251)*x0;
-    out[26] = 0.1375*x181 + x254 + x14*x238 - x250*x118 + (x240 + x251)*x0;
-    out[27] = -2041.22345625*x184 + 0.1375*x191 + x248 + 0.235*x253 + x255*x104;
-    out[28] = 280.668225234375*x139 - 0.157196015625*x164 - 0.01890625*x166 + 0.1375*x219 + 0.1375*x253 + x256 + x0*(-561.33645046875*x155 + 0.31439203125*x157 + 0.0378125*x158 - 2.2864875*x205 + 4082.4469125*x213 + x14*(2*x210 + 2*x211 + x71) + x16*(x108 + 0.1375*((x7 == 1) ? (
-   pow(x[6], -1)
-)
-: 0)) - 0.275*x72*x206) + x255*x109;
-    out[29] = 0.1375*x229 + x256 + x258 + x257*x185;
-    out[30] = x119;
-    out[31] = x228 + x260;
-    out[32] = x241 + x260;
-    out[33] = x249 + 0.235*x259;
-    out[34] = x258 + 0.1375*x259;
-    out[35] = x0*(x14*(2*x222 + 2*x67 + x71) + x16*(x115 + 0.1375*((x9 == 1) ? (
-   pow(x[7], -1)
-)
-: 0)));
+: 0)) - x207*x161 - x208*x160 - x209*x161 + x34*(-2*x144 + x147 - 2*x192 - x202 + x214 - 4*x217 - x218 - x154*x[3]) + (2*x70 + x74)*x34);
 }
 
 __device__ void pycgpu_model_0_internal_cons_func(double* out, const double* x) {
-    out[0] = 1.0*(-1 + x[3] + x[4]);
-    out[1] = 1.0*(-1 + x[5]);
-    out[2] = 1.0*(-1 + x[6] + x[7]);
+    out[0] = 1.0*(-1 + x[3] + x[4] + x[5]);
 }
 
 __device__ void pycgpu_model_0_internal_cons_jac(double* out, const double* x) {
     out[0] = 0;
     out[1] = 1.0;
     out[2] = 1.0;
-    out[3] = 0;
-    out[4] = 0;
-    out[5] = 0;
-    out[6] = 0;
-    out[7] = 0;
-    out[8] = 0;
-    out[9] = 1.0;
-    out[10] = 0;
-    out[11] = 0;
-    out[12] = 0;
-    out[13] = 0;
-    out[14] = 0;
-    out[15] = 0;
-    out[16] = 1.0;
-    out[17] = 1.0;
+    out[3] = 1.0;
 }
 
 __device__ void pycgpu_model_0_mass_obj(double* out, const double* x) {
-    double x0 = 0.1375*x[6];
-    double x1 = 0.235*x[5];
-    double x2 = pow(x0 + x1 + 0.6275*(x[3] + x[4]), -1);
-    out[0] = x2*(0.6275*x[3] + x0);
-    out[1] = 0.6275*x2*x[4];
-    out[2] = x2*x1;
+    double x0 = 1.0/(x[3] + x[4] + x[5]);
+    out[0] = x0*x[3];
+    out[1] = x0*x[4];
+    out[2] = x0*x[5];
     out[3] = 0;
 }
 
 __device__ void pycgpu_model_0_formulamole_obj(double* out, const double* x) {
-    out[0] = 0.6275*x[3] + 0.1375*x[6];
-    out[1] = 0.6275*x[4];
-    out[2] = 0.235*x[5];
-    out[3] = 0.0;
-}
-
-__device__ void pycgpu_model_0_formulamole_grad(double* out, const double* x) {
-    out[0] = 0;
-    out[1] = 0.6275;
-    out[2] = 0;
-    out[3] = 0;
-    out[4] = 0.1375;
-    out[5] = 0;
-    out[6] = 0;
-    out[7] = 0;
-    out[8] = 0.6275;
-    out[9] = 0;
-    out[10] = 0;
-    out[11] = 0;
-    out[12] = 0;
-    out[13] = 0;
-    out[14] = 0;
-    out[15] = 0.235;
-    out[16] = 0;
-    out[17] = 0;
-}
-
-__device__ double pycgpu_model_1_obj(const double* x) {
-    double x0 = pow(1.0*x[5] + 2.0*(x[3] + x[4]), -1);
-    double x1 = x[4]*x[5];
-    double x2 = pow(x[2], 3.0);
-    double x3 = pow(x[2], -1.0);
-    double x4 = 74092.0*x3;
-    double x5 = x[2]*log(x[2]);
-    double x6 = pow(x[2], 2.0);
-    double x7 = pow(x[2], -9.0);
-    double x8 = 2.0*((x[2] < 700.0) ? (
-   -7976.15 + 137.093038*x[2] - 8.77664e-07*x2 + x4 - 24.3671976*x5 - 0.001884662*x6
-)
-: (((x[2] < 933.47 && 700.0 <= x[2])) ? (
-   -11276.24 + 223.048446*x[2] - 5.764227e-06*x2 + x4 - 38.5844296*x5 + 0.018531982*x6
-)
-: ((933.47 <= x[2]) ? (
-   -11278.378 + 188.684153*x[2] - 31.748192*x5 - 1.230524e+28*x7
-)
-: (
-   0
-))));
-    return x0*(x1*(x8 + ((x[2] < 1357.77) ? (
-   -7770.458 + 130.485235*x[2] + 1.29223e-07*x2 + 52478.0*x3 - 24.112392*x5 - 0.00265684*x6
-)
-: ((1357.77 <= x[2]) ? (
-   -13542.026 + 183.803828*x[2] - 31.38*x5 + 3.64167e+29*x7
-)
-: (
-   0
-)))) + (-99526.0 + 19.811*x[2] + x8 + ((x[2] < 1811.0) ? (
-   1225.7 + 124.134*x[2] - 5.8927e-08*x2 + 77359.0*x3 - 23.5143*x5 - 0.00439752*x6
-)
-: ((1811.0 <= x[2]) ? (
-   -25383.581 + 299.31255*x[2] - 46.0*x5 + 2.29603e+31*x7
-)
-: (
-   0
-))))*x[3]*x[5]) + 8.3145*x[2]*x0*(2.0*((1e-15 < x[3]) ? (
-   x[3]*log(x[3])
-)
-: (
-   0
-)) + 2.0*((1e-15 < x[4]) ? (
-   x[4]*log(x[4])
-)
-: (
-   0
-)) + 1.0*((1e-15 < x[5]) ? (
-   x[5]*log(x[5])
-)
-: (
-   0
-))) - 69000.0*x0*x1*x[3];
-}
-
-__device__ double pycgpu_model_1_formulaobj(const double* x) {
-    double x0 = 1.0*x[5] + 2.0*(x[3] + x[4]);
-    double x1 = pow(x0, -1);
-    double x2 = x[4]*x[5];
-    double x3 = pow(x[2], 3.0);
-    double x4 = pow(x[2], -1.0);
-    double x5 = 74092.0*x4;
-    double x6 = x[2]*log(x[2]);
-    double x7 = pow(x[2], 2.0);
-    double x8 = pow(x[2], -9.0);
-    double x9 = 2.0*((x[2] < 700.0) ? (
-   -7976.15 + 137.093038*x[2] - 8.77664e-07*x3 + x5 - 24.3671976*x6 - 0.001884662*x7
-)
-: (((x[2] < 933.47 && 700.0 <= x[2])) ? (
-   -11276.24 + 223.048446*x[2] - 5.764227e-06*x3 + x5 - 38.5844296*x6 + 0.018531982*x7
-)
-: ((933.47 <= x[2]) ? (
-   -11278.378 + 188.684153*x[2] - 31.748192*x6 - 1.230524e+28*x8
-)
-: (
-   0
-))));
-    return x0*(x1*(x2*(x9 + ((x[2] < 1357.77) ? (
-   -7770.458 + 130.485235*x[2] + 1.29223e-07*x3 + 52478.0*x4 - 24.112392*x6 - 0.00265684*x7
-)
-: ((1357.77 <= x[2]) ? (
-   -13542.026 + 183.803828*x[2] - 31.38*x6 + 3.64167e+29*x8
-)
-: (
-   0
-)))) + (-99526.0 + 19.811*x[2] + x9 + ((x[2] < 1811.0) ? (
-   1225.7 + 124.134*x[2] - 5.8927e-08*x3 + 77359.0*x4 - 23.5143*x6 - 0.00439752*x7
-)
-: ((1811.0 <= x[2]) ? (
-   -25383.581 + 299.31255*x[2] - 46.0*x6 + 2.29603e+31*x8
-)
-: (
-   0
-))))*x[3]*x[5]) + 8.3145*x[2]*x1*(2.0*((1e-15 < x[3]) ? (
-   x[3]*log(x[3])
-)
-: (
-   0
-)) + 2.0*((1e-15 < x[4]) ? (
-   x[4]*log(x[4])
-)
-: (
-   0
-)) + 1.0*((1e-15 < x[5]) ? (
-   x[5]*log(x[5])
-)
-: (
-   0
-))) - 69000.0*x2*x1*x[3]);
-}
-
-__device__ void pycgpu_model_1_formulagrad(double* out, const double* x) {
-    double x0 = 1.0*x[5] + 2.0*(x[3] + x[4]);
-    double x1 = pow(x0, -1);
-    double x2 = pow(x[2], 1.0);
-    double x3 = log(x[2]);
-    double x4 = 24.112392*x3;
-    double x5 = pow(x[2], 2.0);
-    double x6 = pow(x5, -1);
-    double x7 = x[2] < 1357.77;
-    double x8 = pow(x[2], -10.0);
-    double x9 = 31.38*x3;
-    double x10 = 1357.77 <= x[2];
-    double x11 = 24.3671976*x3;
-    double x12 = -74092.0*x6;
-    double x13 = x[2] < 700.0;
-    double x14 = 38.5844296*x3;
-    double x15 = (x[2] < 933.47 && 700.0 <= x[2]);
-    double x16 = 31.748192*x3;
-    double x17 = 933.47 <= x[2];
-    double x18 = 2.0*((x13 == 1) ? (
-   112.7258404 - x11 + x12 - 0.003769324*x2 - 2.632992e-06*x5
-)
-: ((x15 == 1) ? (
-   184.4640164 + x12 - x14 + 0.037063964*x2 - 1.7292681e-05*x5
-)
-: ((x17 == 1) ? (
-   156.935961 - x16 + 1.1074716e+29*x8
-)
-: (
-   0
-))));
-    double x19 = x[4]*x[5];
-    double x20 = 23.5143*x3;
-    double x21 = x[2] < 1811.0;
-    double x22 = 46.0*x3;
-    double x23 = 1811.0 <= x[2];
-    double x24 = x[3]*x[5];
-    double x25 = log(x[4]);
-    double x26 = 1e-15 < x[4];
-    double x27 = log(x[3]);
-    double x28 = 1e-15 < x[3];
-    double x29 = log(x[5]);
-    double x30 = 1e-15 < x[5];
-    double x31 = 2.0*((x26 == 1) ? (
-   x25*x[4]
-)
-: (
-   0
-)) + 2.0*((x28 == 1) ? (
-   x27*x[3]
-)
-: (
-   0
-)) + 1.0*((x30 == 1) ? (
-   x29*x[5]
-)
-: (
-   0
-));
-    double x32 = 8.3145*x1;
-    double x33 = x32*x31;
-    double x34 = 1.0*((x30 == 1) ? (
-   0
-)
-: (
-   0
-));
-    double x35 = 2.0*((x28 == 1) ? (
-   0
-)
-: (
-   0
-));
-    double x36 = 2.0*((x26 == 1) ? (
-   0
-)
-: (
-   0
-));
-    double x37 = x35 + x36;
-    double x38 = x[2]*x32;
-    double x39 = 69000.0*x1;
-    double x40 = x39*x[4];
-    double x41 = pow(x[2], 3.0);
-    double x42 = pow(x2, -1);
-    double x43 = 74092.0*x42;
-    double x44 = pow(x[2], -9.0);
-    double x45 = 2.0*((x13 == 1) ? (
-   -7976.15 + 137.093038*x[2] - 8.77664e-07*x41 + x43 - 0.001884662*x5 - x[2]*x11
-)
-: ((x15 == 1) ? (
-   -11276.24 + 223.048446*x[2] - 5.764227e-06*x41 + x43 + 0.018531982*x5 - x[2]*x14
-)
-: ((x17 == 1) ? (
-   -11278.378 + 188.684153*x[2] - 1.230524e+28*x44 - x[2]*x16
-)
-: (
-   0
-))));
-    double x46 = -99526.0 + 19.811*x[2] + x45 + ((x21 == 1) ? (
-   1225.7 + 124.134*x[2] - 5.8927e-08*x41 + 77359.0*x42 - 0.00439752*x5 - x[2]*x20
-)
-: ((x23 == 1) ? (
-   -25383.581 + 299.31255*x[2] + 2.29603e+31*x44 - x[2]*x22
-)
-: (
-   0
-)));
-    double x47 = x46*x[5];
-    double x48 = x45 + ((x7 == 1) ? (
-   -7770.458 + 130.485235*x[2] + 1.29223e-07*x41 + 52478.0*x42 - 0.00265684*x5 - x[2]*x4
-)
-: ((x10 == 1) ? (
-   -13542.026 + 183.803828*x[2] + 3.64167e+29*x44 - x[2]*x9
-)
-: (
-   0
-)));
-    double x49 = x48*x[5];
-    double x50 = x47*x[3] + x49*x[4];
-    double x51 = x[2]*x33 + x1*x50 - x40*x24;
-    double x52 = 2.0*x51;
-    double x53 = 2.0*((x13 == 1) ? (
-   0
-)
-: ((x15 == 1) ? (
-   0
-)
-: ((x17 == 1) ? (
-   0
-)
-: (
-   0
-))));
-    double x54 = x19*(x53 + ((x7 == 1) ? (
-   0
-)
-: ((x10 == 1) ? (
-   0
-)
-: (
-   0
-)))) + x24*(x53 + ((x21 == 1) ? (
-   0
-)
-: ((x23 == 1) ? (
-   0
-)
-: (
-   0
-))));
-    double x55 = pow(x0, -2);
-    double x56 = x50*x55;
-    double x57 = x55*x24*x[4];
-    double x58 = x[2]*x55*x31;
-    double x59 = -2.0*x56 + 138000.0*x57 - 16.629*x58;
-    out[0] = x0*(x33 + x1*(x19*(x18 + ((x7 == 1) ? (
-   106.372843 - 0.00531368*x2 - x4 + 3.87669e-07*x5 - 52478.0*x6
-)
-: ((x10 == 1) ? (
-   152.423828 - 3.277503e+30*x8 - x9
-)
-: (
-   0
-)))) + x24*(19.811 + x18 + ((x21 == 1) ? (
-   100.6197 - 0.00879504*x2 - x20 - 1.76781e-07*x5 - 77359.0*x6
-)
-: ((x23 == 1) ? (
-   253.31255 - x22 - 2.066427e+32*x8
-)
-: (
-   0
-))))) + (x34 + x37)*x38);
-    out[1] = x52 + x0*(x59 + x38*(x34 + x36 + 2.0*((x28 == 1) ? (
-   1 + x27
-)
-: (
-   0
-))) - x39*x19 + (x47 + x54)*x1);
-    out[2] = x52 + x0*(x59 + x38*(x34 + x35 + 2.0*((x26 == 1) ? (
-   1 + x25
-)
-: (
-   0
-))) - x39*x24 + (x49 + x54)*x1);
-    out[3] = 1.0*x51 + x0*(-1.0*x56 + 69000.0*x57 - 8.3145*x58 + x1*(x54 + x46*x[3] + x48*x[4]) + x38*(x37 + 1.0*((x30 == 1) ? (
-   1 + x29
-)
-: (
-   0
-))) - x40*x[3]);
-}
-
-__device__ void pycgpu_model_1_formulahess(double* out, const double* x) {
-    double x0 = 1e-15 < x[4];
-    double x1 = 2.0*((x0 == 1) ? 0
-: 0);
-    double x2 = 1e-15 < x[5];
-    double x3 = 1.0*((x2 == 1) ? 0
-: 0);
-    double x4 = 1e-15 < x[3];
-    double x5 = 2.0*((x4 == 1) ? 0
-: 0);
-    double x6 = x3 + x5;
-    double x7 = x1 + x6;
-    double x8 = 1.0*x[5] + 2.0*(x[3] + x[4]);
-    double x9 = pow(x8, -1);
-    double x10 = 8.3145*x9;
-    double x11 = x[2]*x10;
-    double x12 = x7*x11;
-    double x13 = 16.629*x7;
-    double x14 = x9*x13;
-    double x15 = pow(x[2], 1.0);
-    double x16 = pow(x[2], 3.0);
-    double x17 = pow(x16, -1);
-    double x18 = 148184.0*x17;
-    double x19 = pow(x[2], -1);
-    double x20 = x[2] < 700.0;
-    double x21 = (x[2] < 933.47 && 700.0 <= x[2]);
-    double x22 = pow(x[2], -11.0);
-    double x23 = 933.47 <= x[2];
-    double x24 = 2.0*((x20 == 1) ? (
-   -0.003769324 - 5.265984e-06*x15 + x18 - 24.3671976*x19
-)
-: ((x21 == 1) ? (
-   0.037063964 - 3.4585362e-05*x15 + x18 - 38.5844296*x19
-)
-: ((x23 == 1) ? (
-   -31.748192*x19 - 1.1074716e+30*x22
-)
-: 0)));
-    double x25 = x[2] < 1811.0;
-    double x26 = 1811.0 <= x[2];
-    double x27 = x[3]*x[5];
-    double x28 = x[2] < 1357.77;
-    double x29 = 1357.77 <= x[2];
-    double x30 = x[4]*x[5];
-    double x31 = log(x[2]);
-    double x32 = 24.112392*x31;
-    double x33 = pow(x[2], 2.0);
-    double x34 = pow(x33, -1);
-    double x35 = pow(x[2], -10.0);
-    double x36 = 31.38*x31;
-    double x37 = 24.3671976*x31;
-    double x38 = -74092.0*x34;
-    double x39 = 38.5844296*x31;
-    double x40 = 31.748192*x31;
-    double x41 = 2.0*((x20 == 1) ? (
-   112.7258404 - 0.003769324*x15 - 2.632992e-06*x33 - x37 + x38
-)
-: ((x21 == 1) ? (
-   184.4640164 + 0.037063964*x15 - 1.7292681e-05*x33 + x38 - x39
-)
-: ((x23 == 1) ? (
-   156.935961 + 1.1074716e+29*x35 - x40
-)
-: 0)));
-    double x42 = x41 + ((x28 == 1) ? (
-   106.372843 - 0.00531368*x15 - x32 + 3.87669e-07*x33 - 52478.0*x34
-)
-: ((x29 == 1) ? (
-   152.423828 - 3.277503e+30*x35 - x36
-)
-: 0));
-    double x43 = x42*x[4];
-    double x44 = 23.5143*x31;
-    double x45 = 46.0*x31;
-    double x46 = 19.811 + x41 + ((x25 == 1) ? (
-   100.6197 - 0.00879504*x15 - 1.76781e-07*x33 - 77359.0*x34 - x44
-)
-: ((x26 == 1) ? (
-   253.31255 - 2.066427e+32*x35 - x45
-)
-: 0));
-    double x47 = x46*x[5];
-    double x48 = x43*x[5] + x47*x[3];
-    double x49 = x9*x48;
-    double x50 = log(x[4]);
-    double x51 = log(x[3]);
-    double x52 = log(x[5]);
-    double x53 = 2.0*((x0 == 1) ? (
-   x50*x[4]
-)
-: 0) + 2.0*((x4 == 1) ? (
-   x51*x[3]
-)
-: 0) + 1.0*((x2 == 1) ? (
-   x52*x[5]
-)
-: 0);
-    double x54 = x12 + x53*x10;
-    double x55 = x49 + x54;
-    double x56 = 2.0*x55;
-    double x57 = x1 + x3;
-    double x58 = x57 + 2.0*((x4 == 1) ? (
-   1 + x51
-)
-: 0);
-    double x59 = x58*x10;
-    double x60 = 2.0*((x20 == 1) ? 0
-: ((x21 == 1) ? 0
-: ((x23 == 1) ? 0
-: 0)));
-    double x61 = x60 + ((x25 == 1) ? 0
-: ((x26 == 1) ? 0
-: 0));
-    double x62 = x61*x[5];
-    double x63 = x60 + ((x28 == 1) ? 0
-: ((x29 == 1) ? 0
-: 0));
-    double x64 = x63*x[4];
-    double x65 = x62*x[3] + x64*x[5];
-    double x66 = pow(x8, -2);
-    double x67 = x[2]*x66;
-    double x68 = 16.629*x53;
-    double x69 = x68*x66;
-    double x70 = 2.0*x66;
-    double x71 = x12 - x69 - x67*x13 - x70*x48;
-    double x72 = x8*(x59 + x71 + (x47 + x65)*x9);
-    double x73 = x6 + 2.0*((x0 == 1) ? (
-   1 + x50
-)
-: 0);
-    double x74 = x73*x10;
-    double x75 = x8*(x71 + x74 + x9*(x65 + x42*x[5]));
-    double x76 = 8.3145*x66;
-    double x77 = x[2]*x76;
-    double x78 = x76*x53;
-    double x79 = x1 + x5;
-    double x80 = x79 + 1.0*((x2 == 1) ? (
-   1 + x52
-)
-: 0);
-    double x81 = x80*x10;
-    double x82 = 1.0*x66;
-    double x83 = x8*(x12 - x78 + x81 - x7*x77 - x82*x48 + x9*(x43 + x65 + x46*x[3]));
-    double x84 = 2.0*x49 + x[2]*x14 + x9*x68;
-    double x85 = 276000.0*x66;
-    double x86 = x85*x30;
-    double x87 = 33.258*x67;
-    double x88 = pow(x15, -1);
-    double x89 = 74092.0*x88;
-    double x90 = pow(x[2], -9.0);
-    double x91 = 2.0*((x20 == 1) ? (
-   -7976.15 + 137.093038*x[2] - 8.77664e-07*x16 - 0.001884662*x33 + x89 - x[2]*x37
-)
-: ((x21 == 1) ? (
-   -11276.24 + 223.048446*x[2] - 5.764227e-06*x16 + 0.018531982*x33 + x89 - x[2]*x39
-)
-: ((x23 == 1) ? (
-   -11278.378 + 188.684153*x[2] - 1.230524e+28*x90 - x[2]*x40
-)
-: 0)));
-    double x92 = -99526.0 + 19.811*x[2] + x91 + ((x25 == 1) ? (
-   1225.7 + 124.134*x[2] - 5.8927e-08*x16 - 0.00439752*x33 + 77359.0*x88 - x[2]*x44
-)
-: ((x26 == 1) ? (
-   -25383.581 + 299.31255*x[2] + 2.29603e+31*x90 - x[2]*x45
-)
-: 0));
-    double x93 = x65 + x92*x[5];
-    double x94 = 4.0*x66;
-    double x95 = pow(x8, -3);
-    double x96 = x[2]*x95;
-    double x97 = x95*x30*x[3];
-    double x98 = x92*x[3];
-    double x99 = x91 + ((x28 == 1) ? (
-   -7770.458 + 130.485235*x[2] + 1.29223e-07*x16 - 0.00265684*x33 + 52478.0*x88 - x[2]*x32
-)
-: ((x29 == 1) ? (
-   -13542.026 + 183.803828*x[2] + 3.64167e+29*x90 - x[2]*x36
-)
-: 0));
-    double x100 = x99*x[4];
-    double x101 = x100*x[5] + x98*x[5];
-    double x102 = x95*x101;
-    double x103 = 8.0*x102 - 552000.0*x97 + 66.516*x53*x96;
-    double x104 = 138000.0*x9;
-    double x105 = x[2]*x9;
-    double x106 = 16.629*x58;
-    double x107 = x9*x93;
-    double x108 = 2.0*x107 + x105*x106 - x30*x104;
-    double x109 = 33.258*x53;
-    double x110 = -x67*x109;
-    double x111 = x86*x[3];
-    double x112 = -x94*x101;
-    double x113 = 69000.0*x9;
-    double x114 = 138000.0*x66;
-    double x115 = x30*x114;
-    double x116 = -x[2]*x69 + x115*x[3] - x70*x101;
-    double x117 = x116 + x[2]*x59 - x30*x113;
-    double x118 = x107 + x117;
-    double x119 = x110 + x111 + x112 + 2.0*x118;
-    double x120 = 16.629*x73;
-    double x121 = x63*x[5];
-    double x122 = x121 + x65;
-    double x123 = x65 + x99*x[5];
-    double x124 = x8*(x103 + x115 + x12 - x113*x[5] + x27*x114 - x67*x106 - x67*x120 - x70*x123 - x70*x93 + x9*(x122 + x62));
-    double x125 = x9*x123;
-    double x126 = 2.0*x125 + x105*x120 - x27*x104;
-    double x127 = 69000.0*x66;
-    double x128 = x30*x127;
-    double x129 = x61*x[3];
-    double x130 = x129 + x64;
-    double x131 = 16.629*x80;
-    double x132 = x[4]*x[3];
-    double x133 = x100 + x65 + x98;
-    double x134 = x114*x132 - x67*x131 - x70*x133;
-    double x135 = 4.0*x102 + x12 + x134 - 276000.0*x97 + x96*x109;
-    double x136 = x8*(x128 + x135 - x113*x[4] - x77*x58 - x82*x93 + x9*(x130 + x62 + x65 + x92));
-    double x137 = x9*x133;
-    double x138 = x116 + 2.0*x137 - x104*x132 + x105*x131;
-    double x139 = x113*x[3];
-    double x140 = x116 + x[2]*x74 - x139*x[5];
-    double x141 = x125 + x140;
-    double x142 = x110 + x111 + x112 + 2.0*x141;
-    double x143 = x8*(x135 - x139 + x27*x127 - x73*x77 - x82*x123 + x9*(x122 + x130 + x99));
-    double x144 = -x[2]*x78 + x[2]*x81 + x128*x[3] - x139*x[4] - x82*x101;
-    double x145 = x137 + x144;
-    double x146 = 2.0*x145;
-    out[0] = x8*(x12 + x14 + x9*(x27*(x24 + ((x25 == 1) ? (
-   -0.00879504 - 3.53562e-07*x15 + 154718.0*x17 - 23.5143*x19
-)
-: ((x26 == 1) ? (
-   -46.0*x19 + 2.066427e+33*x22
-)
-: 0))) + x30*(x24 + ((x28 == 1) ? (
-   -0.00531368 + 7.75338e-07*x15 + 104956.0*x17 - 24.112392*x19
-)
-: ((x29 == 1) ? (
-   -31.38*x19 + 3.277503e+31*x22
-)
-: 0)))));
-    out[1] = x56 + x72;
-    out[2] = x56 + x75;
-    out[3] = 1.0*x55 + x83;
-    out[4] = x72 + x84;
-    out[5] = x108 + x119 + x8*(x103 + x86 + x11*(x57 + 2.0*((x4 == 1) ? (
-   pow(x[3], -1)
-)
-: 0)) - x87*x58 - x93*x94 + (2*x62 + x65)*x9);
-    out[6] = x119 + x124 + x126;
-    out[7] = 1.0*x118 + x136 + x138;
-    out[8] = x75 + x84;
-    out[9] = x108 + x124 + x142;
-    out[10] = x126 + x142 + x8*(x103 + x11*(x6 + 2.0*((x0 == 1) ? (
-   pow(x[4], -1)
-)
-: 0)) + x85*x27 - x87*x73 + x9*(2*x121 + x65) - x94*x123);
-    out[11] = x138 + 1.0*x141 + x143;
-    out[12] = 1.0*x49 + x54 + x83;
-    out[13] = 1.0*x107 + x117 + x136 + x146;
-    out[14] = 1.0*x125 + x140 + x143 + x146;
-    out[15] = 1.0*x137 + x144 + 1.0*x145 + x8*(2.0*x102 + x134 - 138000.0*x97 + x11*(x79 + 1.0*((x2 == 1) ? (
-   pow(x[5], -1)
-)
-: 0)) + x68*x96 + x9*(2*x129 + 2*x64 + x65));
-}
-
-__device__ void pycgpu_model_1_internal_cons_func(double* out, const double* x) {
-    out[0] = 1.0*(-1 + x[3] + x[4]);
-    out[1] = 1.0*(-1 + x[5]);
-}
-
-__device__ void pycgpu_model_1_internal_cons_jac(double* out, const double* x) {
-    out[0] = 0;
-    out[1] = 1.0;
-    out[2] = 1.0;
-    out[3] = 0;
-    out[4] = 0;
-    out[5] = 0;
-    out[6] = 0;
-    out[7] = 1.0;
-}
-
-__device__ void pycgpu_model_1_mass_obj(double* out, const double* x) {
-    double x0 = 1.0*x[5];
-    double x1 = pow(x0 + 2.0*(x[3] + x[4]), -1);
-    double x2 = 2.0*x1;
-    out[0] = x2*x[3];
-    out[1] = x2*x[4];
-    out[2] = x0*x1;
-    out[3] = 0;
-}
-
-__device__ void pycgpu_model_1_formulamole_obj(double* out, const double* x) {
-    out[0] = 2.0*x[3];
-    out[1] = 2.0*x[4];
+    out[0] = 1.0*x[3];
+    out[1] = 1.0*x[4];
     out[2] = 1.0*x[5];
     out[3] = 0.0;
 }
 
-__device__ void pycgpu_model_1_formulamole_grad(double* out, const double* x) {
-    out[0] = 0;
-    out[1] = 2.0;
-    out[2] = 0;
-    out[3] = 0;
-    out[4] = 0;
-    out[5] = 0;
-    out[6] = 2.0;
-    out[7] = 0;
-    out[8] = 0;
-    out[9] = 0;
-    out[10] = 0;
-    out[11] = 1.0;
-}
-
-__device__ double pycgpu_model_2_obj(const double* x) {
-    double x0 = pow(2.0*x[5] + 5.0*(x[3] + x[4]), -1);
-    double x1 = x[3]*x[5];
-    double x2 = pow(x[2], 3.0);
-    double x3 = pow(x[2], -1.0);
-    double x4 = 74092.0*x3;
-    double x5 = x[2]*log(x[2]);
-    double x6 = pow(x[2], 2.0);
-    double x7 = pow(x[2], -9.0);
-    double x8 = 5.0*((x[2] < 700.0) ? (
-   -7976.15 + 137.093038*x[2] - 8.77664e-07*x2 + x4 - 24.3671976*x5 - 0.001884662*x6
-)
-: (((x[2] < 933.47 && 700.0 <= x[2])) ? (
-   -11276.24 + 223.048446*x[2] - 5.764227e-06*x2 + x4 - 38.5844296*x5 + 0.018531982*x6
-)
-: ((933.47 <= x[2]) ? (
-   -11278.378 + 188.684153*x[2] - 31.748192*x5 - 1.230524e+28*x7
-)
-: (
-   0
-))));
-    return x0*(x1*(-228250.0 + 48.99503*x[2] + x8 + 2.0*((x[2] < 1811.0) ? (
-   1225.7 + 124.134*x[2] - 5.8927e-08*x2 + 77359.0*x3 - 23.5143*x5 - 0.00439752*x6
-)
-: ((1811.0 <= x[2]) ? (
-   -25383.581 + 299.31255*x[2] - 46.0*x5 + 2.29603e+31*x7
-)
-: (
-   0
-)))) + x[4]*x[5]*(x8 + 2.0*((x[2] < 1357.77) ? (
-   -7770.458 + 130.485235*x[2] + 1.29223e-07*x2 + 52478.0*x3 - 24.112392*x5 - 0.00265684*x6
-)
-: ((1357.77 <= x[2]) ? (
-   -13542.026 + 183.803828*x[2] - 31.38*x5 + 3.64167e+29*x7
-)
-: (
-   0
-))))) + 8.3145*x[2]*x0*(5.0*((1e-15 < x[3]) ? (
-   x[3]*log(x[3])
-)
-: (
-   0
-)) + 5.0*((1e-15 < x[4]) ? (
-   x[4]*log(x[4])
-)
-: (
-   0
-)) + 2.0*((1e-15 < x[5]) ? (
-   x[5]*log(x[5])
-)
-: (
-   0
-))) - 161000.0*x0*x1*x[4];
-}
-
-__device__ double pycgpu_model_2_formulaobj(const double* x) {
-    double x0 = 2.0*x[5] + 5.0*(x[3] + x[4]);
-    double x1 = pow(x0, -1);
-    double x2 = x[3]*x[5];
-    double x3 = pow(x[2], 3.0);
-    double x4 = pow(x[2], -1.0);
-    double x5 = 74092.0*x4;
-    double x6 = x[2]*log(x[2]);
-    double x7 = pow(x[2], 2.0);
-    double x8 = pow(x[2], -9.0);
-    double x9 = 5.0*((x[2] < 700.0) ? (
-   -7976.15 + 137.093038*x[2] - 8.77664e-07*x3 + x5 - 24.3671976*x6 - 0.001884662*x7
-)
-: (((x[2] < 933.47 && 700.0 <= x[2])) ? (
-   -11276.24 + 223.048446*x[2] - 5.764227e-06*x3 + x5 - 38.5844296*x6 + 0.018531982*x7
-)
-: ((933.47 <= x[2]) ? (
-   -11278.378 + 188.684153*x[2] - 31.748192*x6 - 1.230524e+28*x8
-)
-: (
-   0
-))));
-    return x0*(x1*(x2*(-228250.0 + 48.99503*x[2] + x9 + 2.0*((x[2] < 1811.0) ? (
-   1225.7 + 124.134*x[2] - 5.8927e-08*x3 + 77359.0*x4 - 23.5143*x6 - 0.00439752*x7
-)
-: ((1811.0 <= x[2]) ? (
-   -25383.581 + 299.31255*x[2] - 46.0*x6 + 2.29603e+31*x8
-)
-: (
-   0
-)))) + x[4]*x[5]*(x9 + 2.0*((x[2] < 1357.77) ? (
-   -7770.458 + 130.485235*x[2] + 1.29223e-07*x3 + 52478.0*x4 - 24.112392*x6 - 0.00265684*x7
-)
-: ((1357.77 <= x[2]) ? (
-   -13542.026 + 183.803828*x[2] - 31.38*x6 + 3.64167e+29*x8
-)
-: (
-   0
-))))) + 8.3145*x[2]*x1*(5.0*((1e-15 < x[3]) ? (
-   x[3]*log(x[3])
-)
-: (
-   0
-)) + 5.0*((1e-15 < x[4]) ? (
-   x[4]*log(x[4])
-)
-: (
-   0
-)) + 2.0*((1e-15 < x[5]) ? (
-   x[5]*log(x[5])
-)
-: (
-   0
-))) - 161000.0*x2*x1*x[4]);
-}
-
-__device__ void pycgpu_model_2_formulagrad(double* out, const double* x) {
-    double x0 = 2.0*x[5] + 5.0*(x[3] + x[4]);
-    double x1 = pow(x0, -1);
-    double x2 = pow(x[2], 1.0);
-    double x3 = log(x[2]);
-    double x4 = 24.112392*x3;
-    double x5 = pow(x[2], 2.0);
-    double x6 = pow(x5, -1);
-    double x7 = x[2] < 1357.77;
-    double x8 = pow(x[2], -10.0);
-    double x9 = 31.38*x3;
-    double x10 = 1357.77 <= x[2];
-    double x11 = 24.3671976*x3;
-    double x12 = -74092.0*x6;
-    double x13 = x[2] < 700.0;
-    double x14 = 38.5844296*x3;
-    double x15 = (x[2] < 933.47 && 700.0 <= x[2]);
-    double x16 = 31.748192*x3;
-    double x17 = 933.47 <= x[2];
-    double x18 = 5.0*((x13 == 1) ? (
-   112.7258404 - x11 + x12 - 0.003769324*x2 - 2.632992e-06*x5
-)
-: ((x15 == 1) ? (
-   184.4640164 + x12 - x14 + 0.037063964*x2 - 1.7292681e-05*x5
-)
-: ((x17 == 1) ? (
-   156.935961 - x16 + 1.1074716e+29*x8
-)
-: (
-   0
-))));
-    double x19 = x[4]*x[5];
-    double x20 = 23.5143*x3;
-    double x21 = x[2] < 1811.0;
-    double x22 = 46.0*x3;
-    double x23 = 1811.0 <= x[2];
-    double x24 = x[3]*x[5];
-    double x25 = log(x[4]);
-    double x26 = 1e-15 < x[4];
-    double x27 = log(x[3]);
-    double x28 = 1e-15 < x[3];
-    double x29 = log(x[5]);
-    double x30 = 1e-15 < x[5];
-    double x31 = 5.0*((x26 == 1) ? (
-   x25*x[4]
-)
-: (
-   0
-)) + 5.0*((x28 == 1) ? (
-   x27*x[3]
-)
-: (
-   0
-)) + 2.0*((x30 == 1) ? (
-   x29*x[5]
-)
-: (
-   0
-));
-    double x32 = 8.3145*x1;
-    double x33 = x32*x31;
-    double x34 = 5.0*((x26 == 1) ? (
-   0
-)
-: (
-   0
-));
-    double x35 = 2.0*((x30 == 1) ? (
-   0
-)
-: (
-   0
-));
-    double x36 = 5.0*((x28 == 1) ? (
-   0
-)
-: (
-   0
-));
-    double x37 = x35 + x36;
-    double x38 = x[2]*x32;
-    double x39 = 161000.0*x1;
-    double x40 = pow(x[2], 3.0);
-    double x41 = pow(x2, -1);
-    double x42 = 74092.0*x41;
-    double x43 = pow(x[2], -9.0);
-    double x44 = 5.0*((x13 == 1) ? (
-   -7976.15 + 137.093038*x[2] - 8.77664e-07*x40 + x42 - 0.001884662*x5 - x[2]*x11
-)
-: ((x15 == 1) ? (
-   -11276.24 + 223.048446*x[2] - 5.764227e-06*x40 + x42 + 0.018531982*x5 - x[2]*x14
-)
-: ((x17 == 1) ? (
-   -11278.378 + 188.684153*x[2] - 1.230524e+28*x43 - x[2]*x16
-)
-: (
-   0
-))));
-    double x45 = -228250.0 + 48.99503*x[2] + x44 + 2.0*((x21 == 1) ? (
-   1225.7 + 124.134*x[2] - 5.8927e-08*x40 + 77359.0*x41 - 0.00439752*x5 - x[2]*x20
-)
-: ((x23 == 1) ? (
-   -25383.581 + 299.31255*x[2] + 2.29603e+31*x43 - x[2]*x22
-)
-: (
-   0
-)));
-    double x46 = x45*x[5];
-    double x47 = 5.0*((x13 == 1) ? (
-   0
-)
-: ((x15 == 1) ? (
-   0
-)
-: ((x17 == 1) ? (
-   0
-)
-: (
-   0
-))));
-    double x48 = x19*(x47 + 2.0*((x7 == 1) ? (
-   0
-)
-: ((x10 == 1) ? (
-   0
-)
-: (
-   0
-)))) + x24*(x47 + 2.0*((x21 == 1) ? (
-   0
-)
-: ((x23 == 1) ? (
-   0
-)
-: (
-   0
-))));
-    double x49 = x44 + 2.0*((x7 == 1) ? (
-   -7770.458 + 130.485235*x[2] + 1.29223e-07*x40 + 52478.0*x41 - 0.00265684*x5 - x[2]*x4
-)
-: ((x10 == 1) ? (
-   -13542.026 + 183.803828*x[2] + 3.64167e+29*x43 - x[2]*x9
-)
-: (
-   0
-)));
-    double x50 = x49*x[4];
-    double x51 = x46*x[3] + x50*x[5];
-    double x52 = pow(x0, -2);
-    double x53 = x52*x51;
-    double x54 = x[2]*x52*x31;
-    double x55 = x52*x24*x[4];
-    double x56 = -5.0*x53 - 41.5725*x54 + 805000.0*x55;
-    double x57 = x39*x[4];
-    double x58 = x[2]*x33 + x1*x51 - x57*x24;
-    double x59 = 5.0*x58;
-    out[0] = x0*(x33 + x1*(x19*(x18 + 2.0*((x7 == 1) ? (
-   106.372843 - 0.00531368*x2 - x4 + 3.87669e-07*x5 - 52478.0*x6
-)
-: ((x10 == 1) ? (
-   152.423828 - 3.277503e+30*x8 - x9
-)
-: (
-   0
-)))) + x24*(48.99503 + x18 + 2.0*((x21 == 1) ? (
-   100.6197 - 0.00879504*x2 - x20 - 1.76781e-07*x5 - 77359.0*x6
-)
-: ((x23 == 1) ? (
-   253.31255 - x22 - 2.066427e+32*x8
-)
-: (
-   0
-))))) + (x34 + x37)*x38);
-    out[1] = x59 + x0*(x56 + x38*(x34 + x35 + 5.0*((x28 == 1) ? (
-   1 + x27
-)
-: (
-   0
-))) - x39*x19 + (x46 + x48)*x1);
-    out[2] = x59 + x0*(x56 + x1*(x48 + x49*x[5]) + x38*(x37 + 5.0*((x26 == 1) ? (
-   1 + x25
-)
-: (
-   0
-))) - x39*x24);
-    out[3] = 2.0*x58 + x0*(-2.0*x53 - 16.629*x54 + 322000.0*x55 + x1*(x48 + x50 + x45*x[3]) + x38*(x34 + x36 + 2.0*((x30 == 1) ? (
-   1 + x29
-)
-: (
-   0
-))) - x57*x[3]);
-}
-
-__device__ void pycgpu_model_2_formulahess(double* out, const double* x) {
-    double x0 = 1e-15 < x[4];
-    double x1 = 5.0*((x0 == 1) ? 0
-: 0);
-    double x2 = 1e-15 < x[3];
-    double x3 = 5.0*((x2 == 1) ? 0
-: 0);
-    double x4 = 1e-15 < x[5];
-    double x5 = 2.0*((x4 == 1) ? 0
-: 0);
-    double x6 = x3 + x5;
-    double x7 = x1 + x6;
-    double x8 = 2.0*x[5] + 5.0*(x[3] + x[4]);
-    double x9 = pow(x8, -1);
-    double x10 = 16.629*x9;
-    double x11 = x7*x10;
-    double x12 = 8.3145*x9;
-    double x13 = x[2]*x12;
-    double x14 = x7*x13;
-    double x15 = pow(x[2], 1.0);
-    double x16 = pow(x[2], 3.0);
-    double x17 = pow(x16, -1);
-    double x18 = 148184.0*x17;
-    double x19 = pow(x[2], -1);
-    double x20 = x[2] < 700.0;
-    double x21 = (x[2] < 933.47 && 700.0 <= x[2]);
-    double x22 = pow(x[2], -11.0);
-    double x23 = 933.47 <= x[2];
-    double x24 = 5.0*((x20 == 1) ? (
-   -0.003769324 - 5.265984e-06*x15 + x18 - 24.3671976*x19
-)
-: ((x21 == 1) ? (
-   0.037063964 - 3.4585362e-05*x15 + x18 - 38.5844296*x19
-)
-: ((x23 == 1) ? (
-   -31.748192*x19 - 1.1074716e+30*x22
-)
-: 0)));
-    double x25 = x[2] < 1811.0;
-    double x26 = 1811.0 <= x[2];
-    double x27 = x[3]*x[5];
-    double x28 = x[2] < 1357.77;
-    double x29 = 1357.77 <= x[2];
-    double x30 = x[4]*x[5];
-    double x31 = log(x[2]);
-    double x32 = 24.112392*x31;
-    double x33 = pow(x[2], 2.0);
-    double x34 = pow(x33, -1);
-    double x35 = pow(x[2], -10.0);
-    double x36 = 31.38*x31;
-    double x37 = 24.3671976*x31;
-    double x38 = -74092.0*x34;
-    double x39 = 38.5844296*x31;
-    double x40 = 31.748192*x31;
-    double x41 = 5.0*((x20 == 1) ? (
-   112.7258404 - 0.003769324*x15 - 2.632992e-06*x33 - x37 + x38
-)
-: ((x21 == 1) ? (
-   184.4640164 + 0.037063964*x15 - 1.7292681e-05*x33 + x38 - x39
-)
-: ((x23 == 1) ? (
-   156.935961 + 1.1074716e+29*x35 - x40
-)
-: 0)));
-    double x42 = x41 + 2.0*((x28 == 1) ? (
-   106.372843 - 0.00531368*x15 - x32 + 3.87669e-07*x33 - 52478.0*x34
-)
-: ((x29 == 1) ? (
-   152.423828 - 3.277503e+30*x35 - x36
-)
-: 0));
-    double x43 = x42*x[4];
-    double x44 = 23.5143*x31;
-    double x45 = 46.0*x31;
-    double x46 = 48.99503 + x41 + 2.0*((x25 == 1) ? (
-   100.6197 - 0.00879504*x15 - 1.76781e-07*x33 - 77359.0*x34 - x44
-)
-: ((x26 == 1) ? (
-   253.31255 - 2.066427e+32*x35 - x45
-)
-: 0));
-    double x47 = x46*x[5];
-    double x48 = x43*x[5] + x47*x[3];
-    double x49 = x9*x48;
-    double x50 = log(x[4]);
-    double x51 = log(x[3]);
-    double x52 = log(x[5]);
-    double x53 = 5.0*((x0 == 1) ? (
-   x50*x[4]
-)
-: 0) + 5.0*((x2 == 1) ? (
-   x51*x[3]
-)
-: 0) + 2.0*((x4 == 1) ? (
-   x52*x[5]
-)
-: 0);
-    double x54 = x9*x53;
-    double x55 = x14 + x49 + 8.3145*x54;
-    double x56 = 5.0*x55;
-    double x57 = x1 + x5;
-    double x58 = x57 + 5.0*((x2 == 1) ? (
-   1 + x51
-)
-: 0);
-    double x59 = x58*x12;
-    double x60 = 5.0*((x20 == 1) ? 0
-: ((x21 == 1) ? 0
-: ((x23 == 1) ? 0
-: 0)));
-    double x61 = x60 + 2.0*((x28 == 1) ? 0
-: ((x29 == 1) ? 0
-: 0));
-    double x62 = x61*x[5];
-    double x63 = x60 + 2.0*((x25 == 1) ? 0
-: ((x26 == 1) ? 0
-: 0));
-    double x64 = x63*x[5];
-    double x65 = x62*x[4] + x64*x[3];
-    double x66 = pow(x8, -2);
-    double x67 = x[2]*x66;
-    double x68 = x66*x53;
-    double x69 = 41.5725*x68;
-    double x70 = 5.0*x66;
-    double x71 = x14 - x69 - 41.5725*x7*x67 - x70*x48;
-    double x72 = x8*(x59 + x71 + (x47 + x65)*x9);
-    double x73 = x6 + 5.0*((x0 == 1) ? (
-   1 + x50
-)
-: 0);
-    double x74 = x73*x12;
-    double x75 = x8*(x71 + x74 + x9*(x65 + x42*x[5]));
-    double x76 = 16.629*x67;
-    double x77 = x1 + x3;
-    double x78 = x77 + 2.0*((x4 == 1) ? (
-   1 + x52
-)
-: 0);
-    double x79 = x78*x12;
-    double x80 = 16.629*x68;
-    double x81 = 2.0*x66;
-    double x82 = x8*(x14 + x79 - x80 - x7*x76 - x81*x48 + x9*(x43 + x65 + x46*x[3]));
-    double x83 = x[2]*x9;
-    double x84 = 41.5725*x83;
-    double x85 = 5.0*x49 + 41.5725*x54 + x7*x84;
-    double x86 = x66*x30;
-    double x87 = pow(x15, -1);
-    double x88 = 74092.0*x87;
-    double x89 = pow(x[2], -9.0);
-    double x90 = 5.0*((x20 == 1) ? (
-   -7976.15 + 137.093038*x[2] - 8.77664e-07*x16 - 0.001884662*x33 + x88 - x[2]*x37
-)
-: ((x21 == 1) ? (
-   -11276.24 + 223.048446*x[2] - 5.764227e-06*x16 + 0.018531982*x33 + x88 - x[2]*x39
-)
-: ((x23 == 1) ? (
-   -11278.378 + 188.684153*x[2] - 1.230524e+28*x89 - x[2]*x40
-)
-: 0)));
-    double x91 = -228250.0 + 48.99503*x[2] + x90 + 2.0*((x25 == 1) ? (
-   1225.7 + 124.134*x[2] - 5.8927e-08*x16 - 0.00439752*x33 + 77359.0*x87 - x[2]*x44
-)
-: ((x26 == 1) ? (
-   -25383.581 + 299.31255*x[2] + 2.29603e+31*x89 - x[2]*x45
-)
-: 0));
-    double x92 = x65 + x91*x[5];
-    double x93 = 10.0*x66;
-    double x94 = pow(x8, -3);
-    double x95 = x94*x27*x[4];
-    double x96 = x[2]*x53*x94;
-    double x97 = x91*x[3];
-    double x98 = x90 + 2.0*((x28 == 1) ? (
-   -7770.458 + 130.485235*x[2] + 1.29223e-07*x16 - 0.00265684*x33 + 52478.0*x87 - x[2]*x32
-)
-: ((x29 == 1) ? (
-   -13542.026 + 183.803828*x[2] + 3.64167e+29*x89 - x[2]*x36
-)
-: 0));
-    double x99 = x98*x[5];
-    double x100 = x97*x[5] + x99*x[4];
-    double x101 = x94*x100;
-    double x102 = 50.0*x101 - 8050000.0*x95 + 415.725*x96;
-    double x103 = 161000.0*x9;
-    double x104 = x103*x[5];
-    double x105 = x9*x92;
-    double x106 = 805000.0*x66;
-    double x107 = x27*x106;
-    double x108 = -x[2]*x69 + x107*x[4] - x70*x100;
-    double x109 = x105 + x108 + x[2]*x59 - x104*x[4];
-    double x110 = x66*x27;
-    double x111 = x110*x[4];
-    double x112 = x[2]*x68;
-    double x113 = 4025000.0*x111 - 207.8625*x112 - 25.0*x66*x100;
-    double x114 = 5.0*x109 + x113;
-    double x115 = 805000.0*x9;
-    double x116 = 41.5725*x58;
-    double x117 = 5.0*x105 - x30*x115 + x83*x116;
-    double x118 = x62 + x65;
-    double x119 = x73*x67;
-    double x120 = x65 + x99;
-    double x121 = x8*(x102 - x104 + x107 - 41.5725*x119 + x14 + x30*x106 - x67*x116 - x70*x120 - x70*x92 + x9*(x118 + x64));
-    double x122 = x9*x120;
-    double x123 = 5.0*x122 - x27*x115 + x84*x73;
-    double x124 = x[3]*x[4];
-    double x125 = x65 + x97 + x98*x[4];
-    double x126 = x9*x125;
-    double x127 = 5.0*x126 - x115*x124 + x84*x78;
-    double x128 = x103*x[4];
-    double x129 = x63*x[3];
-    double x130 = x61*x[4];
-    double x131 = x129 + x130;
-    double x132 = x78*x67;
-    double x133 = 20.0*x101 - 41.5725*x132 + x14 - 3220000.0*x95 + 166.29*x96 + x106*x124 - x70*x125;
-    double x134 = 1610000.0*x110;
-    double x135 = -83.145*x112 + x134*x[4] - x93*x100;
-    double x136 = x135 + x8*(-x128 + x133 + 322000.0*x86 - x76*x58 - x81*x92 + x9*(x131 + x64 + x65 + x91));
-    double x137 = x108 + x122 + x[2]*x74 - x104*x[3];
-    double x138 = x113 + 5.0*x137;
-    double x139 = 322000.0*x110;
-    double x140 = x135 + x8*(-16.629*x119 + x133 + x139 - x103*x[3] - x81*x120 + x9*(x118 + x131 + x98));
-    double x141 = x126 + x[2]*x79 - x[2]*x80 - x128*x[3] + x139*x[4] - x81*x100;
-    double x142 = 5.0*x141;
-    double x143 = x[2]*x10;
-    double x144 = 322000.0*x9;
-    double x145 = 4.0*x66;
-    out[0] = x8*(x11 + x14 + x9*(x27*(x24 + 2.0*((x25 == 1) ? (
-   -0.00879504 - 3.53562e-07*x15 + 154718.0*x17 - 23.5143*x19
-)
-: ((x26 == 1) ? (
-   -46.0*x19 + 2.066427e+33*x22
-)
-: 0))) + x30*(x24 + 2.0*((x28 == 1) ? (
-   -0.00531368 + 7.75338e-07*x15 + 104956.0*x17 - 24.112392*x19
-)
-: ((x29 == 1) ? (
-   -31.38*x19 + 3.277503e+31*x22
-)
-: 0)))));
-    out[1] = x56 + x72;
-    out[2] = x56 + x75;
-    out[3] = 2.0*x55 + x82;
-    out[4] = x72 + x85;
-    out[5] = x114 + x117 + x8*(x102 + 1610000.0*x86 + x13*(x57 + 5.0*((x2 == 1) ? (
-   pow(x[3], -1)
-)
-: 0)) - 83.145*x67*x58 - x93*x92 + (2*x64 + x65)*x9);
-    out[6] = x114 + x121 + x123;
-    out[7] = 2.0*x109 + x127 + x136;
-    out[8] = x75 + x85;
-    out[9] = x117 + x121 + x138;
-    out[10] = x123 + x138 + x8*(x102 - 83.145*x119 + x134 + x13*(x6 + 5.0*((x0 == 1) ? (
-   pow(x[4], -1)
-)
-: 0)) - x93*x120 + (2*x62 + x65)*x9);
-    out[11] = x127 + 2.0*x137 + x140;
-    out[12] = 2.0*x49 + 16.629*x54 + x82 + x[2]*x11;
-    out[13] = 2.0*x105 + x136 + x142 - x30*x144 + x58*x143;
-    out[14] = 2.0*x122 + x140 + x142 - x27*x144 + x73*x143;
-    out[15] = 644000.0*x111 - 33.258*x112 + 2.0*x126 + 2.0*x141 - x100*x145 - x124*x144 + x78*x143 + x8*(8.0*x101 - 33.258*x132 - 1288000.0*x95 + 66.516*x96 - x125*x145 + x13*(x77 + 2.0*((x4 == 1) ? (
-   pow(x[5], -1)
-)
-: 0)) + 644000.0*x66*x124 + x9*(2*x129 + 2*x130 + x65));
-}
-
-__device__ void pycgpu_model_2_internal_cons_func(double* out, const double* x) {
-    out[0] = 1.0*(-1 + x[3] + x[4]);
-    out[1] = 1.0*(-1 + x[5]);
-}
-
-__device__ void pycgpu_model_2_internal_cons_jac(double* out, const double* x) {
-    out[0] = 0;
-    out[1] = 1.0;
-    out[2] = 1.0;
-    out[3] = 0;
-    out[4] = 0;
-    out[5] = 0;
-    out[6] = 0;
-    out[7] = 1.0;
-}
-
-__device__ void pycgpu_model_2_mass_obj(double* out, const double* x) {
-    double x0 = 2.0*x[5];
-    double x1 = pow(x0 + 5.0*(x[3] + x[4]), -1);
-    double x2 = 5.0*x1;
-    out[0] = x2*x[3];
-    out[1] = x2*x[4];
-    out[2] = x0*x1;
-    out[3] = 0;
-}
-
-__device__ void pycgpu_model_2_formulamole_obj(double* out, const double* x) {
-    out[0] = 5.0*x[3];
-    out[1] = 5.0*x[4];
-    out[2] = 2.0*x[5];
-    out[3] = 0.0;
-}
-
-__device__ void pycgpu_model_2_formulamole_grad(double* out, const double* x) {
-    out[0] = 0;
-    out[1] = 5.0;
-    out[2] = 0;
-    out[3] = 0;
-    out[4] = 0;
-    out[5] = 0;
-    out[6] = 5.0;
-    out[7] = 0;
-    out[8] = 0;
-    out[9] = 0;
-    out[10] = 0;
-    out[11] = 2.0;
-}
-
-__device__ double pycgpu_model_3_obj(const double* x) {
-    double x0 = x[4]*x[3];
-    double x1 = pow(x[3] + x[4], -1);
-    double x2 = 1.0*x1;
-    double x3 = pow(x[2], 3.0);
-    double x4 = pow(x[2], -1.0);
-    double x5 = 74092.0*x4;
-    double x6 = x[2]*log(x[2]);
-    double x7 = pow(x[2], 2.0);
-    double x8 = pow(x[2], -9.0);
-    return x2*(x[3]*(12178.9 - 4.813*x[2] + ((x[2] < 700.0) ? (
-   -7976.15 + 137.093038*x[2] - 8.77664e-07*x3 + x5 - 24.3671976*x6 - 0.001884662*x7
-)
-: (((x[2] < 933.47 && 700.0 <= x[2])) ? (
-   -11276.24 + 223.048446*x[2] - 5.764227e-06*x3 + x5 - 38.5844296*x6 + 0.018531982*x7
-)
-: ((933.47 <= x[2]) ? (
-   -11278.378 + 188.684153*x[2] - 31.748192*x6 - 1.230524e+28*x8
-)
-: (
-   0
-))))) + x[4]*(5009.03 + ((x[2] < 1811.0) ? (
-   1225.7 + 124.134*x[2] - 5.8927e-08*x3 + 77359.0*x4 - 23.5143*x6 - 0.00439752*x7
-)
-: ((1811.0 <= x[2]) ? (
-   -25383.581 + 299.31255*x[2] - 46.0*x6 + 2.29603e+31*x8
-)
-: (
-   0
-))))) + x2*(x0*(-131649.0 + 29.4833*x[2]) - 18619.5*(x[3] - x[4])*x0) + 8.3145*x[2]*x1*(1.0*((1e-15 < x[3]) ? (
-   x[3]*log(x[3])
-)
-: (
-   0
-)) + 1.0*((1e-15 < x[4]) ? (
-   x[4]*log(x[4])
-)
-: (
-   0
-)));
-}
-
-__device__ double pycgpu_model_3_formulaobj(const double* x) {
-    double x0 = x[3] + x[4];
-    double x1 = x[4]*x[3];
-    double x2 = pow(x0, -1);
-    double x3 = 1.0*x2;
-    double x4 = pow(x[2], 3.0);
-    double x5 = pow(x[2], -1.0);
-    double x6 = 74092.0*x5;
-    double x7 = x[2]*log(x[2]);
-    double x8 = pow(x[2], 2.0);
-    double x9 = pow(x[2], -9.0);
-    return 1.0*x0*(x3*(x[3]*(12178.9 - 4.813*x[2] + ((x[2] < 700.0) ? (
-   -7976.15 + 137.093038*x[2] - 8.77664e-07*x4 + x6 - 24.3671976*x7 - 0.001884662*x8
-)
-: (((x[2] < 933.47 && 700.0 <= x[2])) ? (
-   -11276.24 + 223.048446*x[2] - 5.764227e-06*x4 + x6 - 38.5844296*x7 + 0.018531982*x8
-)
-: ((933.47 <= x[2]) ? (
-   -11278.378 + 188.684153*x[2] - 31.748192*x7 - 1.230524e+28*x9
-)
-: (
-   0
-))))) + x[4]*(5009.03 + ((x[2] < 1811.0) ? (
-   1225.7 + 124.134*x[2] - 5.8927e-08*x4 + 77359.0*x5 - 23.5143*x7 - 0.00439752*x8
-)
-: ((1811.0 <= x[2]) ? (
-   -25383.581 + 299.31255*x[2] - 46.0*x7 + 2.29603e+31*x9
-)
-: (
-   0
-))))) + x3*(x1*(-131649.0 + 29.4833*x[2]) - 18619.5*(x[3] - x[4])*x1) + 8.3145*x[2]*x2*(1.0*((1e-15 < x[3]) ? (
-   x[3]*log(x[3])
-)
-: (
-   0
-)) + 1.0*((1e-15 < x[4]) ? (
-   x[4]*log(x[4])
-)
-: (
-   0
-))));
-}
-
-__device__ void pycgpu_model_3_formulagrad(double* out, const double* x) {
-    double x0 = pow(x[2], 1.0);
-    double x1 = log(x[2]);
-    double x2 = 23.5143*x1;
-    double x3 = pow(x[2], 2.0);
-    double x4 = pow(x3, -1);
-    double x5 = x[2] < 1811.0;
-    double x6 = pow(x[2], -10.0);
-    double x7 = 46.0*x1;
-    double x8 = 1811.0 <= x[2];
-    double x9 = 24.3671976*x1;
-    double x10 = -74092.0*x4;
-    double x11 = x[2] < 700.0;
-    double x12 = 38.5844296*x1;
-    double x13 = (x[2] < 933.47 && 700.0 <= x[2]);
-    double x14 = 31.748192*x1;
-    double x15 = 933.47 <= x[2];
-    double x16 = x[3] + x[4];
-    double x17 = pow(x16, -1);
-    double x18 = 1.0*x17;
-    double x19 = log(x[4]);
-    double x20 = 1e-15 < x[4];
-    double x21 = log(x[3]);
-    double x22 = 1e-15 < x[3];
-    double x23 = 1.0*((x20 == 1) ? (
-   x19*x[4]
-)
-: (
-   0
-)) + 1.0*((x22 == 1) ? (
-   x21*x[3]
-)
-: (
-   0
-));
-    double x24 = 8.3145*x17;
-    double x25 = x24*x23;
-    double x26 = 1.0*((x22 == 1) ? (
-   0
-)
-: (
-   0
-));
-    double x27 = 1.0*((x20 == 1) ? (
-   0
-)
-: (
-   0
-));
-    double x28 = x[2]*x24;
-    double x29 = 1.0*x16;
-    double x30 = pow(x[2], 3.0);
-    double x31 = pow(x0, -1);
-    double x32 = 74092.0*x31;
-    double x33 = pow(x[2], -9.0);
-    double x34 = 12178.9 - 4.813*x[2] + ((x11 == 1) ? (
-   -7976.15 + 137.093038*x[2] - 0.001884662*x3 - 8.77664e-07*x30 + x32 - x[2]*x9
-)
-: ((x13 == 1) ? (
-   -11276.24 + 223.048446*x[2] + 0.018531982*x3 - 5.764227e-06*x30 + x32 - x[2]*x12
-)
-: ((x15 == 1) ? (
-   -11278.378 + 188.684153*x[2] - 1.230524e+28*x33 - x[2]*x14
-)
-: (
-   0
-))));
-    double x35 = x[3]*((x11 == 1) ? (
-   0
-)
-: ((x13 == 1) ? (
-   0
-)
-: ((x15 == 1) ? (
-   0
-)
-: (
-   0
-)))) + x[4]*((x5 == 1) ? (
-   0
-)
-: ((x8 == 1) ? (
-   0
-)
-: (
-   0
-)));
-    double x36 = 18619.5*x[4];
-    double x37 = x36*x[3];
-    double x38 = x[3] - x[4];
-    double x39 = -131649.0 + 29.4833*x[2];
-    double x40 = 5009.03 + ((x5 == 1) ? (
-   1225.7 + 124.134*x[2] - 0.00439752*x3 - 5.8927e-08*x30 + 77359.0*x31 - x[2]*x2
-)
-: ((x8 == 1) ? (
-   -25383.581 + 299.31255*x[2] + 2.29603e+31*x33 - x[2]*x7
-)
-: (
-   0
-)));
-    double x41 = x34*x[3] + x40*x[4];
-    double x42 = pow(x16, -2);
-    double x43 = 1.0*x42;
-    double x44 = x39*x[3];
-    double x45 = -x38*x37 + x44*x[4];
-    double x46 = -x41*x43 - x43*x45 - 8.3145*x[2]*x42*x23;
-    double x47 = 1.0*(x[2]*x25 + x41*x18 + x45*x18);
-    out[0] = x29*(x25 + x18*(x[3]*(-4.813 + ((x11 == 1) ? (
-   112.7258404 - 0.003769324*x0 + x10 - 2.632992e-06*x3 - x9
-)
-: ((x13 == 1) ? (
-   184.4640164 + 0.037063964*x0 + x10 - x12 - 1.7292681e-05*x3
-)
-: ((x15 == 1) ? (
-   156.935961 - x14 + 1.1074716e+29*x6
-)
-: (
-   0
-))))) + x[4]*((x5 == 1) ? (
-   100.6197 - 0.00879504*x0 - x2 - 1.76781e-07*x3 - 77359.0*x4
-)
-: ((x8 == 1) ? (
-   253.31255 - 2.066427e+32*x6 - x7
-)
-: (
-   0
-)))) + (x26 + x27)*x28 + 29.4833*x17*x[4]*x[3]);
-    out[1] = x47 + x29*(x46 + x18*(-x37 - x36*x38 + x39*x[4]) + x28*(x27 + 1.0*((x22 == 1) ? (
-   1 + x21
-)
-: (
-   0
-))) + (x34 + x35)*x18);
-    out[2] = x47 + x29*(x46 + x18*(x37 + x44 - 18619.5*x38*x[3]) + x28*(x26 + 1.0*((x20 == 1) ? (
-   1 + x19
-)
-: (
-   0
-))) + (x35 + x40)*x18);
-}
-
-__device__ void pycgpu_model_3_formulahess(double* out, const double* x) {
-    double x0 = x[3] + x[4];
-    double x1 = pow(x0, -1);
-    double x2 = 8.3145*x1;
-    double x3 = 1e-15 < x[3];
-    double x4 = 1.0*((x3 == 1) ? 0
-: 0);
-    double x5 = 1e-15 < x[4];
-    double x6 = 1.0*((x5 == 1) ? 0
-: 0);
-    double x7 = x4 + x6;
-    double x8 = x[2]*x7;
-    double x9 = x2*x8;
-    double x10 = 16.629*x1;
-    double x11 = pow(x[2], 1.0);
-    double x12 = pow(x[2], 3.0);
-    double x13 = pow(x12, -1);
-    double x14 = 148184.0*x13;
-    double x15 = pow(x[2], -1);
-    double x16 = x[2] < 700.0;
-    double x17 = (x[2] < 933.47 && 700.0 <= x[2]);
-    double x18 = pow(x[2], -11.0);
-    double x19 = 933.47 <= x[2];
-    double x20 = x[2] < 1811.0;
-    double x21 = 1811.0 <= x[2];
-    double x22 = 1.0*x1;
-    double x23 = 1.0*x0;
-    double x24 = 29.4833*x1;
-    double x25 = x24*x[4];
-    double x26 = log(x[3]);
-    double x27 = x6 + 1.0*((x3 == 1) ? (
-   1 + x26
-)
-: 0);
-    double x28 = x2*x27;
-    double x29 = log(x[2]);
-    double x30 = 24.3671976*x29;
-    double x31 = pow(x[2], 2.0);
-    double x32 = pow(x31, -1);
-    double x33 = -74092.0*x32;
-    double x34 = 38.5844296*x29;
-    double x35 = pow(x[2], -10.0);
-    double x36 = 31.748192*x29;
-    double x37 = -4.813 + ((x16 == 1) ? (
-   112.7258404 - 0.003769324*x11 - x30 - 2.632992e-06*x31 + x33
-)
-: ((x17 == 1) ? (
-   184.4640164 + 0.037063964*x11 - 1.7292681e-05*x31 + x33 - x34
-)
-: ((x19 == 1) ? (
-   156.935961 + 1.1074716e+29*x35 - x36
-)
-: 0)));
-    double x38 = ((x16 == 1) ? 0
-: ((x17 == 1) ? 0
-: ((x19 == 1) ? 0
-: 0)));
-    double x39 = ((x20 == 1) ? 0
-: ((x21 == 1) ? 0
-: 0));
-    double x40 = x38*x[3] + x39*x[4];
-    double x41 = pow(x0, -2);
-    double x42 = 8.3145*x41;
-    double x43 = log(x[4]);
-    double x44 = 1.0*((x3 == 1) ? (
-   x26*x[3]
-)
-: 0) + 1.0*((x5 == 1) ? (
-   x43*x[4]
-)
-: 0);
-    double x45 = 23.5143*x29;
-    double x46 = 46.0*x29;
-    double x47 = ((x20 == 1) ? (
-   100.6197 - 0.00879504*x11 - 1.76781e-07*x31 - 77359.0*x32 - x45
-)
-: ((x21 == 1) ? (
-   253.31255 - 2.066427e+32*x35 - x46
-)
-: 0));
-    double x48 = 1.0*(x37*x[3] + x47*x[4]);
-    double x49 = x9 - x41*x48 - x42*x44 - x8*x42 - 29.4833*x41*x[4]*x[3];
-    double x50 = x23*(x25 + x28 + x49 + (x37 + x40)*x22);
-    double x51 = x9 + x1*x48 + x2*x44 + x25*x[3];
-    double x52 = 1.0*x51;
-    double x53 = x4 + 1.0*((x5 == 1) ? (
-   1 + x43
-)
-: 0);
-    double x54 = x2*x53;
-    double x55 = x23*(x49 + x54 + x24*x[3] + (x40 + x47)*x22);
-    double x56 = pow(x11, -1);
-    double x57 = 74092.0*x56;
-    double x58 = pow(x[2], -9.0);
-    double x59 = 12178.9 - 4.813*x[2] + ((x16 == 1) ? (
-   -7976.15 + 137.093038*x[2] - 8.77664e-07*x12 - 0.001884662*x31 + x57 - x[2]*x30
-)
-: ((x17 == 1) ? (
-   -11276.24 + 223.048446*x[2] - 5.764227e-06*x12 + 0.018531982*x31 + x57 - x[2]*x34
-)
-: ((x19 == 1) ? (
-   -11278.378 + 188.684153*x[2] - 1.230524e+28*x58 - x[2]*x36
-)
-: 0)));
-    double x60 = x40 + x59;
-    double x61 = 2.0*x60;
-    double x62 = x[2]*x27;
-    double x63 = 37239.0*x[4];
-    double x64 = 18619.5*x[3];
-    double x65 = x64*x[4];
-    double x66 = x[3] - x[4];
-    double x67 = -131649.0 + 29.4833*x[2];
-    double x68 = -x65 - 18619.5*x66*x[4] + x67*x[4];
-    double x69 = 2.0*x41;
-    double x70 = x[2]*x2;
-    double x71 = 16.629*x41;
-    double x72 = pow(x0, -3);
-    double x73 = x67*x[3];
-    double x74 = 2.0*(-x65*x66 + x73*x[4]);
-    double x75 = 5009.03 + ((x20 == 1) ? (
-   1225.7 + 124.134*x[2] - 5.8927e-08*x12 - 0.00439752*x31 + 77359.0*x56 - x[2]*x45
-)
-: ((x21 == 1) ? (
-   -25383.581 + 299.31255*x[2] + 2.29603e+31*x58 - x[2]*x46
-)
-: 0));
-    double x76 = x59*x[3] + x75*x[4];
-    double x77 = x[2]*x44;
-    double x78 = x72*x74 + 2.0*x72*x76 + 16.629*x72*x77;
-    double x79 = 2.0*x1;
-    double x80 = -x71*x77 - x74*x41 - x76*x69;
-    double x81 = 1.0*x60;
-    double x82 = x40 + x75;
-    double x83 = x65 + x73 - x64*x66;
-    double x84 = 1.0*x83;
-    double x85 = x[2]*x53;
-    double x86 = 37239.0*x[3];
-    double x87 = 1.0*x41;
-    double x88 = x80 + x[2]*x28 + x[2]*x54 + x1*x81 + x1*x84 + x23*(x78 + x9 + x22*(x38 + x39 + x40) + x22*(x63 + x67 - x86) - x62*x42 - x81*x41 - x82*x87 - x84*x41 - x85*x42 - x87*x68) + x68*x22 + x82*x22;
-    out[0] = x23*(x9 + x22*(x[3]*((x16 == 1) ? (
-   -0.003769324 - 5.265984e-06*x11 + x14 - 24.3671976*x15
-)
-: ((x17 == 1) ? (
-   0.037063964 - 3.4585362e-05*x11 + x14 - 38.5844296*x15
-)
-: ((x19 == 1) ? (
-   -31.748192*x15 - 1.1074716e+30*x18
-)
-: 0))) + x[4]*((x20 == 1) ? (
-   -0.00879504 - 3.53562e-07*x11 + 154718.0*x13 - 23.5143*x15
-)
-: ((x21 == 1) ? (
-   -46.0*x15 + 2.066427e+33*x18
-)
-: 0))) + x7*x10);
-    out[1] = x50 + x52;
-    out[2] = x52 + x55;
-    out[3] = x50 + x51;
-    out[4] = x80 + x1*x61 + x23*(x78 - x1*x63 - x61*x41 - x68*x69 + x70*(x6 + 1.0*((x3 == 1) ? (
-   pow(x[3], -1)
-)
-: 0)) - x71*x62 + (2*x38 + x40)*x22) + x62*x10 + x79*x68;
-    out[5] = x88;
-    out[6] = x51 + x55;
-    out[7] = x88;
-    out[8] = x80 + x23*(x78 + x1*x86 + x70*(x4 + 1.0*((x5 == 1) ? (
-   pow(x[4], -1)
-)
-: 0)) - x82*x69 - x83*x69 - x85*x71 + (2*x39 + x40)*x22) + x82*x79 + x83*x79 + x85*x10;
-}
-
-__device__ void pycgpu_model_3_internal_cons_func(double* out, const double* x) {
-    out[0] = 1.0*(-1 + x[3] + x[4]);
-}
-
-__device__ void pycgpu_model_3_internal_cons_jac(double* out, const double* x) {
-    out[0] = 0;
-    out[1] = 1.0;
-    out[2] = 1.0;
-}
-
-__device__ void pycgpu_model_3_mass_obj(double* out, const double* x) {
-    double x0 = 1.0/(x[3] + x[4]);
-    out[0] = x0*x[3];
-    out[1] = 0;
-    out[2] = x0*x[4];
-    out[3] = 0;
-}
-
-__device__ void pycgpu_model_3_formulamole_obj(double* out, const double* x) {
-    out[0] = 1.0*x[3];
-    out[1] = 0.0;
-    out[2] = 1.0*x[4];
-    out[3] = 0.0;
-}
-
-__device__ void pycgpu_model_3_formulamole_grad(double* out, const double* x) {
-    out[0] = 0;
-    out[1] = 1.0;
-    out[2] = 0;
-    out[3] = 0;
-    out[4] = 0;
-    out[5] = 1.0;
-}
-
-__device__ double pycgpu_model_4_obj(const double* x) {
-    double x0 = pow(2.0*x[3] + 3.0*(x[4] + x[5]), -1);
-    double x1 = pow(x[2], 3.0);
-    double x2 = pow(x[2], -1.0);
-    double x3 = x[2]*log(x[2]);
-    double x4 = pow(x[2], 2.0);
-    double x5 = pow(x[2], -9.0);
-    double x6 = 74092.0*x2;
-    double x7 = 2.0*((x[2] < 700.0) ? (
-   -7976.15 + 137.093038*x[2] - 8.77664e-07*x1 - 24.3671976*x3 - 0.001884662*x4 + x6
-)
-: (((x[2] < 933.47 && 700.0 <= x[2])) ? (
-   -11276.24 + 223.048446*x[2] - 5.764227e-06*x1 - 38.5844296*x3 + 0.018531982*x4 + x6
-)
-: ((933.47 <= x[2]) ? (
-   -11278.378 + 188.684153*x[2] - 31.748192*x3 - 1.230524e+28*x5
-)
-: (
-   0
-))));
-    return x0*((x7 + 3.0*((x[2] < 1811.0) ? (
-   1225.7 + 124.134*x[2] - 5.8927e-08*x1 + 77359.0*x2 - 23.5143*x3 - 0.00439752*x4
-)
-: ((1811.0 <= x[2]) ? (
-   -25383.581 + 299.31255*x[2] - 46.0*x3 + 2.29603e+31*x5
-)
-: (
-   0
-))))*x[5]*x[3] + (-106700.0 + 3.0*x[2] + x7 + 3.0*((x[2] < 1357.77) ? (
-   -7770.458 + 130.485235*x[2] + 1.29223e-07*x1 + 52478.0*x2 - 24.112392*x3 - 0.00265684*x4
-)
-: ((1357.77 <= x[2]) ? (
-   -13542.026 + 183.803828*x[2] - 31.38*x3 + 3.64167e+29*x5
-)
-: (
-   0
-))))*x[4]*x[3]) + 8.3145*x[2]*x0*(2.0*((1e-15 < x[3]) ? (
-   x[3]*log(x[3])
-)
-: (
-   0
-)) + 3.0*((1e-15 < x[4]) ? (
-   x[4]*log(x[4])
-)
-: (
-   0
-)) + 3.0*((1e-15 < x[5]) ? (
-   x[5]*log(x[5])
-)
-: (
-   0
-)));
-}
-
-__device__ double pycgpu_model_4_formulaobj(const double* x) {
-    double x0 = 2.0*x[3] + 3.0*(x[4] + x[5]);
-    double x1 = pow(x0, -1);
-    double x2 = pow(x[2], 3.0);
-    double x3 = pow(x[2], -1.0);
-    double x4 = x[2]*log(x[2]);
-    double x5 = pow(x[2], 2.0);
-    double x6 = pow(x[2], -9.0);
-    double x7 = 74092.0*x3;
-    double x8 = 2.0*((x[2] < 700.0) ? (
-   -7976.15 + 137.093038*x[2] - 8.77664e-07*x2 - 24.3671976*x4 - 0.001884662*x5 + x7
-)
-: (((x[2] < 933.47 && 700.0 <= x[2])) ? (
-   -11276.24 + 223.048446*x[2] - 5.764227e-06*x2 - 38.5844296*x4 + 0.018531982*x5 + x7
-)
-: ((933.47 <= x[2]) ? (
-   -11278.378 + 188.684153*x[2] - 31.748192*x4 - 1.230524e+28*x6
-)
-: (
-   0
-))));
-    return x0*(x1*((x8 + 3.0*((x[2] < 1811.0) ? (
-   1225.7 + 124.134*x[2] - 5.8927e-08*x2 + 77359.0*x3 - 23.5143*x4 - 0.00439752*x5
-)
-: ((1811.0 <= x[2]) ? (
-   -25383.581 + 299.31255*x[2] - 46.0*x4 + 2.29603e+31*x6
-)
-: (
-   0
-))))*x[5]*x[3] + (-106700.0 + 3.0*x[2] + x8 + 3.0*((x[2] < 1357.77) ? (
-   -7770.458 + 130.485235*x[2] + 1.29223e-07*x2 + 52478.0*x3 - 24.112392*x4 - 0.00265684*x5
-)
-: ((1357.77 <= x[2]) ? (
-   -13542.026 + 183.803828*x[2] - 31.38*x4 + 3.64167e+29*x6
-)
-: (
-   0
-))))*x[4]*x[3]) + 8.3145*x[2]*x1*(2.0*((1e-15 < x[3]) ? (
-   x[3]*log(x[3])
-)
-: (
-   0
-)) + 3.0*((1e-15 < x[4]) ? (
-   x[4]*log(x[4])
-)
-: (
-   0
-)) + 3.0*((1e-15 < x[5]) ? (
-   x[5]*log(x[5])
-)
-: (
-   0
-))));
-}
-
-__device__ void pycgpu_model_4_formulagrad(double* out, const double* x) {
-    double x0 = 2.0*x[3] + 3.0*(x[4] + x[5]);
-    double x1 = pow(x0, -1);
-    double x2 = pow(x[2], 1.0);
-    double x3 = log(x[2]);
-    double x4 = 23.5143*x3;
-    double x5 = pow(x[2], 2.0);
-    double x6 = pow(x5, -1);
-    double x7 = x[2] < 1811.0;
-    double x8 = pow(x[2], -10.0);
-    double x9 = 46.0*x3;
-    double x10 = 1811.0 <= x[2];
-    double x11 = 24.3671976*x3;
-    double x12 = -74092.0*x6;
-    double x13 = x[2] < 700.0;
-    double x14 = 38.5844296*x3;
-    double x15 = (x[2] < 933.47 && 700.0 <= x[2]);
-    double x16 = 31.748192*x3;
-    double x17 = 933.47 <= x[2];
-    double x18 = 2.0*((x13 == 1) ? (
-   112.7258404 - x11 + x12 - 0.003769324*x2 - 2.632992e-06*x5
-)
-: ((x15 == 1) ? (
-   184.4640164 + x12 - x14 + 0.037063964*x2 - 1.7292681e-05*x5
-)
-: ((x17 == 1) ? (
-   156.935961 - x16 + 1.1074716e+29*x8
-)
-: (
-   0
-))));
-    double x19 = x[5]*x[3];
-    double x20 = 24.112392*x3;
-    double x21 = x[2] < 1357.77;
-    double x22 = 31.38*x3;
-    double x23 = 1357.77 <= x[2];
-    double x24 = x[4]*x[3];
-    double x25 = log(x[3]);
-    double x26 = 1e-15 < x[3];
-    double x27 = log(x[5]);
-    double x28 = 1e-15 < x[5];
-    double x29 = log(x[4]);
-    double x30 = 1e-15 < x[4];
-    double x31 = 2.0*((x26 == 1) ? (
-   x25*x[3]
-)
-: (
-   0
-)) + 3.0*((x28 == 1) ? (
-   x27*x[5]
-)
-: (
-   0
-)) + 3.0*((x30 == 1) ? (
-   x29*x[4]
-)
-: (
-   0
-));
-    double x32 = 8.3145*x1;
-    double x33 = x32*x31;
-    double x34 = 2.0*((x26 == 1) ? (
-   0
-)
-: (
-   0
-));
-    double x35 = 3.0*((x30 == 1) ? (
-   0
-)
-: (
-   0
-));
-    double x36 = 3.0*((x28 == 1) ? (
-   0
-)
-: (
-   0
-));
-    double x37 = x35 + x36;
-    double x38 = x[2]*x32;
-    double x39 = pow(x[2], 3.0);
-    double x40 = pow(x2, -1);
-    double x41 = pow(x[2], -9.0);
-    double x42 = 74092.0*x40;
-    double x43 = 2.0*((x13 == 1) ? (
-   -7976.15 + 137.093038*x[2] - 8.77664e-07*x39 + x42 - 0.001884662*x5 - x[2]*x11
-)
-: ((x15 == 1) ? (
-   -11276.24 + 223.048446*x[2] - 5.764227e-06*x39 + x42 + 0.018531982*x5 - x[2]*x14
-)
-: ((x17 == 1) ? (
-   -11278.378 + 188.684153*x[2] - 1.230524e+28*x41 - x[2]*x16
-)
-: (
-   0
-))));
-    double x44 = -106700.0 + 3.0*x[2] + x43 + 3.0*((x21 == 1) ? (
-   -7770.458 + 130.485235*x[2] + 1.29223e-07*x39 + 52478.0*x40 - 0.00265684*x5 - x[2]*x20
-)
-: ((x23 == 1) ? (
-   -13542.026 + 183.803828*x[2] + 3.64167e+29*x41 - x[2]*x22
-)
-: (
-   0
-)));
-    double x45 = x44*x[4];
-    double x46 = x43 + 3.0*((x7 == 1) ? (
-   1225.7 + 124.134*x[2] - 5.8927e-08*x39 + 77359.0*x40 - 0.00439752*x5 - x[2]*x4
-)
-: ((x10 == 1) ? (
-   -25383.581 + 299.31255*x[2] + 2.29603e+31*x41 - x[2]*x9
-)
-: (
-   0
-)));
-    double x47 = x46*x[3];
-    double x48 = x45*x[3] + x47*x[5];
-    double x49 = x[2]*x33 + x1*x48;
-    double x50 = 2.0*((x13 == 1) ? (
-   0
-)
-: ((x15 == 1) ? (
-   0
-)
-: ((x17 == 1) ? (
-   0
-)
-: (
-   0
-))));
-    double x51 = x19*(x50 + 3.0*((x7 == 1) ? (
-   0
-)
-: ((x10 == 1) ? (
-   0
-)
-: (
-   0
-)))) + x24*(x50 + 3.0*((x21 == 1) ? (
-   0
-)
-: ((x23 == 1) ? (
-   0
-)
-: (
-   0
-))));
-    double x52 = pow(x0, -2);
-    double x53 = x52*x48;
-    double x54 = x[2]*x52*x31;
-    double x55 = 3.0*x49;
-    double x56 = -3.0*x53 - 24.9435*x54;
-    out[0] = x0*(x33 + x1*(x19*(x18 + 3.0*((x7 == 1) ? (
-   100.6197 - 0.00879504*x2 - x4 - 1.76781e-07*x5 - 77359.0*x6
-)
-: ((x10 == 1) ? (
-   253.31255 - 2.066427e+32*x8 - x9
-)
-: (
-   0
-)))) + x24*(3.0 + x18 + 3.0*((x21 == 1) ? (
-   106.372843 - 0.00531368*x2 - x20 + 3.87669e-07*x5 - 52478.0*x6
-)
-: ((x23 == 1) ? (
-   152.423828 - x22 - 3.277503e+30*x8
-)
-: (
-   0
-))))) + (x34 + x37)*x38);
-    out[1] = 2.0*x49 + x0*(-2.0*x53 - 16.629*x54 + x1*(x45 + x51 + x46*x[5]) + x38*(x37 + 2.0*((x26 == 1) ? (
-   1 + x25
-)
-: (
-   0
-))));
-    out[2] = x55 + x0*(x56 + x1*(x51 + x44*x[3]) + x38*(x34 + x36 + 3.0*((x30 == 1) ? (
-   1 + x29
-)
-: (
-   0
-))));
-    out[3] = x55 + x0*(x56 + x38*(x34 + x35 + 3.0*((x28 == 1) ? (
-   1 + x27
-)
-: (
-   0
-))) + (x47 + x51)*x1);
-}
-
-__device__ void pycgpu_model_4_formulahess(double* out, const double* x) {
-    double x0 = 1e-15 < x[3];
-    double x1 = 2.0*((x0 == 1) ? 0
-: 0);
-    double x2 = 1e-15 < x[4];
-    double x3 = 3.0*((x2 == 1) ? 0
-: 0);
-    double x4 = 1e-15 < x[5];
-    double x5 = 3.0*((x4 == 1) ? 0
-: 0);
-    double x6 = x3 + x5;
-    double x7 = x1 + x6;
-    double x8 = 2.0*x[3] + 3.0*(x[4] + x[5]);
-    double x9 = pow(x8, -1);
-    double x10 = 8.3145*x9;
-    double x11 = x[2]*x10;
-    double x12 = x7*x11;
-    double x13 = 16.629*x7;
-    double x14 = x9*x13;
-    double x15 = pow(x[2], 1.0);
-    double x16 = pow(x[2], 3.0);
-    double x17 = pow(x16, -1);
-    double x18 = pow(x[2], -1);
-    double x19 = x[2] < 1357.77;
-    double x20 = pow(x[2], -11.0);
-    double x21 = 1357.77 <= x[2];
-    double x22 = 148184.0*x17;
-    double x23 = x[2] < 700.0;
-    double x24 = (x[2] < 933.47 && 700.0 <= x[2]);
-    double x25 = 933.47 <= x[2];
-    double x26 = 2.0*((x23 == 1) ? (
-   -0.003769324 - 5.265984e-06*x15 - 24.3671976*x18 + x22
-)
-: ((x24 == 1) ? (
-   0.037063964 - 3.4585362e-05*x15 - 38.5844296*x18 + x22
-)
-: ((x25 == 1) ? (
-   -31.748192*x18 - 1.1074716e+30*x20
-)
-: 0)));
-    double x27 = x[2] < 1811.0;
-    double x28 = 1811.0 <= x[2];
-    double x29 = log(x[2]);
-    double x30 = 23.5143*x29;
-    double x31 = pow(x[2], 2.0);
-    double x32 = pow(x31, -1);
-    double x33 = pow(x[2], -10.0);
-    double x34 = 46.0*x29;
-    double x35 = 24.3671976*x29;
-    double x36 = -74092.0*x32;
-    double x37 = 38.5844296*x29;
-    double x38 = 31.748192*x29;
-    double x39 = 2.0*((x23 == 1) ? (
-   112.7258404 - 0.003769324*x15 - 2.632992e-06*x31 - x35 + x36
-)
-: ((x24 == 1) ? (
-   184.4640164 + 0.037063964*x15 - 1.7292681e-05*x31 + x36 - x37
-)
-: ((x25 == 1) ? (
-   156.935961 + 1.1074716e+29*x33 - x38
-)
-: 0)));
-    double x40 = x39 + 3.0*((x27 == 1) ? (
-   100.6197 - 0.00879504*x15 - x30 - 1.76781e-07*x31 - 77359.0*x32
-)
-: ((x28 == 1) ? (
-   253.31255 - 2.066427e+32*x33 - x34
-)
-: 0));
-    double x41 = x40*x[5];
-    double x42 = 24.112392*x29;
-    double x43 = 31.38*x29;
-    double x44 = 3.0 + x39 + 3.0*((x19 == 1) ? (
-   106.372843 - 0.00531368*x15 + 3.87669e-07*x31 - 52478.0*x32 - x42
-)
-: ((x21 == 1) ? (
-   152.423828 - 3.277503e+30*x33 - x43
-)
-: 0));
-    double x45 = x44*x[4];
-    double x46 = x41*x[3] + x45*x[3];
-    double x47 = x9*x46;
-    double x48 = log(x[3]);
-    double x49 = log(x[5]);
-    double x50 = log(x[4]);
-    double x51 = 2.0*((x0 == 1) ? (
-   x48*x[3]
-)
-: 0) + 3.0*((x4 == 1) ? (
-   x49*x[5]
-)
-: 0) + 3.0*((x2 == 1) ? (
-   x50*x[4]
-)
-: 0);
-    double x52 = x12 + x47 + x51*x10;
-    double x53 = pow(x8, -2);
-    double x54 = x[2]*x53;
-    double x55 = 16.629*x51;
-    double x56 = x53*x55;
-    double x57 = x53*x46;
-    double x58 = x6 + 2.0*((x0 == 1) ? (
-   1 + x48
-)
-: 0);
-    double x59 = x58*x10;
-    double x60 = 2.0*((x23 == 1) ? 0
-: ((x24 == 1) ? 0
-: ((x25 == 1) ? 0
-: 0)));
-    double x61 = x60 + 3.0*((x19 == 1) ? 0
-: ((x21 == 1) ? 0
-: 0));
-    double x62 = x61*x[4];
-    double x63 = x60 + 3.0*((x27 == 1) ? 0
-: ((x28 == 1) ? 0
-: 0));
-    double x64 = x63*x[5];
-    double x65 = x62*x[3] + x64*x[3];
-    double x66 = x8*(x12 - x56 - 2.0*x57 + x59 - x54*x13 + x9*(x41 + x45 + x65));
-    double x67 = 3.0*x52;
-    double x68 = x1 + x5;
-    double x69 = x68 + 3.0*((x2 == 1) ? (
-   1 + x50
-)
-: 0);
-    double x70 = x69*x10;
-    double x71 = 24.9435*x54;
-    double x72 = 24.9435*x51;
-    double x73 = x72*x53;
-    double x74 = x12 - 3.0*x57 - x73 - x7*x71;
-    double x75 = x8*(x70 + x74 + x9*(x65 + x44*x[3]));
-    double x76 = x1 + x3;
-    double x77 = x76 + 3.0*((x4 == 1) ? (
-   1 + x49
-)
-: 0);
-    double x78 = x77*x10;
-    double x79 = x8*(x74 + x78 + x9*(x65 + x40*x[3]));
-    double x80 = pow(x15, -1);
-    double x81 = 74092.0*x80;
-    double x82 = pow(x[2], -9.0);
-    double x83 = 2.0*((x23 == 1) ? (
-   -7976.15 + 137.093038*x[2] - 8.77664e-07*x16 - 0.001884662*x31 + x81 - x[2]*x35
-)
-: ((x24 == 1) ? (
-   -11276.24 + 223.048446*x[2] - 5.764227e-06*x16 + 0.018531982*x31 + x81 - x[2]*x37
-)
-: ((x25 == 1) ? (
-   -11278.378 + 188.684153*x[2] - 1.230524e+28*x82 - x[2]*x38
-)
-: 0)));
-    double x84 = x83 + 3.0*((x27 == 1) ? (
-   1225.7 + 124.134*x[2] - 5.8927e-08*x16 - 0.00439752*x31 + 77359.0*x80 - x[2]*x30
-)
-: ((x28 == 1) ? (
-   -25383.581 + 299.31255*x[2] + 2.29603e+31*x82 - x[2]*x34
-)
-: 0));
-    double x85 = x84*x[5];
-    double x86 = -106700.0 + 3.0*x[2] + x83 + 3.0*((x19 == 1) ? (
-   -7770.458 + 130.485235*x[2] + 1.29223e-07*x16 - 0.00265684*x31 + 52478.0*x80 - x[2]*x42
-)
-: ((x21 == 1) ? (
-   -13542.026 + 183.803828*x[2] + 3.64167e+29*x82 - x[2]*x43
-)
-: 0));
-    double x87 = x65 + x85 + x86*x[4];
-    double x88 = x9*x87;
-    double x89 = x86*x[3];
-    double x90 = x85*x[3] + x89*x[4];
-    double x91 = x53*x90;
-    double x92 = x88 - 2.0*x91 - x[2]*x56 + x[2]*x59;
-    double x93 = x54*x51;
-    double x94 = x[2]*x9;
-    double x95 = 16.629*x94;
-    double x96 = pow(x8, -3);
-    double x97 = x[2]*x51*x96;
-    double x98 = x90*x96;
-    double x99 = x87*x53;
-    double x100 = 3.0*x92;
-    double x101 = x65 + x89;
-    double x102 = x9*x101;
-    double x103 = x69*x54;
-    double x104 = x53*x101;
-    double x105 = x61*x[3];
-    double x106 = x62 + x64;
-    double x107 = x12 + 99.774*x97 + 12.0*x98 - 3.0*x99 - x71*x58;
-    double x108 = 49.887*x54;
-    double x109 = -6.0*x91 - x51*x108;
-    double x110 = x109 + x8*(-16.629*x103 - 2.0*x104 + x107 + (x105 + x106 + x65 + x86)*x9);
-    double x111 = x65 + x84*x[3];
-    double x112 = x9*x111;
-    double x113 = x53*x111;
-    double x114 = x63*x[3];
-    double x115 = x114 + x65;
-    double x116 = x109 + x8*(x107 - 2.0*x113 - 16.629*x77*x54 + x9*(x106 + x115 + x84));
-    double x117 = 24.9435*x94;
-    double x118 = 3.0*x47 + x7*x117 + x9*x72;
-    double x119 = -3.0*x91 - x[2]*x73;
-    double x120 = x102 + x119 + x[2]*x70;
-    double x121 = 3.0*x88 + x58*x117;
-    double x122 = 149.661*x97 + 18.0*x98;
-    double x123 = 3.0*x102 + x69*x117;
-    double x124 = -9.0*x91 - 74.8305*x93;
-    double x125 = 3.0*x120 + x124;
-    double x126 = 24.9435*x77;
-    double x127 = x8*(-24.9435*x103 - 3.0*x104 - 3.0*x113 + x12 + x122 - x54*x126 + (x105 + x115)*x9);
-    double x128 = 3.0*x112 + x94*x126;
-    double x129 = x112 + x119 + x[2]*x78;
-    double x130 = x124 + 3.0*x129;
-    out[0] = x8*(x12 + x14 + x9*((x26 + 3.0*((x27 == 1) ? (
-   -0.00879504 - 3.53562e-07*x15 + 154718.0*x17 - 23.5143*x18
-)
-: ((x28 == 1) ? (
-   -46.0*x18 + 2.066427e+33*x20
-)
-: 0)))*x[5]*x[3] + (x26 + 3.0*((x19 == 1) ? (
-   -0.00531368 + 7.75338e-07*x15 + 104956.0*x17 - 24.112392*x18
-)
-: ((x21 == 1) ? (
-   -31.38*x18 + 3.277503e+31*x20
-)
-: 0)))*x[4]*x[3]));
-    out[1] = 2.0*x52 + x66;
-    out[2] = x67 + x75;
-    out[3] = x67 + x79;
-    out[4] = 2.0*x47 + x66 + x[2]*x14 + x9*x55;
-    out[5] = 2.0*x88 - 4.0*x91 + 2.0*x92 - 33.258*x93 + x58*x95 + x8*(66.516*x97 + 8.0*x98 - 4.0*x99 + x11*(x6 + 2.0*((x0 == 1) ? (
-   pow(x[3], -1)
-)
-: 0)) - 33.258*x54*x58 + x9*(2*x62 + 2*x64 + x65));
-    out[6] = x100 + 2.0*x102 + x110 + x69*x95;
-    out[7] = x100 + 2.0*x112 + x116 + x77*x95;
-    out[8] = x118 + x75;
-    out[9] = x110 + 2.0*x120 + x121;
-    out[10] = x123 + x125 + x8*(-49.887*x103 - 6.0*x104 + x122 + x11*(x68 + 3.0*((x2 == 1) ? (
-   pow(x[4], -1)
-)
-: 0)) + x9*(2*x105 + x65));
-    out[11] = x125 + x127 + x128;
-    out[12] = x118 + x79;
-    out[13] = x116 + x121 + 2.0*x129;
-    out[14] = x123 + x127 + x130;
-    out[15] = x128 + x130 + x8*(-6.0*x113 + x122 + x11*(x76 + 3.0*((x4 == 1) ? (
-   pow(x[5], -1)
-)
-: 0)) - x77*x108 + x9*(2*x114 + x65));
-}
-
-__device__ void pycgpu_model_4_internal_cons_func(double* out, const double* x) {
-    out[0] = 1.0*(-1 + x[3]);
-    out[1] = 1.0*(-1 + x[4] + x[5]);
-}
-
-__device__ void pycgpu_model_4_internal_cons_jac(double* out, const double* x) {
+__device__ void pycgpu_model_0_formulamole_grad(double* out, const double* x) {
     out[0] = 0;
     out[1] = 1.0;
     out[2] = 0;
@@ -8737,791 +6584,17 @@ __device__ void pycgpu_model_4_internal_cons_jac(double* out, const double* x) {
     out[4] = 0;
     out[5] = 0;
     out[6] = 1.0;
-    out[7] = 1.0;
-}
-
-__device__ void pycgpu_model_4_mass_obj(double* out, const double* x) {
-    double x0 = 2.0*x[3];
-    double x1 = pow(x0 + 3.0*(x[4] + x[5]), -1);
-    double x2 = 3.0*x1;
-    out[0] = x0*x1;
-    out[1] = x2*x[4];
-    out[2] = x2*x[5];
-    out[3] = 0;
-}
-
-__device__ void pycgpu_model_4_formulamole_obj(double* out, const double* x) {
-    out[0] = 2.0*x[3];
-    out[1] = 3.0*x[4];
-    out[2] = 3.0*x[5];
-    out[3] = 0.0;
-}
-
-__device__ void pycgpu_model_4_formulamole_grad(double* out, const double* x) {
-    out[0] = 0;
-    out[1] = 2.0;
-    out[2] = 0;
-    out[3] = 0;
-    out[4] = 0;
-    out[5] = 0;
-    out[6] = 3.0;
     out[7] = 0;
     out[8] = 0;
     out[9] = 0;
     out[10] = 0;
-    out[11] = 3.0;
-}
-
-__device__ double pycgpu_model_5_obj(const double* x) {
-    double x0 = x[5] + x[6];
-    double x1 = pow(1.0*x0 + 1.0*(x[3] + x[4]), -1);
-    double x2 = x0*x[4]*x[3];
-    double x3 = pow(x[2], 3.0);
-    double x4 = pow(x[2], -1.0);
-    double x5 = x[2]*log(x[2]);
-    double x6 = pow(x[2], 2.0);
-    double x7 = pow(x[2], -9.0);
-    double x8 = ((x[2] < 1357.77) ? (
-   -7770.458 + 130.485235*x[2] + 1.29223e-07*x3 + 52478.0*x4 - 24.112392*x5 - 0.00265684*x6
-)
-: ((1357.77 <= x[2]) ? (
-   -13542.026 + 183.803828*x[2] - 31.38*x5 + 3.64167e+29*x7
-)
-: (
-   0
-)));
-    double x9 = 74092.0*x4;
-    double x10 = ((x[2] < 700.0) ? (
-   -7976.15 + 137.093038*x[2] - 8.77664e-07*x3 - 24.3671976*x5 - 0.001884662*x6 + x9
-)
-: (((x[2] < 933.47 && 700.0 <= x[2])) ? (
-   -11276.24 + 223.048446*x[2] - 5.764227e-06*x3 - 38.5844296*x5 + 0.018531982*x6 + x9
-)
-: ((933.47 <= x[2]) ? (
-   -11278.378 + 188.684153*x[2] - 31.748192*x5 - 1.230524e+28*x7
-)
-: (
-   0
-))));
-    double x11 = ((x[2] < 1811.0) ? (
-   1225.7 + 124.134*x[2] - 5.8927e-08*x3 + 77359.0*x4 - 23.5143*x5 - 0.00439752*x6
-)
-: ((1811.0 <= x[2]) ? (
-   -25383.581 + 299.31255*x[2] - 46.0*x5 + 2.29603e+31*x7
-)
-: (
-   0
-)));
-    return x1*(x2*(7600.0 - 24.0*x[2]) - 72000.0*(x[3] - x[4])*x2) + x1*(x[3]*x[5]*(-36976.0 + 1.2*x[2] + x10 + x8) + 2.0*x[4]*x[5]*(4017.0 - 1.255*x[2] + x8) + (x10 + x11)*x[3]*x[6] + (15000.0 + x11 + x8)*x[4]*x[6]) + 8.3145*x[2]*x1*(1.0*((1e-15 < x[3]) ? (
-   x[3]*log(x[3])
-)
-: (
-   0
-)) + 1.0*((1e-15 < x[4]) ? (
-   x[4]*log(x[4])
-)
-: (
-   0
-)) + 1.0*((1e-15 < x[5]) ? (
-   x[5]*log(x[5])
-)
-: (
-   0
-)) + 1.0*((1e-15 < x[6]) ? (
-   x[6]*log(x[6])
-)
-: (
-   0
-)));
-}
-
-__device__ double pycgpu_model_5_formulaobj(const double* x) {
-    double x0 = x[5] + x[6];
-    double x1 = 1.0*x0 + 1.0*(x[3] + x[4]);
-    double x2 = pow(x1, -1);
-    double x3 = x0*x[4]*x[3];
-    double x4 = pow(x[2], 3.0);
-    double x5 = pow(x[2], -1.0);
-    double x6 = x[2]*log(x[2]);
-    double x7 = pow(x[2], 2.0);
-    double x8 = pow(x[2], -9.0);
-    double x9 = ((x[2] < 1357.77) ? (
-   -7770.458 + 130.485235*x[2] + 1.29223e-07*x4 + 52478.0*x5 - 24.112392*x6 - 0.00265684*x7
-)
-: ((1357.77 <= x[2]) ? (
-   -13542.026 + 183.803828*x[2] - 31.38*x6 + 3.64167e+29*x8
-)
-: (
-   0
-)));
-    double x10 = 74092.0*x5;
-    double x11 = ((x[2] < 700.0) ? (
-   -7976.15 + 137.093038*x[2] + x10 - 8.77664e-07*x4 - 24.3671976*x6 - 0.001884662*x7
-)
-: (((x[2] < 933.47 && 700.0 <= x[2])) ? (
-   -11276.24 + 223.048446*x[2] + x10 - 5.764227e-06*x4 - 38.5844296*x6 + 0.018531982*x7
-)
-: ((933.47 <= x[2]) ? (
-   -11278.378 + 188.684153*x[2] - 31.748192*x6 - 1.230524e+28*x8
-)
-: (
-   0
-))));
-    double x12 = ((x[2] < 1811.0) ? (
-   1225.7 + 124.134*x[2] - 5.8927e-08*x4 + 77359.0*x5 - 23.5143*x6 - 0.00439752*x7
-)
-: ((1811.0 <= x[2]) ? (
-   -25383.581 + 299.31255*x[2] - 46.0*x6 + 2.29603e+31*x8
-)
-: (
-   0
-)));
-    return x1*(x2*(x3*(7600.0 - 24.0*x[2]) - 72000.0*(x[3] - x[4])*x3) + x2*(x[3]*x[5]*(-36976.0 + 1.2*x[2] + x11 + x9) + 2.0*x[4]*x[5]*(4017.0 - 1.255*x[2] + x9) + (x11 + x12)*x[3]*x[6] + (15000.0 + x12 + x9)*x[4]*x[6]) + 8.3145*x[2]*x2*(1.0*((1e-15 < x[3]) ? (
-   x[3]*log(x[3])
-)
-: (
-   0
-)) + 1.0*((1e-15 < x[4]) ? (
-   x[4]*log(x[4])
-)
-: (
-   0
-)) + 1.0*((1e-15 < x[5]) ? (
-   x[5]*log(x[5])
-)
-: (
-   0
-)) + 1.0*((1e-15 < x[6]) ? (
-   x[6]*log(x[6])
-)
-: (
-   0
-))));
-}
-
-__device__ void pycgpu_model_5_formulagrad(double* out, const double* x) {
-    double x0 = x[5] + x[6];
-    double x1 = 1.0*x0 + 1.0*(x[3] + x[4]);
-    double x2 = pow(x1, -1);
-    double x3 = pow(x[2], 1.0);
-    double x4 = log(x[2]);
-    double x5 = 23.5143*x4;
-    double x6 = pow(x[2], 2.0);
-    double x7 = pow(x6, -1);
-    double x8 = x[2] < 1811.0;
-    double x9 = pow(x[2], -10.0);
-    double x10 = 46.0*x4;
-    double x11 = 1811.0 <= x[2];
-    double x12 = ((x8 == 1) ? (
-   100.6197 - 0.00879504*x3 - x5 - 1.76781e-07*x6 - 77359.0*x7
-)
-: ((x11 == 1) ? (
-   253.31255 - x10 - 2.066427e+32*x9
-)
-: (
-   0
-)));
-    double x13 = 24.3671976*x4;
-    double x14 = -74092.0*x7;
-    double x15 = x[2] < 700.0;
-    double x16 = 38.5844296*x4;
-    double x17 = (x[2] < 933.47 && 700.0 <= x[2]);
-    double x18 = 31.748192*x4;
-    double x19 = 933.47 <= x[2];
-    double x20 = ((x15 == 1) ? (
-   112.7258404 - x13 + x14 - 0.003769324*x3 - 2.632992e-06*x6
-)
-: ((x17 == 1) ? (
-   184.4640164 + x14 - x16 + 0.037063964*x3 - 1.7292681e-05*x6
-)
-: ((x19 == 1) ? (
-   156.935961 - x18 + 1.1074716e+29*x9
-)
-: (
-   0
-))));
-    double x21 = x[3]*x[6];
-    double x22 = 24.112392*x4;
-    double x23 = x[2] < 1357.77;
-    double x24 = 31.38*x4;
-    double x25 = 1357.77 <= x[2];
-    double x26 = ((x23 == 1) ? (
-   106.372843 - x22 - 0.00531368*x3 + 3.87669e-07*x6 - 52478.0*x7
-)
-: ((x25 == 1) ? (
-   152.423828 - x24 - 3.277503e+30*x9
-)
-: (
-   0
-)));
-    double x27 = x[4]*x[6];
-    double x28 = 2.0*x[4]*x[5];
-    double x29 = x[3]*x[5];
-    double x30 = log(x[4]);
-    double x31 = 1e-15 < x[4];
-    double x32 = log(x[5]);
-    double x33 = 1e-15 < x[5];
-    double x34 = log(x[3]);
-    double x35 = 1e-15 < x[3];
-    double x36 = log(x[6]);
-    double x37 = 1e-15 < x[6];
-    double x38 = 8.3145*(1.0*((x31 == 1) ? (
-   x30*x[4]
-)
-: (
-   0
-)) + 1.0*((x33 == 1) ? (
-   x32*x[5]
-)
-: (
-   0
-)) + 1.0*((x35 == 1) ? (
-   x34*x[3]
-)
-: (
-   0
-)) + 1.0*((x37 == 1) ? (
-   x36*x[6]
-)
-: (
-   0
-)));
-    double x39 = x2*x38;
-    double x40 = 1.0*((x33 == 1) ? (
-   0
-)
-: (
-   0
-));
-    double x41 = 1.0*((x35 == 1) ? (
-   0
-)
-: (
-   0
-));
-    double x42 = 1.0*((x37 == 1) ? (
-   0
-)
-: (
-   0
-));
-    double x43 = 1.0*((x31 == 1) ? (
-   0
-)
-: (
-   0
-));
-    double x44 = x41 + x42 + x43;
-    double x45 = 8.3145*x[2]*x2;
-    double x46 = x0*x[4];
-    double x47 = pow(x[2], 3.0);
-    double x48 = pow(x3, -1);
-    double x49 = 74092.0*x48;
-    double x50 = pow(x[2], -9.0);
-    double x51 = ((x15 == 1) ? (
-   -7976.15 + 137.093038*x[2] - 8.77664e-07*x47 + x49 - 0.001884662*x6 - x[2]*x13
-)
-: ((x17 == 1) ? (
-   -11276.24 + 223.048446*x[2] - 5.764227e-06*x47 + x49 + 0.018531982*x6 - x[2]*x16
-)
-: ((x19 == 1) ? (
-   -11278.378 + 188.684153*x[2] - 1.230524e+28*x50 - x[2]*x18
-)
-: (
-   0
-))));
-    double x52 = ((x8 == 1) ? (
-   1225.7 + 124.134*x[2] - 5.8927e-08*x47 + 77359.0*x48 - 0.00439752*x6 - x[2]*x5
-)
-: ((x11 == 1) ? (
-   -25383.581 + 299.31255*x[2] + 2.29603e+31*x50 - x[2]*x10
-)
-: (
-   0
-)));
-    double x53 = x51 + x52;
-    double x54 = ((x23 == 1) ? (
-   -7770.458 + 130.485235*x[2] + 1.29223e-07*x47 + 52478.0*x48 - 0.00265684*x6 - x[2]*x22
-)
-: ((x25 == 1) ? (
-   -13542.026 + 183.803828*x[2] + 3.64167e+29*x50 - x[2]*x24
-)
-: (
-   0
-)));
-    double x55 = -36976.0 + 1.2*x[2] + x51 + x54;
-    double x56 = ((x8 == 1) ? (
-   0
-)
-: ((x11 == 1) ? (
-   0
-)
-: (
-   0
-)));
-    double x57 = ((x15 == 1) ? (
-   0
-)
-: ((x17 == 1) ? (
-   0
-)
-: ((x19 == 1) ? (
-   0
-)
-: (
-   0
-))));
-    double x58 = ((x23 == 1) ? (
-   0
-)
-: ((x25 == 1) ? (
-   0
-)
-: (
-   0
-)));
-    double x59 = x58*x28 + (x56 + x57)*x21 + (x56 + x58)*x27 + (x57 + x58)*x29;
-    double x60 = x40 + x42;
-    double x61 = 72000.0*x[3];
-    double x62 = x61*x46;
-    double x63 = x[3] - x[4];
-    double x64 = 7600.0 - 24.0*x[2];
-    double x65 = x55*x[3];
-    double x66 = 2.0*(4017.0 - 1.255*x[2] + x54);
-    double x67 = x66*x[5];
-    double x68 = 15000.0 + x52 + x54;
-    double x69 = x68*x[4];
-    double x70 = x53*x[3];
-    double x71 = x65*x[5] + x67*x[4] + x69*x[6] + x70*x[6];
-    double x72 = pow(x1, -2);
-    double x73 = 1.0*x72;
-    double x74 = x64*x[3];
-    double x75 = x74*x[4];
-    double x76 = x0*x75 - x63*x62;
-    double x77 = -x71*x73 - x73*x76 - x[2]*x72*x38;
-    double x78 = 1.0*(x[2]*x39 + x2*x71 + x2*x76);
-    double x79 = x63*x61;
-    double x80 = x77 + x2*(x75 - x79*x[4]);
-    out[0] = x1*(x39 + x2*(x28*(-1.255 + x26) + x29*(1.2 + x20 + x26) + (x12 + x20)*x21 + (x12 + x26)*x27) + (x40 + x44)*x45 - 24.0*x2*x46*x[3]);
-    out[1] = x78 + x1*(x77 + x2*(x59 + x53*x[6] + x55*x[5]) + x2*(-x62 - 72000.0*x63*x46 + x64*x46) + x45*(x43 + x60 + 1.0*((x35 == 1) ? (
-   1 + x34
-)
-: (
-   0
-))));
-    out[2] = x78 + x1*(x77 + x2*(x62 + x0*x74 - x0*x79) + x2*(x59 + x67 + x68*x[6]) + x45*(x41 + x60 + 1.0*((x31 == 1) ? (
-   1 + x30
-)
-: (
-   0
-))));
-    out[3] = x78 + x1*(x80 + x2*(x59 + x65 + x66*x[4]) + x45*(x44 + 1.0*((x33 == 1) ? (
-   1 + x32
-)
-: (
-   0
-))));
-    out[4] = x78 + x1*(x80 + x2*(x59 + x69 + x70) + x45*(x40 + x41 + x43 + 1.0*((x37 == 1) ? (
-   1 + x36
-)
-: (
-   0
-))));
-}
-
-__device__ void pycgpu_model_5_formulahess(double* out, const double* x) {
-    double x0 = x[5] + x[6];
-    double x1 = 1.0*x0 + 1.0*(x[3] + x[4]);
-    double x2 = pow(x1, -1);
-    double x3 = 8.3145*x2;
-    double x4 = 1e-15 < x[6];
-    double x5 = 1.0*((x4 == 1) ? 0
-: 0);
-    double x6 = 1e-15 < x[5];
-    double x7 = 1.0*((x6 == 1) ? 0
-: 0);
-    double x8 = 1e-15 < x[4];
-    double x9 = 1.0*((x8 == 1) ? 0
-: 0);
-    double x10 = 1e-15 < x[3];
-    double x11 = 1.0*((x10 == 1) ? 0
-: 0);
-    double x12 = x11 + x9;
-    double x13 = x12 + x7;
-    double x14 = x13 + x5;
-    double x15 = x[2]*x14;
-    double x16 = x3*x15;
-    double x17 = pow(x[2], 1.0);
-    double x18 = pow(x[2], 3.0);
-    double x19 = pow(x18, -1);
-    double x20 = pow(x[2], -1);
-    double x21 = x[2] < 1357.77;
-    double x22 = pow(x[2], -11.0);
-    double x23 = 1357.77 <= x[2];
-    double x24 = ((x21 == 1) ? (
-   -0.00531368 + 7.75338e-07*x17 + 104956.0*x19 - 24.112392*x20
-)
-: ((x23 == 1) ? (
-   -31.38*x20 + 3.277503e+31*x22
-)
-: 0));
-    double x25 = 148184.0*x19;
-    double x26 = x[2] < 700.0;
-    double x27 = (x[2] < 933.47 && 700.0 <= x[2]);
-    double x28 = 933.47 <= x[2];
-    double x29 = ((x26 == 1) ? (
-   -0.003769324 - 5.265984e-06*x17 - 24.3671976*x20 + x25
-)
-: ((x27 == 1) ? (
-   0.037063964 - 3.4585362e-05*x17 - 38.5844296*x20 + x25
-)
-: ((x28 == 1) ? (
-   -31.748192*x20 - 1.1074716e+30*x22
-)
-: 0)));
-    double x30 = x[2] < 1811.0;
-    double x31 = 1811.0 <= x[2];
-    double x32 = ((x30 == 1) ? (
-   -0.00879504 - 3.53562e-07*x17 + 154718.0*x19 - 23.5143*x20
-)
-: ((x31 == 1) ? (
-   -46.0*x20 + 2.066427e+33*x22
-)
-: 0));
-    double x33 = x0*x2;
-    double x34 = 24.0*x33;
-    double x35 = log(x[3]);
-    double x36 = x5 + x7;
-    double x37 = x36 + x9;
-    double x38 = x37 + 1.0*((x10 == 1) ? (
-   1 + x35
-)
-: 0);
-    double x39 = x3*x38;
-    double x40 = log(x[2]);
-    double x41 = 24.3671976*x40;
-    double x42 = pow(x[2], 2.0);
-    double x43 = pow(x42, -1);
-    double x44 = -74092.0*x43;
-    double x45 = 38.5844296*x40;
-    double x46 = pow(x[2], -10.0);
-    double x47 = 31.748192*x40;
-    double x48 = ((x26 == 1) ? (
-   112.7258404 - 0.003769324*x17 - x41 - 2.632992e-06*x42 + x44
-)
-: ((x27 == 1) ? (
-   184.4640164 + 0.037063964*x17 - 1.7292681e-05*x42 + x44 - x45
-)
-: ((x28 == 1) ? (
-   156.935961 + 1.1074716e+29*x46 - x47
-)
-: 0)));
-    double x49 = 24.112392*x40;
-    double x50 = 31.38*x40;
-    double x51 = ((x21 == 1) ? (
-   106.372843 - 0.00531368*x17 + 3.87669e-07*x42 - 52478.0*x43 - x49
-)
-: ((x23 == 1) ? (
-   152.423828 - 3.277503e+30*x46 - x50
-)
-: 0));
-    double x52 = 1.2 + x48 + x51;
-    double x53 = 23.5143*x40;
-    double x54 = 46.0*x40;
-    double x55 = ((x30 == 1) ? (
-   100.6197 - 0.00879504*x17 - 1.76781e-07*x42 - 77359.0*x43 - x53
-)
-: ((x31 == 1) ? (
-   253.31255 - 2.066427e+32*x46 - x54
-)
-: 0));
-    double x56 = x48 + x55;
-    double x57 = ((x26 == 1) ? 0
-: ((x27 == 1) ? 0
-: ((x28 == 1) ? 0
-: 0)));
-    double x58 = ((x21 == 1) ? 0
-: ((x23 == 1) ? 0
-: 0));
-    double x59 = x57 + x58;
-    double x60 = x59*x[3];
-    double x61 = 2.0*x58;
-    double x62 = x61*x[4];
-    double x63 = ((x30 == 1) ? 0
-: ((x31 == 1) ? 0
-: 0));
-    double x64 = x58 + x63;
-    double x65 = x64*x[6];
-    double x66 = x57 + x63;
-    double x67 = x66*x[3];
-    double x68 = x60*x[5] + x62*x[5] + x65*x[4] + x67*x[6];
-    double x69 = pow(x1, -2);
-    double x70 = x[4]*x[3];
-    double x71 = 24.0*x70;
-    double x72 = 8.3145*x69;
-    double x73 = log(x[4]);
-    double x74 = log(x[5]);
-    double x75 = log(x[6]);
-    double x76 = 1.0*((x10 == 1) ? (
-   x35*x[3]
-)
-: 0) + 1.0*((x8 == 1) ? (
-   x73*x[4]
-)
-: 0) + 1.0*((x6 == 1) ? (
-   x74*x[5]
-)
-: 0) + 1.0*((x4 == 1) ? (
-   x75*x[6]
-)
-: 0);
-    double x77 = x72*x76;
-    double x78 = x56*x[3];
-    double x79 = x51 + x55;
-    double x80 = x79*x[6];
-    double x81 = 2.0*(-1.255 + x51);
-    double x82 = x81*x[4];
-    double x83 = x52*x[3];
-    double x84 = x78*x[6] + x80*x[4] + x82*x[5] + x83*x[5];
-    double x85 = 1.0*x69;
-    double x86 = x16 - x77 - x72*x15 - x84*x85 + x0*x71*x69;
-    double x87 = x1*(x39 + x86 + x2*(x68 + x52*x[5] + x56*x[6]) - x34*x[4]);
-    double x88 = x2*x84;
-    double x89 = x16 + x3*x76 - x70*x34;
-    double x90 = 1.0*(x88 + x89);
-    double x91 = x11 + x36;
-    double x92 = x91 + 1.0*((x8 == 1) ? (
-   1 + x73
-)
-: 0);
-    double x93 = x3*x92;
-    double x94 = x1*(x86 + x93 + x2*(x68 + x80 + x81*x[5]) - x34*x[3]);
-    double x95 = x12 + x5;
-    double x96 = x95 + 1.0*((x6 == 1) ? (
-   1 + x74
-)
-: 0);
-    double x97 = x3*x96;
-    double x98 = x86 - x2*x71;
-    double x99 = x1*(x97 + x98 + x2*(x68 + x82 + x83));
-    double x100 = x13 + 1.0*((x4 == 1) ? (
-   1 + x75
-)
-: 0);
-    double x101 = x3*x100;
-    double x102 = x1*(x101 + x98 + x2*(x68 + x78 + x79*x[4]));
-    double x103 = 1.0*x88 + x89;
-    double x104 = pow(x17, -1);
-    double x105 = 74092.0*x104;
-    double x106 = pow(x[2], -9.0);
-    double x107 = ((x26 == 1) ? (
-   -7976.15 + 137.093038*x[2] + x105 - 8.77664e-07*x18 - 0.001884662*x42 - x[2]*x41
-)
-: ((x27 == 1) ? (
-   -11276.24 + 223.048446*x[2] + x105 - 5.764227e-06*x18 + 0.018531982*x42 - x[2]*x45
-)
-: ((x28 == 1) ? (
-   -11278.378 + 188.684153*x[2] - 1.230524e+28*x106 - x[2]*x47
-)
-: 0)));
-    double x108 = ((x30 == 1) ? (
-   1225.7 + 124.134*x[2] + 77359.0*x104 - 5.8927e-08*x18 - 0.00439752*x42 - x[2]*x53
-)
-: ((x31 == 1) ? (
-   -25383.581 + 299.31255*x[2] + 2.29603e+31*x106 - x[2]*x54
-)
-: 0));
-    double x109 = x107 + x108;
-    double x110 = x109*x[6];
-    double x111 = ((x21 == 1) ? (
-   -7770.458 + 130.485235*x[2] + 52478.0*x104 + 1.29223e-07*x18 - 0.00265684*x42 - x[2]*x49
-)
-: ((x23 == 1) ? (
-   -13542.026 + 183.803828*x[2] + 3.64167e+29*x106 - x[2]*x50
-)
-: 0));
-    double x112 = -36976.0 + 1.2*x[2] + x107 + x111;
-    double x113 = x112*x[5];
-    double x114 = x110 + x113 + x68;
-    double x115 = x2*x114;
-    double x116 = 72000.0*x0;
-    double x117 = x116*x[3];
-    double x118 = x117*x[4];
-    double x119 = x[3] - x[4];
-    double x120 = x119*x116;
-    double x121 = 7600.0 - 24.0*x[2];
-    double x122 = x121*x[4];
-    double x123 = -x118 + x0*x122 - x120*x[4];
-    double x124 = x2*x123;
-    double x125 = 2.0*(4017.0 - 1.255*x[2] + x111);
-    double x126 = x125*x[5];
-    double x127 = 15000.0 + x108 + x111;
-    double x128 = x127*x[6];
-    double x129 = x110*x[3] + x113*x[3] + x126*x[4] + x128*x[4];
-    double x130 = x121*x[3];
-    double x131 = x0*x130;
-    double x132 = -x118*x119 + x131*x[4];
-    double x133 = -x[2]*x77 - x85*x129 - x85*x132;
-    double x134 = x133 + x[2]*x39;
-    double x135 = 1.0*(x115 + x124 + x134);
-    double x136 = 144000.0*x33;
-    double x137 = 2.0*x69;
-    double x138 = x[2]*x3;
-    double x139 = 16.629*x[2];
-    double x140 = x69*x139;
-    double x141 = x59*x[5];
-    double x142 = x66*x[6];
-    double x143 = pow(x1, -3);
-    double x144 = 2.0*x143;
-    double x145 = x129*x144 + x132*x144 + x76*x139*x143;
-    double x146 = 1.0*x115 + 1.0*x124 + x134;
-    double x147 = x141 + x142;
-    double x148 = x65 + x61*x[5];
-    double x149 = x148 + x68;
-    double x150 = x118 + x131 - x119*x117;
-    double x151 = x[2]*x72;
-    double x152 = x126 + x128 + x68;
-    double x153 = -x85*x150 - x85*x152 - x92*x151;
-    double x154 = -x38*x151 - x85*x114 - x85*x123;
-    double x155 = x1*(x145 + x153 + x154 + x16 + x2*(-x117 - x120 + x0*x121 + x116*x[4]) + (x147 + x149)*x2);
-    double x156 = x2*x152;
-    double x157 = x2*x150;
-    double x158 = x133 + x[2]*x93;
-    double x159 = 1.0*x156 + 1.0*x157 + x158;
-    double x160 = x60 + x62;
-    double x161 = x68 + x112*x[3] + x125*x[4];
-    double x162 = x16 - x85*x161 - x96*x151;
-    double x163 = 72000.0*x119;
-    double x164 = x163*x[3];
-    double x165 = x130*x[4] - x164*x[4];
-    double x166 = x145 - x85*x165;
-    double x167 = x162 + x166;
-    double x168 = 72000.0*x70;
-    double x169 = x154 + x2*(x122 - x168 - x163*x[4]);
-    double x170 = x1*(x167 + x169 + x2*(x112 + x147 + x160 + x68));
-    double x171 = x2*x165;
-    double x172 = x133 + 1.0*x171;
-    double x173 = x[2]*x97;
-    double x174 = x2*x161;
-    double x175 = x173 + 1.0*x174;
-    double x176 = x172 + x175;
-    double x177 = x64*x[4];
-    double x178 = x177 + x67 + x68;
-    double x179 = x68 + x109*x[3] + x127*x[4];
-    double x180 = -x100*x151 - x85*x179;
-    double x181 = x16 + x166 + x180;
-    double x182 = x1*(x169 + x181 + x2*(x109 + x147 + x178));
-    double x183 = x[2]*x101;
-    double x184 = x2*x179;
-    double x185 = x183 + 1.0*x184;
-    double x186 = x172 + x185;
-    double x187 = 1.0*(x156 + x157 + x158);
-    double x188 = 4.0*x58;
-    double x189 = x153 + x2*(x130 - x164 + x168);
-    double x190 = x1*(x167 + x189 + x2*(8034.0 - 2.51*x[2] + 2.0*x111 + x149 + x160));
-    double x191 = x1*(x181 + x189 + x2*(x127 + x148 + x178));
-    double x192 = x133 + x171;
-    double x193 = 1.0*(x173 + x174 + x192);
-    double x194 = x145 - x165*x137;
-    double x195 = x172 + x193;
-    double x196 = x1*(x162 + x180 + x194 + (x160 + x178)*x2);
-    double x197 = 1.0*(x183 + x184 + x192);
-    double x198 = x172 + x197;
-    out[0] = x1*(x16 + 16.629*x2*x14 + x2*(2.0*x24*x[4]*x[5] + (x24 + x29)*x[3]*x[5] + (x24 + x32)*x[4]*x[6] + (x29 + x32)*x[3]*x[6]));
-    out[1] = x87 + x90;
-    out[2] = x90 + x94;
-    out[3] = x90 + x99;
-    out[4] = x102 + x90;
-    out[5] = x103 + x87;
-    out[6] = x135 + x146 + x1*(x145 - x114*x137 - x123*x137 - x136*x[4] + x138*(x37 + 1.0*((x10 == 1) ? (
-   pow(x[3], -1)
-)
-: 0)) + x2*(2*x141 + 2*x142 + x68) - x38*x140);
-    out[7] = x135 + x155 + x159;
-    out[8] = x135 + x170 + x176;
-    out[9] = x135 + x182 + x186;
-    out[10] = x103 + x94;
-    out[11] = x146 + x155 + x187;
-    out[12] = x159 + x187 + x1*(x145 + x136*x[3] - x137*x150 - x137*x152 + x138*(x91 + 1.0*((x8 == 1) ? (
-   pow(x[4], -1)
-)
-: 0)) + x2*(2*x65 + x68 + x188*x[5]) - x92*x140);
-    out[13] = x176 + x187 + x190;
-    out[14] = x186 + x187 + x191;
-    out[15] = x103 + x99;
-    out[16] = x146 + x170 + x193;
-    out[17] = x159 + x190 + x193;
-    out[18] = x175 + x195 + x1*(x194 + x138*(x95 + 1.0*((x6 == 1) ? (
-   pow(x[5], -1)
-)
-: 0)) - x161*x137 + x2*(2*x60 + x68 + x188*x[4]) - x96*x140);
-    out[19] = x185 + x195 + x196;
-    out[20] = x102 + x103;
-    out[21] = x146 + x182 + x197;
-    out[22] = x159 + x191 + x197;
-    out[23] = x175 + x196 + x198;
-    out[24] = x185 + x198 + x1*(x194 - x100*x140 + x138*(x13 + 1.0*((x4 == 1) ? (
-   pow(x[6], -1)
-)
-: 0)) - x179*x137 + x2*(2*x177 + 2*x67 + x68));
-}
-
-__device__ void pycgpu_model_5_internal_cons_func(double* out, const double* x) {
-    out[0] = 1.0*(-1 + x[3] + x[4]);
-    out[1] = 1.0*(-1 + x[5] + x[6]);
-}
-
-__device__ void pycgpu_model_5_internal_cons_jac(double* out, const double* x) {
-    out[0] = 0;
-    out[1] = 1.0;
-    out[2] = 1.0;
-    out[3] = 0;
-    out[4] = 0;
-    out[5] = 0;
-    out[6] = 0;
-    out[7] = 0;
-    out[8] = 1.0;
-    out[9] = 1.0;
-}
-
-__device__ void pycgpu_model_5_mass_obj(double* out, const double* x) {
-    double x0 = pow(1.0*(x[3] + x[4]) + 1.0*(x[5] + x[6]), -1);
-    double x1 = 1.0*x0;
-    out[0] = x1*x[3];
-    out[1] = (1.0*x[4] + 1.0*x[5])*x0;
-    out[2] = x1*x[6];
-    out[3] = 0;
-}
-
-__device__ void pycgpu_model_5_formulamole_obj(double* out, const double* x) {
-    out[0] = 1.0*x[3];
-    out[1] = 1.0*x[4] + 1.0*x[5];
-    out[2] = 1.0*x[6];
-    out[3] = 0.0;
-}
-
-__device__ void pycgpu_model_5_formulamole_grad(double* out, const double* x) {
-    out[0] = 0;
-    out[1] = 1.0;
-    out[2] = 0;
-    out[3] = 0;
-    out[4] = 0;
-    out[5] = 0;
-    out[6] = 0;
-    out[7] = 1.0;
-    out[8] = 1.0;
-    out[9] = 0;
-    out[10] = 0;
-    out[11] = 0;
-    out[12] = 0;
-    out[13] = 0;
-    out[14] = 1.0;
+    out[11] = 1.0;
 }
 
 
 
 // --- Global Device-Side PhaseRecord Array ---
-__device__ PhaseRecord g_phase_records_array[6]; // Must be at least 1
+__device__ PhaseRecord g_phase_records_array[1]; // Must be at least 1
 
 // --- Kernel Functions (must be extern "C" for CuPy to find them) ---
 extern "C" {
@@ -9586,20 +6659,35 @@ __global__ void minimal_equilibrium_kernel(
     
     // Process conditions assigned to this thread using stride pattern
     for (int condition_idx = tid; condition_idx < num_conditions; condition_idx += total_threads) {
-        // Simple placeholder calculation - just copy some values and mark as processed
-        int result_offset = condition_idx * 10; // Assume 10 doubles per result
+        // Calculate correct result offset based on actual results layout
+        int results_per_condition = 7 + MAX_COMPONENTS + MAX_PHASES + 
+                                   (MAX_PHASES * MAX_DOF_PER_PHASE) + 
+                                   (MAX_PHASES * MAX_COMPONENTS) + MAX_PHASES;
+        int result_offset = condition_idx * results_per_condition;
         int condition_offset = condition_idx * data_size_per_condition;
         
-        if (result_offset + 9 < num_conditions * 10) {
+        if (result_offset + results_per_condition <= num_conditions * results_per_condition) {
             // Mark this condition as processed with some dummy values
-            results_data[result_offset + 0] = 1000.0 + condition_idx; // Phase amount
-            results_data[result_offset + 1] = 500.0; // Temperature (dummy)
-            results_data[result_offset + 2] = 1.0; // Pressure (dummy)
-            results_data[result_offset + 3] = 0.5; // X composition (dummy)
-            results_data[result_offset + 4] = 1.0; // Status: success
-            // Fill remaining with zeros
-            for (int i = 5; i < 10; i++) {
-                results_data[result_offset + i] = 0.0;
+            results_data[result_offset + 0] = 1000.0 + condition_idx; // GM
+            // Initialize chemical potentials
+            for (int i = 0; i < MAX_COMPONENTS; i++) {
+                results_data[result_offset + 1 + i] = 0.0;
+            }
+            // Initialize phase amounts
+            for (int i = 0; i < MAX_PHASES; i++) {
+                results_data[result_offset + 1 + MAX_COMPONENTS + i] = 0.0;
+            }
+            results_data[result_offset + 1 + MAX_COMPONENTS + MAX_PHASES] = 1.0; // converged
+            results_data[result_offset + 2 + MAX_COMPONENTS + MAX_PHASES] = 0.0; // num_stable_phases
+            results_data[result_offset + 3 + MAX_COMPONENTS + MAX_PHASES] = 500.0; // Temperature
+            results_data[result_offset + 4 + MAX_COMPONENTS + MAX_PHASES] = 1.0; // Pressure
+            results_data[result_offset + 5 + MAX_COMPONENTS + MAX_PHASES] = 1.0; // Status: success
+            // Fill remaining (Y_phases, X_phases, phase_ids) with zeros
+            int remaining_start = result_offset + 6 + MAX_COMPONENTS + MAX_PHASES;
+            int remaining_count = (MAX_PHASES * MAX_DOF_PER_PHASE) + 
+                                 (MAX_PHASES * MAX_COMPONENTS) + MAX_PHASES;
+            for (int i = 0; i < remaining_count; i++) {
+                results_data[remaining_start + i] = 0.0;
             }
         }
     }
@@ -9612,18 +6700,13 @@ __global__ void init_all_gpu_phase_records() {
         printf("GPU DEBUG: init_all_gpu_phase_records kernel called\n");
     }
     #endif
-        g_phase_records_array[0].init(&pycgpu_model_0_obj, &pycgpu_model_0_formulaobj, &pycgpu_model_0_formulagrad, &pycgpu_model_0_formulahess, &pycgpu_model_0_internal_cons_func, &pycgpu_model_0_internal_cons_jac, &pycgpu_model_0_mass_obj, &pycgpu_model_0_formulamole_obj, &pycgpu_model_0_formulamole_grad, 3, 5, 4, 3, 3);
-    g_phase_records_array[1].init(&pycgpu_model_1_obj, &pycgpu_model_1_formulaobj, &pycgpu_model_1_formulagrad, &pycgpu_model_1_formulahess, &pycgpu_model_1_internal_cons_func, &pycgpu_model_1_internal_cons_jac, &pycgpu_model_1_mass_obj, &pycgpu_model_1_formulamole_obj, &pycgpu_model_1_formulamole_grad, 3, 3, 4, 2, 3);
-    g_phase_records_array[2].init(&pycgpu_model_2_obj, &pycgpu_model_2_formulaobj, &pycgpu_model_2_formulagrad, &pycgpu_model_2_formulahess, &pycgpu_model_2_internal_cons_func, &pycgpu_model_2_internal_cons_jac, &pycgpu_model_2_mass_obj, &pycgpu_model_2_formulamole_obj, &pycgpu_model_2_formulamole_grad, 3, 3, 4, 2, 3);
-    g_phase_records_array[3].init(&pycgpu_model_3_obj, &pycgpu_model_3_formulaobj, &pycgpu_model_3_formulagrad, &pycgpu_model_3_formulahess, &pycgpu_model_3_internal_cons_func, &pycgpu_model_3_internal_cons_jac, &pycgpu_model_3_mass_obj, &pycgpu_model_3_formulamole_obj, &pycgpu_model_3_formulamole_grad, 3, 2, 4, 1, 3);
-    g_phase_records_array[4].init(&pycgpu_model_4_obj, &pycgpu_model_4_formulaobj, &pycgpu_model_4_formulagrad, &pycgpu_model_4_formulahess, &pycgpu_model_4_internal_cons_func, &pycgpu_model_4_internal_cons_jac, &pycgpu_model_4_mass_obj, &pycgpu_model_4_formulamole_obj, &pycgpu_model_4_formulamole_grad, 3, 3, 4, 2, 3);
-    g_phase_records_array[5].init(&pycgpu_model_5_obj, &pycgpu_model_5_formulaobj, &pycgpu_model_5_formulagrad, &pycgpu_model_5_formulahess, &pycgpu_model_5_internal_cons_func, &pycgpu_model_5_internal_cons_jac, &pycgpu_model_5_mass_obj, &pycgpu_model_5_formulamole_obj, &pycgpu_model_5_formulamole_grad, 3, 4, 4, 2, 3);
+        g_phase_records_array[0].init(&pycgpu_model_0_obj, &pycgpu_model_0_formulaobj, &pycgpu_model_0_formulagrad, &pycgpu_model_0_formulahess, &pycgpu_model_0_internal_cons_func, &pycgpu_model_0_internal_cons_jac, &pycgpu_model_0_mass_obj, &pycgpu_model_0_formulamole_obj, &pycgpu_model_0_formulamole_grad, 3, 3, 4, 1, 3);
 
     #ifdef VERBOSE_DEBUG
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         printf("GPU DEBUG: init_all_gpu_phase_records kernel completed\n");
         // Debug: Print what was initialized
-        for (int i = 0; i < 6; ++i) {
+        for (int i = 0; i < 1; ++i) {
             // printf("GPU DEBUG: g_phase_records_array[%d].obj = %p\n", i, (void*)g_phase_records_array[i].obj);
             // printf("GPU DEBUG: g_phase_records_array[%d].formulamole_obj = %p\n", i, (void*)g_phase_records_array[i].formulamole_obj);
         }
@@ -10084,8 +7167,6 @@ __device__ bool run_loop_global_mem(
     return converged;
 }
 
-// Simple wrapper for run_loop removed - now defined outside extern "C" block
-
 // --- GLOBAL MEMORY VERSION OF SOLVE_STATE ---
 // This function implements solve_state using global memory arrays
 __device__ void solve_state(
@@ -10105,10 +7186,15 @@ __device__ void solve_state(
     // IMPLEMENTATION: This mirrors the original solve_state but uses global memory arrays
     
     // Calculate matrix dimensions
+    // CRITICAL FIX: Add +1 back to match CPU matrix dimensions exactly
+    // CPU DOES include a system amount constraint row (with [1,1,1] for phase amounts)
     int equilibrium_matrix_rows = state->num_free_stable_compsets + 
                                  spec->num_fixed_stable_compsets + 
                                  spec->num_prescribed_mole_fraction_conditions + 1;
-    int equilibrium_matrix_cols = spec->num_free_chemical_potentials + 
+    // CRITICAL FIX: Use num_free_chemical_potentials which now equals ALL non-VA components
+    // CPU uses all non-VA components as columns, not just mathematically independent ones
+    // This fixes the matrix dimension mismatch (CPU 6x6 vs GPU 5x5 for ternary)
+    int equilibrium_matrix_cols = spec->num_free_chemical_potentials +  // All non-VA components 
                                  state->num_free_stable_compsets + 
                                  spec->num_free_statevars;
     
@@ -10171,9 +7257,10 @@ __device__ void solve_state(
     #ifdef VERBOSE_DEBUG
     if (thread_id == 0 && state->iteration < 3) {
         printf("  RHS after fill_equilibrium_system: [");
-        for (int i = 0; i < equilibrium_matrix_rows && i < 5; ++i) {
+        // Print ALL rows of RHS
+        for (int i = 0; i < equilibrium_matrix_rows; ++i) {
             printf("%.2e", equilibrium_rhs[i]);
-            if (i < 4) printf(", ");
+            if (i < equilibrium_matrix_rows - 1) printf(", ");
         }
         printf("]\n");
     }
@@ -10197,9 +7284,11 @@ __device__ void solve_state(
         #ifdef VERBOSE_DEBUG
         printf("\n[GPU EQUILIBRIUM MATRIX] Iteration %d (rows=%d, cols=%d):\n", 
                state->iteration, equilibrium_matrix_rows, equilibrium_matrix_cols);
-        for (int i = 0; i < equilibrium_matrix_rows && i < 5; ++i) {
+        // ALWAYS print ALL rows of the matrix
+        for (int i = 0; i < equilibrium_matrix_rows; ++i) {
             printf("  Row %d: ", i);
-            for (int j = 0; j < equilibrium_matrix_cols && j < 5; ++j) {
+            // Print ALL columns too
+            for (int j = 0; j < equilibrium_matrix_cols; ++j) {
                 printf("%+.6e ", equilibrium_matrix[i * equilibrium_matrix_cols + j]);
             }
             printf("| RHS: %+.6e\n", equilibrium_rhs[i]);
@@ -10221,9 +7310,10 @@ __device__ void solve_state(
     #ifdef VERBOSE_DEBUG
     if (thread_id == 0 && state->iteration < 3) {
         printf("  RHS after lstsq (solution): [");
-        for (int i = 0; i < equilibrium_matrix_cols && i < 5; ++i) {
+        // Print ALL solution values
+        for (int i = 0; i < equilibrium_matrix_cols; ++i) {
             printf("%.2e", equilibrium_rhs[i]);
-            if (i < 4) printf(", ");
+            if (i < equilibrium_matrix_cols - 1) printf(", ");
         }
         printf("]\n");
     }
@@ -10270,6 +7360,7 @@ __device__ void solve_equilibrium_at_condition_global_mem(
     const DevicePhaseData* phase_data,
     const double* initial_data, // Raw flat array instead of struct
     const DeviceGrid* grid_data,
+    const double* condition_mole_fractions, // NEW: Pass actual mole fractions from condition
     // Pre-allocated global memory arrays (per-thread slices)
     double* A_lstsq_copy,        // Replaces stack: double A_lstsq_copy[MAX_SVD_M * MAX_SVD_N]
     double* U_lstsq,             // Replaces stack: double U_lstsq[MAX_SVD_M * MAX_SVD_N]
@@ -10406,27 +7497,10 @@ __device__ void solve_equilibrium_at_condition_global_mem(
         #endif
     }
     
-    // Step 3: Use global memory for SystemState to avoid stack overflow
-    // SystemState is ~2KB which exceeds GPU thread stack limit of ~1KB
-    // SYSTEM_STATE_SIZE must match Python side allocation (rounded to 1000s)
-    const int SYSTEM_STATE_SIZE_DOUBLES = (
-        MAX_PHASES * 30 +  // compsets array 
-        MAX_PHASES * 15 +  // cs_states array
-        MAX_PHASES * MAX_COMPONENTS * 2 +  // delta_ms, phase_compositions
-        MAX_COMPONENTS * 4 +  // chemical potentials arrays
-        MAX_STATEVARS +  // delta_statevars
-        100  // Other fields and padding
-    );
-    const int SYSTEM_STATE_SIZE = ((SYSTEM_STATE_SIZE_DOUBLES + 999) / 1000) * 1000;
-    
-    if (global_system_states == nullptr) {
-        printf("GPU ERROR: global_system_states is NULL! Cannot allocate SystemState.\n");
-        return;
-    }
-    
-    // Cast the double array to SystemState - assumes proper alignment
-    SystemState* current_sys_state_ptr = reinterpret_cast<SystemState*>(&global_system_states[thread_id * SYSTEM_STATE_SIZE]);
-    SystemState& current_sys_state = *current_sys_state_ptr;
+    // Step 3: Allocate SystemState on stack as per the kernel signature comment
+    // This avoids memory alignment issues with pointer members
+    SystemState current_sys_state_stack;
+    SystemState& current_sys_state = current_sys_state_stack;
     
     // Initialize SystemState to zero
     memset(&current_sys_state, 0, sizeof(SystemState));
@@ -10466,37 +7540,14 @@ __device__ void solve_equilibrium_at_condition_global_mem(
     // Set up basic state from initial_data
     current_sys_state.system_amount = 1.0; // Standard amount
     
-    // CRITICAL: Initialize mole fractions from condition data
-    // The condition data contains: [state_vars (MAX_STATEVARS), mole_fractions (MAX_COMPONENTS)]
-    // So mole fractions start at offset MAX_STATEVARS in condition_args
+    // CRITICAL: Initialize mole fractions from the passed condition_mole_fractions array
+    // This array contains the actual mole fractions from the condition, properly calculated
+    // for binary, ternary, and higher-order systems
     for (int i = 0; i < MAX_COMPONENTS; ++i) {
         if (i < current_spec.num_components) {
-            // Extract mole fraction from condition data
-            // Position: condition_args->state_variables_values[MAX_STATEVARS + i] would be ideal,
-            // but condition_args only contains state variables, not compositions
-            // The compositions are in the flat condition_data_array at offset MAX_STATEVARS
-            double x_val = 0.0;
-            if (condition_args && i < MAX_COMPONENTS) {
-                // The condition_data_array has both state vars and compositions
-                // Layout: [state_vars..., X(NB), X(TI), X(VA), ...]
-                int comp_offset = MAX_STATEVARS + i;
-                x_val = initial_data_flat[comp_offset];  // WRONG - this is initial phase data
-                // Actually need to get from condition data array
-                // For thread 0, the composition should be at condition_data_array[condition_offset + MAX_STATEVARS + i]
-                // But we don't have direct access to condition_data_array here
-                
-                // TEMPORARY: Extract from prescribed_mole_fraction_rhs if available
-                if (current_spec.num_prescribed_mole_fraction_conditions > 0 && i == 1) {
-                    // For X(TI) constraint, get the RHS value
-                    x_val = current_spec.prescribed_mole_fraction_rhs[0];
-                } else if (i == 0) {
-                    // X(NB) = 1 - X(TI) - X(VA)
-                    x_val = 1.0 - current_spec.prescribed_mole_fraction_rhs[0];
-                } else {
-                    x_val = 0.0;  // X(VA) = 0
-                }
-            }
-            current_sys_state.mole_fractions[i] = x_val;
+            // Use the mole fractions that were correctly extracted from condition_data_array
+            // and passed to this function
+            current_sys_state.mole_fractions[i] = condition_mole_fractions[i];
         } else {
             current_sys_state.mole_fractions[i] = 0.0;
         }
@@ -10520,14 +7571,16 @@ __device__ void solve_equilibrium_at_condition_global_mem(
         printf("    [0]=%f, [1]=%f, [2]=%f, [44]=%f\n", 
                initial_data_flat[0], initial_data_flat[1], initial_data_flat[2], initial_data_flat[44]);
         
-        // Test accessing as if it were condition_idx * 45 + offset
-        printf("  Accessing with condition offset (assuming 1 condition, 45 doubles each):\n");
-        int condition_offset = 0 * 45;  // condition 0
+        // Test accessing with calculated doubles_per_struct
+        int doubles_per_struct = MAX_PHASES + MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + 
+                                (MAX_PHASES * MAX_COMPONENTS) + MAX_COMPONENTS + 1;
+        printf("  Accessing with condition offset (using calculated doubles_per_struct=%d):\n", doubles_per_struct);
+        int condition_offset = 0 * doubles_per_struct;  // condition 0
         printf("    condition_offset=0: [%d]=%f, [%d]=%f, [%d]=%f, [%d]=%f\n",
                condition_offset+0, initial_data_flat[condition_offset+0],
                condition_offset+1, initial_data_flat[condition_offset+1], 
                condition_offset+2, initial_data_flat[condition_offset+2],
-               condition_offset+44, initial_data_flat[condition_offset+44]);
+               condition_offset+doubles_per_struct-1, initial_data_flat[condition_offset+doubles_per_struct-1]);
         #endif
     }
     
@@ -10674,8 +7727,8 @@ __device__ void solve_equilibrium_at_condition_global_mem(
         // Set site fractions from lower_convex_hull results
         // Site fractions start after the WORKSPACE's state variables
         // Layout: phase_indices[MAX_PHASES] + phase_amounts[MAX_PHASES] + site_fractions[MAX_PHASES*MAX_DOF_PER_PHASE] + ...
-        // site_fractions start at offset (MAX_PHASES + MAX_PHASES) = 8 for MAX_PHASES=4
-        int site_fractions_offset = 8;  // From Python debug: site_fractions start at [8]
+        // site_fractions start at offset (MAX_PHASES + MAX_PHASES)
+        int site_fractions_offset = MAX_PHASES + MAX_PHASES;  // phase_indices + phase_amounts
         const double* initial_data_flat = initial_data;
         
         // CRITICAL FIX: Map site fractions to ensure correct component order
@@ -11344,7 +8397,7 @@ __device__ void solve_equilibrium_at_condition_global_mem(
                 printf("%.15f", cs->dof[k]);
                 if (k < num_workspace_vars - 1) printf(", ");
             }
-            printf("] (N, P, T, Y(NB), Y(TI)...)\n");
+            printf("] (N, P, T, Y[0], Y[1]...)\n");
             printf("GPU DEBUG: Phase %d - Expected: %d workspace_statevars + %d phase_dof = %d total\n", 
                    i, current_spec.num_statevars, cs->phase_record->phase_dof, num_workspace_vars);
             #endif
@@ -11363,7 +8416,7 @@ __device__ void solve_equilibrium_at_condition_global_mem(
                 printf("%.15f ", cs->dof[k]);
             }
             printf("\n");
-            printf("[GPU DEBUG] Phase %d: N=%.3f, P=%.3f, T=%.3f, Y(NB)=%.15f, Y(TI)=%.15f, energy=%.6f\n", 
+            printf("[GPU DEBUG] Phase %d: N=%.3f, P=%.3f, T=%.3f, Y[0]=%.15f, Y[1]=%.15f, energy=%.6f\n", 
                    i, cs->dof[0], cs->dof[1], cs->dof[2],
                    (num_workspace_vars > 3 ? cs->dof[3] : 0.0), 
                    (num_workspace_vars > 4 ? cs->dof[4] : 0.0), 
@@ -11576,6 +8629,8 @@ __global__ void top_level_equilibrium_kernel(
     int python_max_statevars, // CRITICAL FIX: Python's MAX_STATEVARS value for proper offset calculation
     // DevicePhaseData contents are now implicitly g_phase_records_array and num_unique_models
     const void* initial_phase_data_ptr, // Array of InitialPhaseDataSingle structs from lower_convex_hull
+    int initial_phase_data_stride, // CRITICAL FIX: Python-provided stride for initial phase data
+    int system_spec_stride, // CRITICAL FIX: Python-provided stride for SystemSpec array
     const void* grid_data_ptr_raw, // Pointer to grid data (can be null if not using add_new/nearly_stable in kernel)
     // Debug arrays for step-by-step solver tracking (can be null if debug disabled)
     double* debug_gm_history,           // Array: [num_conditions, max_debug_steps]
@@ -11616,7 +8671,9 @@ __global__ void top_level_equilibrium_kernel(
     
     // GLOBAL MEMORY SETUP: Calculate thread-specific offsets for global memory arrays
     // Each thread gets its own slice of the global memory arrays
-    int thread_idx = tid;  // Use thread ID as the first dimension index
+    // CRITICAL: We must check that tid < num_conditions before using it as array index
+    // For now, use tid but ensure bounds checking happens before any array access
+    int thread_idx = tid;  // Will be bounded by condition_idx check later
     
     // Define missing constants for global memory array sizing
     #ifndef MAX_EQ_MATRIX_SIZE
@@ -11671,28 +8728,32 @@ __global__ void top_level_equilibrium_kernel(
         // Use direct indexing - must match Python side calculation exactly
         // Layout: GM, chemical_potentials[MAX_COMPONENTS], phase_amounts[MAX_PHASES], converged, num_stable_phases, temp, pressure, success_marker, Y_phases[MAX_PHASES * MAX_DOF_PER_PHASE], X_phases[MAX_PHASES * MAX_COMPONENTS], phase_ids[MAX_PHASES]
         int condition_idx = tid;
+        
+        // CRITICAL FIX: Check bounds BEFORE any memory access
+        // This prevents threads beyond num_conditions from writing to unallocated memory
+        if (condition_idx >= num_conditions_total) {
+            return;  // Exit early for threads that don't have valid conditions
+        }
+        
         int results_per_condition = 7 + MAX_COMPONENTS + MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * MAX_COMPONENTS) + MAX_PHASES;  // CRITICAL FIX: Include phase_ids
         int base_offset = condition_idx * results_per_condition;
         
         // Initialize all results to zero (safe default)
+        // Now safe because we've already checked condition_idx < num_conditions_total
         for (int i = 0; i < results_per_condition; ++i) {
             results_array[base_offset + i] = 0.0;
         }
         
         // Step 1: Get condition data using safe byte-level access instead of struct casting
         const double* condition_data_array = (const double*)condition_args_list_ptr_raw;
-        if (condition_data_array == nullptr || condition_idx >= num_conditions_total) {
+        if (condition_data_array == nullptr) {
             if (tid == 0) {
                 #ifdef VERBOSE_DEBUG
-                printf("GPU DEBUG: Early return - condition_data_array=%p, condition_idx=%d, num_conditions=%d\n", 
-                       condition_data_array, condition_idx, num_conditions_total);
+                printf("GPU DEBUG: condition_data_array is null\n");
                 #endif
             }
-            // CRITICAL FIX: Set safe defaults for invalid threads instead of leaving garbage values
+            // Set error marker for null data
             results_array[base_offset + 0] = -999999.0;  // Invalid GM marker
-            for (int j = 1; j < results_per_condition; ++j) {
-                results_array[base_offset + j] = 0.0;  // Zero out all other values
-            }
             return;
         }
         
@@ -11744,10 +8805,41 @@ __global__ void top_level_equilibrium_kernel(
         int spec_size_doubles = spec_core_doubles_calc + spec_work_doubles_calc;
         
         // Get pointer to this thread's SystemSpec data
-        const double* my_spec_data = &system_specs_array[condition_idx * spec_size_doubles];
+        // CRITICAL FIX: Use Python-provided stride instead of calculating it
+        const double* my_spec_data = &system_specs_array[condition_idx * system_spec_stride];
+        
+        if (tid < 2) {
+            #ifdef VERBOSE_DEBUG
+            printf("GPU DEBUG: Thread %d - using system_spec_stride=%d, offset=%d\n", 
+                   tid, system_spec_stride, condition_idx * system_spec_stride);
+            #endif
+        }
         
         // Read num_statevars from the correct position (first field)
         int num_statevars = (int)my_spec_data[0];
+        int num_components = (int)my_spec_data[1];
+        
+        if (tid < 2) {
+            #ifdef VERBOSE_DEBUG
+            printf("GPU DEBUG: Thread %d - SystemSpec: num_statevars=%d, num_components=%d\n", 
+                   tid, num_statevars, num_components);
+            printf("GPU DEBUG: Thread %d - First 10 values from my_spec_data: ", tid);
+            for (int k = 0; k < 10; ++k) {
+                printf("%f ", my_spec_data[k]);
+            }
+            printf("\n");
+            // Also check prescribed_mole_fraction_rhs value
+            int rhs_offset = 3 + MAX_COMPONENTS + (MAX_FIXED_MOLE_FRACTION_CONDITIONS * MAX_COMPONENTS);
+            printf("GPU DEBUG: Thread %d - prescribed_mole_fraction_rhs[0] at offset %d = %f\n", 
+                   tid, rhs_offset, my_spec_data[rhs_offset]);
+            // Check initial chemical potentials
+            printf("GPU DEBUG: Thread %d - initial_chemical_potentials: ", tid);
+            for (int k = 0; k < MAX_COMPONENTS && k < 3; ++k) {
+                printf("[%d]=%f ", k, my_spec_data[3 + k]);
+            }
+            printf("\n");
+            #endif
+        }
         
         if (num_statevars == 2) {
             // Most common case: [N, T] with no pressure variable
@@ -11768,8 +8860,12 @@ __global__ void top_level_equilibrium_kernel(
         
         // CRITICAL: Extract composition values for this specific thread
         double thread_mole_fractions[MAX_COMPONENTS];
+        double prescribed_sum = 0.0;
+        int num_comp = (int)my_spec_data[1]; // num_components is at offset 1
+        
+        // First, copy all prescribed mole fractions from the condition data
         for (int i = 0; i < MAX_COMPONENTS; ++i) {
-            if (i < (int)my_spec_data[1]) { // num_components is at offset 1
+            if (i < num_comp) {
                 // CRITICAL FIX: Use Python's MAX_STATEVARS value directly
                 // Python layout: [state_vars (padded to Python's MAX_STATEVARS), compositions]
                 // Compositions start at: condition_offset + python_max_statevars
@@ -11778,6 +8874,33 @@ __global__ void top_level_equilibrium_kernel(
             } else {
                 thread_mole_fractions[i] = 0.0;
             }
+        }
+        
+        // CRITICAL FIX: For ternary+ systems, need to calculate unprescribed component
+        // In Al-Cu-Fe with X(AL)=0.5, X(CU)=0.2, we need X(FE)=0.3
+        // VA is always 0 for element-only calculations
+        // First, sum all non-VA prescribed components (those with values > -1e-10)
+        prescribed_sum = 0.0;
+        int num_prescribed = 0;
+        int unprescribed_idx = -1;
+        
+        for (int i = 0; i < num_comp - 1; ++i) { // Exclude VA (last component)
+            if (thread_mole_fractions[i] > -1e-10) { // Prescribed components have non-negative values
+                prescribed_sum += thread_mole_fractions[i];
+                num_prescribed++;
+            } else {
+                unprescribed_idx = i; // Track which component needs to be calculated
+            }
+        }
+        
+        // Calculate the unprescribed component to sum to 1.0
+        if (unprescribed_idx >= 0 && unprescribed_idx < num_comp - 1) {
+            thread_mole_fractions[unprescribed_idx] = 1.0 - prescribed_sum;
+        }
+        
+        // Set VA to 0 (last component)
+        if (num_comp > 0) {
+            thread_mole_fractions[num_comp - 1] = 0.0;
         }
         
         if (tid == 0 || tid < 5) {
@@ -11790,7 +8913,7 @@ __global__ void top_level_equilibrium_kernel(
             for (int j = 0; j < 8; ++j) {
                 printf("  [%d] = %f\n", condition_offset + j, condition_data_array[condition_offset + j]);
             }
-            printf("GPU DEBUG: Thread %d mole fractions: X(NB)=%f, X(TI)=%f, X(VA)=%f\n",
+            printf("GPU DEBUG: Thread %d mole fractions: X[0]=%f, X[1]=%f, X[2]=%f\n",
                    tid, thread_mole_fractions[0], thread_mole_fractions[1], thread_mole_fractions[2]);
             #endif
         }
@@ -11798,7 +8921,7 @@ __global__ void top_level_equilibrium_kernel(
         // Store input conditions for verification
         results_array[base_offset + 4 + MAX_COMPONENTS] = temp;
         results_array[base_offset + 5 + MAX_COMPONENTS] = pressure;
-        // Store X(TI) for verification
+        // Store X[1] for verification
         results_array[base_offset + 6 + MAX_COMPONENTS] = thread_mole_fractions[1];
         
         // Step 2: SIMPLIFIED EQUILIBRIUM CALCULATION (following CPU logic but avoiding complex function calls)
@@ -11806,6 +8929,11 @@ __global__ void top_level_equilibrium_kernel(
         
         // FIX: Use direct byte-level array access instead of struct casting to avoid alignment issues
         const double* initial_data_byte_array = (const double*)initial_phase_data_ptr;
+        
+        // CRITICAL FIX: Remove __syncthreads() here - it causes undefined behavior when not all threads reach it
+        // Only threads with valid conditions (0-31) would reach this point, but all 256 threads in the block
+        // must reach __syncthreads() for correct behavior
+        
         if (initial_data_byte_array != nullptr && condition_idx < num_conditions_total) {
             
             if (tid == 0) {
@@ -11841,17 +8969,22 @@ __global__ void top_level_equilibrium_kernel(
             // Convert to all-double layout: 
             // doubles_per_struct = MAX_PHASES + MAX_PHASES + MAX_PHASES*MAX_DOF_PER_PHASE + MAX_PHASES*MAX_COMPONENTS + MAX_COMPONENTS + 1
             // where phase_indices and num_phases are stored as doubles for simplicity
-            int doubles_per_struct = MAX_PHASES + MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * MAX_COMPONENTS) + MAX_COMPONENTS + 1;
-            int struct_offset = condition_idx * doubles_per_struct;
+            // CRITICAL FIX: Use Python-provided stride instead of calculating it
+            int struct_offset = condition_idx * initial_phase_data_stride;
             
-            // Extract num_phases (stored as double at the end of the struct)
-            debug_num_phases = (int)initial_data_byte_array[struct_offset + doubles_per_struct - 1];
+            // Extract num_phases (stored as double at the correct offset)
+            // CRITICAL FIX: Calculate the actual offset for num_phases based on struct layout
+            // offset = 2*MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * MAX_COMPONENTS) + MAX_COMPONENTS
+            int num_phases_offset = 2*MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * MAX_COMPONENTS) + MAX_COMPONENTS;
+            debug_num_phases = (int)initial_data_byte_array[struct_offset + num_phases_offset];
             
-            // DEBUG: Print struct_offset calculation for first few threads
-            if (tid < 2) {
+            // DEBUG: Print struct_offset calculation for failing threads specifically
+            if (tid == 10 || tid == 17 || tid < 2) {
                 #ifdef VERBOSE_DEBUG
-                printf("GPU DEBUG: Thread %d - condition_idx=%d, doubles_per_struct=%d, struct_offset=%d\n", 
-                       tid, condition_idx, doubles_per_struct, struct_offset);
+                printf("GPU DEBUG: Thread %d - condition_idx=%d, initial_phase_data_stride=%d, struct_offset=%d\n", 
+                       tid, condition_idx, initial_phase_data_stride, struct_offset);
+                printf("  Memory address for chem pots: base=%p + offset=%d\n", 
+                       initial_data_byte_array, struct_offset + 60);
                 #endif
             }
             
@@ -11893,9 +9026,40 @@ __global__ void top_level_equilibrium_kernel(
                                        (MAX_PHASES * MAX_DOF_PER_PHASE) + 
                                        (MAX_PHASES * MAX_COMPONENTS);
             
+            // BOUNDS CHECK: Ensure we don't read beyond the array
+            const int total_array_size = num_conditions_total * initial_phase_data_stride;
+            const int chem_pot_read_offset = struct_offset + chem_pot_offset;
+            
+            if (tid < 2) {
+                #ifdef VERBOSE_DEBUG
+                printf("GPU DEBUG: Thread %d bounds check - trying to read from offset %d, total array size is %d\n",
+                       tid, chem_pot_read_offset, total_array_size);
+                // Direct test: Try to read the exact offsets we know should have data
+                if (tid == 1) {
+                    printf("GPU DEBUG: Thread 1 direct read test:\n");
+                    printf("  initial_data_byte_array[60] = %f (should be -31525.5 for cond 0)\n", initial_data_byte_array[60]);
+                    printf("  initial_data_byte_array[125] = %f (should be -31525.5 for cond 1)\n", initial_data_byte_array[125]);
+                    printf("  initial_data_byte_array[126] = %f (should be -40730.8 for cond 1)\n", initial_data_byte_array[126]);
+                }
+                #endif
+            }
+            
             for (int i = 0; i < MAX_COMPONENTS; ++i) {
-                if (i < (int)my_spec_data[1]) { // num_components is at offset 1
-                    chemical_potentials[i] = initial_data_byte_array[struct_offset + chem_pot_offset + i];
+                if (i < (int)my_spec_data[1] && (chem_pot_read_offset + i) < total_array_size) { // num_components is at offset 1
+                    chemical_potentials[i] = initial_data_byte_array[chem_pot_read_offset + i];
+                    if (tid == 1 && i < 2) {
+                        #ifdef VERBOSE_DEBUG
+                        printf("GPU DEBUG: Thread 1 reading chem_pot[%d] from offset %d, value = %f\n", 
+                               i, chem_pot_read_offset + i, initial_data_byte_array[chem_pot_read_offset + i]);
+                        // Also try reading some nearby values to see if there's an offset issue
+                        if (i == 0) {
+                            printf("GPU DEBUG: Thread 1 - values at offsets 123-127: [%f, %f, %f, %f, %f]\n",
+                                   initial_data_byte_array[123], initial_data_byte_array[124], 
+                                   initial_data_byte_array[125], initial_data_byte_array[126], 
+                                   initial_data_byte_array[127]);
+                        }
+                        #endif
+                    }
                 } else {
                     chemical_potentials[i] = 0.0;
                 }
@@ -11904,8 +9068,15 @@ __global__ void top_level_equilibrium_kernel(
             if (tid < 3) {
                 #ifdef VERBOSE_DEBUG
                 printf("GPU DEBUG: Thread %d reading chemical potentials from struct_offset=%d + chem_pot_offset=%d = %d\n", 
-                       tid, struct_offset, chem_pot_offset, struct_offset + chem_pot_offset);
+                       tid, struct_offset, chem_pot_offset, chem_pot_read_offset);
                 printf("GPU DEBUG: Thread %d SystemSpecification check - num_components=%d\n", tid, (int)my_spec_data[1]);
+                if (tid == 1) {
+                    printf("GPU DEBUG: Thread 1 - my_spec_data[0]=%f (num_statevars), my_spec_data[1]=%f (num_components)\n",
+                           my_spec_data[0], my_spec_data[1]);
+                }
+                // Print the actual values being read
+                printf("GPU DEBUG: Thread %d chemical_potentials after reading: [%f, %f, %f, %f]\n",
+                       tid, chemical_potentials[0], chemical_potentials[1], chemical_potentials[2], chemical_potentials[3]);
                 for (int i = 0; i < 3; ++i) {
                     printf("  Thread %d chemical_potentials[%d] = %.6e (from initial_data offset %d)\n", 
                            tid, i, chemical_potentials[i], struct_offset + chem_pot_offset + i);
@@ -11968,13 +9139,13 @@ __global__ void top_level_equilibrium_kernel(
                 }
                 
                 // Validate phase data
-                bool phase_valid = (phase_amount > 1e-12 && phase_record_idx >= 0 && phase_record_idx < 6);
+                bool phase_valid = (phase_amount > 1e-12 && phase_record_idx >= 0 && phase_record_idx < 1);
                 
                 if (tid == 0) {
                     #ifdef VERBOSE_DEBUG
                     printf("GPU DEBUG: Phase %d validation - valid=%d (amount>1e-12=%d, idx>=0=%d, idx<max=%d)\n", 
                            ph_idx, phase_valid, (phase_amount > 1e-12), (phase_record_idx >= 0), 
-                           (phase_record_idx < 6));
+                           (phase_record_idx < 1));
                     #endif
                 }
                 
@@ -12010,7 +9181,7 @@ __global__ void top_level_equilibrium_kernel(
                     // CRITICAL FIX: Access per-thread SystemSpec data instead of casting shared pointer
                     // global_spec_ptr_raw is an array of SystemSpecs in double format, not a single struct
                     const double* system_specs_array = (const double*)global_spec_ptr_raw;
-                    const double* my_spec_doubles = &system_specs_array[condition_idx * spec_size_doubles];
+                    const double* my_spec_doubles = &system_specs_array[condition_idx * system_spec_stride];
                     int actual_num_statevars = (int)my_spec_doubles[0];  // num_statevars is first field
                     
                     if (actual_num_statevars == 2) {
@@ -12097,7 +9268,7 @@ __global__ void top_level_equilibrium_kernel(
                     if (phase_rec->obj != nullptr) {
                         if (tid == 0 && ph_idx == 0) {
                             #ifdef VERBOSE_DEBUG
-                            printf("GPU DEBUG: DOF for energy calc - N=%.15f, P=%.15f, T=%.15f, Y(NB)=%.15f, Y(TI)=%.15f\n", 
+                            printf("GPU DEBUG: DOF for energy calc - N=%.15f, P=%.15f, T=%.15f, Y[0]=%.15f, Y[1]=%.15f\n", 
                                    phase_dof[0], phase_dof[1], phase_dof[2], phase_dof[3], phase_dof[4]);
                             #endif
                         }
@@ -12227,7 +9398,7 @@ __global__ void top_level_equilibrium_kernel(
                                    phase_matrix_dim_local + phase_matrix_dim_local + (phase_matrix_dim_local * phase_matrix_dim_local);
                                    
             int spec_size_doubles = spec_core_doubles + spec_work_doubles;
-            const double* my_spec_doubles = &system_specs_array[condition_idx * spec_size_doubles];
+            const double* my_spec_doubles = &system_specs_array[condition_idx * system_spec_stride];
             
             // CRITICAL FIX: Manually copy fields from double array to struct
             // Python stores everything as doubles in a flat array, we need to 
@@ -12264,7 +9435,7 @@ __global__ void top_level_equilibrium_kernel(
             if (condition_idx <= 2) {
                 #ifdef VERBOSE_DEBUG
                 printf("GPU DEBUG: Thread %d - Copied from my_spec_doubles at offset %d:\n", 
-                       condition_idx, condition_idx * spec_size_doubles);
+                       condition_idx, condition_idx * system_spec_stride);
                 printf("  First 10 doubles: ");
                 for (int i = 0; i < 10; ++i) {
                     printf("%.3f ", my_spec_doubles[i]);
@@ -12276,7 +9447,7 @@ __global__ void top_level_equilibrium_kernel(
                 
                 // Print prescribed_mole_fraction_rhs values
                 #ifdef VERBOSE_DEBUG
-                printf("GPU DEBUG: Thread %d using prescribed_mole_fraction_rhs[0] = %f (should be X(TI) for this condition)\n",
+                printf("GPU DEBUG: Thread %d using prescribed_mole_fraction_rhs[0] = %f (should be X[1] for this condition)\n",
                        condition_idx, thread_spec.prescribed_mole_fraction_rhs[0]);
                 #endif
             }
@@ -12362,14 +9533,14 @@ __global__ void top_level_equilibrium_kernel(
             // thread_spec already created above - no need to recreate
             
             // CRITICAL FIX: Update prescribed_mole_fraction_rhs to match this thread's condition
-            // Each thread needs its own X(TI) target value from the condition data
+            // Each thread needs its own X[1] target value from the condition data
             if (thread_spec.num_prescribed_mole_fraction_conditions > 0) {
-                // For X(TI) constraint (component index 1), update the RHS to match this thread's condition
-                thread_spec.prescribed_mole_fraction_rhs[0] = thread_mole_fractions[1];  // X(TI) for this thread
+                // For X[1] constraint (component index 1), update the RHS to match this thread's condition
+                thread_spec.prescribed_mole_fraction_rhs[0] = thread_mole_fractions[1];  // X[1] for this thread
                 
                 if (tid < 5) {
                     #ifdef VERBOSE_DEBUG
-                    printf("GPU DEBUG: Thread %d UPDATED prescribed_mole_fraction_rhs[0] = %f (X(TI) for this condition)\n", 
+                    printf("GPU DEBUG: Thread %d UPDATED prescribed_mole_fraction_rhs[0] = %f (X[1] for this condition)\n", 
                            tid, thread_spec.prescribed_mole_fraction_rhs[0]);
                     printf("GPU DEBUG: Thread %d SystemSpec: num_statevars=%d, num_components=%d\n",
                            tid, thread_spec.num_statevars, thread_spec.num_components);
@@ -12379,7 +9550,7 @@ __global__ void top_level_equilibrium_kernel(
             
             // Set up device phase data  
             device_phase_data.phase_records_array = g_phase_records_array;
-            device_phase_data.num_unique_phase_records = 6;
+            device_phase_data.num_unique_phase_records = 1;
             device_phase_data.grid_phase_id_to_record_index = nullptr; // Not using grid mapping for now
             device_phase_data.max_grid_phase_id = 0;
             
@@ -12423,6 +9594,8 @@ __global__ void top_level_equilibrium_kernel(
             
             // REFACTORED: Call sophisticated solver with global memory arrays
             // This is the full equilibrium solver using global memory to avoid stack overflow
+            
+            
             if (condition_idx == 0 || condition_idx == 1 || condition_idx == 2) {
                 #ifdef VERBOSE_DEBUG
                 printf("GPU DEBUG: CALLING solve_equilibrium_at_condition_global_mem for condition %d\n", condition_idx);
@@ -12437,43 +9610,20 @@ __global__ void top_level_equilibrium_kernel(
                 #endif
                 if (thread_spec.num_prescribed_mole_fraction_conditions > 0) {
                     #ifdef VERBOSE_DEBUG
-                    printf("  prescribed_mole_fraction_rhs[0]=%f (should be X(TI) for this condition)\n",
+                    printf("  prescribed_mole_fraction_rhs[0]=%f (should be X[1] for this condition)\n",
                            thread_spec.prescribed_mole_fraction_rhs[0]);
                     #endif
                 }
             }
-            // Call the solver from eqsolver.h with corrected parameters
-            // Build InitialPhaseDataSingle from the raw data
-            // (initial_phase_data_single already declared above)
-            initial_phase_data_single.num_phases = safe_num_phases;
-            for (int i = 0; i < MAX_PHASES; ++i) {
-                initial_phase_data_single.phase_indices[i] = (i < safe_num_phases) ? phase_indices[i] : -1;
-                initial_phase_data_single.phase_amounts[i] = (i < safe_num_phases) ? phase_amounts[i] : 0.0;
-            }
-            // Copy site fractions and compositions from raw array
-            for (int ph_idx = 0; ph_idx < safe_num_phases && ph_idx < MAX_PHASES; ++ph_idx) {
-                for (int sf = 0; sf < MAX_DOF_PER_PHASE; ++sf) {
-                    int site_frac_offset = struct_offset + MAX_PHASES + MAX_PHASES + (ph_idx * MAX_DOF_PER_PHASE) + sf;
-                    initial_phase_data_single.site_fractions[ph_idx * MAX_DOF_PER_PHASE + sf] = initial_data_byte_array[site_frac_offset];
-                }
-                for (int comp = 0; comp < MAX_COMPONENTS; ++comp) {
-                    int comp_offset = struct_offset + MAX_PHASES + MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (ph_idx * MAX_COMPONENTS) + comp;
-                    initial_phase_data_single.compositions[ph_idx * MAX_COMPONENTS + comp] = initial_data_byte_array[comp_offset];
-                }
-            }
-            for (int i = 0; i < MAX_COMPONENTS; ++i) {
-                initial_phase_data_single.chemical_potentials[i] = chemical_potentials[i];
-            }
-            
-            // Call the sophisticated solver that uses global memory arrays
             solve_equilibrium_at_condition_global_mem(
-                condition_idx,              // thread_id
-                &thread_spec,               // global system specification
-                &condition_args_single,     // conditions for this point
-                &equilibrium_result,        // result structure
-                &device_phase_data,         // phase data
+                condition_idx,           // thread_id
+                &thread_spec,           // thread-local system specification with correct X[1]
+                &condition_args_single, // conditions for this point
+                &equilibrium_result,    // result structure
+                &device_phase_data,     // phase data
                 initial_data_byte_array + struct_offset, // initial phases for THIS thread (offset into array)
-                device_grid,                // grid data (can be null)
+                device_grid,            // grid data (can be null)
+                thread_mole_fractions,  // NEW: Pass the actual mole fractions from condition
                 // Global memory arrays (per-thread slices)
                 thread_A_lstsq_copy, thread_U_lstsq, thread_V_lstsq,
                 thread_singular_values_lstsq, thread_superdiag_lstsq,
@@ -12515,6 +9665,7 @@ __global__ void top_level_equilibrium_kernel(
                 debug_convergence_history[debug_idx] = equilibrium_result.converged ? 1 : 0;
                 debug_iteration_count[condition_idx] = 6;  // Start + before + solver call + after
             }
+            
             
             // SAFETY CHECK: Validate solver results
             if (isnan(equilibrium_result.final_system_gm) || isinf(equilibrium_result.final_system_gm)) {
@@ -12607,35 +9758,3 @@ __global__ void top_level_equilibrium_kernel(
 }
 
 } // extern "C"
-
-// --- C++ linkage functions (must be outside extern "C") ---
-
-// Simple wrapper for run_loop - moved outside extern "C" to match minimizer.h declaration
-__device__ bool run_loop(SystemSpecification* spec, SystemState* state, int max_iterations) {
-    // Stack-allocated arrays for small problems
-    // These sizes should be sufficient for most equilibrium calculations
-    const int MAX_LOCAL_EQ_SIZE = 300;  // Increased for larger problems
-    double equilibrium_matrix[MAX_LOCAL_EQ_SIZE];
-    double equilibrium_rhs[50];
-    double eq_soln[50];
-    double A_lstsq_copy[MAX_SVD_M * MAX_SVD_N];  // Use dynamic size
-    double U_lstsq[MAX_SVD_M * MAX_SVD_N];
-    double V_lstsq[MAX_SVD_N * MAX_SVD_N];
-    double singular_values_lstsq[MAX_SVD_N];
-    double superdiag_lstsq[MAX_SVD_N];
-    double masses[MAX_COMPONENTS];
-    double mass_jac[MAX_COMPONENTS * (MAX_STATEVARS + MAX_DOF_PER_PHASE)];
-    double x_dof[MAX_STATEVARS + MAX_DOF_PER_PHASE];
-    double grad[MAX_STATEVARS + MAX_DOF_PER_PHASE];
-    double hess[(MAX_STATEVARS + MAX_DOF_PER_PHASE) * (MAX_STATEVARS + MAX_DOF_PER_PHASE)];
-    
-    // Call the global memory version with our stack arrays
-    return run_loop_global_mem(
-        0,  // thread_id = 0 for single-threaded context
-        spec, state, max_iterations,
-        equilibrium_matrix, equilibrium_rhs, eq_soln,
-        A_lstsq_copy, U_lstsq, V_lstsq, singular_values_lstsq, superdiag_lstsq,
-        masses, mass_jac, x_dof, grad, hess
-    );
-}
-

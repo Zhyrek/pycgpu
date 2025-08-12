@@ -468,7 +468,7 @@ __device__ void solve_equilibrium_at_condition(
             // Also show site fractions
             CompositionSet* cs = &current_sys_state.compsets[i];
             if (cs->phase_record != nullptr) {
-                printf("  Site fractions: Y(NB)=%.15e, Y(TI)=%.15e\n",
+                printf("  Site fractions: Y[0]=%.15e, Y[1]=%.15e\n",
                        cs->dof[current_spec.num_statevars + 0],
                        cs->dof[current_spec.num_statevars + 1]);
             }
@@ -820,13 +820,13 @@ __device__ void solve_equilibrium_at_condition(
             int idx = current_sys_state.free_stable_compset_indices[i];
             printf("  Phase %d:\n", idx);
             printf("    Amount: %.15e\n", current_sys_state.phase_amt[idx]);
-            printf("    X(NB): %.15e\n", current_sys_state.phase_compositions[idx * MAX_COMPONENTS + 0]);
-            printf("    X(TI): %.15e\n", current_sys_state.phase_compositions[idx * MAX_COMPONENTS + 1]);
+            printf("    X[0]: %.15e\n", current_sys_state.phase_compositions[idx * MAX_COMPONENTS + 0]);
+            printf("    X[1]: %.15e\n", current_sys_state.phase_compositions[idx * MAX_COMPONENTS + 1]);
             CompositionSet* cs = &current_sys_state.compsets[idx];
-            printf("    Y(NB): %.15e\n", cs->dof[current_spec.num_statevars + 0]);
-            printf("    Y(TI): %.15e\n", cs->dof[current_spec.num_statevars + 1]);
+            printf("    Y[0]: %.15e\n", cs->dof[current_spec.num_statevars + 0]);
+            printf("    Y[1]: %.15e\n", cs->dof[current_spec.num_statevars + 1]);
         }
-        printf("  System mole fractions: X(NB)=%.15e, X(TI)=%.15e\n",
+        printf("  System mole fractions: X[0]=%.15e, X[1]=%.15e\n",
                current_sys_state.mole_fractions[0], current_sys_state.mole_fractions[1]);
     }
     #endif

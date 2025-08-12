@@ -48,7 +48,8 @@ class PropertiesSubset:
     def MU(self):
         """Extract MU for the specific condition."""
         if not hasattr(self.properties, 'MU'):
-            return np.zeros(2)  # Default for 2 components
+            # Return empty array - let caller determine size
+            return np.array([])
             
         mu_full = self.properties.MU
         
@@ -88,8 +89,9 @@ class PropertiesSubset:
         else:
             # Fallback for unexpected shapes
             if self.verbose:
-                print(f"[PropertiesSubset] WARNING: Unexpected MU shape, using flat indexing")
-            return mu_full.flatten()[:2]  # Take first 2 components
+                print(f"[PropertiesSubset] WARNING: Unexpected MU shape {mu_full.shape}, using flat indexing")
+            # For unexpected shapes, return ALL available data - no hardcoded limits
+            return mu_full.flatten()
     
     @property
     def GM(self):

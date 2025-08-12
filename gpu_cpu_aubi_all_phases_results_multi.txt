@@ -58,6 +58,6 @@ X(BI)	X(AU)	T(K)	CPU_GM	GPU_GM	GM_DIFF	CPU_MU_AU	CPU_MU_BI	GPU_MU_AU	GPU_MU_BI	M
 # Maximum GM difference: 0.00 J/mol
 # Maximum MU difference: 0.00 J/mol
 # CPU time: 0.8 seconds
-# GPU time: 0.8 seconds
-# Speedup: 1.1x
-# Total time: 1.6 seconds
+# GPU time: 11.1 seconds
+# Speedup: 0.1x
+# Total time: 11.9 seconds

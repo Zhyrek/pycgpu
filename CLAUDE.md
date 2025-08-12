@@ -45,3 +45,5 @@ The rough architecture of the rewrite is as follows:
 						      * This is where all the auto-generated functions created by gpu_equilibrium.py (originally contained in the ipynb) will go!
 * gpu/svd.c:              This file contains the SVD code required to run linear algebra functions on the GPU in a per-thread fashion.
 							  * This replaces the original LAPACK linear algebra functions used in the original CPU code. This means the linear algebra solver for the GPU is slightly different!
+
+CRITICAL INSTRUCTION: NEVER use stderr redirection (2>&1) when running python scripts. Always let stderr and stdout output normally without any redirection.

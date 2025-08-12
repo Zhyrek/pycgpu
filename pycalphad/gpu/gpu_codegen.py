@@ -3274,10 +3274,15 @@ __device__ void solve_state(
     // IMPLEMENTATION: This mirrors the original solve_state but uses global memory arrays
     
     // Calculate matrix dimensions
+    // CRITICAL FIX: Add +1 back to match CPU matrix dimensions exactly
+    // CPU DOES include a system amount constraint row (with [1,1,1] for phase amounts)
     int equilibrium_matrix_rows = state->num_free_stable_compsets + 
                                  spec->num_fixed_stable_compsets + 
                                  spec->num_prescribed_mole_fraction_conditions + 1;
-    int equilibrium_matrix_cols = spec->num_free_chemical_potentials + 
+    // CRITICAL FIX: Use num_free_chemical_potentials which now equals ALL non-VA components
+    // CPU uses all non-VA components as columns, not just mathematically independent ones
+    // This fixes the matrix dimension mismatch (CPU 6x6 vs GPU 5x5 for ternary)
+    int equilibrium_matrix_cols = spec->num_free_chemical_potentials +  // All non-VA components 
                                  state->num_free_stable_compsets + 
                                  spec->num_free_statevars;
     
@@ -3340,9 +3345,10 @@ __device__ void solve_state(
     #ifdef VERBOSE_DEBUG
     if (thread_id == 0 && state->iteration < 3) {{
         printf("  RHS after fill_equilibrium_system: [");
-        for (int i = 0; i < equilibrium_matrix_rows && i < 5; ++i) {{
+        // Print ALL rows of RHS
+        for (int i = 0; i < equilibrium_matrix_rows; ++i) {{
             printf("%.2e", equilibrium_rhs[i]);
-            if (i < 4) printf(", ");
+            if (i < equilibrium_matrix_rows - 1) printf(", ");
         }}
         printf("]\\n");
     }}
@@ -3366,9 +3372,11 @@ __device__ void solve_state(
         #ifdef VERBOSE_DEBUG
         printf("\\n[GPU EQUILIBRIUM MATRIX] Iteration %d (rows=%d, cols=%d):\\n", 
                state->iteration, equilibrium_matrix_rows, equilibrium_matrix_cols);
-        for (int i = 0; i < equilibrium_matrix_rows && i < 5; ++i) {{
+        // ALWAYS print ALL rows of the matrix
+        for (int i = 0; i < equilibrium_matrix_rows; ++i) {{
             printf("  Row %d: ", i);
-            for (int j = 0; j < equilibrium_matrix_cols && j < 5; ++j) {{
+            // Print ALL columns too
+            for (int j = 0; j < equilibrium_matrix_cols; ++j) {{
                 printf("%+.6e ", equilibrium_matrix[i * equilibrium_matrix_cols + j]);
             }}
             printf("| RHS: %+.6e\\n", equilibrium_rhs[i]);
@@ -3390,9 +3398,10 @@ __device__ void solve_state(
     #ifdef VERBOSE_DEBUG
     if (thread_id == 0 && state->iteration < 3) {{
         printf("  RHS after lstsq (solution): [");
-        for (int i = 0; i < equilibrium_matrix_cols && i < 5; ++i) {{
+        // Print ALL solution values
+        for (int i = 0; i < equilibrium_matrix_cols; ++i) {{
             printf("%.2e", equilibrium_rhs[i]);
-            if (i < 4) printf(", ");
+            if (i < equilibrium_matrix_cols - 1) printf(", ");
         }}
         printf("]\\n");
     }}
@@ -3439,6 +3448,7 @@ __device__ void solve_equilibrium_at_condition_global_mem(
     const DevicePhaseData* phase_data,
     const double* initial_data, // Raw flat array instead of struct
     const DeviceGrid* grid_data,
+    const double* condition_mole_fractions, // NEW: Pass actual mole fractions from condition
     // Pre-allocated global memory arrays (per-thread slices)
     double* A_lstsq_copy,        // Replaces stack: double A_lstsq_copy[MAX_SVD_M * MAX_SVD_N]
     double* U_lstsq,             // Replaces stack: double U_lstsq[MAX_SVD_M * MAX_SVD_N]
@@ -3618,37 +3628,14 @@ __device__ void solve_equilibrium_at_condition_global_mem(
     // Set up basic state from initial_data
     current_sys_state.system_amount = 1.0; // Standard amount
     
-    // CRITICAL: Initialize mole fractions from condition data
-    // The condition data contains: [state_vars (MAX_STATEVARS), mole_fractions (MAX_COMPONENTS)]
-    // So mole fractions start at offset MAX_STATEVARS in condition_args
+    // CRITICAL: Initialize mole fractions from the passed condition_mole_fractions array
+    // This array contains the actual mole fractions from the condition, properly calculated
+    // for binary, ternary, and higher-order systems
     for (int i = 0; i < MAX_COMPONENTS; ++i) {{
         if (i < current_spec.num_components) {{
-            // Extract mole fraction from condition data
-            // Position: condition_args->state_variables_values[MAX_STATEVARS + i] would be ideal,
-            // but condition_args only contains state variables, not compositions
-            // The compositions are in the flat condition_data_array at offset MAX_STATEVARS
-            double x_val = 0.0;
-            if (condition_args && i < MAX_COMPONENTS) {{
-                // The condition_data_array has both state vars and compositions
-                // Layout: [state_vars..., X(NB), X(TI), X(VA), ...]
-                int comp_offset = MAX_STATEVARS + i;
-                x_val = initial_data_flat[comp_offset];  // WRONG - this is initial phase data
-                // Actually need to get from condition data array
-                // For thread 0, the composition should be at condition_data_array[condition_offset + MAX_STATEVARS + i]
-                // But we don't have direct access to condition_data_array here
-                
-                // TEMPORARY: Extract from prescribed_mole_fraction_rhs if available
-                if (current_spec.num_prescribed_mole_fraction_conditions > 0 && i == 1) {{
-                    // For X(TI) constraint, get the RHS value
-                    x_val = current_spec.prescribed_mole_fraction_rhs[0];
-                }} else if (i == 0) {{
-                    // X(NB) = 1 - X(TI) - X(VA)
-                    x_val = 1.0 - current_spec.prescribed_mole_fraction_rhs[0];
-                }} else {{
-                    x_val = 0.0;  // X(VA) = 0
-                }}
-            }}
-            current_sys_state.mole_fractions[i] = x_val;
+            // Use the mole fractions that were correctly extracted from condition_data_array
+            // and passed to this function
+            current_sys_state.mole_fractions[i] = condition_mole_fractions[i];
         }} else {{
             current_sys_state.mole_fractions[i] = 0.0;
         }}
@@ -4498,7 +4485,7 @@ __device__ void solve_equilibrium_at_condition_global_mem(
                 printf("%.15f", cs->dof[k]);
                 if (k < num_workspace_vars - 1) printf(", ");
             }}
-            printf("] (N, P, T, Y(NB), Y(TI)...)\\n");
+            printf("] (N, P, T, Y[0], Y[1]...)\\n");
             printf("GPU DEBUG: Phase %d - Expected: %d workspace_statevars + %d phase_dof = %d total\\n", 
                    i, current_spec.num_statevars, cs->phase_record->phase_dof, num_workspace_vars);
             #endif
@@ -4517,7 +4504,7 @@ __device__ void solve_equilibrium_at_condition_global_mem(
                 printf("%.15f ", cs->dof[k]);
             }}
             printf("\\n");
-            printf("[GPU DEBUG] Phase %d: N=%.3f, P=%.3f, T=%.3f, Y(NB)=%.15f, Y(TI)=%.15f, energy=%.6f\\n", 
+            printf("[GPU DEBUG] Phase %d: N=%.3f, P=%.3f, T=%.3f, Y[0]=%.15f, Y[1]=%.15f, energy=%.6f\\n", 
                    i, cs->dof[0], cs->dof[1], cs->dof[2],
                    (num_workspace_vars > 3 ? cs->dof[3] : 0.0), 
                    (num_workspace_vars > 4 ? cs->dof[4] : 0.0), 
@@ -4961,8 +4948,12 @@ __global__ void top_level_equilibrium_kernel(
         
         // CRITICAL: Extract composition values for this specific thread
         double thread_mole_fractions[MAX_COMPONENTS];
+        double prescribed_sum = 0.0;
+        int num_comp = (int)my_spec_data[1]; // num_components is at offset 1
+        
+        // First, copy all prescribed mole fractions from the condition data
         for (int i = 0; i < MAX_COMPONENTS; ++i) {{
-            if (i < (int)my_spec_data[1]) {{ // num_components is at offset 1
+            if (i < num_comp) {{
                 // CRITICAL FIX: Use Python's MAX_STATEVARS value directly
                 // Python layout: [state_vars (padded to Python's MAX_STATEVARS), compositions]
                 // Compositions start at: condition_offset + python_max_statevars
@@ -4971,6 +4962,33 @@ __global__ void top_level_equilibrium_kernel(
             }} else {{
                 thread_mole_fractions[i] = 0.0;
             }}
+        }}
+        
+        // CRITICAL FIX: For ternary+ systems, need to calculate unprescribed component
+        // In Al-Cu-Fe with X(AL)=0.5, X(CU)=0.2, we need X(FE)=0.3
+        // VA is always 0 for element-only calculations
+        // First, sum all non-VA prescribed components (those with values > -1e-10)
+        prescribed_sum = 0.0;
+        int num_prescribed = 0;
+        int unprescribed_idx = -1;
+        
+        for (int i = 0; i < num_comp - 1; ++i) {{ // Exclude VA (last component)
+            if (thread_mole_fractions[i] > -1e-10) {{ // Prescribed components have non-negative values
+                prescribed_sum += thread_mole_fractions[i];
+                num_prescribed++;
+            }} else {{
+                unprescribed_idx = i; // Track which component needs to be calculated
+            }}
+        }}
+        
+        // Calculate the unprescribed component to sum to 1.0
+        if (unprescribed_idx >= 0 && unprescribed_idx < num_comp - 1) {{
+            thread_mole_fractions[unprescribed_idx] = 1.0 - prescribed_sum;
+        }}
+        
+        // Set VA to 0 (last component)
+        if (num_comp > 0) {{
+            thread_mole_fractions[num_comp - 1] = 0.0;
         }}
         
         if (tid == 0 || tid < 5) {{
@@ -4983,7 +5001,7 @@ __global__ void top_level_equilibrium_kernel(
             for (int j = 0; j < 8; ++j) {{
                 printf("  [%d] = %f\\n", condition_offset + j, condition_data_array[condition_offset + j]);
             }}
-            printf("GPU DEBUG: Thread %d mole fractions: X(NB)=%f, X(TI)=%f, X(VA)=%f\\n",
+            printf("GPU DEBUG: Thread %d mole fractions: X[0]=%f, X[1]=%f, X[2]=%f\\n",
                    tid, thread_mole_fractions[0], thread_mole_fractions[1], thread_mole_fractions[2]);
             #endif
         }}
@@ -4991,7 +5009,7 @@ __global__ void top_level_equilibrium_kernel(
         // Store input conditions for verification
         results_array[base_offset + 4 + MAX_COMPONENTS] = temp;
         results_array[base_offset + 5 + MAX_COMPONENTS] = pressure;
-        // Store X(TI) for verification
+        // Store X[1] for verification
         results_array[base_offset + 6 + MAX_COMPONENTS] = thread_mole_fractions[1];
         
         // Step 2: SIMPLIFIED EQUILIBRIUM CALCULATION (following CPU logic but avoiding complex function calls)
@@ -5338,7 +5356,7 @@ __global__ void top_level_equilibrium_kernel(
                     if (phase_rec->obj != nullptr) {{
                         if (tid == 0 && ph_idx == 0) {{
                             #ifdef VERBOSE_DEBUG
-                            printf("GPU DEBUG: DOF for energy calc - N=%.15f, P=%.15f, T=%.15f, Y(NB)=%.15f, Y(TI)=%.15f\\n", 
+                            printf("GPU DEBUG: DOF for energy calc - N=%.15f, P=%.15f, T=%.15f, Y[0]=%.15f, Y[1]=%.15f\\n", 
                                    phase_dof[0], phase_dof[1], phase_dof[2], phase_dof[3], phase_dof[4]);
                             #endif
                         }}
@@ -5517,7 +5535,7 @@ __global__ void top_level_equilibrium_kernel(
                 
                 // Print prescribed_mole_fraction_rhs values
                 #ifdef VERBOSE_DEBUG
-                printf("GPU DEBUG: Thread %d using prescribed_mole_fraction_rhs[0] = %f (should be X(TI) for this condition)\\n",
+                printf("GPU DEBUG: Thread %d using prescribed_mole_fraction_rhs[0] = %f (should be X[1] for this condition)\\n",
                        condition_idx, thread_spec.prescribed_mole_fraction_rhs[0]);
                 #endif
             }}
@@ -5603,14 +5621,14 @@ __global__ void top_level_equilibrium_kernel(
             // thread_spec already created above - no need to recreate
             
             // CRITICAL FIX: Update prescribed_mole_fraction_rhs to match this thread's condition
-            // Each thread needs its own X(TI) target value from the condition data
+            // Each thread needs its own X[1] target value from the condition data
             if (thread_spec.num_prescribed_mole_fraction_conditions > 0) {{
-                // For X(TI) constraint (component index 1), update the RHS to match this thread's condition
-                thread_spec.prescribed_mole_fraction_rhs[0] = thread_mole_fractions[1];  // X(TI) for this thread
+                // For X[1] constraint (component index 1), update the RHS to match this thread's condition
+                thread_spec.prescribed_mole_fraction_rhs[0] = thread_mole_fractions[1];  // X[1] for this thread
                 
                 if (tid < 5) {{
                     #ifdef VERBOSE_DEBUG
-                    printf("GPU DEBUG: Thread %d UPDATED prescribed_mole_fraction_rhs[0] = %f (X(TI) for this condition)\\n", 
+                    printf("GPU DEBUG: Thread %d UPDATED prescribed_mole_fraction_rhs[0] = %f (X[1] for this condition)\\n", 
                            tid, thread_spec.prescribed_mole_fraction_rhs[0]);
                     printf("GPU DEBUG: Thread %d SystemSpec: num_statevars=%d, num_components=%d\\n",
                            tid, thread_spec.num_statevars, thread_spec.num_components);
@@ -5680,19 +5698,20 @@ __global__ void top_level_equilibrium_kernel(
                 #endif
                 if (thread_spec.num_prescribed_mole_fraction_conditions > 0) {{
                     #ifdef VERBOSE_DEBUG
-                    printf("  prescribed_mole_fraction_rhs[0]=%f (should be X(TI) for this condition)\\n",
+                    printf("  prescribed_mole_fraction_rhs[0]=%f (should be X[1] for this condition)\\n",
                            thread_spec.prescribed_mole_fraction_rhs[0]);
                     #endif
                 }}
             }}
             solve_equilibrium_at_condition_global_mem(
                 condition_idx,           // thread_id
-                &thread_spec,           // thread-local system specification with correct X(TI)
+                &thread_spec,           // thread-local system specification with correct X[1]
                 &condition_args_single, // conditions for this point
                 &equilibrium_result,    // result structure
                 &device_phase_data,     // phase data
                 initial_data_byte_array + struct_offset, // initial phases for THIS thread (offset into array)
                 device_grid,            // grid data (can be null)
+                thread_mole_fractions,  // NEW: Pass the actual mole fractions from condition
                 // Global memory arrays (per-thread slices)
                 thread_A_lstsq_copy, thread_U_lstsq, thread_V_lstsq,
                 thread_singular_values_lstsq, thread_superdiag_lstsq,

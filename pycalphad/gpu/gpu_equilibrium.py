@@ -839,9 +839,17 @@ def _populate_system_specification(global_spec_np, global_spec_arrays, wks_obj, 
                     print(f"[GPU] DEBUG: mu_scalar = {mu_scalar}")
                 global_spec_arrays['initial_chemical_potentials'][comp_idx] = mu_scalar
             else:
-                if wks_obj.verbose:
-                    print(f"[GPU] DEBUG: mu_var not in conditions, adding to free list")
-                free_chemical_potential_indices.append(comp_idx)
+                # CRITICAL FIX: Exclude VA from free chemical potentials
+                # CPU only includes non-VA components as free chemical potentials
+                # Need to check both string representation and Component object name
+                comp_name = str(component).upper() if hasattr(component, '__str__') else str(component)
+                if 'VA' not in comp_name:
+                    if wks_obj.verbose:
+                        print(f"[GPU] DEBUG: mu_var not in conditions, adding to free list (non-VA component: {component})")
+                    free_chemical_potential_indices.append(comp_idx)
+                else:
+                    if wks_obj.verbose:
+                        print(f"[GPU] DEBUG: Skipping VA component from free chemical potentials: {component}")
                 
                 # CRITICAL FIX: For free chemical potentials, use the value from workspace starting point
                 # This is the first divergence - CPU must provide correct initial chemical potentials
@@ -951,9 +959,10 @@ def _populate_system_specification(global_spec_np, global_spec_arrays, wks_obj, 
     for i, idx in enumerate(free_chemical_potential_indices[:max_components]):
         global_spec_arrays['free_chemical_potential_indices'][i] = idx
     
-    # CRITICAL FIX: Account for mole fraction constraints  
-    # The CPU reduces by constraint_count due to Gibbs-Duhem relation
-    num_free_chempot = len(free_chemical_potential_indices) - constraint_count
+    # CRITICAL FIX: Don't subtract constraint_count - CPU includes ALL non-VA components
+    # The CPU matrix has columns for ALL non-VA components' chemical potentials
+    # even when mole fractions are prescribed. The constraints are handled separately.
+    num_free_chempot = len(free_chemical_potential_indices)
     if wks_obj.verbose:
         print(f"[GPU] Using num_free_chemical_potentials = {num_free_chempot}")
         print(f"[GPU]   Components: {global_spec_np[1]}, Free chempot indices: {len(free_chemical_potential_indices)}, Constraints: {constraint_count}")

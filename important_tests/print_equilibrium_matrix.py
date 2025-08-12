@@ -61,13 +61,15 @@ result = equilibrium(dbf, {components}, {phases}, {conditions}, verbose=False, c
         
         cpu_lines = cpu_output.split('\n')
         for i, line in enumerate(cpu_lines):
-            if '[CPU EQUILIBRIUM MATRIX]' in line and 'Iteration 0' in line:
+            if '[EQUILIBRIUM_MATRIX_OUTPUT]' in line and 'CPU' in line and 'Iteration 0' in line:
                 print(line)
-                for j in range(1, 20):
+                for j in range(1, 50):  # Increased range for larger matrices
                     if i+j < len(cpu_lines):
                         next_line = cpu_lines[i+j]
                         if next_line.strip().startswith('Row ') and '|' in next_line and 'RHS:' in next_line:
                             print(next_line)
+                        elif '[EQUILIBRIUM_MATRIX_OUTPUT]' in next_line:
+                            break  # Stop if we hit another matrix output
                 break
         
     finally:
@@ -96,13 +98,15 @@ result = equilibrium(dbf, {components}, {phases}, {conditions}, verbose=True, ca
         
         gpu_lines = gpu_output.split('\n')
         for i, line in enumerate(gpu_lines):
-            if '[GPU EQUILIBRIUM MATRIX]' in line and 'Iteration 0' in line:
+            if '[EQUILIBRIUM_MATRIX_OUTPUT]' in line and 'GPU' in line and 'Iteration 0' in line:
                 print(line)
-                for j in range(1, 20):
+                for j in range(1, 50):  # Increased range for larger matrices
                     if i+j < len(gpu_lines):
                         next_line = gpu_lines[i+j]
                         if next_line.strip().startswith('Row ') and '|' in next_line and 'RHS:' in next_line:
                             print(next_line)
+                        elif '[EQUILIBRIUM_MATRIX_OUTPUT]' in next_line:
+                            break  # Stop if we hit another matrix output
                 break
         
     finally:

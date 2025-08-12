@@ -1096,7 +1096,7 @@ cpdef construct_equilibrium_system(SystemSpecification spec, SystemState state, 
     
     # DEBUG: Print equilibrium matrix for first few iterations
     if DEBUG_MODE and state.iteration == 0:
-        print(f"\n[CPU EQUILIBRIUM MATRIX] Iteration {state.iteration} (rows={equilibrium_matrix.shape[0]}, cols={equilibrium_matrix.shape[1]}):")
+        print(f"\n[EQUILIBRIUM_MATRIX_OUTPUT] CPU Iteration {state.iteration} (rows={equilibrium_matrix.shape[0]}, cols={equilibrium_matrix.shape[1]}):")
         for i in range(equilibrium_matrix.shape[0]):
             row_str = f"  Row {i}: "
             for j in range(equilibrium_matrix.shape[1]):

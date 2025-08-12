@@ -3370,7 +3370,7 @@ __device__ void solve_state(
     // Note: state->iteration might be available instead of iteration_count
     if (thread_id == 0 && state->iteration < 3) {{
         #ifdef VERBOSE_DEBUG
-        printf("\\n[GPU EQUILIBRIUM MATRIX] Iteration %d (rows=%d, cols=%d):\\n", 
+        printf("\\n[EQUILIBRIUM_MATRIX_OUTPUT] GPU Iteration %d (rows=%d, cols=%d):\\n", 
                state->iteration, equilibrium_matrix_rows, equilibrium_matrix_cols);
         // ALWAYS print ALL rows of the matrix
         for (int i = 0; i < equilibrium_matrix_rows; ++i) {{

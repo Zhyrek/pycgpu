@@ -2353,7 +2353,7 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
     // DEBUG: Print the complete equilibrium matrix for iteration 0
     #ifdef VERBOSE_DEBUG
     if (state->condition_idx == 0 && state->iteration == 0) {
-        printf("[GPU EQUILIBRIUM MATRIX] Complete matrix at iteration 0 (rows=%d, cols=%d):\n", total_rows, equilibrium_matrix_cols);
+        printf("[EQUILIBRIUM_MATRIX_OUTPUT] GPU Iteration 0 (rows=%d, cols=%d):\n", total_rows, equilibrium_matrix_cols);
         for (int row = 0; row < total_rows; row++) {
             printf("  Row %d: ", row);
             for (int col = 0; col < equilibrium_matrix_cols; col++) {

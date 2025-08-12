@@ -1,0 +1,5 @@
+# GPU FAILED - CPU ONLY RESULTS
+# Al-Cu-Fe system with ALL 21 phases
+# GPU Error: Memory limits exceeded with 21 phases
+# CPU time: 1.8 seconds
+# Conditions tested: 12

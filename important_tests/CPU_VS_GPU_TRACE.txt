@@ -1,5 +1,5 @@
 === INTERLEAVED CPU-GPU EQUILIBRIUM DEBUG TRACE ===
-Started: 2025-08-12T10:19:41.664841
+Started: 2025-08-12T12:27:03.234604
 
 
 ================================================================================
@@ -14,8 +14,8 @@ SEGMENT 01 COMPARISON
 [SEGMENT 01] [GPU] Entry point and parameter validation
   gpu_mode: True
   components: ['AL', 'CU', 'FE', 'VA']
-  phases: ['LIQUID']
-  conditions: {'T': 973.15, 'P': 101325.0, 'X(AL)': 0.5, 'X(CU)': 0.2}
+  phases: list(len=11, first_10=['LIQUID', 'FCC_A1', 'BCC_A2', 'BCC_B2', 'L12', 'ALCU_THETA', 'ALCU_ETA', 'AL13FE4', 'AL5FE2', 'AL2FE']...)
+  conditions: {'T': 775, 'P': 101325, 'X(AL)': 0.4, 'X(CU)': 0.3}
   output_requested: None
   verbose: True
   force_cpu: False
@@ -32,27 +32,27 @@ SEGMENT 02 COMPARISON
 [SEGMENT 02] [GPU] Workspace initialization
   database: Elements: ['/-', 'AL', 'CU', 'FE', 'VA']
 Species: [Species('/-', '/-1'), Species('AL', 'AL1'), Species('CU', 'CU1'), Species('FE', 'FE1'), Species('VA', 'VA1')]
-Phase({'name': 'AL13FE4', 'constituents': (frozenset({Species('CU', 'CU1'), Species('AL', 'AL1')}), frozenset({Species('FE', 'FE1')}), frozenset({Species('VA', 'VA1'), Species('AL', 'AL1')})), 'sublattices': (0.6275, 0.235, 0.1375), 'model_hints': {}})
-Phase({'name': 'AL2FE', 'constituents': (frozenset({Species('CU', 'CU1'), Species('AL', 'AL1')}), frozenset({Species('FE', 'FE1')})), 'sublattices': (2.0, 1.0), 'model_hints': {}})
-Phase({'name': 'AL5FE2', 'constituents': (frozenset({Species('CU', 'CU1'), Species('AL', 'AL1')}), frozenset({Species('FE', 'FE1')})), 'sublattices': (5.0, 2.0), 'model_hints': {}})
-Phase({'name': 'AL5FE4', 'constituents': (frozenset({Species('FE', 'FE1'), Species('AL', 'AL1')}),), 'sublattices': (1.0,), 'model_hints': {}})
-Phase({'name': 'ALCU_DELTA', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('FE', 'FE1'), Species('CU', 'CU1')})), 'sublattices': (2.0, 3.0), 'model_hints': {}})
-Phase({'name': 'ALCU_EPSILON', 'constituents': (frozenset({Species('CU', 'CU1'), Species('AL', 'AL1')}), frozenset({Species('FE', 'FE1'), Species('CU', 'CU1')})), 'sublattices': (1.0, 1.0), 'model_hints': {}})
-Phase({'name': 'ALCU_ETA', 'constituents': (frozenset({Species('CU', 'CU1'), Species('AL', 'AL1')}), frozenset({Species('FE', 'FE1'), Species('CU', 'CU1')})), 'sublattices': (1.0, 1.0), 'model_hints': {}})
+Phase({'name': 'AL13FE4', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('FE', 'FE1')}), frozenset({Species('AL', 'AL1'), Species('VA', 'VA1')})), 'sublattices': (0.6275, 0.235, 0.1375), 'model_hints': {}})
+Phase({'name': 'AL2FE', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('FE', 'FE1')})), 'sublattices': (2.0, 1.0), 'model_hints': {}})
+Phase({'name': 'AL5FE2', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('FE', 'FE1')})), 'sublattices': (5.0, 2.0), 'model_hints': {}})
+Phase({'name': 'AL5FE4', 'constituents': (frozenset({Species('AL', 'AL1'), Species('FE', 'FE1')}),), 'sublattices': (1.0,), 'model_hints': {}})
+Phase({'name': 'ALCU_DELTA', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('CU', 'CU1'), Species('FE', 'FE1')})), 'sublattices': (2.0, 3.0), 'model_hints': {}})
+Phase({'name': 'ALCU_EPSILON', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('CU', 'CU1'), Species('FE', 'FE1')})), 'sublattices': (1.0, 1.0), 'model_hints': {}})
+Phase({'name': 'ALCU_ETA', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('CU', 'CU1'), Species('FE', 'FE1')})), 'sublattices': (1.0, 1.0), 'model_hints': {}})
 Phase({'name': 'ALCU_PRIME', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('CU', 'CU1')})), 'sublattices': (2.0, 1.0), 'model_hints': {}})
-Phase({'name': 'ALCU_THETA', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('FE', 'FE1'), Species('CU', 'CU1'), Species('AL', 'AL1')})), 'sublattices': (2.0, 1.0), 'model_hints': {}})
-Phase({'name': 'ALCU_ZETA', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('FE', 'FE1'), Species('CU', 'CU1')})), 'sublattices': (9.0, 11.0), 'model_hints': {}})
-Phase({'name': 'BCC_A2', 'constituents': (frozenset({Species('FE', 'FE1'), Species('VA', 'VA1'), Species('CU', 'CU1'), Species('AL', 'AL1')}), frozenset({Species('VA', 'VA1')})), 'sublattices': (1.0, 3.0), 'model_hints': {'ihj_magnetic_afm_factor': -1.0, 'ihj_magnetic_structure_factor': 0.4, 'ordered_phase': 'BCC_B2', 'disordered_phase': 'BCC_A2'}})
-Phase({'name': 'BCC_B2', 'constituents': (frozenset({Species('FE', 'FE1'), Species('VA', 'VA1'), Species('CU', 'CU1'), Species('AL', 'AL1')}), frozenset({Species('FE', 'FE1'), Species('VA', 'VA1'), Species('CU', 'CU1'), Species('AL', 'AL1')}), frozenset({Species('VA', 'VA1')})), 'sublattices': (0.5, 0.5, 3.0), 'model_hints': {'ordered_phase': 'BCC_B2', 'disordered_phase': 'BCC_A2'}})
-Phase({'name': 'FCC_A1', 'constituents': (frozenset({Species('FE', 'FE1'), Species('CU', 'CU1'), Species('AL', 'AL1')}), frozenset({Species('VA', 'VA1')})), 'sublattices': (1.0, 1.0), 'model_hints': {'ihj_magnetic_afm_factor': -3.0, 'ihj_magnetic_structure_factor': 0.28, 'ordered_phase': 'L12', 'disordered_phase': 'FCC_A1'}})
-Phase({'name': 'GAMMA_D83', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('CU', 'CU1'), Species('AL', 'AL1')}), frozenset({Species('FE', 'FE1'), Species('CU', 'CU1')})), 'sublattices': (4.0, 1.0, 8.0), 'model_hints': {}})
-Phase({'name': 'GAMMA_H', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('CU', 'CU1'), Species('AL', 'AL1')}), frozenset({Species('FE', 'FE1'), Species('CU', 'CU1')})), 'sublattices': (4.0, 1.0, 8.0), 'model_hints': {}})
-Phase({'name': 'L12', 'constituents': (frozenset({Species('FE', 'FE1'), Species('CU', 'CU1'), Species('AL', 'AL1')}), frozenset({Species('FE', 'FE1'), Species('CU', 'CU1'), Species('AL', 'AL1')}), frozenset({Species('VA', 'VA1')})), 'sublattices': (0.75, 0.25, 1.0), 'model_hints': {'ordered_phase': 'L12', 'disordered_phase': 'FCC_A1'}})
-Phase({'name': 'LIQUID', 'constituents': (frozenset({Species('FE', 'FE1'), Species('CU', 'CU1'), Species('AL', 'AL1')}),), 'sublattices': (1.0,), 'model_hints': {}})
+Phase({'name': 'ALCU_THETA', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('AL', 'AL1'), Species('CU', 'CU1'), Species('FE', 'FE1')})), 'sublattices': (2.0, 1.0), 'model_hints': {}})
+Phase({'name': 'ALCU_ZETA', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('CU', 'CU1'), Species('FE', 'FE1')})), 'sublattices': (9.0, 11.0), 'model_hints': {}})
+Phase({'name': 'BCC_A2', 'constituents': (frozenset({Species('VA', 'VA1'), Species('AL', 'AL1'), Species('CU', 'CU1'), Species('FE', 'FE1')}), frozenset({Species('VA', 'VA1')})), 'sublattices': (1.0, 3.0), 'model_hints': {'ihj_magnetic_afm_factor': -1.0, 'ihj_magnetic_structure_factor': 0.4, 'ordered_phase': 'BCC_B2', 'disordered_phase': 'BCC_A2'}})
+Phase({'name': 'BCC_B2', 'constituents': (frozenset({Species('VA', 'VA1'), Species('AL', 'AL1'), Species('CU', 'CU1'), Species('FE', 'FE1')}), frozenset({Species('VA', 'VA1'), Species('AL', 'AL1'), Species('CU', 'CU1'), Species('FE', 'FE1')}), frozenset({Species('VA', 'VA1')})), 'sublattices': (0.5, 0.5, 3.0), 'model_hints': {'ordered_phase': 'BCC_B2', 'disordered_phase': 'BCC_A2'}})
+Phase({'name': 'FCC_A1', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1'), Species('FE', 'FE1')}), frozenset({Species('VA', 'VA1')})), 'sublattices': (1.0, 1.0), 'model_hints': {'ihj_magnetic_afm_factor': -3.0, 'ihj_magnetic_structure_factor': 0.28, 'ordered_phase': 'L12', 'disordered_phase': 'FCC_A1'}})
+Phase({'name': 'GAMMA_D83', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('CU', 'CU1'), Species('FE', 'FE1')})), 'sublattices': (4.0, 1.0, 8.0), 'model_hints': {}})
+Phase({'name': 'GAMMA_H', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('CU', 'CU1'), Species('FE', 'FE1')})), 'sublattices': (4.0, 1.0, 8.0), 'model_hints': {}})
+Phase({'name': 'L12', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1'), Species('FE', 'FE1')}), frozenset({Species('AL', 'AL1'), Species('CU', 'CU1'), Species('FE', 'FE1')}), frozenset({Species('VA', 'VA1')})), 'sublattices': (0.75, 0.25, 1.0), 'model_hints': {'ordered_phase': 'L12', 'disordered_phase': 'FCC_A1'}})
+Phase({'name': 'LIQUID', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1'), Species('FE', 'FE1')}),), 'sublattices': (1.0,), 'model_hints': {}})
 Phase({'name': 'TS01T1', 'constituents': (frozenset({Species('FE', 'FE1')}), frozenset({Species('CU', 'CU1')}), frozenset({Species('AL', 'AL1')})), 'sublattices': (4.0, 1.0, 23.0), 'model_hints': {}})
 Phase({'name': 'TS01T2', 'constituents': (frozenset({Species('FE', 'FE1')}), frozenset({Species('CU', 'CU1')}), frozenset({Species('AL', 'AL1')})), 'sublattices': (1.0, 2.0, 7.0), 'model_hints': {}})
-Phase({'name': 'TS01T3', 'constituents': (frozenset({Species('FE', 'FE1')}), frozenset({Species('CU', 'CU1'), Species('AL', 'AL1')}), frozenset({Species('AL', 'AL1')})), 'sublattices': (1.0, 10.0, 10.0), 'model_hints': {}})
-Phase({'name': 'TS01TI', 'constituents': (frozenset({Species('FE', 'FE1')}), frozenset({Species('CU', 'CU1'), Species('AL', 'AL1')}), frozenset({Species('AL', 'AL1')})), 'sublattices': (0.125, 0.255, 0.62), 'model_hints': {}})
+Phase({'name': 'TS01T3', 'constituents': (frozenset({Species('FE', 'FE1')}), frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('AL', 'AL1')})), 'sublattices': (1.0, 10.0, 10.0), 'model_hints': {}})
+Phase({'name': 'TS01TI', 'constituents': (frozenset({Species('FE', 'FE1')}), frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('AL', 'AL1')})), 'sublattices': (0.125, 0.255, 0.62), 'model_hints': {}})
 17 symbols in database
 127 parameters in database
 
@@ -77,8 +77,8 @@ SEGMENT 03 COMPARISON
 
 [SEGMENT 03] Workspace constructor complete
   components: [Component('AL', 'AL1'), Component('CU', 'CU1'), Component('FE', 'FE1'), Component('VA', 'VA1')]
-  phases: ['LIQUID']
-  conditions: {N: array([1.]), P: array([101325.]), T: array([973.15]), X_AL: array([0.5]), X_CU: array([0.2])}
+  phases: ['AL13FE4', 'AL2FE', 'AL5FE2', 'ALCU_ETA', 'ALCU_THETA', 'BCC_B2', 'GAMMA_D83', 'L12', 'LIQUID']
+  conditions: {N: array([1.]), P: array([101325.]), T: array([775.]), X_AL: array([0.4]), X_CU: array([0.3])}
 
 ================================================================================
 SEGMENT 05 COMPARISON
@@ -92,11 +92,11 @@ SEGMENT 05 COMPARISON
 [SEGMENT 05] Phase record factory creation
   components: [Component('AL', 'AL1'), Component('CU', 'CU1'), Component('FE', 'FE1'), Component('VA', 'VA1')]
   conditions: [N, P, T, X_AL, X_CU]
-  models: ['LIQUID']
+  models: ['AL13FE4', 'AL2FE', 'AL5FE2', 'ALCU_ETA', 'ALCU_THETA', 'BCC_B2', 'GAMMA_D83', 'L12', 'LIQUID']
   parameters: OrderedDict()
 
 [SEGMENT 05] Phase record factory created
-  phases: ['LIQUID']
+  phases: ['AL13FE4', 'AL2FE', 'AL5FE2', 'ALCU_ETA', 'ALCU_THETA', 'BCC_B2', 'GAMMA_D83', 'L12', 'LIQUID']
 
 ================================================================================
 SEGMENT 08 COMPARISON
@@ -108,10 +108,10 @@ SEGMENT 08 COMPARISON
 --- GPU ---
 
 [SEGMENT 08] Starting point calculation
-  conditions: OrderedDict({N: array([1.]), P: array([101325.]), T: array([973.15]), X_AL: array([0.5]), X_CU: array([0.2])})
+  conditions: OrderedDict({N: array([1.]), P: array([101325.]), T: array([775.]), X_AL: array([0.4]), X_CU: array([0.3])})
   state_variables: [N, P, T]
-  phase_records: ['LIQUID']
-  grid_shape: (1, 1, 1, 256)
+  phase_records: ['AL13FE4', 'AL2FE', 'AL5FE2', 'ALCU_ETA', 'ALCU_THETA', 'BCC_B2', 'GAMMA_D83', 'L12', 'LIQUID']
+  grid_shape: (1, 1, 1, 9499)
 
 [SEGMENT 08] Global min check
   global_min_enabled: True
@@ -128,7 +128,7 @@ SEGMENT 09 COMPARISON
 [SEGMENT 09] Lower convex hull setup
   state_variables: [N, P, T]
   conds_keys: [N, P, T, X_AL, X_CU]
-  global_grid_shape: (1, 1, 1, 256)
+  global_grid_shape: (1, 1, 1, 9499)
   result_array_shape: (1, 1, 1, 1, 1)
 
 [SEGMENT 09] Lower convex hull arrays cached
@@ -165,10 +165,10 @@ SEGMENT 11 COMPARISON
   lincomb_rhs_shape: (3,)
 
 [SEGMENT 11] [CONDITION 0] Hyperplane result
-  GM: -6.127786146250354e+04
-  MU: [-61366.22481011798, -62408.02559243206, -60377.14646319381]
-  NP: [0.037009099297928935, 0.30492198831567924, 0.6580689123863918, 0.0]
-  points: [223, 229, 235, 0]
+  GM: -5.521095223835998e+04
+  MU: [-74052.3660893327, -40651.38687888762, -44648.63246320202]
+  NP: [0.2510882016036808, 0.3156930126002229, 0.4332187857960962, 0.0]
+  points: [2001, 6988, 4792, 0]
 
 ================================================================================
 SEGMENT 12 COMPARISON
@@ -180,12 +180,12 @@ SEGMENT 12 COMPARISON
 --- GPU ---
 
 [SEGMENT 12] [CONDITION 0] Copy results from grid
-  points: [223, 229, 235, 0]
+  points: [2001, 6988, 4792, 0]
 
 [SEGMENT 12] [CONDITION 0] Copy results complete
-  phases: ['LIQUID', 'LIQUID', 'LIQUID', '']
-  X: [[0.5363522910943187, 0.11774928609621277, 0.3458984228094686], [0.4775533888648897, 0.4028886263102524, 0.119557984824858], [0.5083564192806315, 0.11061547294543718, 0.3810281077739313]]
-  final_GM: -6.127786146250354e+04
+  phases: ['BCC_B2', 'GAMMA_D83', 'BCC_B2', '']
+  X: [[0.49999999999999506, 0.18367346938775964, 0.3163265306122454], [0.3092621664050243, 0.6781789638932431, 0.012558869701732745], [0.4081632653061202, 0.09183673469388479, 0.499999999999995]]
+  final_GM: -5.521095223835998e+04
 
 ================================================================================
 SEGMENT 13 COMPARISON
@@ -232,8 +232,8 @@ SEGMENT 40 COMPARISON
 [SEGMENT 40] [GPU] Equilibrium calculation complete
   converged: True
   properties_shape: (1, 1, 1, 1, 1)
-  final_GM: -6.134871605382863e+04
+  final_GM: -5.642717153850237e+04
 
 ================================================================================
-TRACE COMPLETE - 2025-08-12T10:19:41.665065
+TRACE COMPLETE - 2025-08-12T12:27:03.234838
 ================================================================================

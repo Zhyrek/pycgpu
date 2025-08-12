@@ -3725,20 +3725,30 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
             printf("\n");
             printf("  Target value (prescribed_mole_fraction_rhs[%d]) = %e\n", 
                    mole_frac_cond_row_idx, spec->prescribed_mole_fraction_rhs[mole_frac_cond_row_idx]);
-            printf("  EXPECTED: For AL constraint (row 0): X_AL should be ~0.575559, target=0.5, residual=+0.075559\n");
-            if (mole_frac_cond_row_idx == 0) {
-                printf("  ANALYSIS: AL mole fraction = %e, target = %e\n", 
-                       state->mole_fractions[0], spec->prescribed_mole_fraction_rhs[0]);
-                printf("  ANALYSIS: If this shows X_AL = 0.275559 instead of 0.575559, then AL/FE indices are swapped!\n");
-            }
         }
         #endif
         
         for (current_component_idx = 0; current_component_idx < spec->num_prescribed_mole_fraction_coefficients_cols; current_component_idx++) {
             component_residual += spec->prescribed_mole_fraction_coefficients[mole_frac_cond_row_idx][current_component_idx] *
                                   state->mole_fractions[current_component_idx];
+            #ifdef VERBOSE_DEBUG
+            if (state->condition_idx == 0 && state->iteration == 0 && mole_frac_cond_row_idx == 0) {
+                printf("[GPU RESIDUAL CALC] comp_idx=%d: coeff=%e * mole_frac=%e = %e (cumulative=%e)\n",
+                       current_component_idx,
+                       spec->prescribed_mole_fraction_coefficients[mole_frac_cond_row_idx][current_component_idx],
+                       state->mole_fractions[current_component_idx],
+                       spec->prescribed_mole_fraction_coefficients[mole_frac_cond_row_idx][current_component_idx] * state->mole_fractions[current_component_idx],
+                       component_residual);
+            }
+            #endif
         }
         component_residual -= spec->prescribed_mole_fraction_rhs[mole_frac_cond_row_idx];
+        #ifdef VERBOSE_DEBUG
+        if (state->condition_idx == 0 && state->iteration == 0 && mole_frac_cond_row_idx == 0) {
+            printf("[GPU RESIDUAL CALC] After subtracting target %e: residual = %e\n",
+                   spec->prescribed_mole_fraction_rhs[mole_frac_cond_row_idx], component_residual);
+        }
+        #endif
         
         // DEBUG: Print mole fraction constraint calculation
         #ifdef VERBOSE_DEBUG
@@ -5917,19 +5927,19 @@ __device__ void pycgpu_model_0_formulagrad(double* out, const double* x) {
     double x25 = x[3] + x[4] + x[5];
     double x26 = pow(x25, -1);
     double x27 = 1.0*x26;
-    double x28 = log(x[4]);
-    double x29 = 1e-15 < x[4];
-    double x30 = log(x[5]);
-    double x31 = 1e-15 < x[5];
+    double x28 = log(x[5]);
+    double x29 = 1e-15 < x[5];
+    double x30 = log(x[4]);
+    double x31 = 1e-15 < x[4];
     double x32 = log(x[3]);
     double x33 = 1e-15 < x[3];
     double x34 = 1.0*((x29 == 1) ? (
-   x28*x[4]
+   x28*x[5]
 )
 : (
    0
 )) + 1.0*((x31 == 1) ? (
-   x30*x[5]
+   x30*x[4]
 )
 : (
    0
@@ -5941,7 +5951,7 @@ __device__ void pycgpu_model_0_formulagrad(double* out, const double* x) {
 ));
     double x35 = 8.3145*x26;
     double x36 = x34*x35;
-    double x37 = 1.0*((x29 == 1) ? (
+    double x37 = 1.0*((x31 == 1) ? (
    0
 )
 : (
@@ -5953,7 +5963,7 @@ __device__ void pycgpu_model_0_formulagrad(double* out, const double* x) {
 : (
    0
 ));
-    double x39 = 1.0*((x31 == 1) ? (
+    double x39 = 1.0*((x29 == 1) ? (
    0
 )
 : (
@@ -6149,14 +6159,14 @@ __device__ void pycgpu_model_0_formulagrad(double* out, const double* x) {
 : (
    0
 ))) + (x66 + x69)*x27);
-    out[2] = x109 + x59*(x108 + x27*(x105 + x106 + x110 + x111 + x112 + x76 + (2.0/3.0)*x79 - x83 + x96 + x99 + x101*x[5] + x104*x[5] - x75*x[3] + x82*x52) + x41*(x40 + 1.0*((x29 == 1) ? (
-   1 + x28
+    out[2] = x109 + x59*(x108 + x27*(x105 + x106 + x110 + x111 + x112 + x76 + (2.0/3.0)*x79 - x83 + x96 + x99 + x101*x[5] + x104*x[5] - x75*x[3] + x82*x52) + x41*(x40 + 1.0*((x31 == 1) ? (
+   1 + x30
 )
 : (
    0
 ))) + (x69 + x89)*x27);
-    out[3] = x109 + x59*(x108 + x27*(x100 + x102 - x110 - x111 + x112 + x80 - x84 - x86 + x104*x[4] + x71*x58 + x74*x[3] + x78*x58 + x87*x[3] + x98*x[4]) + x41*(x37 + x38 + 1.0*((x31 == 1) ? (
-   1 + x30
+    out[3] = x109 + x59*(x108 + x27*(x100 + x102 - x110 - x111 + x112 + x80 - x84 - x86 + x104*x[4] + x71*x58 + x74*x[3] + x78*x58 + x87*x[3] + x98*x[4]) + x41*(x37 + x38 + 1.0*((x29 == 1) ? (
+   1 + x28
 )
 : (
    0
@@ -6333,16 +6343,16 @@ __device__ void pycgpu_model_0_formulahess(double* out, const double* x) {
 )
 : 0));
     double x95 = x68*x[3] + x91*x[5] + x94*x[4];
-    double x96 = log(x[4]);
-    double x97 = log(x[5]);
+    double x96 = log(x[5]);
+    double x97 = log(x[4]);
     double x98 = 1.0*((x7 == 1) ? (
    x55*x[3]
 )
-: 0) + 1.0*((x9 == 1) ? (
-   x96*x[4]
-)
 : 0) + 1.0*((x5 == 1) ? (
-   x97*x[5]
+   x96*x[5]
+)
+: 0) + 1.0*((x9 == 1) ? (
+   x97*x[4]
 )
 : 0);
     double x99 = x15 - x83*x85 - x85*x95 - x86*x98 - x[2]*x86*x12;
@@ -6354,14 +6364,14 @@ __device__ void pycgpu_model_0_formulahess(double* out, const double* x) {
     double x105 = 7.20594*x104;
     double x106 = x6 + x8;
     double x107 = x106 + 1.0*((x9 == 1) ? (
-   1 + x96
+   1 + x97
 )
 : 0);
     double x108 = x13*x107;
     double x109 = x35*(x108 + x99 + x34*(8.1*x[3] - 2.32968*x[5] - x103 - x105 - x50 + 4.50112662333333*x54 - x81 + x4*x48 + x40*x41 + x53*x41 - x77*x[5]) + (x74 + x94)*x34);
     double x110 = x[4]*x[3];
     double x111 = x11 + 1.0*((x5 == 1) ? (
-   1 + x97
+   1 + x96
 )
 : 0);
     double x112 = x13*x111;
@@ -9531,22 +9541,8 @@ __global__ void top_level_equilibrium_kernel(
             }
             
             // thread_spec already created above - no need to recreate
-            
-            // CRITICAL FIX: Update prescribed_mole_fraction_rhs to match this thread's condition
-            // Each thread needs its own X[1] target value from the condition data
-            if (thread_spec.num_prescribed_mole_fraction_conditions > 0) {
-                // For X[1] constraint (component index 1), update the RHS to match this thread's condition
-                thread_spec.prescribed_mole_fraction_rhs[0] = thread_mole_fractions[1];  // X[1] for this thread
-                
-                if (tid < 5) {
-                    #ifdef VERBOSE_DEBUG
-                    printf("GPU DEBUG: Thread %d UPDATED prescribed_mole_fraction_rhs[0] = %f (X[1] for this condition)\n", 
-                           tid, thread_spec.prescribed_mole_fraction_rhs[0]);
-                    printf("GPU DEBUG: Thread %d SystemSpec: num_statevars=%d, num_components=%d\n",
-                           tid, thread_spec.num_statevars, thread_spec.num_components);
-                    #endif
-                }
-            }
+            // The prescribed_mole_fraction_rhs values are already correctly set in the SystemSpecification array
+            // DO NOT overwrite them here - that was a binary-system-specific hack that breaks ternary systems
             
             // Set up device phase data  
             device_phase_data.phase_records_array = g_phase_records_array;

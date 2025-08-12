@@ -2274,20 +2274,30 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
             printf("\n");
             printf("  Target value (prescribed_mole_fraction_rhs[%d]) = %e\n", 
                    mole_frac_cond_row_idx, spec->prescribed_mole_fraction_rhs[mole_frac_cond_row_idx]);
-            printf("  EXPECTED: For AL constraint (row 0): X_AL should be ~0.575559, target=0.5, residual=+0.075559\n");
-            if (mole_frac_cond_row_idx == 0) {
-                printf("  ANALYSIS: AL mole fraction = %e, target = %e\n", 
-                       state->mole_fractions[0], spec->prescribed_mole_fraction_rhs[0]);
-                printf("  ANALYSIS: If this shows X_AL = 0.275559 instead of 0.575559, then AL/FE indices are swapped!\n");
-            }
         }
         #endif
         
         for (current_component_idx = 0; current_component_idx < spec->num_prescribed_mole_fraction_coefficients_cols; current_component_idx++) {
             component_residual += spec->prescribed_mole_fraction_coefficients[mole_frac_cond_row_idx][current_component_idx] *
                                   state->mole_fractions[current_component_idx];
+            #ifdef VERBOSE_DEBUG
+            if (state->condition_idx == 0 && state->iteration == 0 && mole_frac_cond_row_idx == 0) {
+                printf("[GPU RESIDUAL CALC] comp_idx=%d: coeff=%e * mole_frac=%e = %e (cumulative=%e)\n",
+                       current_component_idx,
+                       spec->prescribed_mole_fraction_coefficients[mole_frac_cond_row_idx][current_component_idx],
+                       state->mole_fractions[current_component_idx],
+                       spec->prescribed_mole_fraction_coefficients[mole_frac_cond_row_idx][current_component_idx] * state->mole_fractions[current_component_idx],
+                       component_residual);
+            }
+            #endif
         }
         component_residual -= spec->prescribed_mole_fraction_rhs[mole_frac_cond_row_idx];
+        #ifdef VERBOSE_DEBUG
+        if (state->condition_idx == 0 && state->iteration == 0 && mole_frac_cond_row_idx == 0) {
+            printf("[GPU RESIDUAL CALC] After subtracting target %e: residual = %e\n",
+                   spec->prescribed_mole_fraction_rhs[mole_frac_cond_row_idx], component_residual);
+        }
+        #endif
         
         // DEBUG: Print mole fraction constraint calculation
         #ifdef VERBOSE_DEBUG

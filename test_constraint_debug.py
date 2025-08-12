@@ -1,23 +1,27 @@
-#!/usr/bin/env python
-"""Test to see what constraint values the GPU is using."""
+#\!/usr/bin/env python
+"""Test to capture GPU constraint calculation debug output"""
 
-import numpy as np
-from pycalphad import Database, equilibrium, variables as v
 import warnings
 warnings.filterwarnings("ignore")
+import sys
+sys.path.insert(0, "/mnt/c/users/scott/Documents/pycalphad")
 
-# Load database
-dbf = Database('Al-Cu-Fe.tdb')
-comps = ['AL', 'CU', 'FE', 'VA']
-phases = ['LIQUID', 'FCC_A1']
+from pycalphad import Database, equilibrium
+import pycalphad.variables as v
 
-# Single ternary condition
-conditions = {
-    v.T: 1200,
-    v.P: 101325,
-    v.X('CU'): 0.2,  
-    v.X('FE'): 0.3   
-}
+dbf = Database("Al-Cu-Fe.tdb")
 
-print("Testing constraint calculation...")
-result_gpu = equilibrium(dbf, comps, phases, conditions, gpu=True, verbose=False, calc_opts={'pdens': 50})
+# Test with ternary system - AL-CU-FE with only LIQUID phase
+print("=" * 60)
+print("Testing AL-CU-FE ternary system with GPU (LIQUID only)")
+print("=" * 60)
+
+try:
+    result = equilibrium(dbf, ["AL","CU","FE","VA"], ["LIQUID"], 
+                        {"T": 973.15, "P": 101325, "X_AL": 0.5, "X_CU": 0.2}, 
+                        verbose=True, calc_opts={"pdens": 50}, gpu=True)
+    print("GPU calculation completed successfully")
+except Exception as e:
+    print(f"GPU calculation failed: {e}")
+    import traceback
+    traceback.print_exc()

@@ -5619,22 +5619,8 @@ __global__ void top_level_equilibrium_kernel(
             }}
             
             // thread_spec already created above - no need to recreate
-            
-            // CRITICAL FIX: Update prescribed_mole_fraction_rhs to match this thread's condition
-            // Each thread needs its own X[1] target value from the condition data
-            if (thread_spec.num_prescribed_mole_fraction_conditions > 0) {{
-                // For X[1] constraint (component index 1), update the RHS to match this thread's condition
-                thread_spec.prescribed_mole_fraction_rhs[0] = thread_mole_fractions[1];  // X[1] for this thread
-                
-                if (tid < 5) {{
-                    #ifdef VERBOSE_DEBUG
-                    printf("GPU DEBUG: Thread %d UPDATED prescribed_mole_fraction_rhs[0] = %f (X[1] for this condition)\\n", 
-                           tid, thread_spec.prescribed_mole_fraction_rhs[0]);
-                    printf("GPU DEBUG: Thread %d SystemSpec: num_statevars=%d, num_components=%d\\n",
-                           tid, thread_spec.num_statevars, thread_spec.num_components);
-                    #endif
-                }}
-            }}
+            // The prescribed_mole_fraction_rhs values are already correctly set in the SystemSpecification array
+            // DO NOT overwrite them here - that was a binary-system-specific hack that breaks ternary systems
             
             // Set up device phase data  
             device_phase_data.phase_records_array = g_phase_records_array;

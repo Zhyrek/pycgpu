@@ -175,11 +175,16 @@ def compile_phases_separately(wks_obj, verbose: bool = False,
     if verbose:
         print(f"[GPU] Using optimization level: {opt_level}")
     
-    # Build complete source
-    source = build_complete_source(
+    # For the optimized compiler, we don't need SystemSpecification arrays
+    # as they're generated separately in the main path
+    systemspec_arrays = ""
+    
+    # Build complete source including SystemSpecification
+    source = build_complete_source_with_systemspec(
         model_functions_c_code,
         g_phase_record_array_init_calls_c_code,
-        num_phases
+        num_phases,
+        systemspec_arrays
     )
     
     # Try compilation with timeout
@@ -381,7 +386,12 @@ def compile_with_fallback(wks_obj, verbose: bool = False) -> cp.RawModule:
 
 
 def build_complete_source(model_functions: str, init_calls: str, num_phases: int) -> str:
-    """Build the complete source code for all phases."""
+    """Build the complete source code for all phases (without SystemSpecification)."""
+    return build_complete_source_with_systemspec(model_functions, init_calls, num_phases, "")
+
+def build_complete_source_with_systemspec(model_functions: str, init_calls: str, 
+                                         num_phases: int, systemspec_arrays: str) -> str:
+    """Build the complete source code for all phases with SystemSpecification."""
     
     # Read headers
     svd_c_source = _read_gpu_header("svd.c")
@@ -449,6 +459,9 @@ __device__ void gpu_debug_log_array(const char* message, const double* arr, int 
 {minimizer_h_source}
 {eqsolver_h_source}
 
+// SystemSpecification arrays
+{systemspec_arrays}
+
 // Phase functions
 {model_functions}
 
@@ -457,7 +470,7 @@ __device__ PhaseRecord g_phase_records_array[{num_phases if num_phases > 0 else 
 
 extern "C" {{
 
-__global__ void initPhaseRecords() {{
+__global__ void init_all_gpu_phase_records() {{
     {''.join(init_calls)}
 }}
 
@@ -468,7 +481,7 @@ __global__ void test_kernel(double* output, const double* input, int n) {{
     }}
 }}
 
-__global__ void equilibrium_kernel(
+__global__ void top_level_equilibrium_kernel(
     const void* global_spec_ptr,
     const void* condition_args_ptr,
     void* results_ptr,
@@ -476,16 +489,27 @@ __global__ void equilibrium_kernel(
     const void* initial_data_ptr,
     const void* grid_data_ptr
 ) {{
+    // Cast pointers to correct types
+    const SystemSpecification* global_spec = (const SystemSpecification*)global_spec_ptr;
+    const ConditionArguments* condition_args = (const ConditionArguments*)condition_args_ptr;
+    EquilibriumResult* results = (EquilibriumResult*)results_ptr;
+    const InitialPhaseData* initial_data = (const InitialPhaseData*)initial_data_ptr;
+    const double* grid_energies = (const double*)grid_data_ptr;
+    
+    // Get thread ID
     int tid = blockDim.x * blockIdx.x + threadIdx.x;
     
-    if (tid == 0) {{
-        {''.join(init_calls)}
-    }}
-    __syncthreads();
-    
-    if (tid < num_conditions && results_ptr != nullptr) {{
-        double* results = (double*)results_ptr;
-        results[tid] = {num_phases}.0;
+    // Process conditions
+    if (tid < num_conditions) {{
+        // Call the equilibrium solver for this condition
+        solve_equilibrium_at_condition(
+            tid,
+            global_spec,
+            condition_args,
+            results,
+            initial_data,
+            grid_energies
+        );
     }}
 }}
 

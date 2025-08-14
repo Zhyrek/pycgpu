@@ -1967,13 +1967,29 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             # to the kernel using the -D flag to define it in the kernel code."
             
             # Check if optimized compilation is needed for many phases
-            if num_unique_models_for_gpu > 15:
-                # Use optimized multi-phase compiler for many phases
+            # Use aggressive optimization reduction for better compilation times
+            if num_unique_models_for_gpu >= 14:
+                # Use optimized compilation with reduced optimization level
                 if verbose:
-                    print(f"[GPU] System has {num_unique_models_for_gpu} phases, using optimized multi-phase compilation")
+                    print(f"[GPU] System has {num_unique_models_for_gpu} phases, using reduced optimization")
                     
-                # Use the workspace object for compilation since it has the models
-                module = compile_phases_separately(wks_obj, verbose=verbose, max_compilation_time=120)
+                # Create -D compiler flags for dynamic sizing
+                define_flags = []
+                for define_name, value in dynamic_sizes.items():
+                    define_flags.append(f'-D{define_name}={value}')
+                
+                # Add VERBOSE_DEBUG flag if verbose mode is enabled
+                if verbose:
+                    define_flags.append('-DVERBOSE_DEBUG')
+                    print(f"[GPU] Using dynamic kernel sizing: {dynamic_sizes}")
+                    print(f"[GPU] Compiler defines: {define_flags}")
+                
+                # Use -O0 for many phases to avoid compilation timeout
+                opt_level = '-O0'
+                
+                # Compilation options with dynamic defines (must be tuple for CuPy)
+                compile_options = tuple(['-std=c++11', opt_level] + define_flags)
+                module = cp.RawModule(code=full_kernel_source, options=compile_options, backend='nvcc')
             else:
                 # Standard compilation for smaller systems
                 if verbose:
@@ -1995,8 +2011,10 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                     opt_level = '-O3'
                 elif num_unique_models_for_gpu <= 10:
                     opt_level = '-O2'
-                else:
+                elif num_unique_models_for_gpu <= 12:
                     opt_level = '-O1'
+                else:
+                    opt_level = '-O0'  # No optimization for 13+ phases
                 
                 # Compilation options with dynamic defines (must be tuple for CuPy)
                 compile_options = tuple(['-std=c++11', opt_level] + define_flags)

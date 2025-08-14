@@ -698,7 +698,11 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
             
             # Copy site fractions (Y values)
             if y_values.ndim >= 2 and orig_phase_idx < y_values.shape[0]:
-                y_row = y_values[orig_phase_idx][:max_dof_per_phase] if y_values.ndim == 2 else y_values[:max_dof_per_phase]
+                y_row = y_values[orig_phase_idx][:max_dof_per_phase]
+                initial_phase_data_arrays['site_fractions'][cond_idx, i, :len(y_row)] = y_row
+            elif y_values.ndim == 1:
+                # For 1D array, we can't index by phase - this is likely single phase data
+                y_row = y_values[:max_dof_per_phase]
                 initial_phase_data_arrays['site_fractions'][cond_idx, i, :len(y_row)] = y_row
                 
                 # DEBUG: Print site fractions being copied for first condition
@@ -716,11 +720,18 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
                     print(f"[GPU] DEBUG: x_values content: {x_values.flatten()[:10]}")
             
             if x_values.ndim >= 2 and orig_phase_idx < x_values.shape[0]:
-                x_row = x_values[orig_phase_idx][:max_components] if x_values.ndim == 2 else x_values[:max_components]
+                x_row = x_values[orig_phase_idx][:max_components]
                 initial_phase_data_arrays['compositions'][cond_idx, i, :len(x_row)] = x_row
                 
                 if wks_obj.verbose and cond_idx < 2:
                     print(f"[GPU] DEBUG: Copied X for phase {i}: {x_row}")
+            elif x_values.ndim == 1:
+                # For 1D array, we can't index by phase - likely single phase or need reshaping
+                x_row = x_values[:max_components]
+                initial_phase_data_arrays['compositions'][cond_idx, i, :len(x_row)] = x_row
+                
+                if wks_obj.verbose and cond_idx < 2:
+                    print(f"[GPU] DEBUG: Copied X for phase {i} from 1D array: {x_row}")
             else:
                 if wks_obj.verbose and cond_idx < 2:
                     print(f"[GPU] DEBUG: Could not copy X for phase {i} (x_values.ndim={x_values.ndim}, shape={getattr(x_values, 'shape', 'no shape')})")
@@ -767,7 +778,9 @@ def _populate_system_specification(global_spec_np, global_spec_arrays, wks_obj, 
             print(f"[GPU] DEBUG: Populate constants: components={max_components}, statevars={max_statevars}, constraints={max_constraints}")
         
         global_spec_np[0] = min(len(wks_obj.phase_record_factory.state_variables), max_statevars)  # num_statevars
-        global_spec_np[1] = min(len(wks_obj.components), max_components)  # num_components
+        # CRITICAL: CPU uses ONLY nonvacant elements as components
+        nonvacant_components = [c for c in wks_obj.components if str(c).upper() != 'VA']
+        global_spec_np[1] = min(len(nonvacant_components), max_components)  # num_components (NONVACANT ONLY)
         global_spec_np[2] = 1.0  # prescribed_system_amount - System normalized to 1 mole
         
         if wks_obj.verbose:
@@ -805,11 +818,23 @@ def _populate_system_specification(global_spec_np, global_spec_arrays, wks_obj, 
         raise
     
     # Check each component for fixed chemical potential conditions
+    # CRITICAL: CPU only works with nonvacant_elements, never includes VA
     if wks_obj.verbose:
         print("[GPU] DEBUG: Checking chemical potential conditions...")
     
+    # Build nonvacant component list EXACTLY like CPU
+    nonvacant_elements = []
+    for component in wks_obj.components[:max_components]:
+        comp_name = str(component).upper() if hasattr(component, '__str__') else str(component)
+        if 'VA' not in comp_name:
+            nonvacant_elements.append(component)
+    
+    if wks_obj.verbose:
+        print(f"[GPU] DEBUG: nonvacant_elements = {nonvacant_elements} (count={len(nonvacant_elements)})")
+    
     try:
-        for comp_idx, component in enumerate(wks_obj.components[:max_components]):
+        # CPU iterates over nonvacant_elements ONLY
+        for comp_idx, component in enumerate(nonvacant_elements):
             if wks_obj.verbose:
                 print(f"[GPU] DEBUG: Processing component {comp_idx}: {component}")
             
@@ -839,17 +864,10 @@ def _populate_system_specification(global_spec_np, global_spec_arrays, wks_obj, 
                     print(f"[GPU] DEBUG: mu_scalar = {mu_scalar}")
                 global_spec_arrays['initial_chemical_potentials'][comp_idx] = mu_scalar
             else:
-                # CRITICAL FIX: Exclude VA from free chemical potentials
-                # CPU only includes non-VA components as free chemical potentials
-                # Need to check both string representation and Component object name
-                comp_name = str(component).upper() if hasattr(component, '__str__') else str(component)
-                if 'VA' not in comp_name:
-                    if wks_obj.verbose:
-                        print(f"[GPU] DEBUG: mu_var not in conditions, adding to free list (non-VA component: {component})")
-                    free_chemical_potential_indices.append(comp_idx)
-                else:
-                    if wks_obj.verbose:
-                        print(f"[GPU] DEBUG: Skipping VA component from free chemical potentials: {component}")
+                # Since we're iterating over nonvacant_elements only, no VA check needed
+                if wks_obj.verbose:
+                    print(f"[GPU] DEBUG: mu_var not in conditions, adding to free list: {component}")
+                free_chemical_potential_indices.append(comp_idx)
                 
                 # CRITICAL FIX: For free chemical potentials, use the value from workspace starting point
                 # This is the first divergence - CPU must provide correct initial chemical potentials
@@ -908,44 +926,48 @@ def _populate_system_specification(global_spec_np, global_spec_arrays, wks_obj, 
         if wks_obj.verbose:
             print("[GPU] DEBUG: Checking mole fraction constraints...")
         
-        # Check for mole fraction constraints
+        # Check for mole fraction constraints - EXACTLY like CPU
         constraint_count = 0
-        for comp_idx, component in enumerate(wks_obj.components[:max_components]):
-            if wks_obj.verbose:
-                print(f"[GPU] DEBUG: Processing mole fraction for component {comp_idx}: {component}")
-            
-            x_var = v.MoleFraction(component)
-            if wks_obj.verbose:
-                print(f"[GPU] DEBUG: x_var = {x_var}")
-            
-            if x_var in wks_obj.conditions and constraint_count < max_constraints:
-                if wks_obj.verbose:
-                    print(f"[GPU] DEBUG: Found x_var in conditions")
+        for cond, value in wks_obj.conditions.items():
+            if isinstance(cond, v.MoleFraction) and cond.phase_name is None and constraint_count < max_constraints:
+                # Extract element name from X_EL
+                el = str(cond)[2:]  # Gets 'AL' from 'X_AL'
                 
-                x_value = wks_obj.conditions[x_var]
-                if wks_obj.verbose:
-                    print(f"[GPU] DEBUG: x_value = {x_value} (type: {type(x_value)})")
-                
-                # Handle multi-point conditions: for global spec, use the first value as template
-                # Individual conditions will be handled per-thread in ConditionArgsSingle
-                x_value_array = np.asarray(x_value)
-                if x_value_array.size > 1:
+                # Check if el is in nonvacant_elements (need to convert Component to string for comparison)
+                nonvacant_element_names = [str(comp).upper() for comp in nonvacant_elements]
+                if el not in nonvacant_element_names:
                     if wks_obj.verbose:
-                        print(f"[GPU] DEBUG: Multi-point condition detected, using first value for global spec")
+                        print(f"[GPU] DEBUG: Skipping constraint for vacant element: {el}")
+                    continue
+                
+                # Find index in nonvacant_elements list (like CPU)
+                el_idx = nonvacant_element_names.index(el)
+                
+                if wks_obj.verbose:
+                    print(f"[GPU] DEBUG: Processing constraint X({el}) = {value}")
+                    print(f"[GPU] DEBUG: el_idx in nonvacant_elements = {el_idx}")
+                
+                # Handle multi-point conditions
+                x_value_array = np.asarray(value)
+                if x_value_array.size > 1:
                     x_scalar = float(x_value_array.flatten()[0])
                 else:
                     x_scalar = float(x_value_array.item())
                 
-                if wks_obj.verbose:
-                    print(f"[GPU] DEBUG: x_scalar = {x_scalar}")
+                # CPU creates coefficient array of size num_nonvacant_components ONLY
+                # Initialize coefficients to 0 for nonvacant components only
+                for i in range(len(nonvacant_elements)):
+                    global_spec_arrays['prescribed_mole_fraction_coefficients'][constraint_count, i] = 0.0
                 
-                # Create constraint: X_i = value -> X_i - value = 0
-                global_spec_arrays['prescribed_mole_fraction_coefficients'][constraint_count, comp_idx] = 1.0
+                # Set coefficient for the constrained component using nonvacant index
+                global_spec_arrays['prescribed_mole_fraction_coefficients'][constraint_count, el_idx] = 1.0
                 global_spec_arrays['prescribed_mole_fraction_rhs'][constraint_count] = x_scalar
-                constraint_count += 1
-            else:
+                
                 if wks_obj.verbose:
-                    print(f"[GPU] DEBUG: x_var not in conditions or constraint limit reached")
+                    print(f"[GPU] DEBUG: Set constraint {constraint_count}: coef[{el_idx}]=1.0 (el={el}), rhs={x_scalar}")
+                    print(f"[GPU] DEBUG: Constraint coefficients (nonvacant only): {global_spec_arrays['prescribed_mole_fraction_coefficients'][constraint_count, :len(nonvacant_elements)]}")
+                
+                constraint_count += 1
                     
     except Exception as e:
         if wks_obj.verbose:
@@ -953,7 +975,10 @@ def _populate_system_specification(global_spec_np, global_spec_arrays, wks_obj, 
         raise
     
     global_spec_np[3] = constraint_count  # num_prescribed_mole_fraction_conditions
-    global_spec_np[4] = global_spec_np[1]  # num_prescribed_mole_fraction_coefficients_cols = num_components
+    # CRITICAL FIX: CPU uses nonvacant_elements.size, but GPU needs to handle full component array
+    # The coefficients array has MAX_COMPONENTS columns, but only nonvacant ones are used
+    # We still need to pass the full size for array indexing compatibility
+    global_spec_np[4] = global_spec_np[1]  # num_prescribed_mole_fraction_coefficients_cols = num_components (including VA)
     
     # Populate index arrays
     for i, idx in enumerate(free_chemical_potential_indices[:max_components]):
@@ -2252,6 +2277,11 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     global_memory_arrays['equilibrium_rhs'] = cp.empty((total_threads_for_allocation, MAX_EQ_MATRIX_ROWS), dtype=cp.float64)
     global_memory_arrays['eq_soln'] = cp.empty((total_threads_for_allocation, MAX_EQ_SOLN_LEN), dtype=cp.float64)
     
+    # CRITICAL FIX: Allocate SystemState in global memory to avoid stack overflow
+    # SystemState is too large for GPU thread stack (~100KB+ per thread)
+    SYSTEM_STATE_SIZE = 50000  # Size in doubles, matching gpu_codegen.py
+    global_memory_arrays['system_states'] = cp.empty((total_threads_for_allocation, SYSTEM_STATE_SIZE), dtype=cp.float64)
+    
     # CRITICAL: CompositionSet arrays to prevent stack overflow
     # Each CompositionSet needs space for DOF values and other data
     # Estimate size: phase_record pointer (8) + NP (8) + dof array (MAX_STATEVARS + MAX_DOF_PER_PHASE)*8 + X array (MAX_COMPONENTS)*8 + etc
@@ -2375,7 +2405,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             global_memory_arrays['equilibrium_matrix'].data.ptr,
             global_memory_arrays['equilibrium_rhs'].data.ptr,
             global_memory_arrays['eq_soln'].data.ptr,
-            0  # SystemState uses stack allocation, not global memory
+            global_memory_arrays['system_states'].data.ptr  # CRITICAL FIX: Pass global memory for SystemState
         )
     else:
         kernel_args_v1 = (
@@ -2411,7 +2441,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             global_memory_arrays['equilibrium_matrix'].data.ptr,
             global_memory_arrays['equilibrium_rhs'].data.ptr,
             global_memory_arrays['eq_soln'].data.ptr,
-            0  # SystemState uses stack allocation, not global memory
+            global_memory_arrays['system_states'].data.ptr  # CRITICAL FIX: Pass global memory for SystemState
         )
     
     # Alternative: try passing arrays directly instead of pointers

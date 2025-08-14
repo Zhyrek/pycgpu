@@ -1,5 +1,5 @@
 === INTERLEAVED CPU-GPU EQUILIBRIUM DEBUG TRACE ===
-Started: 2025-08-12T08:32:30.338436
+Started: 2025-08-14T09:32:42.855312
 
 
 ================================================================================
@@ -7,15 +7,23 @@ SEGMENT 01 COMPARISON
 ================================================================================
 
 --- CPU ---
-(No CPU data for this segment)
+
+[SEGMENT 01] Entry point and parameter validation
+  gpu_mode: False
+  components: ['AL', 'CU', 'FE', 'VA']
+  phases: ['LIQUID']
+  conditions: {X_AL: 0.25, X_CU: 0.25, T: 2000, P: 101325}
+  output_requested: None
+  verbose: True
+  force_cpu: False
 
 --- GPU ---
 
 [SEGMENT 01] [GPU] Entry point and parameter validation
   gpu_mode: True
-  components: ['FE', 'CU', 'VA', 'AL']
+  components: ['AL', 'CU', 'FE', 'VA']
   phases: ['LIQUID']
-  conditions: {'T': 973.15, 'P': 101325.0, 'X(CU)': 0.2, 'X(AL)': 0.5}
+  conditions: {X_AL: 0.25, X_CU: 0.25, T: 2000, P: 101325}
   output_requested: None
   verbose: True
   force_cpu: False
@@ -25,30 +33,27 @@ SEGMENT 02 COMPARISON
 ================================================================================
 
 --- CPU ---
-(No CPU data for this segment)
 
---- GPU ---
-
-[SEGMENT 02] [GPU] Workspace initialization
+[SEGMENT 02] Workspace initialization
   database: Elements: ['/-', 'AL', 'CU', 'FE', 'VA']
 Species: [Species('/-', '/-1'), Species('AL', 'AL1'), Species('CU', 'CU1'), Species('FE', 'FE1'), Species('VA', 'VA1')]
 Phase({'name': 'AL13FE4', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('FE', 'FE1')}), frozenset({Species('AL', 'AL1'), Species('VA', 'VA1')})), 'sublattices': (0.6275, 0.235, 0.1375), 'model_hints': {}})
 Phase({'name': 'AL2FE', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('FE', 'FE1')})), 'sublattices': (2.0, 1.0), 'model_hints': {}})
 Phase({'name': 'AL5FE2', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('FE', 'FE1')})), 'sublattices': (5.0, 2.0), 'model_hints': {}})
-Phase({'name': 'AL5FE4', 'constituents': (frozenset({Species('FE', 'FE1'), Species('AL', 'AL1')}),), 'sublattices': (1.0,), 'model_hints': {}})
-Phase({'name': 'ALCU_DELTA', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('FE', 'FE1'), Species('CU', 'CU1')})), 'sublattices': (2.0, 3.0), 'model_hints': {}})
-Phase({'name': 'ALCU_EPSILON', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('FE', 'FE1'), Species('CU', 'CU1')})), 'sublattices': (1.0, 1.0), 'model_hints': {}})
-Phase({'name': 'ALCU_ETA', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('FE', 'FE1'), Species('CU', 'CU1')})), 'sublattices': (1.0, 1.0), 'model_hints': {}})
+Phase({'name': 'AL5FE4', 'constituents': (frozenset({Species('AL', 'AL1'), Species('FE', 'FE1')}),), 'sublattices': (1.0,), 'model_hints': {}})
+Phase({'name': 'ALCU_DELTA', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('CU', 'CU1'), Species('FE', 'FE1')})), 'sublattices': (2.0, 3.0), 'model_hints': {}})
+Phase({'name': 'ALCU_EPSILON', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('CU', 'CU1'), Species('FE', 'FE1')})), 'sublattices': (1.0, 1.0), 'model_hints': {}})
+Phase({'name': 'ALCU_ETA', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('CU', 'CU1'), Species('FE', 'FE1')})), 'sublattices': (1.0, 1.0), 'model_hints': {}})
 Phase({'name': 'ALCU_PRIME', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('CU', 'CU1')})), 'sublattices': (2.0, 1.0), 'model_hints': {}})
-Phase({'name': 'ALCU_THETA', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('FE', 'FE1'), Species('AL', 'AL1'), Species('CU', 'CU1')})), 'sublattices': (2.0, 1.0), 'model_hints': {}})
-Phase({'name': 'ALCU_ZETA', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('FE', 'FE1'), Species('CU', 'CU1')})), 'sublattices': (9.0, 11.0), 'model_hints': {}})
-Phase({'name': 'BCC_A2', 'constituents': (frozenset({Species('FE', 'FE1'), Species('AL', 'AL1'), Species('CU', 'CU1'), Species('VA', 'VA1')}), frozenset({Species('VA', 'VA1')})), 'sublattices': (1.0, 3.0), 'model_hints': {'ihj_magnetic_afm_factor': -1.0, 'ihj_magnetic_structure_factor': 0.4, 'ordered_phase': 'BCC_B2', 'disordered_phase': 'BCC_A2'}})
-Phase({'name': 'BCC_B2', 'constituents': (frozenset({Species('FE', 'FE1'), Species('AL', 'AL1'), Species('CU', 'CU1'), Species('VA', 'VA1')}), frozenset({Species('FE', 'FE1'), Species('AL', 'AL1'), Species('CU', 'CU1'), Species('VA', 'VA1')}), frozenset({Species('VA', 'VA1')})), 'sublattices': (0.5, 0.5, 3.0), 'model_hints': {'ordered_phase': 'BCC_B2', 'disordered_phase': 'BCC_A2'}})
-Phase({'name': 'FCC_A1', 'constituents': (frozenset({Species('FE', 'FE1'), Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('VA', 'VA1')})), 'sublattices': (1.0, 1.0), 'model_hints': {'ihj_magnetic_afm_factor': -3.0, 'ihj_magnetic_structure_factor': 0.28, 'ordered_phase': 'L12', 'disordered_phase': 'FCC_A1'}})
-Phase({'name': 'GAMMA_D83', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('FE', 'FE1'), Species('CU', 'CU1')})), 'sublattices': (4.0, 1.0, 8.0), 'model_hints': {}})
-Phase({'name': 'GAMMA_H', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('FE', 'FE1'), Species('CU', 'CU1')})), 'sublattices': (4.0, 1.0, 8.0), 'model_hints': {}})
-Phase({'name': 'L12', 'constituents': (frozenset({Species('FE', 'FE1'), Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('FE', 'FE1'), Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('VA', 'VA1')})), 'sublattices': (0.75, 0.25, 1.0), 'model_hints': {'ordered_phase': 'L12', 'disordered_phase': 'FCC_A1'}})
-Phase({'name': 'LIQUID', 'constituents': (frozenset({Species('FE', 'FE1'), Species('AL', 'AL1'), Species('CU', 'CU1')}),), 'sublattices': (1.0,), 'model_hints': {}})
+Phase({'name': 'ALCU_THETA', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('AL', 'AL1'), Species('CU', 'CU1'), Species('FE', 'FE1')})), 'sublattices': (2.0, 1.0), 'model_hints': {}})
+Phase({'name': 'ALCU_ZETA', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('CU', 'CU1'), Species('FE', 'FE1')})), 'sublattices': (9.0, 11.0), 'model_hints': {}})
+Phase({'name': 'BCC_A2', 'constituents': (frozenset({Species('AL', 'AL1'), Species('VA', 'VA1'), Species('CU', 'CU1'), Species('FE', 'FE1')}), frozenset({Species('VA', 'VA1')})), 'sublattices': (1.0, 3.0), 'model_hints': {'ihj_magnetic_afm_factor': -1.0, 'ihj_magnetic_structure_factor': 0.4, 'ordered_phase': 'BCC_B2', 'disordered_phase': 'BCC_A2'}})
+Phase({'name': 'BCC_B2', 'constituents': (frozenset({Species('AL', 'AL1'), Species('VA', 'VA1'), Species('CU', 'CU1'), Species('FE', 'FE1')}), frozenset({Species('AL', 'AL1'), Species('VA', 'VA1'), Species('CU', 'CU1'), Species('FE', 'FE1')}), frozenset({Species('VA', 'VA1')})), 'sublattices': (0.5, 0.5, 3.0), 'model_hints': {'ordered_phase': 'BCC_B2', 'disordered_phase': 'BCC_A2'}})
+Phase({'name': 'FCC_A1', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1'), Species('FE', 'FE1')}), frozenset({Species('VA', 'VA1')})), 'sublattices': (1.0, 1.0), 'model_hints': {'ihj_magnetic_afm_factor': -3.0, 'ihj_magnetic_structure_factor': 0.28, 'ordered_phase': 'L12', 'disordered_phase': 'FCC_A1'}})
+Phase({'name': 'GAMMA_D83', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('CU', 'CU1'), Species('FE', 'FE1')})), 'sublattices': (4.0, 1.0, 8.0), 'model_hints': {}})
+Phase({'name': 'GAMMA_H', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('CU', 'CU1'), Species('FE', 'FE1')})), 'sublattices': (4.0, 1.0, 8.0), 'model_hints': {}})
+Phase({'name': 'L12', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1'), Species('FE', 'FE1')}), frozenset({Species('AL', 'AL1'), Species('CU', 'CU1'), Species('FE', 'FE1')}), frozenset({Species('VA', 'VA1')})), 'sublattices': (0.75, 0.25, 1.0), 'model_hints': {'ordered_phase': 'L12', 'disordered_phase': 'FCC_A1'}})
+Phase({'name': 'LIQUID', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1'), Species('FE', 'FE1')}),), 'sublattices': (1.0,), 'model_hints': {}})
 Phase({'name': 'TS01T1', 'constituents': (frozenset({Species('FE', 'FE1')}), frozenset({Species('CU', 'CU1')}), frozenset({Species('AL', 'AL1')})), 'sublattices': (4.0, 1.0, 23.0), 'model_hints': {}})
 Phase({'name': 'TS01T2', 'constituents': (frozenset({Species('FE', 'FE1')}), frozenset({Species('CU', 'CU1')}), frozenset({Species('AL', 'AL1')})), 'sublattices': (1.0, 2.0, 7.0), 'model_hints': {}})
 Phase({'name': 'TS01T3', 'constituents': (frozenset({Species('FE', 'FE1')}), frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('AL', 'AL1')})), 'sublattices': (1.0, 10.0, 10.0), 'model_hints': {}})
@@ -58,7 +63,42 @@ Phase({'name': 'TS01TI', 'constituents': (frozenset({Species('FE', 'FE1')}), fro
 
   models: None
   parameters: None
-  calc_opts: {'pdens': 50}
+  calc_opts: None
+  solver: None
+  phase_records: None
+
+--- GPU ---
+
+[SEGMENT 02] [GPU] Workspace initialization
+  database: Elements: ['/-', 'AL', 'CU', 'FE', 'VA']
+Species: [Species('/-', '/-1'), Species('AL', 'AL1'), Species('CU', 'CU1'), Species('FE', 'FE1'), Species('VA', 'VA1')]
+Phase({'name': 'AL13FE4', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('FE', 'FE1')}), frozenset({Species('AL', 'AL1'), Species('VA', 'VA1')})), 'sublattices': (0.6275, 0.235, 0.1375), 'model_hints': {}})
+Phase({'name': 'AL2FE', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('FE', 'FE1')})), 'sublattices': (2.0, 1.0), 'model_hints': {}})
+Phase({'name': 'AL5FE2', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('FE', 'FE1')})), 'sublattices': (5.0, 2.0), 'model_hints': {}})
+Phase({'name': 'AL5FE4', 'constituents': (frozenset({Species('AL', 'AL1'), Species('FE', 'FE1')}),), 'sublattices': (1.0,), 'model_hints': {}})
+Phase({'name': 'ALCU_DELTA', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('CU', 'CU1'), Species('FE', 'FE1')})), 'sublattices': (2.0, 3.0), 'model_hints': {}})
+Phase({'name': 'ALCU_EPSILON', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('CU', 'CU1'), Species('FE', 'FE1')})), 'sublattices': (1.0, 1.0), 'model_hints': {}})
+Phase({'name': 'ALCU_ETA', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('CU', 'CU1'), Species('FE', 'FE1')})), 'sublattices': (1.0, 1.0), 'model_hints': {}})
+Phase({'name': 'ALCU_PRIME', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('CU', 'CU1')})), 'sublattices': (2.0, 1.0), 'model_hints': {}})
+Phase({'name': 'ALCU_THETA', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('AL', 'AL1'), Species('CU', 'CU1'), Species('FE', 'FE1')})), 'sublattices': (2.0, 1.0), 'model_hints': {}})
+Phase({'name': 'ALCU_ZETA', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('CU', 'CU1'), Species('FE', 'FE1')})), 'sublattices': (9.0, 11.0), 'model_hints': {}})
+Phase({'name': 'BCC_A2', 'constituents': (frozenset({Species('AL', 'AL1'), Species('VA', 'VA1'), Species('CU', 'CU1'), Species('FE', 'FE1')}), frozenset({Species('VA', 'VA1')})), 'sublattices': (1.0, 3.0), 'model_hints': {'ihj_magnetic_afm_factor': -1.0, 'ihj_magnetic_structure_factor': 0.4, 'ordered_phase': 'BCC_B2', 'disordered_phase': 'BCC_A2'}})
+Phase({'name': 'BCC_B2', 'constituents': (frozenset({Species('AL', 'AL1'), Species('VA', 'VA1'), Species('CU', 'CU1'), Species('FE', 'FE1')}), frozenset({Species('AL', 'AL1'), Species('VA', 'VA1'), Species('CU', 'CU1'), Species('FE', 'FE1')}), frozenset({Species('VA', 'VA1')})), 'sublattices': (0.5, 0.5, 3.0), 'model_hints': {'ordered_phase': 'BCC_B2', 'disordered_phase': 'BCC_A2'}})
+Phase({'name': 'FCC_A1', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1'), Species('FE', 'FE1')}), frozenset({Species('VA', 'VA1')})), 'sublattices': (1.0, 1.0), 'model_hints': {'ihj_magnetic_afm_factor': -3.0, 'ihj_magnetic_structure_factor': 0.28, 'ordered_phase': 'L12', 'disordered_phase': 'FCC_A1'}})
+Phase({'name': 'GAMMA_D83', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('CU', 'CU1'), Species('FE', 'FE1')})), 'sublattices': (4.0, 1.0, 8.0), 'model_hints': {}})
+Phase({'name': 'GAMMA_H', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('CU', 'CU1'), Species('FE', 'FE1')})), 'sublattices': (4.0, 1.0, 8.0), 'model_hints': {}})
+Phase({'name': 'L12', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1'), Species('FE', 'FE1')}), frozenset({Species('AL', 'AL1'), Species('CU', 'CU1'), Species('FE', 'FE1')}), frozenset({Species('VA', 'VA1')})), 'sublattices': (0.75, 0.25, 1.0), 'model_hints': {'ordered_phase': 'L12', 'disordered_phase': 'FCC_A1'}})
+Phase({'name': 'LIQUID', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1'), Species('FE', 'FE1')}),), 'sublattices': (1.0,), 'model_hints': {}})
+Phase({'name': 'TS01T1', 'constituents': (frozenset({Species('FE', 'FE1')}), frozenset({Species('CU', 'CU1')}), frozenset({Species('AL', 'AL1')})), 'sublattices': (4.0, 1.0, 23.0), 'model_hints': {}})
+Phase({'name': 'TS01T2', 'constituents': (frozenset({Species('FE', 'FE1')}), frozenset({Species('CU', 'CU1')}), frozenset({Species('AL', 'AL1')})), 'sublattices': (1.0, 2.0, 7.0), 'model_hints': {}})
+Phase({'name': 'TS01T3', 'constituents': (frozenset({Species('FE', 'FE1')}), frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('AL', 'AL1')})), 'sublattices': (1.0, 10.0, 10.0), 'model_hints': {}})
+Phase({'name': 'TS01TI', 'constituents': (frozenset({Species('FE', 'FE1')}), frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('AL', 'AL1')})), 'sublattices': (0.125, 0.255, 0.62), 'model_hints': {}})
+17 symbols in database
+127 parameters in database
+
+  models: None
+  parameters: None
+  calc_opts: None
   solver: None
   phase_records: None
 
@@ -67,7 +107,15 @@ SEGMENT 03 COMPARISON
 ================================================================================
 
 --- CPU ---
-(No CPU data for this segment)
+
+[SEGMENT 03] Workspace constructor start
+  args: ()
+  kwargs: ['database', 'components', 'phases', 'conditions', 'models', 'parameters', 'verbose', 'calc_opts', 'solver', 'phase_record_factory']
+
+[SEGMENT 03] Workspace constructor complete
+  components: [Component('AL', 'AL1'), Component('CU', 'CU1'), Component('FE', 'FE1'), Component('VA', 'VA1')]
+  phases: ['LIQUID']
+  conditions: {N: array([1.]), P: array([101325.]), T: array([2000.]), X_AL: array([0.25]), X_CU: array([0.25])}
 
 --- GPU ---
 
@@ -78,14 +126,22 @@ SEGMENT 03 COMPARISON
 [SEGMENT 03] Workspace constructor complete
   components: [Component('AL', 'AL1'), Component('CU', 'CU1'), Component('FE', 'FE1'), Component('VA', 'VA1')]
   phases: ['LIQUID']
-  conditions: {N: array([1.]), P: array([101325.]), T: array([973.15]), X_AL: array([0.5]), X_CU: array([0.2])}
+  conditions: {N: array([1.]), P: array([101325.]), T: array([2000.]), X_AL: array([0.25]), X_CU: array([0.25])}
 
 ================================================================================
 SEGMENT 05 COMPARISON
 ================================================================================
 
 --- CPU ---
-(No CPU data for this segment)
+
+[SEGMENT 05] Phase record factory creation
+  components: [Component('AL', 'AL1'), Component('CU', 'CU1'), Component('FE', 'FE1'), Component('VA', 'VA1')]
+  conditions: [N, P, T, X_AL, X_CU]
+  models: ['LIQUID']
+  parameters: OrderedDict()
+
+[SEGMENT 05] Phase record factory created
+  phases: ['LIQUID']
 
 --- GPU ---
 
@@ -99,19 +155,94 @@ SEGMENT 05 COMPARISON
   phases: ['LIQUID']
 
 ================================================================================
+SEGMENT 06 COMPARISON
+================================================================================
+
+--- CPU ---
+
+[SEGMENT 06] Workspace recompute setup
+  conditions: {N: array([1.]), P: array([101325.]), T: array([2000.]), X_AL: array([0.25]), X_CU: array([0.25])}
+  phase_record_factory: <pycalphad.codegen.phase_record_factory.PhaseRecordFactory object at 0x78fe4504d580>
+  parameters: OrderedDict()
+
+[SEGMENT 06] Workspace recompute setup complete
+  unitless_conds: OrderedDict({N: array([1.]), P: array([101325.]), T: array([2000.]), X_AL: array([0.25]), X_CU: array([0.25])})
+  str_conds: OrderedDict({'N': array([1.]), 'P': array([101325.]), 'T': array([2000.]), 'X_AL': array([0.25]), 'X_CU': array([0.25])})
+  local_conds: {}
+  state_variables: [N, P, T]
+  grid_opts: OrderedDict({'N': array([1.]), 'P': array([101325.]), 'T': array([2000.]), 'pdens': 60})
+
+--- GPU ---
+(No GPU data for this segment)
+
+================================================================================
+SEGMENT 07 COMPARISON
+================================================================================
+
+--- CPU ---
+
+[SEGMENT 07] Calculate grid start
+  database: Elements: ['/-', 'AL', 'CU', 'FE', 'VA']
+Species: [Species('/-', '/-1'), Species('AL', 'AL1'), Species('CU', 'CU1'), Species('FE', 'FE1'), Species('VA', 'VA1')]
+Phase({'name': 'AL13FE4', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('FE', 'FE1')}), frozenset({Species('AL', 'AL1'), Species('VA', 'VA1')})), 'sublattices': (0.6275, 0.235, 0.1375), 'model_hints': {}})
+Phase({'name': 'AL2FE', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('FE', 'FE1')})), 'sublattices': (2.0, 1.0), 'model_hints': {}})
+Phase({'name': 'AL5FE2', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('FE', 'FE1')})), 'sublattices': (5.0, 2.0), 'model_hints': {}})
+Phase({'name': 'AL5FE4', 'constituents': (frozenset({Species('AL', 'AL1'), Species('FE', 'FE1')}),), 'sublattices': (1.0,), 'model_hints': {}})
+Phase({'name': 'ALCU_DELTA', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('CU', 'CU1'), Species('FE', 'FE1')})), 'sublattices': (2.0, 3.0), 'model_hints': {}})
+Phase({'name': 'ALCU_EPSILON', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('CU', 'CU1'), Species('FE', 'FE1')})), 'sublattices': (1.0, 1.0), 'model_hints': {}})
+Phase({'name': 'ALCU_ETA', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('CU', 'CU1'), Species('FE', 'FE1')})), 'sublattices': (1.0, 1.0), 'model_hints': {}})
+Phase({'name': 'ALCU_PRIME', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('CU', 'CU1')})), 'sublattices': (2.0, 1.0), 'model_hints': {}})
+Phase({'name': 'ALCU_THETA', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('AL', 'AL1'), Species('CU', 'CU1'), Species('FE', 'FE1')})), 'sublattices': (2.0, 1.0), 'model_hints': {}})
+Phase({'name': 'ALCU_ZETA', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('CU', 'CU1'), Species('FE', 'FE1')})), 'sublattices': (9.0, 11.0), 'model_hints': {}})
+Phase({'name': 'BCC_A2', 'constituents': (frozenset({Species('AL', 'AL1'), Species('VA', 'VA1'), Species('CU', 'CU1'), Species('FE', 'FE1')}), frozenset({Species('VA', 'VA1')})), 'sublattices': (1.0, 3.0), 'model_hints': {'ihj_magnetic_afm_factor': -1.0, 'ihj_magnetic_structure_factor': 0.4, 'ordered_phase': 'BCC_B2', 'disordered_phase': 'BCC_A2'}})
+Phase({'name': 'BCC_B2', 'constituents': (frozenset({Species('AL', 'AL1'), Species('VA', 'VA1'), Species('CU', 'CU1'), Species('FE', 'FE1')}), frozenset({Species('AL', 'AL1'), Species('VA', 'VA1'), Species('CU', 'CU1'), Species('FE', 'FE1')}), frozenset({Species('VA', 'VA1')})), 'sublattices': (0.5, 0.5, 3.0), 'model_hints': {'ordered_phase': 'BCC_B2', 'disordered_phase': 'BCC_A2'}})
+Phase({'name': 'FCC_A1', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1'), Species('FE', 'FE1')}), frozenset({Species('VA', 'VA1')})), 'sublattices': (1.0, 1.0), 'model_hints': {'ihj_magnetic_afm_factor': -3.0, 'ihj_magnetic_structure_factor': 0.28, 'ordered_phase': 'L12', 'disordered_phase': 'FCC_A1'}})
+Phase({'name': 'GAMMA_D83', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('CU', 'CU1'), Species('FE', 'FE1')})), 'sublattices': (4.0, 1.0, 8.0), 'model_hints': {}})
+Phase({'name': 'GAMMA_H', 'constituents': (frozenset({Species('AL', 'AL1')}), frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('CU', 'CU1'), Species('FE', 'FE1')})), 'sublattices': (4.0, 1.0, 8.0), 'model_hints': {}})
+Phase({'name': 'L12', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1'), Species('FE', 'FE1')}), frozenset({Species('AL', 'AL1'), Species('CU', 'CU1'), Species('FE', 'FE1')}), frozenset({Species('VA', 'VA1')})), 'sublattices': (0.75, 0.25, 1.0), 'model_hints': {'ordered_phase': 'L12', 'disordered_phase': 'FCC_A1'}})
+Phase({'name': 'LIQUID', 'constituents': (frozenset({Species('AL', 'AL1'), Species('CU', 'CU1'), Species('FE', 'FE1')}),), 'sublattices': (1.0,), 'model_hints': {}})
+Phase({'name': 'TS01T1', 'constituents': (frozenset({Species('FE', 'FE1')}), frozenset({Species('CU', 'CU1')}), frozenset({Species('AL', 'AL1')})), 'sublattices': (4.0, 1.0, 23.0), 'model_hints': {}})
+Phase({'name': 'TS01T2', 'constituents': (frozenset({Species('FE', 'FE1')}), frozenset({Species('CU', 'CU1')}), frozenset({Species('AL', 'AL1')})), 'sublattices': (1.0, 2.0, 7.0), 'model_hints': {}})
+Phase({'name': 'TS01T3', 'constituents': (frozenset({Species('FE', 'FE1')}), frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('AL', 'AL1')})), 'sublattices': (1.0, 10.0, 10.0), 'model_hints': {}})
+Phase({'name': 'TS01TI', 'constituents': (frozenset({Species('FE', 'FE1')}), frozenset({Species('AL', 'AL1'), Species('CU', 'CU1')}), frozenset({Species('AL', 'AL1')})), 'sublattices': (0.125, 0.255, 0.62), 'model_hints': {}})
+17 symbols in database
+127 parameters in database
+
+  components: [Component('AL', 'AL1'), Component('CU', 'CU1'), Component('FE', 'FE1'), Component('VA', 'VA1')]
+  phases: ['LIQUID']
+  local_conds: {}
+  grid_opts: OrderedDict({'N': array([1.]), 'P': array([101325.]), 'T': array([2000.]), 'pdens': 60})
+
+[SEGMENT 07] Calculate grid complete
+  grid_shape: (1, 1, 1, 306)
+  grid_coords: ['component', 'N', 'P', 'T']
+  GM_range: [-155958.73670541242, 10000000000.0]
+
+--- GPU ---
+(No GPU data for this segment)
+
+================================================================================
 SEGMENT 08 COMPARISON
 ================================================================================
 
 --- CPU ---
-(No CPU data for this segment)
+
+[SEGMENT 08] Starting point calculation
+  conditions: OrderedDict({N: array([1.]), P: array([101325.]), T: array([2000.]), X_AL: array([0.25]), X_CU: array([0.25])})
+  state_variables: [N, P, T]
+  phase_records: ['LIQUID']
+  grid_shape: (1, 1, 1, 306)
+
+[SEGMENT 08] Global min check
+  global_min_enabled: True
 
 --- GPU ---
 
 [SEGMENT 08] Starting point calculation
-  conditions: OrderedDict({N: array([1.]), P: array([101325.]), T: array([973.15]), X_AL: array([0.5]), X_CU: array([0.2])})
+  conditions: OrderedDict({N: array([1.]), P: array([101325.]), T: array([2000.]), X_AL: array([0.25]), X_CU: array([0.25])})
   state_variables: [N, P, T]
   phase_records: ['LIQUID']
-  grid_shape: (1, 1, 1, 256)
+  grid_shape: (1, 1, 1, 306)
 
 [SEGMENT 08] Global min check
   global_min_enabled: True
@@ -121,14 +252,24 @@ SEGMENT 09 COMPARISON
 ================================================================================
 
 --- CPU ---
-(No CPU data for this segment)
+
+[SEGMENT 09] Lower convex hull setup
+  state_variables: [N, P, T]
+  conds_keys: [N, P, T, X_AL, X_CU]
+  global_grid_shape: (1, 1, 1, 306)
+  result_array_shape: (1, 1, 1, 1, 1)
+
+[SEGMENT 09] Lower convex hull arrays cached
+  num_components: 3
+  local_conds_keys: []
+  str_conds_keys: ['N', 'P', 'T', 'X_AL', 'X_CU']
 
 --- GPU ---
 
 [SEGMENT 09] Lower convex hull setup
   state_variables: [N, P, T]
   conds_keys: [N, P, T, X_AL, X_CU]
-  global_grid_shape: (1, 1, 1, 256)
+  global_grid_shape: (1, 1, 1, 306)
   result_array_shape: (1, 1, 1, 1, 1)
 
 [SEGMENT 09] Lower convex hull arrays cached
@@ -141,7 +282,10 @@ SEGMENT 10 COMPARISON
 ================================================================================
 
 --- CPU ---
-(No CPU data for this segment)
+
+[SEGMENT 10] [CONDITION 0] Lower convex hull condition loop
+  condition_idx: 0
+  primary_index: (0, 0, 0, 0, 0)
 
 --- GPU ---
 
@@ -154,7 +298,18 @@ SEGMENT 11 COMPARISON
 ================================================================================
 
 --- CPU ---
-(No CPU data for this segment)
+
+[SEGMENT 11] [CONDITION 0] Hyperplane calculation
+  grid_index: (0, 0, 0)
+  fixed_chempot_indices: []
+  lincomb_coefs_shape: (3, 3)
+  lincomb_rhs_shape: (3,)
+
+[SEGMENT 11] [CONDITION 0] Hyperplane result
+  GM: -1.509064865274327e+05
+  MU: [-182147.532119144, -147148.89285755705, -137164.76056651497]
+  NP: [0.1723235010036237, 0.5933149458223395, 0.23436155317403687, 0.0]
+  points: [246, 295, 258, 0]
 
 --- GPU ---
 
@@ -165,75 +320,533 @@ SEGMENT 11 COMPARISON
   lincomb_rhs_shape: (3,)
 
 [SEGMENT 11] [CONDITION 0] Hyperplane result
-  GM: -6.127786146250354e+04
-  MU: [-61366.22481011798, -62408.02559243206, -60377.14646319381]
-  NP: [0.037009099297928935, 0.30492198831567924, 0.6580689123863918, 0.0]
-  points: [223, 229, 235, 0]
+  GM: -1.509064865274327e+05
+  MU: [-182147.532119144, -147148.89285755705, -137164.76056651497]
+  NP: [0.1723235010036237, 0.5933149458223395, 0.23436155317403687, 0.0]
+  points: [246, 295, 258, 0]
 
 ================================================================================
 SEGMENT 12 COMPARISON
 ================================================================================
 
 --- CPU ---
-(No CPU data for this segment)
+
+[SEGMENT 12] [CONDITION 0] Copy results from grid
+  points: [246, 295, 258, 0]
+
+[SEGMENT 12] [CONDITION 0] Copy results complete
+  phases: ['LIQUID', 'LIQUID', 'LIQUID', '']
+  X: [[0.28892931983814857, 0.22045391218942137, 0.49061676797243], [0.22308508030262741, 0.28931481663042846, 0.4876001030669441], [0.28951410677408657, 0.17219464856901048, 0.5382912446569029]]
+  final_GM: -1.509064865274327e+05
 
 --- GPU ---
 
 [SEGMENT 12] [CONDITION 0] Copy results from grid
-  points: [223, 229, 235, 0]
+  points: [246, 295, 258, 0]
 
 [SEGMENT 12] [CONDITION 0] Copy results complete
   phases: ['LIQUID', 'LIQUID', 'LIQUID', '']
-  X: [[0.5363522910943187, 0.11774928609621277, 0.3458984228094686], [0.4775533888648897, 0.4028886263102524, 0.119557984824858], [0.5083564192806315, 0.11061547294543718, 0.3810281077739313]]
-  final_GM: -6.127786146250354e+04
+  X: [[0.28892931983814857, 0.22045391218942137, 0.49061676797243], [0.22308508030262741, 0.28931481663042846, 0.4876001030669441], [0.28951410677408657, 0.17219464856901048, 0.5382912446569029]]
+  final_GM: -1.509064865274327e+05
 
 ================================================================================
 SEGMENT 13 COMPARISON
 ================================================================================
 
 --- CPU ---
-(No CPU data for this segment)
+
+[SEGMENT 13] Solver input validation
+
+[SEGMENT 13] CPU Numerical validation
+  cpu_initial_np_mean: 3.333333333333333e-01
+  cpu_initial_np_min: 1.723235010036237e-01
+  cpu_initial_np_max: 5.933149458223395e-01
+  cpu_initial_energy_mean: -1.514526893321707e+05
+  cpu_initial_energy_min: -1.523626431790278e+05
+  cpu_initial_energy_max: -1.500883031735647e+05
+  cpu_total_energy: -1.509064865274327e+05
+
+[SEGMENT 13] [CPU] Initial NP comparison
+    CPU array: shape=(3,), dtype=float64
+  CPU values: [0.1723235010036237, 0.5933149458223395, 0.23436155317403687]
+  CPU min: 1.723235010036237e-01, max: 5.933149458223395e-01, mean: 3.333333333333333e-01
+
+
+[SEGMENT 13] [CPU] Initial Energy comparison
+    CPU array: shape=(3,), dtype=float64
+  CPU values: [-152362.64317902783, -150088.30317356472, -151907.12164391964]
+  CPU min: -1.523626431790278e+05, max: -1.500883031735647e+05, mean: -1.514526893321707e+05
+
+
+[SEGMENT 13] CPU Composition validation
+  cpu_composition_mean: 3.333333333333333e-01
+  cpu_composition_min: 1.721946485690105e-01
+  cpu_composition_max: 5.382912446569029e-01
+
+[SEGMENT 13] [CPU] Initial X comparison
+    CPU array: shape=(9,), dtype=float64
+  CPU values: [0.28892931983814857, 0.22045391218942137, 0.49061676797243, 0.22308508030262741, 0.28931481663042846, 0.4876001030669441, 0.28951410677408657, 0.17219464856901048, 0.5382912446569029]
+  CPU min: 1.721946485690105e-01, max: 5.382912446569029e-01, mean: 3.333333333333333e-01
+
 
 --- GPU ---
 
 [SEGMENT 13] Solver input validation
 
 ================================================================================
+SEGMENT 16 COMPARISON
+================================================================================
+
+--- CPU ---
+
+[SEGMENT 16] Get system specification - setup
+
+--- GPU ---
+(No GPU data for this segment)
+
+================================================================================
+SEGMENT 17 COMPARISON
+================================================================================
+
+--- CPU ---
+
+[SEGMENT 17] Get system spec - process conditions
+
+--- GPU ---
+(No GPU data for this segment)
+
+================================================================================
+SEGMENT 18 COMPARISON
+================================================================================
+
+--- CPU ---
+
+[SEGMENT 18] Get system spec - identify indices
+
+--- GPU ---
+(No GPU data for this segment)
+
+================================================================================
+SEGMENT 19 COMPARISON
+================================================================================
+
+--- CPU ---
+
+[SEGMENT 19] Create system specification object
+
+--- GPU ---
+(No GPU data for this segment)
+
+================================================================================
+SEGMENT 20 COMPARISON
+================================================================================
+
+--- CPU ---
+
+[SEGMENT 20] Create system state
+
+--- GPU ---
+(No GPU data for this segment)
+
+================================================================================
+SEGMENT 22 COMPARISON
+================================================================================
+
+--- CPU ---
+
+[SEGMENT 22] State recompute - global quantities (iteration 0)
+
+[SEGMENT 22] State recompute - global quantities (iteration 1)
+
+[SEGMENT 22] State recompute - global quantities (iteration 2)
+
+[SEGMENT 22] State recompute - global quantities (iteration 3)
+
+[SEGMENT 22] State recompute - global quantities (iteration 4)
+
+[SEGMENT 22] State recompute - global quantities (iteration 5)
+
+[SEGMENT 22] State recompute - global quantities (iteration 6)
+
+[SEGMENT 22] State recompute - global quantities (iteration 7)
+
+[SEGMENT 22] State recompute - global quantities (iteration 8)
+
+--- GPU ---
+(No GPU data for this segment)
+
+================================================================================
+SEGMENT 23 COMPARISON
+================================================================================
+
+--- CPU ---
+
+[SEGMENT 23] State recompute - phase quantities (iteration 0)
+
+[SEGMENT 23] State recompute - phase quantities (iteration 1)
+
+[SEGMENT 23] State recompute - phase quantities (iteration 2)
+
+[SEGMENT 23] State recompute - phase quantities (iteration 3)
+
+[SEGMENT 23] State recompute - phase quantities (iteration 4)
+
+[SEGMENT 23] State recompute - phase quantities (iteration 5)
+
+[SEGMENT 23] State recompute - phase quantities (iteration 6)
+
+[SEGMENT 23] State recompute - phase quantities (iteration 7)
+
+[SEGMENT 23] State recompute - phase quantities (iteration 8)
+
+--- GPU ---
+(No GPU data for this segment)
+
+================================================================================
+SEGMENT 27 COMPARISON
+================================================================================
+
+--- CPU ---
+
+[SEGMENT 27] Construct equilibrium system (iteration 0)
+
+[SEGMENT 27] Construct equilibrium system (iteration 1)
+
+[SEGMENT 27] Construct equilibrium system (iteration 2)
+
+[SEGMENT 27] Construct equilibrium system (iteration 3)
+
+[SEGMENT 27] Construct equilibrium system (iteration 4)
+
+[SEGMENT 27] Construct equilibrium system (iteration 5)
+
+[SEGMENT 27] Construct equilibrium system (iteration 6)
+
+[SEGMENT 27] Construct equilibrium system (iteration 7)
+
+[SEGMENT 27] Construct equilibrium system (iteration 8)
+
+--- GPU ---
+(No GPU data for this segment)
+
+================================================================================
 SEGMENT 28 COMPARISON
 ================================================================================
 
 --- CPU ---
-(No CPU data for this segment)
+
+[SEGMENT 28] Fill equilibrium system - phase rows (iteration 0)
+
+[SEGMENT 28] Fill equilibrium system - phase rows (iteration 1)
+
+[SEGMENT 28] Fill equilibrium system - phase rows (iteration 2)
+
+[SEGMENT 28] Fill equilibrium system - phase rows (iteration 3)
+
+[SEGMENT 28] Fill equilibrium system - phase rows (iteration 4)
+
+[SEGMENT 28] Fill equilibrium system - phase rows (iteration 5)
+
+[SEGMENT 28] Fill equilibrium system - phase rows (iteration 6)
+
+[SEGMENT 28] Fill equilibrium system - phase rows (iteration 7)
+
+[SEGMENT 28] Fill equilibrium system - phase rows (iteration 8)
+
+[SEGMENT 28] Post-equilibrium property calculation
 
 --- GPU ---
 
 [SEGMENT 28] Post-equilibrium property calculation
 
 ================================================================================
+SEGMENT 29 COMPARISON
+================================================================================
+
+--- CPU ---
+
+[SEGMENT 29] Fill equilibrium system - constraint rows (iteration 0)
+
+[SEGMENT 29] Fill equilibrium system - constraint rows (iteration 1)
+
+[SEGMENT 29] Fill equilibrium system - constraint rows (iteration 2)
+
+[SEGMENT 29] Fill equilibrium system - constraint rows (iteration 3)
+
+[SEGMENT 29] Fill equilibrium system - constraint rows (iteration 4)
+
+[SEGMENT 29] Fill equilibrium system - constraint rows (iteration 5)
+
+[SEGMENT 29] Fill equilibrium system - constraint rows (iteration 6)
+
+[SEGMENT 29] Fill equilibrium system - constraint rows (iteration 7)
+
+[SEGMENT 29] Fill equilibrium system - constraint rows (iteration 8)
+
+--- GPU ---
+(No GPU data for this segment)
+
+================================================================================
+SEGMENT 30 COMPARISON
+================================================================================
+
+--- CPU ---
+
+[SEGMENT 30] Fill equilibrium system - residuals (iteration 0)
+
+[SEGMENT 30] Fill equilibrium system - residuals (iteration 1)
+
+[SEGMENT 30] Fill equilibrium system - residuals (iteration 2)
+
+[SEGMENT 30] Fill equilibrium system - residuals (iteration 3)
+
+[SEGMENT 30] Fill equilibrium system - residuals (iteration 4)
+
+[SEGMENT 30] Fill equilibrium system - residuals (iteration 5)
+
+[SEGMENT 30] Fill equilibrium system - residuals (iteration 6)
+
+[SEGMENT 30] Fill equilibrium system - residuals (iteration 7)
+
+[SEGMENT 30] Fill equilibrium system - residuals (iteration 8)
+
+--- GPU ---
+(No GPU data for this segment)
+
+================================================================================
+SEGMENT 31 COMPARISON
+================================================================================
+
+--- CPU ---
+
+[SEGMENT 31] Solve linear system (iteration 0)
+
+[SEGMENT 31] Solve linear system (iteration 1)
+
+[SEGMENT 31] Solve linear system (iteration 2)
+
+[SEGMENT 31] Solve linear system (iteration 3)
+
+[SEGMENT 31] Solve linear system (iteration 4)
+
+[SEGMENT 31] Solve linear system (iteration 5)
+
+[SEGMENT 31] Solve linear system (iteration 6)
+
+[SEGMENT 31] Solve linear system (iteration 7)
+
+[SEGMENT 31] Solve linear system (iteration 8)
+
+--- GPU ---
+(No GPU data for this segment)
+
+================================================================================
 SEGMENT 32 COMPARISON
 ================================================================================
 
 --- CPU ---
-(No CPU data for this segment)
+
+[SEGMENT 32] Update chemical potentials (iteration 0)
+
+[SEGMENT 32] Update chemical potentials (iteration 1)
+
+[SEGMENT 32] Update chemical potentials (iteration 2)
+
+[SEGMENT 32] Update chemical potentials (iteration 3)
+
+[SEGMENT 32] Update chemical potentials (iteration 4)
+
+[SEGMENT 32] Update chemical potentials (iteration 5)
+
+[SEGMENT 32] Update chemical potentials (iteration 6)
+
+[SEGMENT 32] Update chemical potentials (iteration 7)
+
+[SEGMENT 32] Update chemical potentials (iteration 8)
+
+[SEGMENT 32] Final result formatting
 
 --- GPU ---
 
 [SEGMENT 32] Final result formatting
 
 ================================================================================
+SEGMENT 33 COMPARISON
+================================================================================
+
+--- CPU ---
+
+[SEGMENT 33] Post solve hook (iteration 0)
+
+[SEGMENT 33] Post solve hook (iteration 1)
+
+[SEGMENT 33] Post solve hook (iteration 2)
+
+[SEGMENT 33] Post solve hook (iteration 3)
+
+[SEGMENT 33] Post solve hook (iteration 4)
+
+[SEGMENT 33] Post solve hook (iteration 5)
+
+[SEGMENT 33] Post solve hook (iteration 6)
+
+[SEGMENT 33] Post solve hook (iteration 7)
+
+[SEGMENT 33] Post solve hook (iteration 8)
+
+--- GPU ---
+(No GPU data for this segment)
+
+================================================================================
+SEGMENT 34 COMPARISON
+================================================================================
+
+--- CPU ---
+
+[SEGMENT 34] Remove and consolidate phases (iteration 0)
+
+[SEGMENT 34] Remove and consolidate phases (iteration 1)
+
+[SEGMENT 34] Remove and consolidate phases (iteration 2)
+
+[SEGMENT 34] Remove and consolidate phases (iteration 3)
+
+[SEGMENT 34] Remove and consolidate phases (iteration 4)
+
+[SEGMENT 34] Remove and consolidate phases (iteration 5)
+
+[SEGMENT 34] Remove and consolidate phases (iteration 6)
+
+[SEGMENT 34] Remove and consolidate phases (iteration 7)
+
+[SEGMENT 34] Remove and consolidate phases (iteration 8)
+
+--- GPU ---
+(No GPU data for this segment)
+
+================================================================================
+SEGMENT 35 COMPARISON
+================================================================================
+
+--- CPU ---
+
+[SEGMENT 35] Check convergence (iteration 0)
+
+[SEGMENT 35] Check convergence (iteration 1)
+
+[SEGMENT 35] Check convergence (iteration 2)
+
+[SEGMENT 35] Check convergence (iteration 3)
+
+[SEGMENT 35] Check convergence (iteration 4)
+
+[SEGMENT 35] Check convergence (iteration 5)
+
+[SEGMENT 35] Check convergence (iteration 6)
+
+[SEGMENT 35] Check convergence (iteration 7)
+
+[SEGMENT 35] Check convergence (iteration 8)
+
+--- GPU ---
+(No GPU data for this segment)
+
+================================================================================
+SEGMENT 36 COMPARISON
+================================================================================
+
+--- CPU ---
+
+[SEGMENT 36] Change phases (iteration 8)
+
+--- GPU ---
+(No GPU data for this segment)
+
+================================================================================
+SEGMENT 37 COMPARISON
+================================================================================
+
+--- CPU ---
+
+[SEGMENT 37] Advance state (iteration 0)
+
+[SEGMENT 37] Advance state (iteration 2)
+
+[SEGMENT 37] Advance state (iteration 4)
+
+[SEGMENT 37] Advance state (iteration 5)
+
+[SEGMENT 37] Advance state (iteration 6)
+
+[SEGMENT 37] Advance state (iteration 7)
+
+--- GPU ---
+(No GPU data for this segment)
+
+================================================================================
+SEGMENT 38 COMPARISON
+================================================================================
+
+--- CPU ---
+
+[SEGMENT 38] Solver remove metastable
+
+--- GPU ---
+(No GPU data for this segment)
+
+================================================================================
+SEGMENT 39 COMPARISON
+================================================================================
+
+--- CPU ---
+
+[SEGMENT 39] Solver result assembly
+
+--- GPU ---
+(No GPU data for this segment)
+
+================================================================================
 SEGMENT 40 COMPARISON
 ================================================================================
 
 --- CPU ---
-(No CPU data for this segment)
+
+[SEGMENT 40] [CONDITION 0] Final Gibbs energy calculation
+
+[SEGMENT 40] Equilibrium calculation complete
+  converged: True
+  properties_shape: (1, 1, 1, 1, 1)
+  final_GM: -1.510581607173448e+05
 
 --- GPU ---
 
 [SEGMENT 40] [GPU] Equilibrium calculation complete
   converged: True
   properties_shape: (1, 1, 1, 1, 1)
-  final_GM: -5.222281094398175e+04
+  final_GM: -1.510581607211386e+05
 
 ================================================================================
-TRACE COMPLETE - 2025-08-12T08:32:30.338819
+SEGMENT 41 COMPARISON
+================================================================================
+
+--- CPU ---
+
+[SEGMENT 41] Phase addition - driving force calculation
+
+--- GPU ---
+(No GPU data for this segment)
+
+================================================================================
+SEGMENT 42 COMPARISON
+================================================================================
+
+--- CPU ---
+
+[SEGMENT 42] Phase addition - decision
+
+--- GPU ---
+(No GPU data for this segment)
+
+================================================================================
+TRACE COMPLETE - 2025-08-14T09:32:42.856420
 ================================================================================

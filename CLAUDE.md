@@ -16,6 +16,8 @@ You MUST run the code ad read the output before claiming you have fixed an issue
 Never change any of the existing CPU code in pycalphad, this is the ground truth we are working to match. 
 You are permitted, however, to add additional debugging statements to the CPU code to check to make sure the GPU code is matching the CPU code closely (e.g. print outs for exact numerical values).
 
+**CRITICAL: When comparing CPU and GPU results, NEVER use the pdens parameter in calc_opts. The pdens parameter changes the calculation behavior and will cause incorrect comparisons. Always compare CPU and GPU with identical parameters, which means omitting pdens entirely.**
+
 Included with this prompt are certain files that represent current progress towards the top level goal.
 Some notable differences between pycalphad and this rewrite that you should take into account are as follows:
 

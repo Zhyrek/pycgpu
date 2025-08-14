@@ -36,15 +36,15 @@ def run_comprehensive_test(verbose=False):
     # We'll test a grid of compositions at different temperatures
     # For ternary, we need to specify two composition variables
     conditions = {
-        v.X('AL'): (0.1, 0.7, 0.2),  # 0.1 to 0.7 in 0.2 increments (4 points)
-        v.X('CU'): (0.1, 0.5, 0.2),  # 0.1 to 0.5 in 0.2 increments (3 points)
+        v.X('AL'): (0.1, 0.9, 0.1),  # 0.1 to 0.9 in 0.1 increments (9 points)
+        v.X('CU'): (0.1, 0.9, 0.1),  # 0.1 to 0.9 in 0.1 increments (9 points)
         v.T: (600, 1500, 300),        # 600 to 1500 in 300K increments (4 points)
         v.P: 101325
     }
     
     # Calculate expected number of conditions
-    x_al_values = np.arange(0.1, 0.71, 0.2)  # [0.1, 0.3, 0.5, 0.7]
-    x_cu_values = np.arange(0.1, 0.51, 0.2)  # [0.1, 0.3, 0.5]
+    x_al_values = np.arange(0.1, 0.91, 0.1)  # [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+    x_cu_values = np.arange(0.1, 0.91, 0.1)  # [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
     temperatures = np.arange(600, 1501, 300)  # [600, 900, 1200, 1500]
     
     # Filter out invalid compositions where X_AL + X_CU >= 1.0
@@ -69,7 +69,6 @@ def run_comprehensive_test(verbose=False):
         print("Running CPU calculation...")
         cpu_start = time.time()
         result_cpu = equilibrium(dbf, comps, phases, conditions, 
-                                calc_opts={'pdens': 50}, 
                                 gpu=False, verbose=verbose)
         cpu_time = time.time() - cpu_start
         print(f"CPU calculation completed in {cpu_time:.1f} seconds")
@@ -78,7 +77,6 @@ def run_comprehensive_test(verbose=False):
         print("Running GPU calculation...")
         gpu_start = time.time()
         result_gpu = equilibrium(dbf, comps, phases, conditions, 
-                                calc_opts={'pdens': 50},
                                 gpu=True, verbose=verbose)
         gpu_time = time.time() - gpu_start
         print(f"GPU calculation completed in {gpu_time:.1f} seconds")
@@ -131,21 +129,23 @@ def run_comprehensive_test(verbose=False):
         x_al_flat = []
         x_cu_flat = []
         temp_flat = []
+        valid_mask = []
         
         # The flattening order matches the dimension order in the dataset
+        # IMPORTANT: We must include ALL grid points to match the result arrays
         for t_idx, t_val in enumerate(temp_coords):
             for al_idx, al_val in enumerate(x_al_coords):
                 for cu_idx, cu_val in enumerate(x_cu_coords):
-                    # Skip invalid compositions
-                    if al_val + cu_val >= 0.999:
-                        continue
                     temp_flat.append(t_val)
                     x_al_flat.append(al_val)
                     x_cu_flat.append(cu_val)
+                    # Mark whether this composition is valid
+                    valid_mask.append(al_val + cu_val < 0.999)
                 
         x_al_flat = np.array(x_al_flat)
         x_cu_flat = np.array(x_cu_flat)
         temp_flat = np.array(temp_flat)
+        valid_mask = np.array(valid_mask)
         
         # Flatten all result arrays
         cpu_gm_flat = cpu_gm.flatten()
@@ -164,12 +164,12 @@ def run_comprehensive_test(verbose=False):
         # Verify array lengths
         num_results = len(cpu_gm_flat)
         if len(x_al_flat) != num_results:
-            print(f"\nWARNING: Adjusting condition arrays to match result length")
-            x_al_flat = x_al_flat[:num_results]
-            x_cu_flat = x_cu_flat[:num_results]
-            temp_flat = temp_flat[:num_results]
+            print(f"\nERROR: Mismatch between conditions ({len(x_al_flat)}) and results ({num_results})")
+            print(f"This should not happen - check grid construction!")
+            return
         
-        print(f"\nProcessing {num_results} results...")
+        num_valid = np.sum(valid_mask)
+        print(f"\nProcessing {num_results} total grid points ({num_valid} valid compositions)...")
         
         # Open output file
         output_file = 'gpu_cpu_alcufe_8phases_results_multi.txt'
@@ -190,18 +190,14 @@ def run_comprehensive_test(verbose=False):
             
             # Compare results
             for i in range(num_results):
-                # Skip if we get NaN or if composition is invalid
-                if i >= len(x_al_flat) or i >= len(x_cu_flat):
+                # Skip invalid compositions based on our mask
+                if not valid_mask[i]:
                     continue
                     
                 x_al = x_al_flat[i]
                 x_cu = x_cu_flat[i]
                 x_fe = 1.0 - x_al - x_cu  # Calculate Fe mole fraction
                 temp = temp_flat[i]
-                
-                # Skip invalid compositions
-                if x_fe < -0.001 or x_fe > 1.001:
-                    continue
                 
                 # Skip NaN values
                 if np.isnan(cpu_gm_flat[i]) or np.isnan(gpu_gm_flat[i]):

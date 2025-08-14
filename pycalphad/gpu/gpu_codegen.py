@@ -3469,7 +3469,7 @@ __device__ void solve_equilibrium_at_condition_global_mem(
     double* equilibrium_matrix,  // Replaces stack: large equilibrium system matrix
     double* equilibrium_rhs,     // Replaces stack: equilibrium system RHS vector
     double* eq_soln,             // Replaces stack: equilibrium solution vector
-    double* global_system_states // UNUSED - SystemState allocated on stack
+    double* global_system_states // CRITICAL FIX: SystemState in global memory to avoid stack overflow
 ) {{
     // STACK OVERFLOW FIX: All large arrays are now passed as parameters from global memory
     
@@ -3585,13 +3585,25 @@ __device__ void solve_equilibrium_at_condition_global_mem(
         #endif
     }}
     
-    // Step 3: Allocate SystemState on stack as per the kernel signature comment
-    // This avoids memory alignment issues with pointer members
-    SystemState current_sys_state_stack;
-    SystemState& current_sys_state = current_sys_state_stack;
-    
-    // Initialize SystemState to zero
-    memset(&current_sys_state, 0, sizeof(SystemState));
+    // Step 3: Use SystemState from global memory to avoid stack overflow
+    // CRITICAL FIX: SystemState is too large (~100KB) for GPU thread stack
+    SystemState* current_sys_state_ptr = nullptr;
+    if (global_system_states != nullptr) {{
+        // Cast the global memory to SystemState pointer
+        current_sys_state_ptr = (SystemState*)global_system_states;
+        // Initialize SystemState to zero
+        memset(current_sys_state_ptr, 0, sizeof(SystemState));
+    }} else {{
+        // Fallback: allocate on stack (will cause overflow with many threads)
+        #ifdef VERBOSE_DEBUG
+        if (thread_id == 0) {{
+            printf("GPU DEBUG: WARNING - SystemState allocated on stack (no global memory provided)\\n");
+        }}
+        #endif
+        // This will fail with multiple threads due to stack overflow
+        return;  // Exit early to avoid crash
+    }}
+    SystemState& current_sys_state = *current_sys_state_ptr;
     // SystemState is now properly zero-initialized via memset
     
     // Initialize SystemState manually without creating large stack arrays
@@ -3716,7 +3728,7 @@ __device__ void solve_equilibrium_at_condition_global_mem(
             }}
             continue;
         }}
-        if (phase_amount <= MIN_PHASE_FRACTION/100.0) {{
+        if (phase_amount <= MIN_PHASE_FRACTION) {{
             // DEBUG: Mark phase amount too small
             if (thread_id == 0 && i == 0) {{
                 result->X_phases[21] = -2.0; // Phase amount too small marker
@@ -4571,7 +4583,7 @@ __device__ void solve_equilibrium_at_condition_global_mem(
     // IMPORTANT: Only sync active phases (phase_amt > 0) to avoid overwriting consolidated phases
     for (int i = 0; i < current_sys_state.num_compsets; ++i) {{
         // Only sync if the phase is active (not removed/consolidated)
-        if (current_sys_state.phase_amt[i] > MIN_PHASE_FRACTION / 10.0) {{
+        if (current_sys_state.phase_amt[i] > MIN_PHASE_FRACTION) {{
             current_sys_state.phase_amt[i] = current_sys_state.compsets[i].NP;
         }}
         if (thread_id == 0 && i < 2) {{

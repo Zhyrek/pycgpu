@@ -161,7 +161,7 @@ __device__ bool identify_candidate_phase_to_add(
         // Check distinctness against current compsets (matching CPU logic lines 62-72)
         for (int cs_idx = 0; cs_idx < current_sys_state->num_compsets; ++cs_idx) {
             if (current_sys_state->compsets[cs_idx].phase_record == nullptr || 
-                current_sys_state->phase_amt[cs_idx] < MIN_PHASE_FRACTION/100.0) continue;
+                current_sys_state->phase_amt[cs_idx] < MIN_PHASE_FRACTION) continue;
 
             if (current_sys_state->compsets[cs_idx].phase_record == final_candidate_phase_record) {
                 // Same phase type, check overall composition (using X, not site fractions)
@@ -239,7 +239,7 @@ __device__ bool identify_nearly_stable_phases(
         // Check if this phase type (record_idx) is already in current_sys_state
         bool phase_type_entered = false;
         for (int cs_idx = 0; cs_idx < current_sys_state->num_compsets; ++cs_idx) {
-             if (current_sys_state->compsets[cs_idx].phase_record == nullptr || current_sys_state->phase_amt[cs_idx] < MIN_PHASE_FRACTION/100.0) continue;
+             if (current_sys_state->compsets[cs_idx].phase_record == nullptr || current_sys_state->phase_amt[cs_idx] < MIN_PHASE_FRACTION) continue;
             // Compare by checking if the phase_record pointer matches one in the global array
             const PhaseRecord* pr_in_compset = current_sys_state->compsets[cs_idx].phase_record;
             if (pr_in_compset == &phase_data->phase_records_array[record_idx]) {
@@ -348,7 +348,7 @@ __device__ void solve_equilibrium_at_condition(
         printf("GPU DEBUG: solve_equilibrium_at_condition - num_phases=%d\n", initial_data->num_phases);
         for (int debug_i = 0; debug_i < initial_data->num_phases && debug_i < 3; ++debug_i) {
             printf("GPU DEBUG: Initial phase %d: idx=%d, amount=%f, threshold=%e\n", 
-                   debug_i, initial_data->phase_indices[debug_i], initial_data->phase_amounts[debug_i], MIN_PHASE_FRACTION/100.0);
+                   debug_i, initial_data->phase_indices[debug_i], initial_data->phase_amounts[debug_i], MIN_PHASE_FRACTION);
         }
     }
     #endif
@@ -374,9 +374,9 @@ __device__ void solve_equilibrium_at_condition(
         }
         
         double phase_amount = initial_data->phase_amounts[i];
-        if (phase_amount <= MIN_PHASE_FRACTION/100.0) {
+        if (phase_amount <= MIN_PHASE_FRACTION) {
             #ifdef VERBOSE_DEBUG
-            if (thread_id == 0) printf("GPU DEBUG: Skipping phase %d - amount %f <= threshold %e\n", i, phase_amount, MIN_PHASE_FRACTION/100.0);
+            if (thread_id == 0) printf("GPU DEBUG: Skipping phase %d - amount %f <= threshold %e\n", i, phase_amount, MIN_PHASE_FRACTION);
             #endif
             continue; // Skip negligible phases
         }
@@ -652,7 +652,7 @@ __device__ void solve_equilibrium_at_condition(
                         }
                     }
                     // Also check if phase amount is still significant (not removed to ~0)
-                    if (same_composition && current_sys_state.phase_amt[after_idx] > MIN_PHASE_FRACTION/100.0) {
+                    if (same_composition && current_sys_state.phase_amt[after_idx] > MIN_PHASE_FRACTION) {
                         still_present = true;
                         break;
                     }
@@ -786,7 +786,7 @@ __device__ void solve_equilibrium_at_condition(
                             }
                         }
                         // Also check if phase amount is still significant (not removed to ~0)
-                        if (same_composition && current_sys_state.phase_amt[after_idx] > MIN_PHASE_FRACTION/100.0) {
+                        if (same_composition && current_sys_state.phase_amt[after_idx] > MIN_PHASE_FRACTION) {
                             still_present = true;
                             break;
                         }
@@ -848,15 +848,15 @@ __device__ void solve_equilibrium_at_condition(
     double final_gm_calc = 0.0;
     int stable_phase_count = 0;
     #ifdef VERBOSE_DEBUG
-    printf("GPU DEBUG: Collecting stable phases - num_compsets=%d, MIN_PHASE_FRACTION/10=%e\n", 
-           current_sys_state.num_compsets, MIN_PHASE_FRACTION / 10.0);
+    printf("GPU DEBUG: Collecting stable phases - num_compsets=%d, MIN_PHASE_FRACTION=%e\n", 
+           current_sys_state.num_compsets, MIN_PHASE_FRACTION);
     #endif
     for (int i = 0; i < current_sys_state.num_compsets; ++i) {
         #ifdef VERBOSE_DEBUG
         printf("GPU DEBUG: compset %d - phase_amt=%.10f, threshold=%e\n", 
-               i, current_sys_state.phase_amt[i], MIN_PHASE_FRACTION / 10.0);
+               i, current_sys_state.phase_amt[i], MIN_PHASE_FRACTION);
         #endif
-        if (current_sys_state.phase_amt[i] > MIN_PHASE_FRACTION / 10.0) {
+        if (current_sys_state.phase_amt[i] > MIN_PHASE_FRACTION) {
             // Use cs_states[i].energy which is set to pr->formulaobj(compset->dof) in recompute()
             // This is the Gibbs energy per formula unit, which is what the CPU uses
             double phase_contribution = current_sys_state.phase_amt[i] * current_sys_state.cs_states[i].energy;

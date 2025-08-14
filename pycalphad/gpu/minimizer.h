@@ -2332,23 +2332,85 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
         }
         #endif
     }
-    // CRITICAL FIX: Add system amount constraint row to match CPU exactly
-    // CPU DOES include an explicit N=1 constraint row in the equilibrium matrix
-    // This is the last row with [0,0,0,1,1,1] for phase amounts
+    // CRITICAL FIX: Add system amount constraint row to match CPU EXACTLY
+    // The CPU calls write_row_fixed_mole_amount for each component to build this row
+    // This adds small contributions to the chemical potential columns (not exactly zero!)
     
-    // SYSTEM AMOUNT CONSTRAINT ROW - Simple version matching CPU
+    // SYSTEM AMOUNT CONSTRAINT ROW - Match CPU exactly by calling write_row_fixed_mole_amount
     int system_amount_row_idx = current_row_offset + num_fixed_mole_frac_conds;
     
-    // Set all chemical potential columns to 0 (already zeroed)
-    // Set phase amount columns to 1
-    int phase_col_offset = spec->num_free_chemical_potentials;  // Skip chemical potential columns
-    for (int i = 0; i < num_free_stable_phases; i++) {
-        equilibrium_matrix[system_amount_row_idx * equilibrium_matrix_cols + phase_col_offset + i] = 1.0;
+    // Zero out the row first (it should already be zeroed but let's be explicit)
+    for (int col = 0; col < equilibrium_matrix_cols; col++) {
+        equilibrium_matrix[system_amount_row_idx * equilibrium_matrix_cols + col] = 0.0;
+    }
+    equilibrium_rhs[system_amount_row_idx] = 0.0;
+    
+    // Loop over all active phases and call write_row_fixed_mole_amount for each component
+    // This matches CPU's fill_equilibrium_system logic exactly
+    for (int stable_idx = 0; stable_idx < state->num_free_stable_compsets; stable_idx++) {
+        int compset_original_idx = state->free_stable_compset_indices[stable_idx];
+        CompositionSet* current_compset = &state->compsets[compset_original_idx];
+        CompsetState* current_cs_state = &state->cs_states[compset_original_idx];
+        
+        if (current_compset->phase_record == nullptr) continue;
+        
+        // Call write_row_fixed_mole_amount for each component (matching CPU)
+        for (int component_idx = 0; component_idx < spec->num_components; component_idx++) {
+            write_row_fixed_mole_amount(
+                &equilibrium_matrix[system_amount_row_idx * equilibrium_matrix_cols],
+                &equilibrium_rhs[system_amount_row_idx],
+                component_idx,
+                spec->free_chemical_potential_indices, spec->num_free_chemical_potentials,
+                state->free_stable_compset_indices, state->num_free_stable_compsets,
+                spec->free_statevar_indices, spec->num_free_statevars,
+                spec->fixed_chemical_potential_indices, spec->num_fixed_chemical_potentials,
+                state->chemical_potentials,
+                current_cs_state->mass_jac, current_cs_state->mass_jac_cols,
+                current_cs_state->c_component, current_cs_state->c_component_cols,
+                current_cs_state->c_statevars, current_cs_state->c_statevars_cols,
+                current_cs_state->c_G, current_cs_state->c_G_length,
+                current_cs_state->masses,
+                current_cs_state->moles_normalization,
+                current_cs_state->moles_normalization_grad,
+                state->phase_amt,
+                compset_original_idx);
+        }
     }
     
-    // RHS is the residual: prescribed_system_amount - current_system_amount
-    double system_residual = spec->prescribed_system_amount - state->system_amount;
-    equilibrium_rhs[system_amount_row_idx] = system_residual;
+    // Also handle fixed stable phases (if any) - matching CPU
+    for (int fixed_idx = 0; fixed_idx < spec->num_fixed_stable_compsets; fixed_idx++) {
+        int compset_original_idx = spec->fixed_stable_compset_indices[fixed_idx];
+        CompositionSet* current_compset = &state->compsets[compset_original_idx];
+        CompsetState* current_cs_state = &state->cs_states[compset_original_idx];
+        
+        if (current_compset->phase_record == nullptr) continue;
+        
+        // Call write_row_fixed_mole_amount for each component
+        for (int component_idx = 0; component_idx < spec->num_components; component_idx++) {
+            write_row_fixed_mole_amount(
+                &equilibrium_matrix[system_amount_row_idx * equilibrium_matrix_cols],
+                &equilibrium_rhs[system_amount_row_idx],
+                component_idx,
+                spec->free_chemical_potential_indices, spec->num_free_chemical_potentials,
+                state->free_stable_compset_indices, state->num_free_stable_compsets,
+                spec->free_statevar_indices, spec->num_free_statevars,
+                spec->fixed_chemical_potential_indices, spec->num_fixed_chemical_potentials,
+                state->chemical_potentials,
+                current_cs_state->mass_jac, current_cs_state->mass_jac_cols,
+                current_cs_state->c_component, current_cs_state->c_component_cols,
+                current_cs_state->c_statevars, current_cs_state->c_statevars_cols,
+                current_cs_state->c_G, current_cs_state->c_G_length,
+                current_cs_state->masses,
+                current_cs_state->moles_normalization,
+                current_cs_state->moles_normalization_grad,
+                state->phase_amt,
+                compset_original_idx);
+        }
+    }
+    
+    // Finally, subtract the system amount residual from RHS (matching CPU)
+    double system_residual = state->system_amount - spec->prescribed_system_amount;
+    equilibrium_rhs[system_amount_row_idx] -= system_residual;
     
     // DEBUG: Print the complete equilibrium matrix for iteration 0
     #ifdef VERBOSE_DEBUG

@@ -1951,7 +1951,12 @@ typedef struct SystemState {
             printf("[GPU] SEGMENT 22 DEBUG: iteration=%d, num_components=%d\n", iteration, spec->num_components);
             printf("[GPU]   chemical_potentials: [%.15e, %.15e]\n", chemical_potentials[0], chemical_potentials[1]);
             printf("[GPU]   system_amount: %.15e\n", system_amount);
-            printf("[GPU]   mole_fractions: [%.6f, %.6f]\n", mole_fractions[0], mole_fractions[1]);
+            printf("[GPU]   mole_fractions: [");
+            for (int comp_i = 0; comp_i < spec->num_components; comp_i++) {
+                printf("%.6f", mole_fractions[comp_i]);
+                if (comp_i < spec->num_components - 1) printf(", ");
+            }
+            printf("]\n");
             gpu_debug_log_array("chemical_potentials", chemical_potentials, spec->num_components);
             gpu_debug_log_value("system_amount", system_amount);
             gpu_debug_log_array("mole_fractions", mole_fractions, spec->num_components);
@@ -3707,9 +3712,12 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
         #ifdef VERBOSE_DEBUG
         if (state->condition_idx == 0 && state->iteration == 0) {
             printf("[GPU CONSTRAINT DEBUG] Calculating residual for constraint row %d:\n", mole_frac_cond_row_idx);
-            printf("  System mole fractions: [%e, %e, %e, %e]\n", 
-                   state->mole_fractions[0], state->mole_fractions[1], 
-                   state->mole_fractions[2], state->mole_fractions[3]);
+            printf("  System mole fractions: [");
+            for (int comp_i = 0; comp_i < spec->num_prescribed_mole_fraction_coefficients_cols; comp_i++) {
+                printf("%e", state->mole_fractions[comp_i]);
+                if (comp_i < spec->num_prescribed_mole_fraction_coefficients_cols - 1) printf(", ");
+            }
+            printf("]\n");
             printf("  Coefficients for this constraint:");
             for (int i = 0; i < spec->num_prescribed_mole_fraction_coefficients_cols; i++) {
                 printf(" [%d]=%e", i, spec->prescribed_mole_fraction_coefficients[mole_frac_cond_row_idx][i]);
@@ -3723,8 +3731,24 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
         for (current_component_idx = 0; current_component_idx < spec->num_prescribed_mole_fraction_coefficients_cols; current_component_idx++) {
             component_residual += spec->prescribed_mole_fraction_coefficients[mole_frac_cond_row_idx][current_component_idx] *
                                   state->mole_fractions[current_component_idx];
+            #ifdef VERBOSE_DEBUG
+            if (state->condition_idx == 0 && state->iteration == 0 && mole_frac_cond_row_idx == 0) {
+                printf("[GPU RESIDUAL CALC] comp_idx=%d: coeff=%e * mole_frac=%e = %e (cumulative=%e)\n",
+                       current_component_idx,
+                       spec->prescribed_mole_fraction_coefficients[mole_frac_cond_row_idx][current_component_idx],
+                       state->mole_fractions[current_component_idx],
+                       spec->prescribed_mole_fraction_coefficients[mole_frac_cond_row_idx][current_component_idx] * state->mole_fractions[current_component_idx],
+                       component_residual);
+            }
+            #endif
         }
         component_residual -= spec->prescribed_mole_fraction_rhs[mole_frac_cond_row_idx];
+        #ifdef VERBOSE_DEBUG
+        if (state->condition_idx == 0 && state->iteration == 0 && mole_frac_cond_row_idx == 0) {
+            printf("[GPU RESIDUAL CALC] After subtracting target %e: residual = %e\n",
+                   spec->prescribed_mole_fraction_rhs[mole_frac_cond_row_idx], component_residual);
+        }
+        #endif
         
         // DEBUG: Print mole fraction constraint calculation
         #ifdef VERBOSE_DEBUG
@@ -3733,8 +3757,12 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
                    mole_frac_cond_row_idx, component_residual, 
                    component_residual + spec->prescribed_mole_fraction_rhs[mole_frac_cond_row_idx],
                    spec->prescribed_mole_fraction_rhs[mole_frac_cond_row_idx]);
-            printf("  state->mole_fractions: [%e, %e]\n", 
-                   state->mole_fractions[0], state->mole_fractions[1]);
+            printf("  state->mole_fractions: [");
+            for (int comp_i = 0; comp_i < spec->num_prescribed_mole_fraction_coefficients_cols; comp_i++) {
+                printf("%e", state->mole_fractions[comp_i]);
+                if (comp_i < spec->num_prescribed_mole_fraction_coefficients_cols - 1) printf(", ");
+            }
+            printf("]\n");
         }
         #endif
         
@@ -3755,28 +3783,90 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
         }
         #endif
     }
-    // CRITICAL FIX: Add system amount constraint row to match CPU exactly
-    // CPU DOES include an explicit N=1 constraint row in the equilibrium matrix
-    // This is the last row with [0,0,0,1,1,1] for phase amounts
+    // CRITICAL FIX: Add system amount constraint row to match CPU EXACTLY
+    // The CPU calls write_row_fixed_mole_amount for each component to build this row
+    // This adds small contributions to the chemical potential columns (not exactly zero!)
     
-    // SYSTEM AMOUNT CONSTRAINT ROW - Simple version matching CPU
+    // SYSTEM AMOUNT CONSTRAINT ROW - Match CPU exactly by calling write_row_fixed_mole_amount
     int system_amount_row_idx = current_row_offset + num_fixed_mole_frac_conds;
     
-    // Set all chemical potential columns to 0 (already zeroed)
-    // Set phase amount columns to 1
-    int phase_col_offset = spec->num_free_chemical_potentials;  // Skip chemical potential columns
-    for (int i = 0; i < num_free_stable_phases; i++) {
-        equilibrium_matrix[system_amount_row_idx * equilibrium_matrix_cols + phase_col_offset + i] = 1.0;
+    // Zero out the row first (it should already be zeroed but let's be explicit)
+    for (int col = 0; col < equilibrium_matrix_cols; col++) {
+        equilibrium_matrix[system_amount_row_idx * equilibrium_matrix_cols + col] = 0.0;
+    }
+    equilibrium_rhs[system_amount_row_idx] = 0.0;
+    
+    // Loop over all active phases and call write_row_fixed_mole_amount for each component
+    // This matches CPU's fill_equilibrium_system logic exactly
+    for (int stable_idx = 0; stable_idx < state->num_free_stable_compsets; stable_idx++) {
+        int compset_original_idx = state->free_stable_compset_indices[stable_idx];
+        CompositionSet* current_compset = &state->compsets[compset_original_idx];
+        CompsetState* current_cs_state = &state->cs_states[compset_original_idx];
+        
+        if (current_compset->phase_record == nullptr) continue;
+        
+        // Call write_row_fixed_mole_amount for each component (matching CPU)
+        for (int component_idx = 0; component_idx < spec->num_components; component_idx++) {
+            write_row_fixed_mole_amount(
+                &equilibrium_matrix[system_amount_row_idx * equilibrium_matrix_cols],
+                &equilibrium_rhs[system_amount_row_idx],
+                component_idx,
+                spec->free_chemical_potential_indices, spec->num_free_chemical_potentials,
+                state->free_stable_compset_indices, state->num_free_stable_compsets,
+                spec->free_statevar_indices, spec->num_free_statevars,
+                spec->fixed_chemical_potential_indices, spec->num_fixed_chemical_potentials,
+                state->chemical_potentials,
+                current_cs_state->mass_jac, current_cs_state->mass_jac_cols,
+                current_cs_state->c_component, current_cs_state->c_component_cols,
+                current_cs_state->c_statevars, current_cs_state->c_statevars_cols,
+                current_cs_state->c_G, current_cs_state->c_G_length,
+                current_cs_state->masses,
+                current_cs_state->moles_normalization,
+                current_cs_state->moles_normalization_grad,
+                state->phase_amt,
+                compset_original_idx);
+        }
     }
     
-    // RHS is the residual: prescribed_system_amount - current_system_amount
-    double system_residual = spec->prescribed_system_amount - state->system_amount;
-    equilibrium_rhs[system_amount_row_idx] = system_residual;
+    // Also handle fixed stable phases (if any) - matching CPU
+    for (int fixed_idx = 0; fixed_idx < spec->num_fixed_stable_compsets; fixed_idx++) {
+        int compset_original_idx = spec->fixed_stable_compset_indices[fixed_idx];
+        CompositionSet* current_compset = &state->compsets[compset_original_idx];
+        CompsetState* current_cs_state = &state->cs_states[compset_original_idx];
+        
+        if (current_compset->phase_record == nullptr) continue;
+        
+        // Call write_row_fixed_mole_amount for each component
+        for (int component_idx = 0; component_idx < spec->num_components; component_idx++) {
+            write_row_fixed_mole_amount(
+                &equilibrium_matrix[system_amount_row_idx * equilibrium_matrix_cols],
+                &equilibrium_rhs[system_amount_row_idx],
+                component_idx,
+                spec->free_chemical_potential_indices, spec->num_free_chemical_potentials,
+                state->free_stable_compset_indices, state->num_free_stable_compsets,
+                spec->free_statevar_indices, spec->num_free_statevars,
+                spec->fixed_chemical_potential_indices, spec->num_fixed_chemical_potentials,
+                state->chemical_potentials,
+                current_cs_state->mass_jac, current_cs_state->mass_jac_cols,
+                current_cs_state->c_component, current_cs_state->c_component_cols,
+                current_cs_state->c_statevars, current_cs_state->c_statevars_cols,
+                current_cs_state->c_G, current_cs_state->c_G_length,
+                current_cs_state->masses,
+                current_cs_state->moles_normalization,
+                current_cs_state->moles_normalization_grad,
+                state->phase_amt,
+                compset_original_idx);
+        }
+    }
+    
+    // Finally, subtract the system amount residual from RHS (matching CPU)
+    double system_residual = state->system_amount - spec->prescribed_system_amount;
+    equilibrium_rhs[system_amount_row_idx] -= system_residual;
     
     // DEBUG: Print the complete equilibrium matrix for iteration 0
     #ifdef VERBOSE_DEBUG
     if (state->condition_idx == 0 && state->iteration == 0) {
-        printf("[GPU EQUILIBRIUM MATRIX] Complete matrix at iteration 0 (rows=%d, cols=%d):\n", total_rows, equilibrium_matrix_cols);
+        printf("[EQUILIBRIUM_MATRIX_OUTPUT] GPU Iteration 0 (rows=%d, cols=%d):\n", total_rows, equilibrium_matrix_cols);
         for (int row = 0; row < total_rows; row++) {
             printf("  Row %d: ", row);
             for (int col = 0; col < equilibrium_matrix_cols; col++) {
@@ -4871,7 +4961,7 @@ __device__ bool identify_candidate_phase_to_add(
         // Check distinctness against current compsets (matching CPU logic lines 62-72)
         for (int cs_idx = 0; cs_idx < current_sys_state->num_compsets; ++cs_idx) {
             if (current_sys_state->compsets[cs_idx].phase_record == nullptr || 
-                current_sys_state->phase_amt[cs_idx] < MIN_PHASE_FRACTION/100.0) continue;
+                current_sys_state->phase_amt[cs_idx] < MIN_PHASE_FRACTION) continue;
 
             if (current_sys_state->compsets[cs_idx].phase_record == final_candidate_phase_record) {
                 // Same phase type, check overall composition (using X, not site fractions)
@@ -4949,7 +5039,7 @@ __device__ bool identify_nearly_stable_phases(
         // Check if this phase type (record_idx) is already in current_sys_state
         bool phase_type_entered = false;
         for (int cs_idx = 0; cs_idx < current_sys_state->num_compsets; ++cs_idx) {
-             if (current_sys_state->compsets[cs_idx].phase_record == nullptr || current_sys_state->phase_amt[cs_idx] < MIN_PHASE_FRACTION/100.0) continue;
+             if (current_sys_state->compsets[cs_idx].phase_record == nullptr || current_sys_state->phase_amt[cs_idx] < MIN_PHASE_FRACTION) continue;
             // Compare by checking if the phase_record pointer matches one in the global array
             const PhaseRecord* pr_in_compset = current_sys_state->compsets[cs_idx].phase_record;
             if (pr_in_compset == &phase_data->phase_records_array[record_idx]) {
@@ -5058,7 +5148,7 @@ __device__ void solve_equilibrium_at_condition(
         printf("GPU DEBUG: solve_equilibrium_at_condition - num_phases=%d\n", initial_data->num_phases);
         for (int debug_i = 0; debug_i < initial_data->num_phases && debug_i < 3; ++debug_i) {
             printf("GPU DEBUG: Initial phase %d: idx=%d, amount=%f, threshold=%e\n", 
-                   debug_i, initial_data->phase_indices[debug_i], initial_data->phase_amounts[debug_i], MIN_PHASE_FRACTION/100.0);
+                   debug_i, initial_data->phase_indices[debug_i], initial_data->phase_amounts[debug_i], MIN_PHASE_FRACTION);
         }
     }
     #endif
@@ -5084,9 +5174,9 @@ __device__ void solve_equilibrium_at_condition(
         }
         
         double phase_amount = initial_data->phase_amounts[i];
-        if (phase_amount <= MIN_PHASE_FRACTION/100.0) {
+        if (phase_amount <= MIN_PHASE_FRACTION) {
             #ifdef VERBOSE_DEBUG
-            if (thread_id == 0) printf("GPU DEBUG: Skipping phase %d - amount %f <= threshold %e\n", i, phase_amount, MIN_PHASE_FRACTION/100.0);
+            if (thread_id == 0) printf("GPU DEBUG: Skipping phase %d - amount %f <= threshold %e\n", i, phase_amount, MIN_PHASE_FRACTION);
             #endif
             continue; // Skip negligible phases
         }
@@ -5362,7 +5452,7 @@ __device__ void solve_equilibrium_at_condition(
                         }
                     }
                     // Also check if phase amount is still significant (not removed to ~0)
-                    if (same_composition && current_sys_state.phase_amt[after_idx] > MIN_PHASE_FRACTION/100.0) {
+                    if (same_composition && current_sys_state.phase_amt[after_idx] > MIN_PHASE_FRACTION) {
                         still_present = true;
                         break;
                     }
@@ -5496,7 +5586,7 @@ __device__ void solve_equilibrium_at_condition(
                             }
                         }
                         // Also check if phase amount is still significant (not removed to ~0)
-                        if (same_composition && current_sys_state.phase_amt[after_idx] > MIN_PHASE_FRACTION/100.0) {
+                        if (same_composition && current_sys_state.phase_amt[after_idx] > MIN_PHASE_FRACTION) {
                             still_present = true;
                             break;
                         }
@@ -5558,15 +5648,15 @@ __device__ void solve_equilibrium_at_condition(
     double final_gm_calc = 0.0;
     int stable_phase_count = 0;
     #ifdef VERBOSE_DEBUG
-    printf("GPU DEBUG: Collecting stable phases - num_compsets=%d, MIN_PHASE_FRACTION/10=%e\n", 
-           current_sys_state.num_compsets, MIN_PHASE_FRACTION / 10.0);
+    printf("GPU DEBUG: Collecting stable phases - num_compsets=%d, MIN_PHASE_FRACTION=%e\n", 
+           current_sys_state.num_compsets, MIN_PHASE_FRACTION);
     #endif
     for (int i = 0; i < current_sys_state.num_compsets; ++i) {
         #ifdef VERBOSE_DEBUG
         printf("GPU DEBUG: compset %d - phase_amt=%.10f, threshold=%e\n", 
-               i, current_sys_state.phase_amt[i], MIN_PHASE_FRACTION / 10.0);
+               i, current_sys_state.phase_amt[i], MIN_PHASE_FRACTION);
         #endif
-        if (current_sys_state.phase_amt[i] > MIN_PHASE_FRACTION / 10.0) {
+        if (current_sys_state.phase_amt[i] > MIN_PHASE_FRACTION) {
             // Use cs_states[i].energy which is set to pr->formulaobj(compset->dof) in recompute()
             // This is the Gibbs energy per formula unit, which is what the CPU uses
             double phase_contribution = current_sys_state.phase_amt[i] * current_sys_state.cs_states[i].energy;
@@ -5899,37 +5989,37 @@ __device__ void pycgpu_model_0_formulagrad(double* out, const double* x) {
     double x25 = x[3] + x[4] + x[5];
     double x26 = pow(x25, -1);
     double x27 = 1.0*x26;
-    double x28 = log(x[5]);
-    double x29 = 1e-15 < x[5];
-    double x30 = log(x[3]);
-    double x31 = 1e-15 < x[3];
-    double x32 = log(x[4]);
-    double x33 = 1e-15 < x[4];
+    double x28 = log(x[3]);
+    double x29 = 1e-15 < x[3];
+    double x30 = log(x[4]);
+    double x31 = 1e-15 < x[4];
+    double x32 = log(x[5]);
+    double x33 = 1e-15 < x[5];
     double x34 = 1.0*((x29 == 1) ? (
-   x28*x[5]
+   x28*x[3]
 )
 : (
    0
 )) + 1.0*((x31 == 1) ? (
-   x30*x[3]
+   x30*x[4]
 )
 : (
    0
 )) + 1.0*((x33 == 1) ? (
-   x32*x[4]
+   x32*x[5]
 )
 : (
    0
 ));
     double x35 = 8.3145*x26;
     double x36 = x34*x35;
-    double x37 = 1.0*((x33 == 1) ? (
+    double x37 = 1.0*((x31 == 1) ? (
    0
 )
 : (
    0
 ));
-    double x38 = 1.0*((x31 == 1) ? (
+    double x38 = 1.0*((x33 == 1) ? (
    0
 )
 : (
@@ -6125,20 +6215,20 @@ __device__ void pycgpu_model_0_formulagrad(double* out, const double* x) {
 : (
    0
 )))*x[4]) + x27*(-2.32968*x45 + 22.1314*x48 - 0.0327*x50 + 4.8728*x56 + 8.1*x58 - 3.60297*x44*x45 + 11.3118607*x47*x49 + x54*(-80.8 + x51) + 9.12034153*x57*x49) + (x37 + x40)*x41);
-    out[1] = x109 + x59*(x108 + x27*(-x76 + x80 + x83 + x84 + x86 + (2.0/3.0)*x88 + x71*x45 + x72*x[4] + x74*x[5] - x75*x[4] + x78*x45 + x81*x53 + x85*x[5] + x87*x[5]) + x41*(x37 + x39 + 1.0*((x31 == 1) ? (
-   1 + x30
+    out[1] = x109 + x59*(x108 + x27*(-x76 + x80 + x83 + x84 + x86 + (2.0/3.0)*x88 + x71*x45 + x72*x[4] + x74*x[5] - x75*x[4] + x78*x45 + x81*x53 + x85*x[5] + x87*x[5]) + x41*(x37 + x38 + 1.0*((x29 == 1) ? (
+   1 + x28
 )
 : (
    0
 ))) + (x66 + x69)*x27);
-    out[2] = x109 + x59*(x108 + x27*(x105 + x106 + x110 + x111 + x112 + x76 + (2.0/3.0)*x79 - x83 + x96 + x99 + x101*x[5] + x104*x[5] - x75*x[3] + x82*x52) + x41*(x40 + 1.0*((x33 == 1) ? (
-   1 + x32
+    out[2] = x109 + x59*(x108 + x27*(x105 + x106 + x110 + x111 + x112 + x76 + (2.0/3.0)*x79 - x83 + x96 + x99 + x101*x[5] + x104*x[5] - x75*x[3] + x82*x52) + x41*(x40 + 1.0*((x31 == 1) ? (
+   1 + x30
 )
 : (
    0
 ))) + (x69 + x89)*x27);
-    out[3] = x109 + x59*(x108 + x27*(x100 + x102 - x110 - x111 + x112 + x80 - x84 - x86 + x104*x[4] + x71*x58 + x74*x[3] + x78*x58 + x87*x[3] + x98*x[4]) + x41*(x37 + x38 + 1.0*((x29 == 1) ? (
-   1 + x28
+    out[3] = x109 + x59*(x108 + x27*(x100 + x102 - x110 - x111 + x112 + x80 - x84 - x86 + x104*x[4] + x71*x58 + x74*x[3] + x78*x58 + x87*x[3] + x98*x[4]) + x41*(x37 + x39 + 1.0*((x33 == 1) ? (
+   1 + x32
 )
 : (
    0
@@ -6315,16 +6405,16 @@ __device__ void pycgpu_model_0_formulahess(double* out, const double* x) {
 )
 : 0));
     double x95 = x68*x[3] + x91*x[5] + x94*x[4];
-    double x96 = log(x[5]);
-    double x97 = log(x[4]);
+    double x96 = log(x[4]);
+    double x97 = log(x[5]);
     double x98 = 1.0*((x9 == 1) ? (
    x55*x[3]
 )
-: 0) + 1.0*((x5 == 1) ? (
-   x96*x[5]
-)
 : 0) + 1.0*((x7 == 1) ? (
-   x97*x[4]
+   x96*x[4]
+)
+: 0) + 1.0*((x5 == 1) ? (
+   x97*x[5]
 )
 : 0);
     double x99 = x15 - x83*x85 - x85*x95 - x86*x98 - x[2]*x86*x12;
@@ -6336,14 +6426,14 @@ __device__ void pycgpu_model_0_formulahess(double* out, const double* x) {
     double x105 = 7.20594*x104;
     double x106 = x10 + x6;
     double x107 = x106 + 1.0*((x7 == 1) ? (
-   1 + x97
+   1 + x96
 )
 : 0);
     double x108 = x13*x107;
     double x109 = x35*(x108 + x99 + x34*(8.1*x[3] - 2.32968*x[5] - x103 - x105 - x50 + 4.50112662333333*x54 - x81 + x4*x48 + x40*x41 + x53*x41 - x77*x[5]) + (x74 + x94)*x34);
     double x110 = x[4]*x[3];
     double x111 = x11 + 1.0*((x5 == 1) ? (
-   1 + x96
+   1 + x97
 )
 : 0);
     double x112 = x13*x111;
@@ -7239,9 +7329,10 @@ __device__ void solve_state(
     #ifdef VERBOSE_DEBUG
     if (thread_id == 0 && state->iteration < 3) {
         printf("  RHS after fill_equilibrium_system: [");
-        for (int i = 0; i < equilibrium_matrix_rows && i < 5; ++i) {
+        // Print ALL rows of RHS
+        for (int i = 0; i < equilibrium_matrix_rows; ++i) {
             printf("%.2e", equilibrium_rhs[i]);
-            if (i < 4) printf(", ");
+            if (i < equilibrium_matrix_rows - 1) printf(", ");
         }
         printf("]\n");
     }
@@ -7263,11 +7354,13 @@ __device__ void solve_state(
     // Note: state->iteration might be available instead of iteration_count
     if (thread_id == 0 && state->iteration < 3) {
         #ifdef VERBOSE_DEBUG
-        printf("\n[GPU EQUILIBRIUM MATRIX] Iteration %d (rows=%d, cols=%d):\n", 
+        printf("\n[EQUILIBRIUM_MATRIX_OUTPUT] GPU Iteration %d (rows=%d, cols=%d):\n", 
                state->iteration, equilibrium_matrix_rows, equilibrium_matrix_cols);
-        for (int i = 0; i < equilibrium_matrix_rows && i < 5; ++i) {
+        // ALWAYS print ALL rows of the matrix
+        for (int i = 0; i < equilibrium_matrix_rows; ++i) {
             printf("  Row %d: ", i);
-            for (int j = 0; j < equilibrium_matrix_cols && j < 5; ++j) {
+            // Print ALL columns too
+            for (int j = 0; j < equilibrium_matrix_cols; ++j) {
                 printf("%+.6e ", equilibrium_matrix[i * equilibrium_matrix_cols + j]);
             }
             printf("| RHS: %+.6e\n", equilibrium_rhs[i]);
@@ -7289,9 +7382,10 @@ __device__ void solve_state(
     #ifdef VERBOSE_DEBUG
     if (thread_id == 0 && state->iteration < 3) {
         printf("  RHS after lstsq (solution): [");
-        for (int i = 0; i < equilibrium_matrix_cols && i < 5; ++i) {
+        // Print ALL solution values
+        for (int i = 0; i < equilibrium_matrix_cols; ++i) {
             printf("%.2e", equilibrium_rhs[i]);
-            if (i < 4) printf(", ");
+            if (i < equilibrium_matrix_cols - 1) printf(", ");
         }
         printf("]\n");
     }
@@ -7359,7 +7453,7 @@ __device__ void solve_equilibrium_at_condition_global_mem(
     double* equilibrium_matrix,  // Replaces stack: large equilibrium system matrix
     double* equilibrium_rhs,     // Replaces stack: equilibrium system RHS vector
     double* eq_soln,             // Replaces stack: equilibrium solution vector
-    double* global_system_states // UNUSED - SystemState allocated on stack
+    double* global_system_states // CRITICAL FIX: SystemState in global memory to avoid stack overflow
 ) {
     // STACK OVERFLOW FIX: All large arrays are now passed as parameters from global memory
     
@@ -7475,13 +7569,25 @@ __device__ void solve_equilibrium_at_condition_global_mem(
         #endif
     }
     
-    // Step 3: Allocate SystemState on stack as per the kernel signature comment
-    // This avoids memory alignment issues with pointer members
-    SystemState current_sys_state_stack;
-    SystemState& current_sys_state = current_sys_state_stack;
-    
-    // Initialize SystemState to zero
-    memset(&current_sys_state, 0, sizeof(SystemState));
+    // Step 3: Use SystemState from global memory to avoid stack overflow
+    // CRITICAL FIX: SystemState is too large (~100KB) for GPU thread stack
+    SystemState* current_sys_state_ptr = nullptr;
+    if (global_system_states != nullptr) {
+        // Cast the global memory to SystemState pointer
+        current_sys_state_ptr = (SystemState*)global_system_states;
+        // Initialize SystemState to zero
+        memset(current_sys_state_ptr, 0, sizeof(SystemState));
+    } else {
+        // Fallback: allocate on stack (will cause overflow with many threads)
+        #ifdef VERBOSE_DEBUG
+        if (thread_id == 0) {
+            printf("GPU DEBUG: WARNING - SystemState allocated on stack (no global memory provided)\n");
+        }
+        #endif
+        // This will fail with multiple threads due to stack overflow
+        return;  // Exit early to avoid crash
+    }
+    SystemState& current_sys_state = *current_sys_state_ptr;
     // SystemState is now properly zero-initialized via memset
     
     // Initialize SystemState manually without creating large stack arrays
@@ -7606,7 +7712,7 @@ __device__ void solve_equilibrium_at_condition_global_mem(
             }
             continue;
         }
-        if (phase_amount <= MIN_PHASE_FRACTION/100.0) {
+        if (phase_amount <= MIN_PHASE_FRACTION) {
             // DEBUG: Mark phase amount too small
             if (thread_id == 0 && i == 0) {
                 result->X_phases[21] = -2.0; // Phase amount too small marker
@@ -8461,7 +8567,7 @@ __device__ void solve_equilibrium_at_condition_global_mem(
     // IMPORTANT: Only sync active phases (phase_amt > 0) to avoid overwriting consolidated phases
     for (int i = 0; i < current_sys_state.num_compsets; ++i) {
         // Only sync if the phase is active (not removed/consolidated)
-        if (current_sys_state.phase_amt[i] > MIN_PHASE_FRACTION / 10.0) {
+        if (current_sys_state.phase_amt[i] > MIN_PHASE_FRACTION) {
             current_sys_state.phase_amt[i] = current_sys_state.compsets[i].NP;
         }
         if (thread_id == 0 && i < 2) {
@@ -9509,22 +9615,8 @@ __global__ void top_level_equilibrium_kernel(
             }
             
             // thread_spec already created above - no need to recreate
-            
-            // CRITICAL FIX: Update prescribed_mole_fraction_rhs to match this thread's condition
-            // Each thread needs its own X[1] target value from the condition data
-            if (thread_spec.num_prescribed_mole_fraction_conditions > 0) {
-                // For X[1] constraint (component index 1), update the RHS to match this thread's condition
-                thread_spec.prescribed_mole_fraction_rhs[0] = thread_mole_fractions[1];  // X[1] for this thread
-                
-                if (tid < 5) {
-                    #ifdef VERBOSE_DEBUG
-                    printf("GPU DEBUG: Thread %d UPDATED prescribed_mole_fraction_rhs[0] = %f (X[1] for this condition)\n", 
-                           tid, thread_spec.prescribed_mole_fraction_rhs[0]);
-                    printf("GPU DEBUG: Thread %d SystemSpec: num_statevars=%d, num_components=%d\n",
-                           tid, thread_spec.num_statevars, thread_spec.num_components);
-                    #endif
-                }
-            }
+            // The prescribed_mole_fraction_rhs values are already correctly set in the SystemSpecification array
+            // DO NOT overwrite them here - that was a binary-system-specific hack that breaks ternary systems
             
             // Set up device phase data  
             device_phase_data.phase_records_array = g_phase_records_array;

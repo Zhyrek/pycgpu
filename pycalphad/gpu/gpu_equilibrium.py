@@ -44,6 +44,9 @@ from .gpu_codegen import (
     compute_dynamic_kernel_sizes
 )
 
+# Import optimized multi-phase compiler for handling many phases
+from .separate_phase_compiler import compile_phases_separately
+
 # Global cache for compiled GPU modules  
 _gpu_module_cache = {}
 
@@ -1963,14 +1966,14 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             # by the kernel should be computed based on the phase records/models in pycalphad, and then passed 
             # to the kernel using the -D flag to define it in the kernel code."
             
-            # Check if optimized compilation is needed
-            from .modular_compiler_v3 import ModularGPUCompilerV3
-            compiler = ModularGPUCompilerV3(verbose=verbose)
-            
-            if compiler.needs_modular_compilation(num_unique_models_for_gpu):
+            # Check if optimized compilation is needed for many phases
+            if num_unique_models_for_gpu > 15:
+                # Use optimized multi-phase compiler for many phases
                 if verbose:
-                    print(f"[GPU] System has {num_unique_models_for_gpu} phases, using optimized compilation")
-                module = compiler.compile_kernel(full_kernel_source, num_unique_models_for_gpu, dynamic_sizes)
+                    print(f"[GPU] System has {num_unique_models_for_gpu} phases, using optimized multi-phase compilation")
+                    
+                # Use the workspace object for compilation since it has the models
+                module = compile_phases_separately(wks_obj, verbose=verbose, max_compilation_time=120)
             else:
                 # Standard compilation for smaller systems
                 if verbose:
@@ -1987,8 +1990,16 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                     print(f"[GPU] Using dynamic kernel sizing: {dynamic_sizes}")
                     print(f"[GPU] Compiler defines: {define_flags}")
                 
+                # Choose optimization level based on phase count
+                if num_unique_models_for_gpu <= 5:
+                    opt_level = '-O3'
+                elif num_unique_models_for_gpu <= 10:
+                    opt_level = '-O2'
+                else:
+                    opt_level = '-O1'
+                
                 # Compilation options with dynamic defines (must be tuple for CuPy)
-                compile_options = tuple(['-std=c++11'] + define_flags)
+                compile_options = tuple(['-std=c++11', opt_level] + define_flags)
                 module = cp.RawModule(code=full_kernel_source, options=compile_options, backend='nvcc')
                 
             if verbose:

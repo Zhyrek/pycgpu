@@ -325,7 +325,7 @@ typedef struct SystemState {
 
     double _driving_forces_arr[MAX_PHASES];
     double _phase_energies_per_mole_atoms_arr[MAX_PHASES];
-    double _phase_amounts_per_mole_atoms_arr[MAX_PHASES * MAX_COMPONENTS];
+    double* _phase_amounts_per_mole_atoms_arr;  // Now points to global memory instead of stack allocation
 
     __device__ void init(SystemSpecification* spec, CompositionSet* initial_compsets, int initial_num_compsets) {
         #ifdef VERBOSE_DEBUG

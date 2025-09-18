@@ -2914,6 +2914,7 @@ __global__ void top_level_equilibrium_kernel(
     // Additional SystemState arrays to reduce stack usage
     double* thread_delta_ms = work_arrays && work_arrays->arrays[20] ? &work_arrays->arrays[20][thread_idx * (MAX_PHASES * MAX_COMPONENTS)] : nullptr;
     double* thread_phase_compositions = work_arrays && work_arrays->arrays[21] ? &work_arrays->arrays[21][thread_idx * (MAX_PHASES * MAX_COMPONENTS)] : nullptr;
+    double* thread_phase_amounts_per_mole_atoms = work_arrays && work_arrays->arrays[22] ? &work_arrays->arrays[22][thread_idx * (MAX_PHASES * MAX_COMPONENTS)] : nullptr;
 
     // MIRROR CPU LOGIC: Start with what definitely works on CPU
     if (tid < num_conditions_total && results_list_ptr_raw != nullptr) {{
@@ -3815,7 +3816,8 @@ __global__ void top_level_equilibrium_kernel(
                 thread_equilibrium_matrix, thread_equilibrium_rhs, thread_eq_soln,
                 work_arrays && work_arrays->arrays[19] ? &work_arrays->arrays[19][thread_idx * SYSTEM_STATE_SIZE] : nullptr,
                 thread_delta_ms,  // Pass delta_ms global memory pointer
-                thread_phase_compositions  // Pass phase_compositions global memory pointer
+                thread_phase_compositions,  // Pass phase_compositions global memory pointer
+                thread_phase_amounts_per_mole_atoms  // Pass phase_amounts_per_mole_atoms global memory pointer
             );
             
             // COMMENTED OUT: Temporary placeholder values (real solver is now being called above)

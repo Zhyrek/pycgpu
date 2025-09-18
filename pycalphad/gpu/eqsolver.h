@@ -379,7 +379,8 @@ __device__ void solve_equilibrium_at_condition(
     double* equilibrium_rhs,     // Replaces stack: equilibrium system RHS vector
     double* eq_soln,             // Replaces stack: equilibrium solution vector
     double* global_system_states, // CRITICAL FIX: SystemState in global memory to avoid stack overflow
-    double* delta_ms             // NEW: Global memory for delta_ms array
+    double* delta_ms,            // NEW: Global memory for delta_ms array
+    double* phase_compositions   // NEW: Global memory for phase_compositions array
 ) {
     // STACK OVERFLOW FIX: All large arrays are now passed as parameters from global memory
     
@@ -517,8 +518,9 @@ __device__ void solve_equilibrium_at_condition(
     // SystemState is now properly zero-initialized via memset
 
     // Initialize SystemState manually without creating large stack arrays
-    // Set the delta_ms pointer to global memory
+    // Set the global memory pointers
     current_sys_state.delta_ms = delta_ms;
+    current_sys_state.phase_compositions = phase_compositions;
 
     current_sys_state.num_compsets = 0;
     current_sys_state.iteration = 0;

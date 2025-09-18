@@ -2368,6 +2368,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     # Additional SystemState arrays moved from stack to global memory
     # Each thread gets its own section via striding: thread_idx * array_size
     global_memory_arrays['delta_ms'] = cp.empty((total_threads_for_allocation, dynamic_sizes['MAX_PHASES'] * dynamic_sizes['MAX_COMPONENTS']), dtype=cp.float64)
+    global_memory_arrays['phase_compositions'] = cp.empty((total_threads_for_allocation, dynamic_sizes['MAX_PHASES'] * dynamic_sizes['MAX_COMPONENTS']), dtype=cp.float64)
     
     # CRITICAL: CompositionSet arrays to prevent stack overflow
     # Each CompositionSet needs space for DOF values and other data
@@ -2397,7 +2398,8 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     work_arrays_ptrs[18] = global_memory_arrays['eq_soln'].data.ptr
     work_arrays_ptrs[19] = global_memory_arrays['system_states'].data.ptr
     work_arrays_ptrs[20] = global_memory_arrays['delta_ms'].data.ptr  # NEW: delta_ms array
-    # Indices 21 and 22 reserved for phase_compositions and _phase_amounts_per_mole_atoms_arr
+    work_arrays_ptrs[21] = global_memory_arrays['phase_compositions'].data.ptr  # NEW: phase_compositions array
+    # Index 22 reserved for _phase_amounts_per_mole_atoms_arr
     work_arrays_gpu = cp.asarray(work_arrays_ptrs)
     global_memory_arrays['removed_compsets'] = cp.zeros((total_threads_for_allocation, dynamic_sizes['MAX_PHASES'] * compset_size_doubles), dtype=cp.float64)
     global_memory_arrays['compsets_before_solve'] = cp.zeros((total_threads_for_allocation, dynamic_sizes['MAX_PHASES'] * compset_size_doubles), dtype=cp.float64)

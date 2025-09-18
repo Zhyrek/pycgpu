@@ -310,7 +310,7 @@ typedef struct SystemState {
     int delta_ms_rows;
     int delta_ms_cols;
     double delta_statevars[MAX_STATEVARS];
-    double phase_compositions[MAX_PHASES * MAX_COMPONENTS];
+    double* phase_compositions;  // Now points to global memory instead of stack allocation
     int phase_compositions_rows;
     int phase_compositions_cols;
 

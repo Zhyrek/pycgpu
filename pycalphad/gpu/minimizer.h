@@ -306,7 +306,7 @@ typedef struct SystemState {
     int condition_idx;  // Thread/condition index for debug output
     double previous_chemical_potentials[MAX_COMPONENTS];
     double largest_chemical_potential_difference;
-    double delta_ms[MAX_PHASES * MAX_COMPONENTS];
+    double* delta_ms;  // Now points to global memory instead of stack allocation
     int delta_ms_rows;
     int delta_ms_cols;
     double delta_statevars[MAX_STATEVARS];

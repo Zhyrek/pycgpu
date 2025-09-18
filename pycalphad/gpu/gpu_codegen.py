@@ -2632,7 +2632,7 @@ def _generate_full_gpu_source(wks_obj: Workspace,
 
 // --- WorkArrays struct to reduce kernel parameters for AMD compatibility ---
 typedef struct WorkArrays {{
-    double* arrays[20];  // Pack all 20 work array pointers together
+    double* arrays[23];  // Pack all work array pointers together (expanded for SystemState arrays)
 }} WorkArrays;
 
 // --- GPU Debug logging helpers (must be outside extern "C") ---
@@ -2911,7 +2911,9 @@ __global__ void top_level_equilibrium_kernel(
     double* thread_equilibrium_matrix = work_arrays && work_arrays->arrays[16] ? &work_arrays->arrays[16][thread_idx * MAX_EQ_MATRIX_SIZE] : nullptr;
     double* thread_equilibrium_rhs = work_arrays && work_arrays->arrays[17] ? &work_arrays->arrays[17][thread_idx * MAX_EQ_MATRIX_ROWS] : nullptr;
     double* thread_eq_soln = work_arrays && work_arrays->arrays[18] ? &work_arrays->arrays[18][thread_idx * MAX_EQ_SOLN_LEN] : nullptr;
-    
+    // Additional SystemState arrays to reduce stack usage
+    double* thread_delta_ms = work_arrays && work_arrays->arrays[20] ? &work_arrays->arrays[20][thread_idx * (MAX_PHASES * MAX_COMPONENTS)] : nullptr;
+
     // MIRROR CPU LOGIC: Start with what definitely works on CPU
     if (tid < num_conditions_total && results_list_ptr_raw != nullptr) {{
         // Cast to simple double array for efficient GPU memory access
@@ -3810,7 +3812,8 @@ __global__ void top_level_equilibrium_kernel(
                 thread_x_dof, thread_grad, thread_hess,
                 thread_masses, thread_mass_jac, thread_phase_matrix,
                 thread_equilibrium_matrix, thread_equilibrium_rhs, thread_eq_soln,
-                work_arrays && work_arrays->arrays[19] ? &work_arrays->arrays[19][thread_idx * SYSTEM_STATE_SIZE] : nullptr
+                work_arrays && work_arrays->arrays[19] ? &work_arrays->arrays[19][thread_idx * SYSTEM_STATE_SIZE] : nullptr,
+                thread_delta_ms  // Pass delta_ms global memory pointer
             );
             
             // COMMENTED OUT: Temporary placeholder values (real solver is now being called above)

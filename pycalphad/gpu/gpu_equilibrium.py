@@ -44,8 +44,15 @@ from .gpu_codegen import (
     compute_dynamic_kernel_sizes
 )
 
-# Global cache for compiled GPU modules
+# Import optimized multi-phase compiler for handling many phases
+from .separate_phase_compiler import compile_phases_separately
+
+# Global cache for compiled GPU modules (in-memory)
 _gpu_module_cache = {}
+
+# Disk cache directory for persistent kernel storage
+import os
+from pathlib import Path
 
 
 def _extract_values(obj):
@@ -1559,7 +1566,10 @@ def _create_initial_phase_data_struct_array(initial_phase_data_arrays, num_condi
             # CRITICAL FIX: Read num_phases from the correct offset, not -1
             num_phases_offset = 2*MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * MAX_COMPONENTS) + MAX_COMPONENTS
             num_phases = int(initial_phase_data_flat[i, num_phases_offset])
-            print(f"[GPU] InitialPhaseData[{i}]: num_phases={num_phases}, phases={phase_indices[:2]}, amounts={phase_amounts[:2]}")
+            # Show all active phases, not just first 2
+            active_phases = phase_indices[:num_phases]
+            active_amounts = phase_amounts[:num_phases]
+            print(f"[GPU] InitialPhaseData[{i}]: num_phases={num_phases}, phases={active_phases}, amounts={active_amounts}")
             # Also check if we're getting the same data for all conditions
             if i > 0:
                 same_phases = np.array_equal(phase_indices[:2], initial_phase_data_flat[0, 0:2].astype(int))
@@ -1935,25 +1945,71 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
 
     
     # 2. Assemble full GPU source and compile kernel (with caching)
-    # Include dynamic sizes in cache key since they affect compilation
+    # CRITICAL: Cache key should ONLY depend on phases and components, not on specific conditions or CSE variations
+    import hashlib
     dynamic_sizes = compute_dynamic_kernel_sizes(wks_obj)
-    # Include conversion fix marker and verbose flag in cache key
-    cache_key_input = model_funcs_c + str(num_unique_models_for_gpu) + str(sorted(dynamic_sizes.items())) + "_HESSIAN_FIX_V2" + ("_VERBOSE" if verbose else "")
+
+    # Build deterministic cache key from phases and components only
+    sorted_phases = sorted(wks_obj.phases)  # Sort phase names for consistency
+    sorted_components = sorted([c.name for c in wks_obj.components])  # Sort component names
+
+    # Cache key includes: phases, components, dynamic sizes, and flags
+    # It does NOT include the actual generated code (which has CSE variations)
+    cache_key_parts = [
+        "phases:" + ",".join(sorted_phases),
+        "components:" + ",".join(sorted_components),
+        "sizes:" + str(sorted(dynamic_sizes.items())),
+        "version:HESSIAN_FIX_V3",  # Version marker for cache invalidation
+        "verbose:" + str(verbose)
+    ]
+    cache_key_input = "|".join(cache_key_parts)
     cache_key = hashlib.md5(cache_key_input.encode()).hexdigest()
+
+    if verbose:
+        print(f"[GPU] Cache key based on: {len(sorted_phases)} phases, {len(sorted_components)} components")
+        print(f"[GPU] Cache key: {cache_key}")
 
 
     if cache_key not in _gpu_module_cache:
-        if verbose:
-            print(f"[GPU] Compiling new GPU module with cache key: {cache_key}")
+        # Check disk cache first
+        cache_dir = Path(".pycgpu_kernels")
+        cache_file = cache_dir / f"{cache_key}.cu"
 
-        full_kernel_source = _generate_full_gpu_source(wks_obj, model_funcs_c, pr_init_calls_c, num_unique_models_for_gpu)
+        if cache_file.exists():
+            if verbose:
+                print(f"[GPU] Found cached kernel in .pycgpu_kernels/{cache_key}.cu")
+            with open(cache_file, 'r') as f:
+                full_kernel_source = f.read()
+        else:
+            if verbose:
+                print(f"[GPU] Cache miss - compiling new GPU module")
+                print(f"[GPU] Cache key: {cache_key}")
+
+            full_kernel_source = _generate_full_gpu_source(wks_obj, model_funcs_c, pr_init_calls_c, num_unique_models_for_gpu)
+
+            # Save to disk cache
+            cache_dir.mkdir(exist_ok=True)
+            with open(cache_file, 'w') as f:
+                f.write(full_kernel_source)
+            if verbose:
+                print(f"[GPU] Saved kernel to cache: .pycgpu_kernels/{cache_key}.cu")
+
+        # Debug: Check source consistency
+        source_hash = hashlib.sha256(full_kernel_source.encode()).hexdigest()
+        if verbose:
+            print(f"[GPU] Source hash: {source_hash[:16]}... (length: {len(full_kernel_source)})")
         
-        # For debugging, save the generated source to a file
+        # For debugging, save the generated source to a file with timestamp
         if verbose:
             try:
+                timestamp = datetime.now().strftime("%H%M%S")
+                kernel_filename = f"generated_equilibrium_kernel_{timestamp}.cu"
+                with open(kernel_filename, "w") as f:
+                    f.write(full_kernel_source)
+                print(f"[GPU] DEBUG: Saved generated kernel source to '{kernel_filename}'")
+                # Also save a copy without timestamp for easy comparison
                 with open("generated_equilibrium_kernel.cu", "w") as f:
                     f.write(full_kernel_source)
-                print("[GPU] DEBUG: Saved generated kernel source to 'generated_equilibrium_kernel.cu'")
             except Exception as e:
                 print(f"[GPU] DEBUG: Could not save kernel source: {e}")
             
@@ -2026,7 +2082,8 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         _gpu_module_cache[cache_key] = module
     else:
         if verbose:
-            print(f"[GPU] Cache hit for key: {cache_key}. Using existing module.")
+            print(f"[GPU] Cache HIT - reusing compiled module for same phases/components")
+            print(f"[GPU] Cache key: {cache_key}")
         module = _gpu_module_cache[cache_key]
     
     # CRITICAL: Call the global PhaseRecord initialization kernel every time
@@ -2312,6 +2369,30 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     # Each CompositionSet needs space for DOF values and other data
     # Estimate size: phase_record pointer (8) + NP (8) + dof array (MAX_STATEVARS + MAX_DOF_PER_PHASE)*8 + X array (MAX_COMPONENTS)*8 + etc
     compset_size_doubles = 2 + dynamic_sizes['MAX_STATEVARS'] + dynamic_sizes['MAX_DOF_PER_PHASE'] + dynamic_sizes['MAX_COMPONENTS'] + 10  # Extra for other fields
+
+    # Create WorkArrays struct for AMD compatibility (reduces kernel parameters from 28+ to 16)
+    work_arrays_ptrs = np.zeros(20, dtype=np.uint64)
+    work_arrays_ptrs[0] = global_memory_arrays['A_lstsq_copy'].data.ptr
+    work_arrays_ptrs[1] = global_memory_arrays['U_lstsq'].data.ptr
+    work_arrays_ptrs[2] = global_memory_arrays['V_lstsq'].data.ptr
+    work_arrays_ptrs[3] = global_memory_arrays['singular_values_lstsq'].data.ptr
+    work_arrays_ptrs[4] = global_memory_arrays['superdiag_lstsq'].data.ptr
+    work_arrays_ptrs[5] = global_memory_arrays['U_inv'].data.ptr
+    work_arrays_ptrs[6] = global_memory_arrays['V_inv'].data.ptr
+    work_arrays_ptrs[7] = global_memory_arrays['singular_values_inv'].data.ptr
+    work_arrays_ptrs[8] = global_memory_arrays['superdiag_inv'].data.ptr
+    work_arrays_ptrs[9] = global_memory_arrays['work_inv'].data.ptr
+    work_arrays_ptrs[10] = global_memory_arrays['x_dof'].data.ptr
+    work_arrays_ptrs[11] = global_memory_arrays['grad'].data.ptr
+    work_arrays_ptrs[12] = global_memory_arrays['hess'].data.ptr
+    work_arrays_ptrs[13] = global_memory_arrays['masses'].data.ptr
+    work_arrays_ptrs[14] = global_memory_arrays['mass_jac'].data.ptr
+    work_arrays_ptrs[15] = global_memory_arrays['phase_matrix'].data.ptr
+    work_arrays_ptrs[16] = global_memory_arrays['equilibrium_matrix'].data.ptr
+    work_arrays_ptrs[17] = global_memory_arrays['equilibrium_rhs'].data.ptr
+    work_arrays_ptrs[18] = global_memory_arrays['eq_soln'].data.ptr
+    work_arrays_ptrs[19] = global_memory_arrays['system_states'].data.ptr
+    work_arrays_gpu = cp.asarray(work_arrays_ptrs)
     global_memory_arrays['removed_compsets'] = cp.zeros((total_threads_for_allocation, dynamic_sizes['MAX_PHASES'] * compset_size_doubles), dtype=cp.float64)
     global_memory_arrays['compsets_before_solve'] = cp.zeros((total_threads_for_allocation, dynamic_sizes['MAX_PHASES'] * compset_size_doubles), dtype=cp.float64)
     global_memory_arrays['compsets_before_final_solve'] = cp.zeros((total_threads_for_allocation, dynamic_sizes['MAX_PHASES'] * compset_size_doubles), dtype=cp.float64)
@@ -2392,35 +2473,6 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     if wks_obj.verbose:
         print(f"[GPU] Passing to kernel: condition_data_stride={condition_data_stride} (max_statevars={max_statevars_scalar} + max_components={max_components_scalar})")
     
-    # Create WorkArrays struct to pack all array pointers (for AMD GPU compatibility)
-    # This reduces kernel parameters from 28+ to ~16
-    # Create a simple array of pointers that will be cast to WorkArrays struct in kernel
-    work_arrays_ptrs = np.zeros(20, dtype=np.uint64)
-    work_arrays_ptrs[0] = global_memory_arrays['A_lstsq_copy'].data.ptr
-    work_arrays_ptrs[1] = global_memory_arrays['U_lstsq'].data.ptr
-    work_arrays_ptrs[2] = global_memory_arrays['V_lstsq'].data.ptr
-    work_arrays_ptrs[3] = global_memory_arrays['singular_values_lstsq'].data.ptr
-    work_arrays_ptrs[4] = global_memory_arrays['superdiag_lstsq'].data.ptr
-    work_arrays_ptrs[5] = global_memory_arrays['U_inv'].data.ptr
-    work_arrays_ptrs[6] = global_memory_arrays['V_inv'].data.ptr
-    work_arrays_ptrs[7] = global_memory_arrays['singular_values_inv'].data.ptr
-    work_arrays_ptrs[8] = global_memory_arrays['superdiag_inv'].data.ptr
-    work_arrays_ptrs[9] = global_memory_arrays['work_inv'].data.ptr
-    work_arrays_ptrs[10] = global_memory_arrays['x_dof'].data.ptr
-    work_arrays_ptrs[11] = global_memory_arrays['grad'].data.ptr
-    work_arrays_ptrs[12] = global_memory_arrays['hess'].data.ptr
-    work_arrays_ptrs[13] = global_memory_arrays['masses'].data.ptr
-    work_arrays_ptrs[14] = global_memory_arrays['mass_jac'].data.ptr
-    work_arrays_ptrs[15] = global_memory_arrays['phase_matrix'].data.ptr
-    work_arrays_ptrs[16] = global_memory_arrays['equilibrium_matrix'].data.ptr
-    work_arrays_ptrs[17] = global_memory_arrays['equilibrium_rhs'].data.ptr
-    work_arrays_ptrs[18] = global_memory_arrays['eq_soln'].data.ptr
-    work_arrays_ptrs[19] = global_memory_arrays['system_states'].data.ptr
-
-    # Copy to GPU
-    work_arrays_gpu = cp.asarray(work_arrays_ptrs)
-    gpu_arrays.append(work_arrays_gpu)  # Keep reference to prevent garbage collection
-
     # Now use the proper struct pointers for the kernel call
     # Try different argument formats to see which one works
     if debug_enabled:
@@ -2440,7 +2492,8 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             debug_arrays['convergence_history'].data.ptr,  # int* debug_convergence_history
             debug_arrays['iteration_count'].data.ptr,      # int* debug_iteration_count
             debug_step_count,                    # int debug_max_steps
-            work_arrays_gpu.data.ptr             # const WorkArrays* work_arrays - packed struct
+            # WorkArrays struct containing all 20 global memory arrays
+            work_arrays_gpu.data.ptr            # const WorkArrays* work_arrays
         )
     else:
         kernel_args_v1 = (
@@ -2456,7 +2509,8 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             grid_data_ptr_for_kernel,           # const DeviceGrid* grid_data_ptr
             0, 0, 0, 0,                         # null debug arrays (4 pointers)
             0,                                  # debug_max_steps = 0 when debug disabled
-            work_arrays_gpu.data.ptr             # const WorkArrays* work_arrays - packed struct
+            # WorkArrays struct containing all 20 global memory arrays
+            work_arrays_gpu.data.ptr            # const WorkArrays* work_arrays
         )
     
     # Alternative: try passing arrays directly instead of pointers

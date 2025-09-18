@@ -1,10 +1,15 @@
 #pragma once
 #include <math.h>       // For fabs, fmax, fmin, etc.
 #include <float.h>      // For DBL_EPSILON if needed
+#include <string.h>     // For memset
 #include "phase_rec.h" // PhaseRecord definition
 #include "comp_set.h" // CompositionSet definition
 #include "lu_solver.h" // LU decomposition solver
 #include "debug_gpu.h" // GPU debug system
+
+// Forward declarations for types defined in eqsolver.h
+struct DeviceGrid;
+struct DevicePhaseData;
 
 // Forward declare SVD functions (actual definitions in svd.c will be included at compile time)
 __device__ int Singular_Value_Decomposition(double* A, int nrows, int ncols, double* U, 
@@ -28,6 +33,10 @@ __device__ void lstsq(double* A, int nrows, int ncols, double* b, double toleran
 #define MIN_SITE_FRACTION 1e-14
 #define MIN_PHASE_FRACTION 1e-6
 #define COMP_DIFFERENCE_TOL 1e-4
+
+#ifndef MAX_EQ_SOLN_LEN
+#define MAX_EQ_SOLN_LEN 50
+#endif
 #define INTERNAL_CONSTRAINT_SCALING 1.0
 #define MAX_ENDMEMBER_PAIRS 5000
 #define MAX_EXTRA_POINTS 90000
@@ -58,6 +67,22 @@ struct SystemState;
 // struct CompositionSet; // Already defined in comp_set.h
 // struct PhaseRecord; // Already defined in phase_rec.h
 
+// Define the matrix dimensions first
+#define MAX_SVD_DIM (MAX_PHASES + MAX_FIXED_MOLE_FRACTION_CONDITIONS + MAX_COMPONENTS + MAX_STATEVARS + 2)
+#define MAX_SVD_M MAX_SVD_DIM
+#define MAX_SVD_N MAX_SVD_DIM
+#define MAX_PHASE_MATRIX_DIM (MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS)
+
+// Maximum number of threads that can run simultaneously
+// This should be at least as large as the maximum number of conditions
+#ifndef MAX_THREADS
+#define MAX_THREADS 1024
+#endif
+
+// Note: All work arrays for lstsq are now allocated by Python and passed as kernel parameters
+// This allows for dynamic allocation based on the actual number of conditions
+// Each thread gets its own slice of these arrays to avoid race conditions
+
 // Corresponds to SystemSpecification in minimizer.pyx
 #ifdef __cplusplus
 extern "C" {
@@ -86,24 +111,12 @@ typedef struct SystemSpecification {
     int max_num_free_stable_phases;
     double ALLOWED_MASS_RESIDUAL;
 
-    #define MAX_SVD_DIM (MAX_PHASES + MAX_FIXED_MOLE_FRACTION_CONDITIONS + MAX_COMPONENTS + MAX_STATEVARS + 2)
-    #define MAX_SVD_M MAX_SVD_DIM
-    #define MAX_SVD_N MAX_SVD_DIM
+    // Work arrays removed - now passed as parameters from Python to functions that need them
+    // This allows for dynamic allocation based on actual number of conditions
 
-    // For invert_matrix: A is N x N, U, V are N x N, work is N*N
-    // Max N for phase_matrix: MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS (since phase_local_conditions is 0)
-    #define MAX_PHASE_MATRIX_DIM (MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS)
-
-    double A_lstsq_copy[MAX_SVD_M * MAX_SVD_N];
-    double U_lstsq[MAX_SVD_M * MAX_SVD_N];
-    double V_lstsq[MAX_SVD_N * MAX_SVD_N];
-    double singular_values_lstsq[MAX_SVD_N];
-    double superdiag_lstsq[MAX_SVD_N];
-
-    double U_inv[MAX_PHASE_MATRIX_DIM * MAX_PHASE_MATRIX_DIM];
-    double V_inv[MAX_PHASE_MATRIX_DIM * MAX_PHASE_MATRIX_DIM];
-    double singular_values_inv[MAX_PHASE_MATRIX_DIM];
-    double superdiag_inv[MAX_PHASE_MATRIX_DIM];
+    // Note: invert_matrix is no longer used (replaced by invert_matrix_lu)
+    // These SVD arrays are not needed anymore - removed to save stack space
+    // Only work_inv is still used by invert_matrix_lu
     double work_inv[MAX_PHASE_MATRIX_DIM * MAX_PHASE_MATRIX_DIM];
 
     __device__ void init(int ns, int nc, double psa,
@@ -327,13 +340,14 @@ typedef struct SystemState {
             if (compsets[i].phase_record != nullptr) { // Ensure phase_record is valid
                  cs_states[i].init(spec, &compsets[i]);
             } else {
-                // Handle error: phase_record is null. Maybe default init cs_state or mark compset invalid.
-                cs_states[i] = CompsetState(); // Default constructor
+                // Handle error: phase_record is null. Use memset to avoid temporary on stack
+                memset(&cs_states[i], 0, sizeof(CompsetState));
             }
         }
         for (int i = num_compsets; i < MAX_PHASES; ++i) {
-             cs_states[i] = CompsetState();
-             compsets[i] = CompositionSet();
+             // Use memset to avoid creating temporaries on the stack
+             memset(&cs_states[i], 0, sizeof(CompsetState));
+             memset(&compsets[i], 0, sizeof(CompositionSet));
         }
 
         for (int i = 0; i < spec->num_fixed_stable_compsets; ++i) {
@@ -1525,11 +1539,29 @@ typedef struct SystemState {
                 metastable_phase_iterations[idx] = 0;
             } else if (idx < num_compsets) { // Only increment for valid compsets
                 metastable_phase_iterations[idx]++;
+                #ifdef DEBUG_METASTABLE
+                if (condition_idx == 0 && metastable_phase_iterations[idx] > 0) {
+                    printf("[GPU] Condition 0: Phase %d now metastable for %d iterations\n", 
+                           idx, metastable_phase_iterations[idx]);
+                }
+                #endif
             }
         }
     }
 } SystemState;
 
+// Forward declaration for identify_candidate_phase_to_add function from eqsolver.h (needs to be after SystemState)
+__device__ bool identify_candidate_phase_to_add(
+    int* candidate_phase_grid_idx,
+    double* candidate_driving_force,
+    const SystemState* current_sys_state,
+    const SystemSpecification* spec,
+    const DeviceGrid* grid_data,
+    const DevicePhaseData* phase_data,
+    const double* state_variables_values,
+    double minimum_df,
+    const CompositionSet* removed_compsets,
+    int num_removed_compsets);
 
 // Function definitions (previously declared)
 
@@ -2413,18 +2445,34 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
     equilibrium_rhs[system_amount_row_idx] -= system_residual;
     
     // DEBUG: Print the complete equilibrium matrix for iteration 0
-    #ifdef VERBOSE_DEBUG
-    if (state->condition_idx == 0 && state->iteration == 0) {
-        printf("[EQUILIBRIUM_MATRIX_OUTPUT] GPU Iteration 0 (rows=%d, cols=%d):\n", total_rows, equilibrium_matrix_cols);
+    // Always print for iteration 0 to debug phase removal issue
+    if (state->iteration == 0) {
+        printf("[GPU EQUILIBRIUM MATRIX] Iteration 0 (rows=%d, cols=%d):\n", total_rows, equilibrium_matrix_cols);
+        printf("  Phase amounts before solve: ");
+        for (int i = 0; i < state->num_free_stable_compsets; i++) {
+            int idx = state->free_stable_compset_indices[i];
+            printf("phase_%d=%.6e ", idx, state->phase_amt[idx]);
+        }
+        printf("\n");
+        
         for (int row = 0; row < total_rows; row++) {
             printf("  Row %d: ", row);
             for (int col = 0; col < equilibrium_matrix_cols; col++) {
-                printf("%+e ", equilibrium_matrix[row * equilibrium_matrix_cols + col]);
+                printf("%+.6e ", equilibrium_matrix[row * equilibrium_matrix_cols + col]);
             }
-            printf("| RHS: %+e\n", equilibrium_rhs[row]);
+            printf("| RHS: %+.6e", equilibrium_rhs[row]);
+            
+            // Identify what this row represents
+            if (row < state->num_free_stable_compsets) {
+                printf(" (phase %d energy)", state->free_stable_compset_indices[row]);
+            } else if (row < state->num_free_stable_compsets + spec->num_prescribed_mole_fraction_conditions) {
+                printf(" (mole fraction constraint %d)", row - state->num_free_stable_compsets);
+            } else if (row == total_rows - 1) {
+                printf(" (system amount)");
+            }
+            printf("\n");
         }
     }
-    #endif
 }
 
 // run_loop, solve_state, advance_state, remove_and_consolidate_phases, change_phases
@@ -2516,7 +2564,7 @@ __device__ bool post_solve_hook(SystemSpecification* spec, SystemState* state) {
     return true;
 }
 
-// solve_state function removed - using solve_state_global_mem instead
+// solve_state and run_loop implementations start below
 
 __device__ void advance_state(SystemSpecification* spec, SystemState* state, const double* equilibrium_soln, int soln_length, double step_size_param) {
     int thread_id = threadIdx.x + blockIdx.x * blockDim.x;
@@ -2787,6 +2835,8 @@ __device__ bool remove_and_consolidate_phases(SystemSpecification* spec, SystemS
 
         // Remove unstable phases (matching CPU minimizer.pyx line 1328)
         if (state->phase_amt[idx1] < 1e-10) {
+            printf("[GPU] Removing phase %d (iteration %d): amount %.15e < 1e-10\n", 
+                   idx1, state->iteration, state->phase_amt[idx1]);
             // CRITICAL FIX: Check if removing this phase would leave us unable to satisfy mass balance
             // Count how many phases would remain after removal
             int phases_remaining = 0;
@@ -2844,19 +2894,25 @@ __device__ bool remove_and_consolidate_phases(SystemSpecification* spec, SystemS
                 }
             }
             
-            // Debug: Log consolidation check
-            #ifdef VERBOSE_DEBUG
-            if (thread_id == 0 && state->iteration < 5) {
-                printf("  Checking phases %d and %d for consolidation:\n", idx1, idx2);
-                printf("    Max composition diff: %.6f (threshold: %.6f)\n", max_diff, COMPSET_CONSOLIDATE_DISTANCE);
-                printf("    Phase compositions: [%.6f, %.6f] vs [%.6f, %.6f]\n",
+            // Debug: Log consolidation check - always print for first condition
+            if (compset1->phase_record == compset2->phase_record) {
+                printf("[GPU] Iteration %d: Checking phases %d and %d (same type) for consolidation:\n", 
+                       state->iteration, idx1, idx2);
+                printf("    Compositions: [%.6f, %.6f, %.6f] vs [%.6f, %.6f, %.6f]\n",
                        state->phase_compositions[idx1 * MAX_COMPONENTS + 0],
                        state->phase_compositions[idx1 * MAX_COMPONENTS + 1],
+                       state->phase_compositions[idx1 * MAX_COMPONENTS + 2],
                        state->phase_compositions[idx2 * MAX_COMPONENTS + 0],
-                       state->phase_compositions[idx2 * MAX_COMPONENTS + 1]);
+                       state->phase_compositions[idx2 * MAX_COMPONENTS + 1],
+                       state->phase_compositions[idx2 * MAX_COMPONENTS + 2]);
+                printf("    Max diff: %.8f (threshold: %.8f)\n", max_diff, COMPSET_CONSOLIDATE_DISTANCE);
+                printf("    Amounts: %.6f vs %.6f\n", state->phase_amt[idx1], state->phase_amt[idx2]);
                 printf("    Should consolidate: %s\n", should_consolidate ? "YES" : "NO");
-                
-                // DEBUG: Also show site fractions
+            }
+            
+            #ifdef VERBOSE_DEBUG
+            if (thread_id == 0 && state->iteration < 5) {
+                // Keep original verbose debug
                 if (should_consolidate && state->iteration == 0) {
                     CompositionSet* cs1 = &state->compsets[idx1];
                     CompositionSet* cs2 = &state->compsets[idx2];
@@ -3029,7 +3085,8 @@ __device__ bool remove_and_consolidate_phases(SystemSpecification* spec, SystemS
     return phases_changed;
 }
 
-__device__ bool change_phases(SystemSpecification* spec, SystemState* state) {
+__device__ bool change_phases(SystemSpecification* spec, SystemState* state, 
+                              const DeviceGrid* grid_data, const DevicePhaseData* phase_data) {
     int thread_id = threadIdx.x + blockIdx.x * blockDim.x;
     #ifdef VERBOSE_DEBUG
     if (thread_id == 0) {
@@ -3087,6 +3144,12 @@ __device__ bool change_phases(SystemSpecification* spec, SystemState* state) {
         if (state->metastable_phase_iterations[cs_idx] >= MIN_REQUIRED_METASTABLE_PHASE_ITERATIONS_TO_ADD &&
             current_driving_forces[cs_idx] > MIN_DRIVING_FORCE_TO_ADD &&
             state->times_compset_removed[cs_idx] < MAX_ALLOWED_TIMES_COMPSET_REMOVED) {
+            #ifdef DEBUG_METASTABLE
+            if (condition_idx == 0) {
+                printf("[GPU] Condition 0: Phase %d metastable for %d iters, df=%e, will add\n", 
+                       cs_idx, state->metastable_phase_iterations[cs_idx], current_driving_forces[cs_idx]);
+            }
+            #endif
             if (num_to_add < MAX_PHASES) compsets_to_add_indices[num_to_add++] = cs_idx;
         }
     }
@@ -3176,6 +3239,7 @@ __device__ bool change_phases(SystemSpecification* spec, SystemState* state) {
 
     if (current_free_set_changed_flag) phases_changed = true;
 
+
     state->num_free_stable_compsets = final_free_count;
     #ifdef VERBOSE_DEBUG
     if (thread_id == 0) {
@@ -3224,7 +3288,622 @@ __device__ bool change_phases(SystemSpecification* spec, SystemState* state) {
 }
 
 
-// run_loop function removed - using run_loop_global_mem from gpu_codegen.py instead
+// run_loop function removed - moved here from gpu_codegen.py
+
+// --- GLOBAL MEMORY VERSION OF SOLVE_STATE ---
+// This function implements solve_state using global memory arrays
+__device__ void solve_state(
+    SystemSpecification* spec, 
+    SystemState* state, 
+    double* out_equilibrium_soln, 
+    int soln_length,
+    double* equilibrium_matrix,  // global memory
+    double* equilibrium_rhs,     // global memory
+    double* A_lstsq_copy,       // global memory for SVD
+    double* U_lstsq,
+    double* V_lstsq,
+    double* singular_values_lstsq,
+    double* superdiag_lstsq,
+    int thread_id               // Pass thread_id for debug output
+) {
+    // IMPLEMENTATION: This mirrors the original solve_state but uses global memory arrays
+    
+    // Calculate matrix dimensions
+    // CRITICAL FIX: Add +1 back to match CPU matrix dimensions exactly
+    // CPU DOES include a system amount constraint row (with [1,1,1] for phase amounts)
+    int equilibrium_matrix_rows = state->num_free_stable_compsets + 
+                                 spec->num_fixed_stable_compsets + 
+                                 spec->num_prescribed_mole_fraction_conditions + 1;
+    // CRITICAL FIX: Use num_free_chemical_potentials which now equals ALL non-VA components
+    // CPU uses all non-VA components as columns, not just mathematically independent ones
+    // This fixes the matrix dimension mismatch (CPU 6x6 vs GPU 5x5 for ternary)
+    int equilibrium_matrix_cols = spec->num_free_chemical_potentials +  // All non-VA components 
+                                 state->num_free_stable_compsets + 
+                                 spec->num_free_statevars;
+    
+    // DEBUG: Print matrix size calculation
+    if (state->iteration < 5 && thread_id == 0) {
+        #ifdef VERBOSE_DEBUG
+        printf("[GPU MATRIX SIZE] Iteration %d: num_free_stable_compsets=%d, fixed=%d, mole_frac_conds=%d\n",
+               state->iteration, state->num_free_stable_compsets, spec->num_fixed_stable_compsets,
+               spec->num_prescribed_mole_fraction_conditions);
+        printf("  Matrix dimensions: %dx%d (cols = %d + %d + %d)\n", 
+               equilibrium_matrix_rows, equilibrium_matrix_cols,
+               spec->num_free_chemical_potentials, state->num_free_stable_compsets, spec->num_free_statevars);
+        #endif
+    }
+    
+    // CRITICAL: Call recompute at the beginning of solve_state, just like CPU does
+    // This ensures all CompsetState arrays (masses, jacobians, energies) are up-to-date
+    
+    // DEBUG: Verify spec pointer before calling recompute
+    if (thread_id == 0) {
+        #ifdef VERBOSE_DEBUG
+        printf("GPU DEBUG: solve_state - spec=%p, spec->num_statevars=%d\n", 
+               spec, spec->num_statevars);
+        #endif
+        if (spec->num_statevars < 0 || spec->num_statevars > 10) {
+            printf("GPU ERROR: spec appears corrupted in solve_state!\n");
+            printf("  spec->num_statevars=%d (0x%X)\n", spec->num_statevars, spec->num_statevars);
+            printf("  spec->num_components=%d\n", spec->num_components);
+            // Try to continue anyway
+        }
+    }
+    
+    state->recompute(spec);
+    
+    // The old manual update loop is not needed since recompute handles everything
+    
+    // CRITICAL FIX: Update state->system_amount to reflect current phase amounts
+    // The issue is that state->system_amount stays at 1.0 while phase_amt grows exponentially
+    // This causes the system amount constraint to be wrong
+    state->system_amount = 0.0;
+    for (int cs_idx = 0; cs_idx < state->num_compsets; ++cs_idx) {
+        state->system_amount += state->phase_amt[cs_idx];
+    }
+    
+    // CRITICAL FIX: Manually zero the equilibrium matrix AND RHS before calling fill_equilibrium_system
+    // This is needed because these arrays are in global memory and persist across iterations
+    // When matrix size changes (e.g., 4x4 to 3x3 after phase consolidation), old values remain!
+    for (int i = 0; i < equilibrium_matrix_rows * equilibrium_matrix_cols; ++i) {
+        equilibrium_matrix[i] = 0.0;
+    }
+    for (int i = 0; i < equilibrium_matrix_rows; ++i) {
+        equilibrium_rhs[i] = 0.0;
+    }
+    
+    // Call fill_equilibrium_system with global memory arrays
+    fill_equilibrium_system(equilibrium_matrix, equilibrium_matrix_cols,
+                           equilibrium_rhs, spec, state);
+    
+    // DEBUG: Check RHS after fill_equilibrium_system
+    #ifdef VERBOSE_DEBUG
+    if (thread_id == 0 && state->iteration < 3) {
+        printf("  RHS after fill_equilibrium_system: [");
+        // Print ALL rows of RHS
+        for (int i = 0; i < equilibrium_matrix_rows; ++i) {
+            printf("%.2e", equilibrium_rhs[i]);
+            if (i < equilibrium_matrix_rows - 1) printf(", ");
+        }
+        printf("]\n");
+    }
+    #endif
+    
+    // DEBUG: Disabled to avoid compilation issues
+    // if (iteration_count == 0 && thread_id == 0) { printf("GPU DEBUG\n"); }
+    
+    // Use global memory arrays for SVD solve
+    // This replaces the local arrays that were causing stack overflow
+    
+    // First copy equilibrium_matrix to A_lstsq_copy to preserve original
+    int matrix_size = equilibrium_matrix_rows * equilibrium_matrix_cols;
+    for (int i = 0; i < matrix_size; ++i) {
+        A_lstsq_copy[i] = equilibrium_matrix[i];
+    }
+    
+    // DEBUG: Check matrix dimensions and content before SVD
+    // Note: state->iteration might be available instead of iteration_count
+    if (thread_id == 0 && state->iteration < 3) {
+        #ifdef VERBOSE_DEBUG
+        printf("\n[EQUILIBRIUM_MATRIX_OUTPUT] GPU Iteration %d (rows=%d, cols=%d):\n", 
+               state->iteration, equilibrium_matrix_rows, equilibrium_matrix_cols);
+        // ALWAYS print ALL rows of the matrix
+        for (int i = 0; i < equilibrium_matrix_rows; ++i) {
+            printf("  Row %d: ", i);
+            // Print ALL columns too
+            for (int j = 0; j < equilibrium_matrix_cols; ++j) {
+                printf("%+.6e ", equilibrium_matrix[i * equilibrium_matrix_cols + j]);
+            }
+            printf("| RHS: %+.6e\n", equilibrium_rhs[i]);
+        }
+        printf("  system_amount=%.6f, prescribed=%.6f\n", 
+               state->system_amount, spec->prescribed_system_amount);
+        #endif
+    }
+    
+    // Call lstsq with correct signature
+    // CRITICAL FIX: Use same tolerance as CPU (1e-16) instead of 1e-12
+    lstsq(A_lstsq_copy, equilibrium_matrix_rows, equilibrium_matrix_cols, 
+          equilibrium_rhs, 1e-16, 
+          U_lstsq, V_lstsq, singular_values_lstsq, superdiag_lstsq);
+    
+    // The solution should be in equilibrium_rhs after lstsq completes
+    
+    // DEBUG: Check if lstsq produced a non-zero solution
+    #ifdef VERBOSE_DEBUG
+    if (thread_id == 0 && state->iteration < 3) {
+        printf("  RHS after lstsq (solution): [");
+        // Print ALL solution values
+        for (int i = 0; i < equilibrium_matrix_cols; ++i) {
+            printf("%.2e", equilibrium_rhs[i]);
+            if (i < equilibrium_matrix_cols - 1) printf(", ");
+        }
+        printf("]\n");
+    }
+    #endif
+    // Copy back to output solution
+    for (int i = 0; i < soln_length && i < equilibrium_matrix_cols; ++i) {
+        out_equilibrium_soln[i] = equilibrium_rhs[i];
+    }
+    
+    // CRITICAL FIX: Update chemical potentials from the solution
+    // The equilibrium solution contains NEW chemical potential values (not deltas)
+    // This matches CPU behavior at minimizer.pyx line 1250
+    for (int i = 0; i < spec->num_free_chemical_potentials; ++i) {
+        int chempot_idx = spec->free_chemical_potential_indices[i];
+        state->chemical_potentials[chempot_idx] = out_equilibrium_soln[i];
+    }
+    
+    // Force fixed chemical potentials to adopt their fixed values
+    for (int i = 0; i < spec->num_fixed_chemical_potentials; ++i) {
+        int comp_idx = spec->fixed_chemical_potential_indices[i];
+        if (comp_idx >= 0 && comp_idx < spec->num_components) {
+            state->chemical_potentials[comp_idx] = spec->initial_chemical_potentials[comp_idx];
+        }
+    }
+    
+    // Calculate largest chemical potential difference for convergence check
+    state->largest_chemical_potential_difference = -INFINITY;
+    for (int comp_idx = 0; comp_idx < spec->num_components; ++comp_idx) {
+        double diff = fabs(state->chemical_potentials[comp_idx] - state->previous_chemical_potentials[comp_idx]);
+        if (diff > state->largest_chemical_potential_difference) {
+            state->largest_chemical_potential_difference = diff;
+        }
+    }
+}
+
+// --- GLOBAL MEMORY VERSION OF RUN_LOOP ---
+// This function implements the sophisticated run_loop using global memory arrays
+// to avoid stack overflow while maintaining all the sophisticated solver logic
+__device__ bool run_loop(
+    int thread_id,              // Add thread_id parameter for debug output
+    SystemSpecification* spec, 
+    SystemState* state, 
+    int max_iterations,
+    const DeviceGrid* grid_data,     // Add grid data for phase search
+    const DevicePhaseData* phase_data,  // Add phase data for phase search
+    // Global memory arrays to replace stack arrays
+    double* equilibrium_matrix,  // replaces local equilibrium matrix
+    double* equilibrium_rhs,     // replaces local equilibrium RHS  
+    double* eq_soln,            // replaces local solution vector
+    double* A_lstsq_copy,       // replaces local SVD arrays
+    double* U_lstsq,
+    double* V_lstsq,
+    double* singular_values_lstsq,
+    double* superdiag_lstsq,
+    double* masses,             // replaces local masses arrays
+    double* mass_jac,           // replaces local jacobian arrays
+    double* x_dof,              // replaces local DOF arrays
+    double* grad,               // replaces local gradient arrays
+    double* hess                // replaces local hessian arrays
+) {
+    // IMPLEMENTATION: This mirrors the original run_loop but uses global memory arrays
+    
+    if (thread_id == 0) {
+        #ifdef VERBOSE_DEBUG
+        printf("GPU DEBUG: run_loop STARTED with max_iterations=%d\n", max_iterations);
+        #endif
+    }
+    
+    double step_size = 1.0;
+    bool converged = false;
+    bool phases_changed_iter;
+    
+    // Use global memory for eq_soln instead of local array
+    int eq_soln_len;
+    
+    // DEBUG: Store initial values before loop starts (removed debug_gm_history references)
+    // The debug variables debug_gm_history and debug_max_steps are not available in this function scope
+    
+    const int DEBUG_ENABLED = 0;  // Set to 1 to enable debug output
+    
+    for (int iteration_count = 0; iteration_count < max_iterations; ++iteration_count) {
+        if (thread_id == 0 && iteration_count % 50 == 0) {
+            #ifdef VERBOSE_DEBUG
+            printf("\nGPU DEBUG: Iteration %d/%d\n", iteration_count, max_iterations);
+            #endif
+        }
+        state->iteration = iteration_count;
+        phases_changed_iter = false;
+        
+        // DEBUG: Mark that we entered the iteration loop (removed debug_gm_history references)
+        if (DEBUG_ENABLED && thread_id == 0 && iteration_count == 0) {
+            #ifdef VERBOSE_DEBUG
+            printf("\nGPU DEBUG: ===== ITERATION 0 (DETAILED) =====\n");
+            printf("GPU DEBUG: State before iteration:\n");
+            printf("GPU DEBUG:   Chemical potentials: [%.6f, %.6f]\n", 
+                   state->chemical_potentials[0], state->chemical_potentials[1]);
+            #endif
+            #ifdef VERBOSE_DEBUG
+            printf("GPU DEBUG:   Number of phases: %d\n", state->num_free_stable_compsets);
+            printf("GPU DEBUG:   Free stable indices: ");
+            for (int i = 0; i < state->num_free_stable_compsets; ++i) {
+                printf("%d ", state->free_stable_compset_indices[i]);
+            }
+            printf("\n");
+            printf("GPU DEBUG:   System amount: %.6f\n", state->system_amount);
+            printf("GPU DEBUG:   Mole fractions: [%.6f, %.6f]\n", 
+                   state->mole_fractions[0], state->mole_fractions[1]);
+            #endif
+            
+            // Details for each phase
+            for (int i = 0; i < state->num_free_stable_compsets; ++i) {
+                int idx = state->free_stable_compset_indices[i];
+                CompositionSet* cs = &state->compsets[idx];
+                CompsetState* css = &state->cs_states[idx];
+                #ifdef VERBOSE_DEBUG
+                printf("GPU DEBUG:   Phase %d:\n", idx);
+                printf("GPU DEBUG:     NP=%.6f\n", cs->NP);
+                printf("GPU DEBUG:     phase_amt=%.6f (formula units)\n", state->phase_amt[idx]);
+                printf("GPU DEBUG:     energy=%.6f\n", css->energy);
+                printf("GPU DEBUG:     dof=[%.15f, %.15f, %.15f]\n", 
+                       cs->dof[0], cs->dof[1], cs->dof[2]);
+                printf("GPU DEBUG:     phase_compositions=[%.6f, %.6f]\n",
+                       state->phase_compositions[idx * MAX_COMPONENTS + 0],
+                       state->phase_compositions[idx * MAX_COMPONENTS + 1]);
+                #endif
+                // Calculate phase_comp_sum
+                double phase_comp_sum = 0.0;
+                for (int j = 0; j < spec->num_components; ++j) {
+                    phase_comp_sum += state->phase_compositions[idx * MAX_COMPONENTS + j];
+                }
+                #ifdef VERBOSE_DEBUG
+                printf("GPU DEBUG:     phase_comp_sum=%.6f\n", phase_comp_sum);
+                printf("GPU DEBUG:     phase_amt * phase_comp_sum=%.6f\n", 
+                       state->phase_amt[idx] * phase_comp_sum);
+                #endif
+            }
+        } else if (thread_id == 0) {
+            #ifdef VERBOSE_DEBUG
+            printf("GPU DEBUG: Entered iteration loop, max_iterations=%d\n", max_iterations);
+            #endif
+        }
+        
+        // SEGMENT 21: PRE-SOLVE HOOK
+        if (thread_id < 3 && iteration_count < 3) {
+            #ifdef VERBOSE_DEBUG
+            printf("[GPU] SEGMENT 21: Pre-solve hook (condition %d, iteration %d)\n", thread_id, iteration_count);
+            #endif
+        }
+        
+        // Call pre_solve_hook (this should be safe, no large arrays)
+        bool pre_hook_result = pre_solve_hook(spec, state);
+        if (!pre_hook_result) {
+            // DEBUG: Mark pre_solve_hook failure (removed debug_gm_history references)
+            if (thread_id == 0) {
+                #ifdef VERBOSE_DEBUG
+                printf("GPU DEBUG: pre_solve_hook failed!\n");
+                #endif
+            }
+            break;
+        }
+        
+        // SEGMENT 22: STATE RECOMPUTATION
+        if (thread_id < 3 && iteration_count < 3) {
+            #ifdef VERBOSE_DEBUG
+            printf("[GPU] SEGMENT 22: State recomputation (condition %d)\n", thread_id);
+            printf("[GPU]   num_phases_active: %d\n", state->num_free_stable_compsets);
+            for (int i = 0; i < state->num_free_stable_compsets; ++i) {
+                int idx = state->free_stable_compset_indices[i];
+                CompositionSet* cs = &state->compsets[idx];
+                printf("[GPU]   phase_%d: NP=%.15e, X=[%.6f, %.6f] (reading from indices %d, %d)\n",
+                       idx, state->phase_amt[idx],
+                       state->phase_compositions[idx * MAX_COMPONENTS + 0],
+                       state->phase_compositions[idx * MAX_COMPONENTS + 1],
+                       idx * MAX_COMPONENTS + 0,
+                       idx * MAX_COMPONENTS + 1);
+                if (idx == 1 && thread_id == 0 && iteration_count == 0) {
+                    printf("[GPU]   DEBUG: phase_compositions array around phase 1:\n");
+                    for (int j = 0; j < 8; ++j) {
+                        printf("    [%d] = %f\n", j, state->phase_compositions[j]);
+                    }
+                }
+            }
+            #endif
+        }
+        
+        // NOTE: recompute is called inside solve_state, matching CPU behavior
+        // Do NOT call it here to avoid double recomputation
+        
+        eq_soln_len = spec->num_free_chemical_potentials + state->num_free_stable_compsets + spec->num_free_statevars;
+        
+        // DEBUG: Store eq_soln_len calculation (removed debug_gm_history references)
+        if (thread_id == 0 && iteration_count == 0) {
+            #ifdef VERBOSE_DEBUG
+            printf("GPU DEBUG: eq_soln_len=%d (chem_pot=%d + compsets=%d + statevars=%d)\n", 
+                   eq_soln_len, spec->num_free_chemical_potentials, 
+                   state->num_free_stable_compsets, spec->num_free_statevars);
+            #endif
+        }
+        
+        if (eq_soln_len > MAX_EQ_SOLN_LEN || eq_soln_len <= 0) {
+            // DEBUG: Mark eq_soln_len failure (removed debug_gm_history references)
+            if (thread_id == 0) {
+                #ifdef VERBOSE_DEBUG
+                printf("GPU DEBUG: eq_soln_len check failed! eq_soln_len=%d, MAX_EQ_SOLN_LEN=%d\n", 
+                       eq_soln_len, MAX_EQ_SOLN_LEN);
+                #endif
+            }
+            converged = false;
+            break;
+        }
+        
+        // DEBUG: Mark that we passed eq_soln_len check (removed debug_gm_history references)
+        
+        // DEBUG: Before solve_state - check state (DISABLED)
+        // if (thread_id == 0) {
+        //     printf("GPU DEBUG iter %d: num_compsets=%d, num_free_stable=%d\n", 
+        //            iteration_count, state->num_compsets, state->num_free_stable_compsets);
+        // }
+        
+        // SEGMENT 27-30: SOLVE STATE
+        if (thread_id < 3 && iteration_count < 3) {
+            #ifdef VERBOSE_DEBUG
+            printf("[GPU] SEGMENT 27: Construct equilibrium system (condition %d)\n", thread_id);
+            #endif
+        }
+        
+        // Call solve_state with global memory arrays
+        solve_state(spec, state, eq_soln, eq_soln_len, 
+                   equilibrium_matrix, equilibrium_rhs, 
+                   A_lstsq_copy, U_lstsq, V_lstsq, 
+                   singular_values_lstsq, superdiag_lstsq, thread_id);
+        
+        // DEBUG: After solve_state
+        if ((iteration_count < 3 || iteration_count % 50 == 0) && thread_id == 0) { 
+            #ifdef VERBOSE_DEBUG
+            printf("GPU DEBUG: Equilibrium solution at iteration %d (len=%d): [", iteration_count, eq_soln_len);
+            for (int i = 0; i < eq_soln_len && i < 10; ++i) {
+                printf("%.6e", eq_soln[i]);
+                if (i < eq_soln_len - 1) printf(", ");
+            }
+            if (eq_soln_len > 10) printf("...");
+            printf("]\n");
+            
+            // Check if solution is all zeros
+            bool all_zeros = true;
+            for (int i = 0; i < eq_soln_len; ++i) {
+                if (fabs(eq_soln[i]) > 1e-15) {
+                    all_zeros = false;
+                    break;
+                }
+            }
+            if (all_zeros) {
+                printf("GPU DEBUG: WARNING - Equilibrium solution is all zeros!\n");
+            }
+            
+            printf("GPU DEBUG: After solve_state:\n");
+            printf("GPU DEBUG:   Chemical potentials: [%.6f, %.6f]\n", 
+                   state->chemical_potentials[0], state->chemical_potentials[1]);
+            
+            // Details for each phase after solve
+            for (int i = 0; i < state->num_free_stable_compsets; ++i) {
+                int idx = state->free_stable_compset_indices[i];
+                CompositionSet* cs = &state->compsets[idx];
+                printf("GPU DEBUG:   Phase %d:\n", idx);
+                printf("GPU DEBUG:     phase_amt=%.6f (formula units)\n", state->phase_amt[idx]);
+                printf("GPU DEBUG:     NP=%.6f\n", cs->NP);
+                printf("GPU DEBUG:     dof=[%.15f, %.15f, %.15f]\n", 
+                       cs->dof[0], cs->dof[1], cs->dof[2]);
+            }
+            #endif
+        }
+        
+        // SEGMENT 33: POST SOLVE HOOK (matching CPU order)
+        if (thread_id < 3 && iteration_count < 3) {
+            #ifdef VERBOSE_DEBUG
+            printf("[GPU] SEGMENT 33: Post solve hook\n");
+            #endif
+        }
+        
+        // Call post_solve_hook first (matching CPU behavior)
+        if (!post_solve_hook(spec, state)) {
+            if (thread_id < 3 && iteration_count < 3) {
+                #ifdef VERBOSE_DEBUG
+                printf("[GPU]   post_solve_hook_returned_false\n");
+                #endif
+            }
+            break;
+        }
+        
+        if (thread_id < 3 && iteration_count < 3) {
+            #ifdef VERBOSE_DEBUG
+            printf("[GPU]   post_solve_hook_returned_true\n");
+            #endif
+        }
+        
+        // SEGMENT 34: REMOVE AND CONSOLIDATE PHASES (before advance_state to match CPU)
+        if (thread_id < 3 && iteration_count < 3) {
+            #ifdef VERBOSE_DEBUG
+            printf("[GPU] SEGMENT 34: Remove and consolidate phases\n");
+            #endif
+        }
+        
+        // NOTE: Phase compositions are calculated in solve_state->recompute()
+        // We use those compositions for consolidation checks to match CPU behavior
+        
+        // Phase change operations (these should be safe, no large arrays)
+        if (remove_and_consolidate_phases(spec, state)) {
+            phases_changed_iter = true;
+            if (thread_id < 3 && iteration_count < 3) {
+                #ifdef VERBOSE_DEBUG
+                printf("[GPU]   phases_removed: true\n");
+                #endif
+            }
+        }
+        
+        // SEGMENT 32: CHECK CONVERGENCE
+        if (thread_id < 3 && iteration_count < 3) {
+            #ifdef VERBOSE_DEBUG
+            printf("[GPU] SEGMENT 32: Check convergence\n");
+            #endif
+        }
+        bool convergence_result = check_convergence(spec, state);
+        if (thread_id == 0 && (iteration_count < 3 || iteration_count % 50 == 0 || convergence_result)) {
+            #ifdef VERBOSE_DEBUG
+            printf("GPU DEBUG: Convergence check at iteration %d:\n", iteration_count);
+            printf("  largest_phase_amt_change=%.2e (limit 1e-10)\n", state->largest_phase_amt_change);
+            printf("  largest_y_change=%.2e (limit 5e-09)\n", state->largest_y_change);
+            printf("  largest_statevar_change=%.2e (limit 1e-5)\n", state->largest_statevar_change);
+            printf("  mass_residual=%.2e (limit %.2e)\n", state->mass_residual, spec->ALLOWED_MASS_RESIDUAL);
+            printf("  iterations_since_last_phase_change=%d (need >=5)\n", state->iterations_since_last_phase_change);
+            printf("  Converged: %s\n", convergence_result ? "YES" : "NO");
+            #endif
+        }
+        
+        if (convergence_result) {
+            // Try to add phases if converged
+            if (change_phases(spec, state, grid_data, phase_data)) {
+                phases_changed_iter = true;
+                if (thread_id < 3 && iteration_count < 3) {
+                    #ifdef VERBOSE_DEBUG
+                    printf("[GPU]   phases_added: true\n");
+                    #endif
+                }
+            }
+            
+            if (!phases_changed_iter) {
+                // Truly converged with no phase changes
+                converged = true;
+                break;
+            }
+        }
+        
+        // Update phase change tracking
+        if (phases_changed_iter) {
+            state->iterations_since_last_phase_change = 0;
+        } else {
+            state->iterations_since_last_phase_change++;
+        }
+        
+        // DEBUG: Before advance_state
+        if (thread_id < 3 && iteration_count < 3) { 
+            #ifdef VERBOSE_DEBUG
+            printf("GPU DEBUG iter %d: Before advance_state\n", iteration_count);
+            printf("  Phase amounts: [%.6f, %.6f]\n", state->phase_amt[0], state->phase_amt[1]);
+            printf("  eq_soln phase deltas: [%.6e, %.6e]\n", 
+                   eq_soln[spec->num_free_chemical_potentials], 
+                   eq_soln[spec->num_free_chemical_potentials + 1]);
+            #endif
+        }
+        
+        // SEGMENT 31: ADVANCE STATE (only if phases weren't changed)
+        if (thread_id < 3 && iteration_count < 3) {
+            #ifdef VERBOSE_DEBUG
+            printf("[GPU] SEGMENT 31: Advance state\n");
+            printf("[GPU]   step_size: %.6f\n", step_size);
+            #endif
+        }
+        
+        // CRITICAL FIX: Skip advance_state if phases changed (match CPU behavior)
+        if (!phases_changed_iter) {
+            // Call advance_state (this should be safe, no large arrays)
+            advance_state(spec, state, eq_soln, eq_soln_len, step_size);
+        } else {
+            if (thread_id < 3 && iteration_count < 3) {
+                #ifdef VERBOSE_DEBUG
+                printf("[GPU] SKIPPING advance_state due to phase changes\n");
+                #endif
+            }
+        }
+        
+        // DEBUG: Add detailed output after first iteration
+        if (iteration_count == 0 && thread_id == 0) {
+            #ifdef VERBOSE_DEBUG
+            printf("\n[GPU TRACE] ===== AFTER ITERATION 0 =====\n");
+            printf("[GPU TRACE] Chemical potentials: [");
+            for (int i = 0; i < spec->num_components; ++i) {
+                printf("%.15e", state->chemical_potentials[i]);
+                if (i < spec->num_components - 1) printf(", ");
+            }
+            printf("]\n");
+            printf("[GPU TRACE] System amount: %.15e\n", state->system_amount);
+            printf("[GPU TRACE] Mole fractions: [");
+            for (int i = 0; i < spec->num_components; ++i) {
+                printf("%.15e", state->mole_fractions[i]);
+                if (i < spec->num_components - 1) printf(", ");
+            }
+            printf("]\n");
+            printf("[GPU TRACE] Mass residual: %.15e\n", state->mass_residual);
+            printf("[GPU TRACE] Number of active phases: %d\n", state->num_free_stable_compsets);
+            printf("[GPU TRACE] Free stable indices: [");
+            for (int i = 0; i < state->num_free_stable_compsets; ++i) {
+                printf("%d", state->free_stable_compset_indices[i]);
+                if (i < state->num_free_stable_compsets - 1) printf(", ");
+            }
+            printf("]\n");
+            #endif
+            
+            #ifdef VERBOSE_DEBUG
+            for (int idx = 0; idx < state->num_free_stable_compsets; ++idx) {
+                int cs_idx = state->free_stable_compset_indices[idx];
+                CompositionSet* compset = &state->compsets[cs_idx];
+                CompsetState* csst = &state->cs_states[cs_idx];
+                
+                printf("\n[GPU TRACE] Phase %d:\n", cs_idx);
+                printf("  NP (mole fraction): %.15e\n", compset->NP);
+                printf("  phase_amt (formula units): %.15e\n", state->phase_amt[cs_idx]);
+                printf("  energy: %.15e\n", csst->energy);
+                printf("  phase_compositions: [");
+                for (int c = 0; c < spec->num_components; ++c) {
+                    printf("%.15e", state->phase_compositions[cs_idx * MAX_COMPONENTS + c]);
+                    if (c < spec->num_components - 1) printf(", ");
+                }
+                printf("]\n");
+                double phase_comp_sum = 0.0;
+                for (int c = 0; c < spec->num_components; ++c) {
+                    phase_comp_sum += state->phase_compositions[cs_idx * MAX_COMPONENTS + c];
+                }
+                printf("  phase_comp_sum: %.15e\n", phase_comp_sum);
+                printf("  Site fractions: [");
+                for (int sf = 0; sf < compset->phase_record->phase_dof; ++sf) {
+                    printf("%.15e", compset->dof[spec->num_statevars + sf]);
+                    if (sf < compset->phase_record->phase_dof - 1) printf(", ");
+                }
+                printf("]\n");
+                printf("  State variables: [");
+                for (int sv = 0; sv < spec->num_statevars; ++sv) {
+                    printf("%.15e", compset->dof[sv]);
+                    if (sv < spec->num_statevars - 1) printf(", ");
+                }
+                printf("]\n");
+            }
+            #endif
+            
+            #ifdef VERBOSE_DEBUG
+            printf("\n[GPU TRACE] Convergence status:\n");
+            printf("  converged: %s\n", converged ? "true" : "false");
+            printf("  phases_changed: %s\n", phases_changed_iter ? "true" : "false");
+            printf("  largest_phase_amt_change: %.15e\n", state->largest_phase_amt_change);
+            printf("  largest_y_change: %.15e\n", state->largest_y_change);
+            printf("  largest_statevar_change: %.15e\n", state->largest_statevar_change);
+            printf("[GPU TRACE] ===== END ITERATION 0 =====\n\n");
+            #endif
+        }
+    }
+    
+    return converged;
+}
 
 // SVD-based matrix functions using svd.c
 
@@ -3274,16 +3953,9 @@ __device__ void invert_matrix(double* matrix, int dim, double* U, double* V,
  */
 __device__ void lstsq(double* A, int nrows, int ncols, double* b, double tolerance,
                       double* U, double* V, double* singular_values, double* superdiag) {
-    // Store original A and b for residual check (similar to CPU's lstsq_check_infeasible)
-    double A_copy[MAX_SVD_M * MAX_SVD_N];
-    double b_orig[MAX_SVD_M];
-    for (int i = 0; i < nrows * ncols; ++i) {
-        A_copy[i] = A[i];
-    }
-    for (int i = 0; i < nrows; ++i) {
-        b_orig[i] = b[i];
-    }
-    
+    // Note: A is already a copy (A_lstsq_copy), so we don't need another copy
+    // b_orig was only used for residual check which has been removed
+
     // Perform SVD: A = U * S * V^T
     int svd_result = Singular_Value_Decomposition(A, nrows, ncols, U, singular_values, V, superdiag);
     
@@ -3319,20 +3991,11 @@ __device__ void lstsq(double* A, int nrows, int ncols, double* b, double toleran
     
     Singular_Value_Decomposition_Solve(U, singular_values, V, tolerance, nrows, ncols, b, temp_solution);
     
-    // Check residual to detect spurious solutions (similar to CPU's lstsq_check_infeasible)
-    double residual = 0.0;
-    for (int i = 0; i < nrows; ++i) {
-        double row_sum = 0.0;
-        for (int j = 0; j < ncols; ++j) {
-            row_sum += A_copy[i * ncols + j] * temp_solution[j];
-        }
-        double diff = row_sum - b_orig[i];
-        residual += diff * diff;
-    }
-    
+    // Residual calculation disabled to save stack space
+    // (A_copy array was removed - saves ~130*130*8 = 135KB of stack)
+
     #ifdef VERBOSE_DEBUG
     if (nrows <= 4 && ncols <= 3) {
-        printf("  Residual after solve: %.15e\n", residual);
         printf("  Solution vector:\n");
         for (int i = 0; i < ncols; ++i) {
             printf("    x[%d] = %.15e\n", i, temp_solution[i]);

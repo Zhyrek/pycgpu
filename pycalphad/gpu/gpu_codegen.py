@@ -4719,6 +4719,12 @@ __device__ void solve_equilibrium_at_condition_global_mem(
     // No cleanup needed - spec_buffer is on stack
 }}
 
+// Struct to pack all work array pointers - reduces kernel parameters for AMD compatibility
+// Using array indexing instead of named fields for simpler memory layout
+typedef struct WorkArrays {{
+    double* arrays[20];  // All the work array pointers packed together
+}} WorkArrays;
+
 // --- Back to Basics: Simple GPU kernel that mirrors successful CPU logic ---
 __global__ void top_level_equilibrium_kernel(
     const void* global_spec_ptr_raw, // CRITICAL FIX: Array of SystemSpecifications, one per condition
@@ -4734,32 +4740,12 @@ __global__ void top_level_equilibrium_kernel(
     const void* grid_data_ptr_raw, // Pointer to grid data (can be null if not using add_new/nearly_stable in kernel)
     // Debug arrays for step-by-step solver tracking (can be null if debug disabled)
     double* debug_gm_history,           // Array: [num_conditions, max_debug_steps]
-    double* debug_mu_history,           // Array: [num_conditions, max_debug_steps, MAX_COMPONENTS]  
+    double* debug_mu_history,           // Array: [num_conditions, max_debug_steps, MAX_COMPONENTS]
     int* debug_convergence_history,     // Array: [num_conditions, max_debug_steps]
     int* debug_iteration_count,         // Array: [num_conditions]
     int debug_max_steps,                // Maximum debug steps to track
-    // GLOBAL MEMORY ARRAYS: Replace stack memory with per-thread global memory slices
-    // Each array is [num_conditions_total, array_size] so each thread gets its own slice
-    double* global_A_lstsq_copy,        // [num_conditions, MAX_SVD_M * MAX_SVD_N]
-    double* global_U_lstsq,             // [num_conditions, MAX_SVD_M * MAX_SVD_N]
-    double* global_V_lstsq,             // [num_conditions, MAX_SVD_N * MAX_SVD_N]
-    double* global_singular_values_lstsq, // [num_conditions, MAX_SVD_N]
-    double* global_superdiag_lstsq,     // [num_conditions, MAX_SVD_N]
-    double* global_U_inv,               // [num_conditions, MAX_PHASE_MATRIX_DIM * MAX_PHASE_MATRIX_DIM]
-    double* global_V_inv,               // [num_conditions, MAX_PHASE_MATRIX_DIM * MAX_PHASE_MATRIX_DIM]
-    double* global_singular_values_inv, // [num_conditions, MAX_PHASE_MATRIX_DIM]
-    double* global_superdiag_inv,       // [num_conditions, MAX_PHASE_MATRIX_DIM]
-    double* global_work_inv,            // [num_conditions, MAX_PHASE_MATRIX_DIM * MAX_PHASE_MATRIX_DIM]
-    double* global_x_dof,               // [num_conditions, MAX_STATEVARS + MAX_DOF_PER_PHASE]
-    double* global_grad,                // [num_conditions, MAX_STATEVARS + MAX_DOF_PER_PHASE]
-    double* global_hess,                // [num_conditions, (MAX_STATEVARS + MAX_DOF_PER_PHASE)^2]
-    double* global_masses,              // [num_conditions, MAX_COMPONENTS]
-    double* global_mass_jac,            // [num_conditions, MAX_COMPONENTS * (MAX_STATEVARS + MAX_DOF_PER_PHASE)]
-    double* global_phase_matrix,        // [num_conditions, (MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS)^2]
-    double* global_equilibrium_matrix,  // [num_conditions, MAX_EQ_MATRIX_SIZE]
-    double* global_equilibrium_rhs,     // [num_conditions, MAX_EQ_MATRIX_ROWS]
-    double* global_eq_soln,             // [num_conditions, MAX_EQ_SOLN_LEN]
-    double* global_system_states        // UNUSED - SystemState allocated on stack
+    // GLOBAL MEMORY ARRAYS: Packed into struct to reduce kernel parameters for AMD compatibility
+    const WorkArrays* work_arrays       // Struct containing all work array pointers
 ) {{
     int tid = blockDim.x * blockIdx.x + threadIdx.x;
     
@@ -4800,25 +4786,28 @@ __global__ void top_level_equilibrium_kernel(
     const int CONSTRAINT_MATRIX_SIZE = (MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS) * (MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS);
     
     // Calculate thread-specific pointers (each thread gets its own slice)
-    double* thread_A_lstsq_copy = global_A_lstsq_copy ? &global_A_lstsq_copy[thread_idx * SVD_MN_SIZE] : nullptr;
-    double* thread_U_lstsq = global_U_lstsq ? &global_U_lstsq[thread_idx * SVD_MN_SIZE] : nullptr;
-    double* thread_V_lstsq = global_V_lstsq ? &global_V_lstsq[thread_idx * SVD_NN_SIZE] : nullptr;
-    double* thread_singular_values_lstsq = global_singular_values_lstsq ? &global_singular_values_lstsq[thread_idx * SVD_N_SIZE] : nullptr;
-    double* thread_superdiag_lstsq = global_superdiag_lstsq ? &global_superdiag_lstsq[thread_idx * SVD_N_SIZE] : nullptr;
-    double* thread_U_inv = global_U_inv ? &global_U_inv[thread_idx * PHASE_MATRIX_SIZE] : nullptr;
-    double* thread_V_inv = global_V_inv ? &global_V_inv[thread_idx * PHASE_MATRIX_SIZE] : nullptr;
-    double* thread_singular_values_inv = global_singular_values_inv ? &global_singular_values_inv[thread_idx * MAX_PHASE_MATRIX_DIM] : nullptr;
-    double* thread_superdiag_inv = global_superdiag_inv ? &global_superdiag_inv[thread_idx * MAX_PHASE_MATRIX_DIM] : nullptr;
-    double* thread_work_inv = global_work_inv ? &global_work_inv[thread_idx * PHASE_MATRIX_SIZE] : nullptr;
-    double* thread_x_dof = global_x_dof ? &global_x_dof[thread_idx * DOF_SIZE] : nullptr;
-    double* thread_grad = global_grad ? &global_grad[thread_idx * DOF_SIZE] : nullptr;
-    double* thread_hess = global_hess ? &global_hess[thread_idx * HESS_SIZE] : nullptr;
-    double* thread_masses = global_masses ? &global_masses[thread_idx * MAX_COMPONENTS] : nullptr;
-    double* thread_mass_jac = global_mass_jac ? &global_mass_jac[thread_idx * MASS_JAC_SIZE] : nullptr;
-    double* thread_phase_matrix = global_phase_matrix ? &global_phase_matrix[thread_idx * CONSTRAINT_MATRIX_SIZE] : nullptr;
-    double* thread_equilibrium_matrix = global_equilibrium_matrix ? &global_equilibrium_matrix[thread_idx * MAX_EQ_MATRIX_SIZE] : nullptr;
-    double* thread_equilibrium_rhs = global_equilibrium_rhs ? &global_equilibrium_rhs[thread_idx * MAX_EQ_MATRIX_ROWS] : nullptr;
-    double* thread_eq_soln = global_eq_soln ? &global_eq_soln[thread_idx * MAX_EQ_SOLN_LEN] : nullptr;
+    // Arrays are indexed: 0=A_lstsq_copy, 1=U_lstsq, 2=V_lstsq, 3=singular_values_lstsq, 4=superdiag_lstsq,
+    // 5=U_inv, 6=V_inv, 7=singular_values_inv, 8=superdiag_inv, 9=work_inv, 10=x_dof, 11=grad, 12=hess,
+    // 13=masses, 14=mass_jac, 15=phase_matrix, 16=equilibrium_matrix, 17=equilibrium_rhs, 18=eq_soln, 19=system_states
+    double* thread_A_lstsq_copy = work_arrays->arrays[0] ? &work_arrays->arrays[0][thread_idx * SVD_MN_SIZE] : nullptr;
+    double* thread_U_lstsq = work_arrays->arrays[1] ? &work_arrays->arrays[1][thread_idx * SVD_MN_SIZE] : nullptr;
+    double* thread_V_lstsq = work_arrays->arrays[2] ? &work_arrays->arrays[2][thread_idx * SVD_NN_SIZE] : nullptr;
+    double* thread_singular_values_lstsq = work_arrays->arrays[3] ? &work_arrays->arrays[3][thread_idx * SVD_N_SIZE] : nullptr;
+    double* thread_superdiag_lstsq = work_arrays->arrays[4] ? &work_arrays->arrays[4][thread_idx * SVD_N_SIZE] : nullptr;
+    double* thread_U_inv = work_arrays->arrays[5] ? &work_arrays->arrays[5][thread_idx * PHASE_MATRIX_SIZE] : nullptr;
+    double* thread_V_inv = work_arrays->arrays[6] ? &work_arrays->arrays[6][thread_idx * PHASE_MATRIX_SIZE] : nullptr;
+    double* thread_singular_values_inv = work_arrays->arrays[7] ? &work_arrays->arrays[7][thread_idx * MAX_PHASE_MATRIX_DIM] : nullptr;
+    double* thread_superdiag_inv = work_arrays->arrays[8] ? &work_arrays->arrays[8][thread_idx * MAX_PHASE_MATRIX_DIM] : nullptr;
+    double* thread_work_inv = work_arrays->arrays[9] ? &work_arrays->arrays[9][thread_idx * PHASE_MATRIX_SIZE] : nullptr;
+    double* thread_x_dof = work_arrays->arrays[10] ? &work_arrays->arrays[10][thread_idx * DOF_SIZE] : nullptr;
+    double* thread_grad = work_arrays->arrays[11] ? &work_arrays->arrays[11][thread_idx * DOF_SIZE] : nullptr;
+    double* thread_hess = work_arrays->arrays[12] ? &work_arrays->arrays[12][thread_idx * HESS_SIZE] : nullptr;
+    double* thread_masses = work_arrays->arrays[13] ? &work_arrays->arrays[13][thread_idx * MAX_COMPONENTS] : nullptr;
+    double* thread_mass_jac = work_arrays->arrays[14] ? &work_arrays->arrays[14][thread_idx * MASS_JAC_SIZE] : nullptr;
+    double* thread_phase_matrix = work_arrays->arrays[15] ? &work_arrays->arrays[15][thread_idx * CONSTRAINT_MATRIX_SIZE] : nullptr;
+    double* thread_equilibrium_matrix = work_arrays->arrays[16] ? &work_arrays->arrays[16][thread_idx * MAX_EQ_MATRIX_SIZE] : nullptr;
+    double* thread_equilibrium_rhs = work_arrays->arrays[17] ? &work_arrays->arrays[17][thread_idx * MAX_EQ_MATRIX_ROWS] : nullptr;
+    double* thread_eq_soln = work_arrays->arrays[18] ? &work_arrays->arrays[18][thread_idx * MAX_EQ_SOLN_LEN] : nullptr;
     
     // MIRROR CPU LOGIC: Start with what definitely works on CPU
     if (tid < num_conditions_total && results_list_ptr_raw != nullptr) {{
@@ -5718,7 +5707,7 @@ __global__ void top_level_equilibrium_kernel(
                 thread_x_dof, thread_grad, thread_hess,
                 thread_masses, thread_mass_jac, thread_phase_matrix,
                 thread_equilibrium_matrix, thread_equilibrium_rhs, thread_eq_soln,
-                global_system_states ? &global_system_states[thread_idx * SYSTEM_STATE_SIZE] : nullptr
+                work_arrays->arrays[19] ? &work_arrays->arrays[19][thread_idx * SYSTEM_STATE_SIZE] : nullptr
             );
             
             // COMMENTED OUT: Temporary placeholder values (real solver is now being called above)

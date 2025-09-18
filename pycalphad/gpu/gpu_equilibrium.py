@@ -44,10 +44,7 @@ from .gpu_codegen import (
     compute_dynamic_kernel_sizes
 )
 
-# Import optimized multi-phase compiler for handling many phases
-from .separate_phase_compiler import compile_phases_separately
-
-# Global cache for compiled GPU modules  
+# Global cache for compiled GPU modules
 _gpu_module_cache = {}
 
 
@@ -2395,6 +2392,35 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     if wks_obj.verbose:
         print(f"[GPU] Passing to kernel: condition_data_stride={condition_data_stride} (max_statevars={max_statevars_scalar} + max_components={max_components_scalar})")
     
+    # Create WorkArrays struct to pack all array pointers (for AMD GPU compatibility)
+    # This reduces kernel parameters from 28+ to ~16
+    # Create a simple array of pointers that will be cast to WorkArrays struct in kernel
+    work_arrays_ptrs = np.zeros(20, dtype=np.uint64)
+    work_arrays_ptrs[0] = global_memory_arrays['A_lstsq_copy'].data.ptr
+    work_arrays_ptrs[1] = global_memory_arrays['U_lstsq'].data.ptr
+    work_arrays_ptrs[2] = global_memory_arrays['V_lstsq'].data.ptr
+    work_arrays_ptrs[3] = global_memory_arrays['singular_values_lstsq'].data.ptr
+    work_arrays_ptrs[4] = global_memory_arrays['superdiag_lstsq'].data.ptr
+    work_arrays_ptrs[5] = global_memory_arrays['U_inv'].data.ptr
+    work_arrays_ptrs[6] = global_memory_arrays['V_inv'].data.ptr
+    work_arrays_ptrs[7] = global_memory_arrays['singular_values_inv'].data.ptr
+    work_arrays_ptrs[8] = global_memory_arrays['superdiag_inv'].data.ptr
+    work_arrays_ptrs[9] = global_memory_arrays['work_inv'].data.ptr
+    work_arrays_ptrs[10] = global_memory_arrays['x_dof'].data.ptr
+    work_arrays_ptrs[11] = global_memory_arrays['grad'].data.ptr
+    work_arrays_ptrs[12] = global_memory_arrays['hess'].data.ptr
+    work_arrays_ptrs[13] = global_memory_arrays['masses'].data.ptr
+    work_arrays_ptrs[14] = global_memory_arrays['mass_jac'].data.ptr
+    work_arrays_ptrs[15] = global_memory_arrays['phase_matrix'].data.ptr
+    work_arrays_ptrs[16] = global_memory_arrays['equilibrium_matrix'].data.ptr
+    work_arrays_ptrs[17] = global_memory_arrays['equilibrium_rhs'].data.ptr
+    work_arrays_ptrs[18] = global_memory_arrays['eq_soln'].data.ptr
+    work_arrays_ptrs[19] = global_memory_arrays['system_states'].data.ptr
+
+    # Copy to GPU
+    work_arrays_gpu = cp.asarray(work_arrays_ptrs)
+    gpu_arrays.append(work_arrays_gpu)  # Keep reference to prevent garbage collection
+
     # Now use the proper struct pointers for the kernel call
     # Try different argument formats to see which one works
     if debug_enabled:
@@ -2414,27 +2440,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             debug_arrays['convergence_history'].data.ptr,  # int* debug_convergence_history
             debug_arrays['iteration_count'].data.ptr,      # int* debug_iteration_count
             debug_step_count,                    # int debug_max_steps
-            # Global memory arrays for solver stack overflow fix
-            global_memory_arrays['A_lstsq_copy'].data.ptr,
-            global_memory_arrays['U_lstsq'].data.ptr,
-            global_memory_arrays['V_lstsq'].data.ptr,
-            global_memory_arrays['singular_values_lstsq'].data.ptr,
-            global_memory_arrays['superdiag_lstsq'].data.ptr,
-            global_memory_arrays['U_inv'].data.ptr,
-            global_memory_arrays['V_inv'].data.ptr,
-            global_memory_arrays['singular_values_inv'].data.ptr,
-            global_memory_arrays['superdiag_inv'].data.ptr,
-            global_memory_arrays['work_inv'].data.ptr,
-            global_memory_arrays['x_dof'].data.ptr,
-            global_memory_arrays['grad'].data.ptr,
-            global_memory_arrays['hess'].data.ptr,
-            global_memory_arrays['masses'].data.ptr,
-            global_memory_arrays['mass_jac'].data.ptr,
-            global_memory_arrays['phase_matrix'].data.ptr,
-            global_memory_arrays['equilibrium_matrix'].data.ptr,
-            global_memory_arrays['equilibrium_rhs'].data.ptr,
-            global_memory_arrays['eq_soln'].data.ptr,
-            global_memory_arrays['system_states'].data.ptr  # CRITICAL FIX: Pass global memory for SystemState
+            work_arrays_gpu.data.ptr             # const WorkArrays* work_arrays - packed struct
         )
     else:
         kernel_args_v1 = (
@@ -2450,27 +2456,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             grid_data_ptr_for_kernel,           # const DeviceGrid* grid_data_ptr
             0, 0, 0, 0,                         # null debug arrays (4 pointers)
             0,                                  # debug_max_steps = 0 when debug disabled
-            # Global memory arrays for solver stack overflow fix (always enabled)
-            global_memory_arrays['A_lstsq_copy'].data.ptr,
-            global_memory_arrays['U_lstsq'].data.ptr,
-            global_memory_arrays['V_lstsq'].data.ptr,
-            global_memory_arrays['singular_values_lstsq'].data.ptr,
-            global_memory_arrays['superdiag_lstsq'].data.ptr,
-            global_memory_arrays['U_inv'].data.ptr,
-            global_memory_arrays['V_inv'].data.ptr,
-            global_memory_arrays['singular_values_inv'].data.ptr,
-            global_memory_arrays['superdiag_inv'].data.ptr,
-            global_memory_arrays['work_inv'].data.ptr,
-            global_memory_arrays['x_dof'].data.ptr,
-            global_memory_arrays['grad'].data.ptr,
-            global_memory_arrays['hess'].data.ptr,
-            global_memory_arrays['masses'].data.ptr,
-            global_memory_arrays['mass_jac'].data.ptr,
-            global_memory_arrays['phase_matrix'].data.ptr,
-            global_memory_arrays['equilibrium_matrix'].data.ptr,
-            global_memory_arrays['equilibrium_rhs'].data.ptr,
-            global_memory_arrays['eq_soln'].data.ptr,
-            global_memory_arrays['system_states'].data.ptr  # CRITICAL FIX: Pass global memory for SystemState
+            work_arrays_gpu.data.ptr             # const WorkArrays* work_arrays - packed struct
         )
     
     # Alternative: try passing arrays directly instead of pointers

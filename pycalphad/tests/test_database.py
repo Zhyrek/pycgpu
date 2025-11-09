@@ -1191,3 +1191,27 @@ def test_tdb_reader_reads_legacy_never_disorder_status_bits(load_database):
     assert dbf.phases["CBCC_A12"].model_hints.get("never_disorder") == True
     assert dbf.phases["CBCC_A12"].model_hints.get("ordered_phase") == "CBCC_A12"
     assert dbf.phases["CBCC_A12"].model_hints.get("disordered_phase") == "DIS_A12"
+
+
+def test_database_info_without_space():
+    """DATABASE_INFO command should parse correctly without space before apostrophe (gh-228)"""
+    # This tests the original failing case from issue #228
+    tdb_str = """
+DATABASE_INFO'
+'
+'
+!
+    """
+    dbf = Database.from_string(tdb_str, fmt='tdb')
+    # If we get here without an exception, the test passes
+    assert dbf is not None
+
+    # Also test with space (should still work)
+    tdb_str_with_space = """
+DATABASE_INFO '
+'
+'
+!
+    """
+    dbf2 = Database.from_string(tdb_str_with_space, fmt='tdb')
+    assert dbf2 is not None

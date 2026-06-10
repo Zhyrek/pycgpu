@@ -307,3 +307,15 @@ def test_jansson_derivative_of_composition_set_property():
                                L * (1 - 2 * x) * dx_dT, rtol=1e-8)
     wks = Workspace(Database(GAP_TDB), ['AL', 'ZN', 'VA'], ['FCC_A1'], {**conds, v.X('ZN'): x / 2})
     assert np.all(np.isnan(wks.get('X(FCC_A1#2,ZN).T', 'NP(FCC_A1#2).T', 'HM(FCC_A1#2).T')))
+
+
+@select_database("C002_NiTiCr_LuXiaogang.tdb")
+def test_isolated_phase_issue670(load_database):
+    """See issue 670, isolated phase for B19_PRIME phase should agree with the """
+    dbf = load_database()
+    phase_name = "B19_PRIME"
+    # NOTE: this can be somewhat step size dependent, i.e. (0.499,0.52,0.002) might work, but (0.499,0.52,0.001) does not
+    wks = Workspace(dbf, components = ['NI', 'TI', 'VA'], phases = [phase_name], conditions = {v.X('NI'): (0.499,0.52,0.002), v.T: 300, v.P:101325, v.N: 1})
+    np.testing.assert_allclose(wks.get("GM"), wks.get(IsolatedPhase(phase_name, wks)(f"GM({phase_name})")))
+    wks = Workspace(dbf, components = ['NI', 'TI', 'VA'], phases = [phase_name], conditions = {v.X('NI'): (0.499,0.52,0.001), v.T: 300, v.P:101325, v.N: 1})
+    np.testing.assert_allclose(wks.get("GM"), wks.get(IsolatedPhase(phase_name, wks)(f"GM({phase_name})")))

@@ -135,8 +135,8 @@ def link_device_code(obj_files: List[str], output_file: str, verbose: bool = Fal
     return output_file
 
 
-def compile_phases_separately(wks_obj, verbose: bool = False, 
-                            max_compilation_time: int = 120) -> cp.RawModule:
+def compile_phases_separately(wks_obj, verbose: bool = False,
+                            max_compilation_time: int = 120) -> "cp.RawModule":
     """
     Compile phases using optimized compilation strategy.
     
@@ -323,7 +323,7 @@ __global__ void equilibrium_kernel(
     return source
 
 
-def compile_with_fallback(wks_obj, verbose: bool = False) -> cp.RawModule:
+def compile_with_fallback(wks_obj, verbose: bool = False) -> "cp.RawModule":
     """
     Fallback to chunked compilation if separate compilation fails.
     

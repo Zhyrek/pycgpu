@@ -23,6 +23,38 @@ except Exception as e:
     cp = None
     GPU_AVAILABLE = False
     print(f"[GPU] GPU initialization failed: {e}, using CPU fallback")
+
+
+def _detect_gpu_backend():
+    """Detect whether CuPy is using CUDA (nvcc) or ROCm/HIP (hipcc).
+
+    Returns 'nvcc' for NVIDIA CUDA or 'hipcc' for AMD ROCm/HIP.
+    """
+    if cp is None:
+        return 'nvcc'  # Default fallback
+    try:
+        # CuPy on ROCm/HIP sets this attribute
+        if hasattr(cp, 'cuda') and hasattr(cp.cuda, 'runtime'):
+            runtime_version = cp.cuda.runtime.runtimeGetVersion()
+            # ROCm runtime versions are typically very large numbers (e.g., 50000000+)
+            # CUDA runtime versions are smaller (e.g., 11000, 12000)
+            if runtime_version > 20000000:
+                return 'hipcc'
+    except Exception:
+        pass
+    try:
+        # Alternative detection: check if hipcc is available
+        if hasattr(cp.cuda.compiler, '_get_hipcc_path'):
+            return 'hipcc'
+    except (AttributeError, Exception):
+        pass
+    try:
+        # Check environment variable set by ROCm
+        if os.getenv('ROCM_PATH') or os.getenv('HIP_PATH'):
+            return 'hipcc'
+    except Exception:
+        pass
+    return 'nvcc'
 import hashlib
 from collections import OrderedDict
 from datetime import datetime
@@ -52,7 +84,31 @@ _gpu_module_cache = {}
 
 # Disk cache directory for persistent kernel storage
 import os
+import platform as _platform
 from pathlib import Path
+
+
+def _kernel_cache_dir() -> Path:
+    """Per-user kernel cache directory (override with PYCGPU_CACHE_DIR).
+
+    Lives outside the working directory so installed packages work from
+    read-only or arbitrary cwd. Follows platform conventions
+    (XDG/Library/Caches/LOCALAPPDATA) without requiring platformdirs.
+    """
+    env = os.environ.get('PYCGPU_CACHE_DIR')
+    if env:
+        cache_dir = Path(env)
+    else:
+        system = _platform.system()
+        if system == 'Windows':
+            base = Path(os.environ.get('LOCALAPPDATA', Path.home() / 'AppData' / 'Local'))
+        elif system == 'Darwin':
+            base = Path.home() / 'Library' / 'Caches'
+        else:
+            base = Path(os.environ.get('XDG_CACHE_HOME', Path.home() / '.cache'))
+        cache_dir = base / 'pycalphad' / 'gpu_kernels'
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
 
 
 def _extract_values(obj):
@@ -750,9 +806,10 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
         if wks_obj.verbose:
             print(f"[GPU] Warning: grid is None, cannot prepare grid data")
         grid_data_device_struct_np = None
+        grid_block_shape = None
     else:
         try:
-            grid_data_device_struct_np = _prepare_grid_data_for_gpu_from_calculate_result(grid, py_phase_name_to_unique_idx_map, max_phases_per_condition, max_dof_per_phase, max_components, wks_obj.verbose)
+            grid_data_device_struct_np, grid_block_shape = _prepare_grid_data_for_gpu_from_calculate_result(grid, py_phase_name_to_unique_idx_map, max_phases_per_condition, max_dof_per_phase, max_components, wks_obj.verbose)
         except Exception as e:
             if wks_obj.verbose:
                 print(f"[GPU] Warning: Grid data preparation failed: {e}")
@@ -760,9 +817,19 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
                 traceback.print_exc()
                 print("[GPU] Continuing without grid data (phase addition will be limited)")
             grid_data_device_struct_np = None
+            grid_block_shape = None
+
+    # Map each condition to its grid block (block per statevar combination, e.g. per T).
+    # Condition multi-index leading dims == grid block dims (both are the statevar coords).
+    grid_block_indices_np = np.zeros(num_conditions_total, dtype=np.int32)
+    if grid_data_device_struct_np is not None and grid_block_shape is not None:
+        k = len(grid_block_shape)
+        for ci in range(num_conditions_total):
+            mi = np.unravel_index(ci, gm_array.shape)
+            grid_block_indices_np[ci] = np.ravel_multi_index(tuple(mi[:k]), grid_block_shape)
 
     return (num_conditions_total, condition_args_np, global_spec_scalars, global_spec_arrays,
-            initial_phase_data_arrays, grid_data_device_struct_np, properties)
+            initial_phase_data_arrays, grid_data_device_struct_np, grid_block_indices_np, properties)
 
 
 def _populate_system_specification(global_spec_np, global_spec_arrays, wks_obj, dynamic_sizes=None, properties=None):
@@ -1071,7 +1138,7 @@ def _prepare_grid_data_for_gpu_from_calculate_result(grid_data, py_phase_name_to
         if grid_data is None:
             if verbose:
                 print("[GPU] Warning: No grid data provided from calculate() result.")
-            return None
+            return None, None
         
         # Extract grid arrays directly from calculate() result
         if hasattr(grid_data, 'Y') and hasattr(grid_data, 'X') and hasattr(grid_data, 'GM') and hasattr(grid_data, 'Phase'):
@@ -1082,7 +1149,7 @@ def _prepare_grid_data_for_gpu_from_calculate_result(grid_data, py_phase_name_to
         else:
             if verbose:
                 print("[GPU] Warning: Calculate result does not have expected Y, X, GM, Phase attributes.")
-            return None
+            return None, None
             
         # Get phase indices mapping from grid attributes
         phase_indices_map = {}
@@ -1096,7 +1163,7 @@ def _prepare_grid_data_for_gpu_from_calculate_result(grid_data, py_phase_name_to
         if len(original_shape) < 2:
             if verbose:
                 print("[GPU] Warning: Grid data has unexpected shape.")
-            return None
+            return None, None
             
         # For grid data from calculate(), we need to handle multi-dimensional arrays
         # The actual grid points are in the last dimension for shapes like (1, 1, 1, 1, 124, 2)
@@ -1106,20 +1173,33 @@ def _prepare_grid_data_for_gpu_from_calculate_result(grid_data, py_phase_name_to
         else:
             # 2D case: grid points are in dimension 0
             num_grid_points_total = original_shape[0] if len(original_shape) >= 2 else len(grid_Y)
-        
-        # Flatten grid data
-        # First reshape to 2D by collapsing all leading dimensions
-        if len(grid_Y.shape) > 2:
-            # Reshape from (1, 1, 1, 1, 124, 2) to (124, 2)
-            grid_Y_flat = grid_Y.reshape(-1, grid_Y.shape[-1])[-num_grid_points_total:]
-            grid_X_flat = grid_X.reshape(-1, grid_X.shape[-1])[-num_grid_points_total:]
-            grid_GM_flat = grid_GM.flatten()[-num_grid_points_total:]
-            grid_Phase_flat = grid_Phase.flatten()[-num_grid_points_total:]
+
+        # The grid has one block of `num_grid_points_total` points per statevar
+        # combination (e.g. per T value): GM shape is (N, P, T, points). Each
+        # condition must use ITS OWN block — energies are T-dependent. We build one
+        # DeviceGrid struct per block; the kernel selects a block per condition.
+        if len(grid_GM.shape) >= 2:
+            grid_block_shape = tuple(grid_GM.shape[:-1])
         else:
-            grid_Y_flat = grid_Y.reshape(num_grid_points_total, -1) if len(grid_Y.shape) > 1 else grid_Y.reshape(-1, 1)
-            grid_X_flat = grid_X.reshape(num_grid_points_total, -1) if len(grid_X.shape) > 1 else grid_X.reshape(-1, 1)
-            grid_GM_flat = grid_GM.flatten()
-            grid_Phase_flat = grid_Phase.flatten()
+            grid_block_shape = (1,)
+        n_blocks = int(np.prod(grid_block_shape))
+
+        # Reshape to (n_blocks, points, ...)
+        if len(grid_Y.shape) > 2:
+            grid_Y_blocks = grid_Y.reshape(n_blocks, num_grid_points_total, grid_Y.shape[-1])
+            grid_X_blocks = grid_X.reshape(n_blocks, num_grid_points_total, grid_X.shape[-1])
+            grid_GM_blocks = grid_GM.reshape(n_blocks, num_grid_points_total)
+            grid_Phase_blocks = grid_Phase.reshape(n_blocks, num_grid_points_total)
+        else:
+            grid_Y_blocks = (grid_Y.reshape(num_grid_points_total, -1) if len(grid_Y.shape) > 1 else grid_Y.reshape(-1, 1))[None, ...]
+            grid_X_blocks = (grid_X.reshape(num_grid_points_total, -1) if len(grid_X.shape) > 1 else grid_X.reshape(-1, 1))[None, ...]
+            grid_GM_blocks = grid_GM.reshape(1, -1)
+            grid_Phase_blocks = grid_Phase.reshape(1, -1)
+
+        grid_Y_flat = grid_Y_blocks[0]
+        grid_X_flat = grid_X_blocks[0]
+        grid_GM_flat = grid_GM_blocks[0]
+        grid_Phase_flat = grid_Phase_blocks[0]
         
         phase_dof_stride = grid_Y_flat.shape[1] if len(grid_Y_flat.shape) > 1 else 1
         num_components_stride = grid_X_flat.shape[1] if len(grid_X_flat.shape) > 1 else 1
@@ -1155,9 +1235,10 @@ def _prepare_grid_data_for_gpu_from_calculate_result(grid_data, py_phase_name_to
                 phase_grid_indices_stop[phase_idx] = current_start + phase_count
                 current_start += phase_count
         
-        # Limit grid data size to reasonable maximum
-        max_grid_points_allowed = int(_get_c_define("MAX_GRID_POINTS"))
-        actual_grid_points = int(min(num_grid_points_total, max_grid_points_allowed))
+        # Use the FULL grid: the CPU sees every point, and truncation hides the
+        # grid slices of the alphabetically-last phases from add_nearly_stable /
+        # add_new_phases (nothing kernel-side is sized by MAX_GRID_POINTS).
+        actual_grid_points = int(num_grid_points_total)
         num_unique_phases = int(len(py_phase_name_to_unique_idx_map))
         
         if verbose:
@@ -1185,68 +1266,59 @@ def _prepare_grid_data_for_gpu_from_calculate_result(grid_data, py_phase_name_to
             ('phase_grid_indices_stop', f'{num_unique_phases}i4'),
             ('num_mappable_phases_in_grid', 'i4')
         ]
-        
-        grid_data_np = np.zeros(1, dtype=device_grid_dtype)[0]
-        
-        # Fill the structured array with truncated data
-        try:
-            y_data_flat = grid_Y_flat.flatten()
-            y_data_size = min(len(y_data_flat), actual_grid_points * max_dof)
+        # Blocks are laid out back-to-back on the GPU; each block's doubles must be
+        # 8-byte aligned, so pad the record itemsize to a multiple of 8.
+        _tail_pad = (-np.dtype(device_grid_dtype).itemsize) % 8
+        if _tail_pad:
+            device_grid_dtype.append(('_tail_pad', f'{_tail_pad}u1'))
+
+        grid_data_blocks = np.zeros(n_blocks, dtype=device_grid_dtype)
+
+        for b in range(n_blocks):
+            grid_data_np = grid_data_blocks[b]
+            y_flat_b = grid_Y_blocks[b].flatten()
+            x_flat_b = grid_X_blocks[b].flatten()
+            gm_flat_b = grid_GM_blocks[b].flatten()
+
+            y_data_size = min(len(y_flat_b), actual_grid_points * max_dof)
             if y_data_size > 0:
-                grid_data_np['Y_ptr_data'][:y_data_size] = y_data_flat[:y_data_size]
-        except Exception as e:
-            if verbose:
-                print(f"[GPU] Warning: Failed to fill Y data: {e}")
-        
-        try:
-            x_data_flat = grid_X_flat.flatten()
-            x_data_size = min(len(x_data_flat), actual_grid_points * max_components)
+                grid_data_np['Y_ptr_data'][:y_data_size] = y_flat_b[:y_data_size]
+            x_data_size = min(len(x_flat_b), actual_grid_points * max_components)
             if x_data_size > 0:
-                grid_data_np['X_ptr_data'][:x_data_size] = x_data_flat[:x_data_size]
-        except Exception as e:
-            if verbose:
-                print(f"[GPU] Warning: Failed to fill X data: {e}")
-        
-        try:
-            gm_data_size = min(len(grid_GM_flat), actual_grid_points)
+                grid_data_np['X_ptr_data'][:x_data_size] = x_flat_b[:x_data_size]
+            gm_data_size = min(len(gm_flat_b), actual_grid_points)
             if gm_data_size > 0:
-                grid_data_np['GM_ptr_data'][:gm_data_size] = grid_GM_flat[:gm_data_size]
-        except Exception as e:
-            if verbose:
-                print(f"[GPU] Warning: Failed to fill GM data: {e}")
-        
-        try:
+                grid_data_np['GM_ptr_data'][:gm_data_size] = gm_flat_b[:gm_data_size]
+            # Phase names/ids and phase index ranges are the same in every block
+            # (the composition sampling is identical; only GM varies with T).
             phase_id_data_size = min(len(phase_ids_flat), actual_grid_points)
             if phase_id_data_size > 0:
                 grid_data_np['PhaseID_ptr_data'][:phase_id_data_size] = phase_ids_flat[:phase_id_data_size]
-        except Exception as e:
-            if verbose:
-                print(f"[GPU] Warning: Failed to fill PhaseID data: {e}")
-        
-        # Fill size information first
-        grid_data_np['num_grid_points_total'] = actual_grid_points
-        grid_data_np['phase_dof_stride_Y'] = phase_dof_stride
-        grid_data_np['num_components_stride_X'] = num_components_stride
-        grid_data_np['actual_y_data_size'] = actual_grid_points * max_dof
-        grid_data_np['actual_x_data_size'] = actual_grid_points * max_components
-        grid_data_np['actual_gm_data_size'] = actual_grid_points
-        grid_data_np['actual_phase_id_data_size'] = actual_grid_points
-        
-        indices_size = min(len(phase_grid_indices_start), len(py_phase_name_to_unique_idx_map))
-        grid_data_np['phase_grid_indices_start'][:indices_size] = phase_grid_indices_start[:indices_size]
-        grid_data_np['phase_grid_indices_stop'][:indices_size] = phase_grid_indices_stop[:indices_size]
-        grid_data_np['num_mappable_phases_in_grid'] = len(py_phase_name_to_unique_idx_map)
-        
+
+            grid_data_np['num_grid_points_total'] = actual_grid_points
+            grid_data_np['phase_dof_stride_Y'] = phase_dof_stride
+            grid_data_np['num_components_stride_X'] = num_components_stride
+            grid_data_np['actual_y_data_size'] = actual_grid_points * max_dof
+            grid_data_np['actual_x_data_size'] = actual_grid_points * max_components
+            grid_data_np['actual_gm_data_size'] = actual_grid_points
+            grid_data_np['actual_phase_id_data_size'] = actual_grid_points
+
+            indices_size = min(len(phase_grid_indices_start), len(py_phase_name_to_unique_idx_map))
+            grid_data_np['phase_grid_indices_start'][:indices_size] = phase_grid_indices_start[:indices_size]
+            grid_data_np['phase_grid_indices_stop'][:indices_size] = phase_grid_indices_stop[:indices_size]
+            grid_data_np['num_mappable_phases_in_grid'] = len(py_phase_name_to_unique_idx_map)
+
         if verbose:
-            print(f"[GPU] Prepared grid data from calculate(): {actual_grid_points} grid points (limited from {num_grid_points_total}), {len(py_phase_name_to_unique_idx_map)} phases")
-        
-        return grid_data_np
-        
+            print(f"[GPU] Prepared grid data from calculate(): {n_blocks} block(s) of {actual_grid_points} grid points "
+                  f"(limited from {num_grid_points_total}), block shape {grid_block_shape}, {len(py_phase_name_to_unique_idx_map)} phases")
+
+        return grid_data_blocks, grid_block_shape
+
     except Exception as e:
         if verbose:
             print(f"[GPU] Error preparing grid data from calculate() result: {e}")
             print("[GPU] Continuing without grid data (phase addition will be limited)")
-        return None
+        return None, None
 
 
 # Removed _create_minimal_grid_from_eq_data - no longer needed since we use fresh calculate() results
@@ -1694,17 +1766,23 @@ def _process_gpu_results(results_cpu_flat: np.ndarray, wks_obj: Workspace,
     
     # CPU uses fixed vertex count of 3 for single-phase systems (phase_count + 2 rule)
     # This represents the maximum number of composition sets in equilibrium
-    # For GPU, we need to use the actual MAX_PHASES from the kernel
+    # Match the CPU's vertex dimension: Gibbs phase rule caps stable phases at
+    # the number of non-VA components (+1 buffer slot). The kernel writes up to
+    # MAX_PHASES slots but only the first few can be stable; trimming here keeps
+    # GPU output shapes identical to CPU (e.g. (..., 4) not (..., 22)).
+    _n_nonva = len([c for c in wks_obj.components if getattr(c, 'name', str(c)) != 'VA'])
     if dynamic_sizes is not None:
-        vertex_count = dynamic_sizes['MAX_PHASES']
+        vertex_count = min(dynamic_sizes['MAX_PHASES'], _n_nonva + 1)
     else:
-        vertex_count = len(wks_obj.phases) + 2
+        vertex_count = _n_nonva + 1
     final_coords['vertex'] = np.arange(vertex_count)
     
-    # Internal DOF depends on the phase model structure
-    # For now, use a heuristic based on the total number of components (including VA)
-    # This matches the CPU behavior better
-    internal_dof_count = len(wks_obj.components)  # Total components including VA
+    # The internal_dof axis is sized by the LARGEST phase_dof across phases
+    # (CPU behavior); sizing it by component count silently truncated Y output
+    # for multi-sublattice phases (e.g. BCC_B2 has 9 site fractions).
+    internal_dof_count = max(
+        (len(wks_obj.models[p].site_fractions) for p in wks_obj.phases),
+        default=len(wks_obj.components))
     final_coords['internal_dof'] = np.arange(internal_dof_count)
 
     # Process results if we have data
@@ -1803,13 +1881,21 @@ def _process_gpu_results(results_cpu_flat: np.ndarray, wks_obj: Workspace,
             y_trimmed = y_reshaped_full[..., :vertex_count, :internal_dof_count]
             
             # CRITICAL FIX: Set Y values to NaN for phases with zero amount to match CPU
-            # This handles the case where GPU outputs values for inactive phases
+            # This handles the case where GPU outputs values for inactive phases.
+            # Also NaN-pad dof slots beyond each phase's own phase_dof (CPU fills
+            # prop_Y with NaN and only writes :phase_dof).
+            _dof_by_pid = {pid: len(wks_obj.models[name].site_fractions)
+                           for name, pid in py_phase_name_to_unique_idx_map.items()
+                           if name in wks_obj.models}
             for idx in np.ndindex(y_trimmed.shape[:-1]):  # Iterate over all but last dimension
                 phase_idx = idx[-1]  # vertex index
                 if phase_idx < np_trimmed[idx[:-1]].shape[0]:
                     phase_amount = np_trimmed[idx[:-1] + (phase_idx,)]
                     if phase_amount <= 1e-10:  # Phase not present
                         y_trimmed[idx] = np.nan
+                    else:
+                        _pd = _dof_by_pid.get(int(phase_ids_trimmed[idx]), y_trimmed.shape[-1])
+                        y_trimmed[idx + (slice(_pd, None),)] = np.nan
             
             data_vars['Y'] = (tuple(str(k) for k in coords_keys_for_shape) + ('vertex', 'internal_dof'), y_trimmed)
             
@@ -1847,8 +1933,10 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     verbose = wks_obj.verbose
     
     # Check if GPU should be used - NO FALLBACK, FAIL HARD
-    use_gpu = GPU_AVAILABLE and not force_cpu and os.getenv('FORCE_CPU', '0') != '1'
-    
+    # The C++/OpenMP backend (PYCGPU_CPU=1) does not need CUDA or CuPy.
+    _cpu_backend_mode = bool(os.environ.get('PYCGPU_CPU'))
+    use_gpu = (GPU_AVAILABLE or _cpu_backend_mode) and not force_cpu and os.getenv('FORCE_CPU', '0') != '1'
+
     if not use_gpu:
         reason = "forced by parameter" if force_cpu else "not available"
         raise RuntimeError(f"[GPU] GPU {reason}, no fallback allowed")
@@ -1860,11 +1948,34 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         print(f"[GPU DEBUG] Phases: {wks_obj.phases}")
 
     # Check for CuPy availability at runtime - NO FALLBACK
-    if cp is None:
-        raise RuntimeError("[GPU] CuPy module not loaded, no fallback allowed")
+    # Backend selection: CUDA (default, requires CuPy) or the C++/OpenMP CPU
+    # backend (PYCGPU_CPU=1), which must work WITHOUT CuPy installed. All buffer
+    # code below goes through `xp` and the small helpers so both backends share
+    # one pipeline; in CPU mode every buffer is a host numpy array and the
+    # "pointers" handed to the solver are host addresses (zero staging copies).
+    if _cpu_backend_mode:
+        xp = np
+    else:
+        if cp is None:
+            raise RuntimeError(
+                "[GPU] CuPy is not available. Install cupy for the CUDA backend, "
+                "or set PYCGPU_CPU=1 to use the C++/OpenMP CPU backend.")
+        # Test GPU accessibility - NO FALLBACK
+        _ = cp.cuda.Device()
+        xp = cp
 
-    # Test GPU accessibility - NO FALLBACK
-    _ = cp.cuda.Device()
+    def _dev_ptr(a):
+        """Kernel-visible pointer: device ptr for cupy, host ptr for numpy."""
+        return a.ctypes.data if isinstance(a, np.ndarray) else a.data.ptr
+
+    def _to_numpy(a):
+        return a if isinstance(a, np.ndarray) else cp.asnumpy(a)
+
+    def _from_bytes(b):
+        """Writable uint8 array from a bytes-like (device in CUDA mode)."""
+        if _cpu_backend_mode:
+            return np.frombuffer(b, dtype=np.uint8).copy()
+        return cp.frombuffer(b, dtype=cp.uint8)
 
     # Get starting point data without calling full equilibrium
     # Replicate exactly what CPU workspace does before calling starting_point
@@ -1955,12 +2066,26 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
 
     # Cache key includes: phases, components, dynamic sizes, and flags
     # It does NOT include the actual generated code (which has CSE variations)
+    # Hash the static GPU header sources so edits to them invalidate cached kernels
+    _gpu_dir = os.path.dirname(os.path.abspath(__file__))
+    _header_hash = hashlib.md5()
+    # gpu_codegen.py is included because the cached artifact is the GENERATED
+    # source: codegen changes must invalidate cached kernels.
+    for _hdr in ("svd.c", "phase_rec.h", "comp_set.h", "lu_solver.h", "minimizer.h",
+                 "eqsolver.h", "gpu_codegen.py"):
+        with open(os.path.join(_gpu_dir, _hdr), "rb") as _f:
+            _header_hash.update(_f.read())
+
     cache_key_parts = [
         "phases:" + ",".join(sorted_phases),
         "components:" + ",".join(sorted_components),
         "sizes:" + str(sorted(dynamic_sizes.items())),
-        "version:HESSIAN_FIX_V3",  # Version marker for cache invalidation
-        "verbose:" + str(verbose)
+        "headers:" + _header_hash.hexdigest(),
+        "verbose:" + str(verbose),
+        "guard:" + str(bool(os.environ.get('PYCGPU_GUARD'))),
+        "backend:" + ("cpu" if os.environ.get('PYCGPU_CPU') else "gpu"),
+        "fmad:" + str(bool(os.environ.get('PYCGPU_NOFMAD'))),
+        "robust:" + str(bool(os.environ.get('PYCGPU_ROBUST')))
     ]
     cache_key_input = "|".join(cache_key_parts)
     cache_key = hashlib.md5(cache_key_input.encode()).hexdigest()
@@ -1972,12 +2097,12 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
 
     if cache_key not in _gpu_module_cache:
         # Check disk cache first
-        cache_dir = Path(".pycgpu_kernels")
+        cache_dir = _kernel_cache_dir()
         cache_file = cache_dir / f"{cache_key}.cu"
 
         if cache_file.exists():
             if verbose:
-                print(f"[GPU] Found cached kernel in .pycgpu_kernels/{cache_key}.cu")
+                print(f"[GPU] Found cached kernel in {cache_file}")
             with open(cache_file, 'r') as f:
                 full_kernel_source = f.read()
         else:
@@ -1988,11 +2113,10 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             full_kernel_source = _generate_full_gpu_source(wks_obj, model_funcs_c, pr_init_calls_c, num_unique_models_for_gpu)
 
             # Save to disk cache
-            cache_dir.mkdir(exist_ok=True)
             with open(cache_file, 'w') as f:
                 f.write(full_kernel_source)
             if verbose:
-                print(f"[GPU] Saved kernel to cache: .pycgpu_kernels/{cache_key}.cu")
+                print(f"[GPU] Saved kernel to cache: {cache_file}")
 
         # Debug: Check source consistency
         source_hash = hashlib.sha256(full_kernel_source.encode()).hexdigest()
@@ -2019,60 +2143,47 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             # by the kernel should be computed based on the phase records/models in pycalphad, and then passed 
             # to the kernel using the -D flag to define it in the kernel code."
             
-            # Check if optimized compilation is needed for many phases
-            # Use aggressive optimization reduction for better compilation times
-            if num_unique_models_for_gpu >= 14:
-                # Use optimized compilation with reduced optimization level
-                if verbose:
-                    print(f"[GPU] System has {num_unique_models_for_gpu} phases, using reduced optimization")
-                    
-                # Create -D compiler flags for dynamic sizing
-                define_flags = []
-                for define_name, value in dynamic_sizes.items():
-                    define_flags.append(f'-D{define_name}={value}')
-                
-                # Add VERBOSE_DEBUG flag if verbose mode is enabled
-                if verbose:
-                    define_flags.append('-DVERBOSE_DEBUG')
-                    print(f"[GPU] Using dynamic kernel sizing: {dynamic_sizes}")
-                    print(f"[GPU] Compiler defines: {define_flags}")
-                
-                # Use -O0 for many phases to avoid compilation timeout
-                opt_level = '-O0'
-                
-                # Compilation options with dynamic defines (must be tuple for CuPy)
-                compile_options = tuple(['-std=c++11', opt_level] + define_flags)
-                module = cp.RawModule(code=full_kernel_source, options=compile_options, backend='nvcc')
+            # Create -D compiler flags for dynamic sizing
+            define_flags = []
+            for define_name, value in dynamic_sizes.items():
+                define_flags.append(f'-D{define_name}={value}')
+
+            # Add VERBOSE_DEBUG flag if verbose mode is enabled
+            if verbose:
+                define_flags.append('-DVERBOSE_DEBUG')
+                print(f"[GPU] Using dynamic kernel sizing: {dynamic_sizes}")
+                print(f"[GPU] Compiler defines: {define_flags}")
+            if os.environ.get('PYCGPU_GUARD'):
+                # Memory-safety validation mode: interleave guard slices between
+                # per-thread work-array slices and scan them after the run.
+                define_flags.append('-DPYCGPU_GUARD_SLICES')
+            if os.environ.get('PYCGPU_ROBUST'):
+                # Robust-removal experiment: consolidation removals count toward
+                # times_compset_removed (see minimizer.h remove_and_consolidate).
+                define_flags.append('-DPYCGPU_ROBUST_REMOVAL')
+
+            if os.environ.get('PYCGPU_CPU'):
+                # CPU-C++ backend: compile the same generated source with g++/OpenMP.
+                from pycalphad.gpu.cpu_backend import build_cpu_library
+                module = build_cpu_library(full_kernel_source, define_flags,
+                                           cache_dir=str(_kernel_cache_dir()),
+                                           verbose=verbose)
             else:
-                # Standard compilation for smaller systems
+                # Compile cost is one-time (CuPy caches binaries by source+options),
+                # but runtime cost of low optimization is paid on every kernel launch,
+                # so prefer -O3/-O2 even for many-phase systems.
+                opt_level = '-O3' if num_unique_models_for_gpu <= 5 else '-O2'
                 if verbose:
-                    print(f"[GPU] System has {num_unique_models_for_gpu} phases, using standard compilation")
-                    
-                # Create -D compiler flags for dynamic sizing
-                define_flags = []
-                for define_name, value in dynamic_sizes.items():
-                    define_flags.append(f'-D{define_name}={value}')
-                
-                # Add VERBOSE_DEBUG flag if verbose mode is enabled
-                if verbose:
-                    define_flags.append('-DVERBOSE_DEBUG')
-                    print(f"[GPU] Using dynamic kernel sizing: {dynamic_sizes}")
-                    print(f"[GPU] Compiler defines: {define_flags}")
-                
-                # Choose optimization level based on phase count
-                if num_unique_models_for_gpu <= 5:
-                    opt_level = '-O3'
-                elif num_unique_models_for_gpu <= 10:
-                    opt_level = '-O2'
-                elif num_unique_models_for_gpu <= 12:
-                    opt_level = '-O1'
-                else:
-                    opt_level = '-O0'  # No optimization for 13+ phases
-                
-                # Compilation options with dynamic defines (must be tuple for CuPy)
-                compile_options = tuple(['-std=c++11', opt_level] + define_flags)
-                module = cp.RawModule(code=full_kernel_source, options=compile_options, backend='nvcc')
-                
+                    print(f"[GPU] System has {num_unique_models_for_gpu} phases, compiling with {opt_level}")
+
+                # Compilation options with dynamic defines (must be tuple for CuPy).
+                # --fmad tunable: FMA contraction changes rounding enough to flip
+                # degenerate phase-selection decisions vs the (non-FMA) Cython CPU
+                # build — the C++ backend needed -ffp-contract=off for parity.
+                fmad = ['--fmad=false'] if os.environ.get('PYCGPU_NOFMAD') else []
+                compile_options = tuple(['-std=c++11', opt_level] + fmad + define_flags)
+                module = cp.RawModule(code=full_kernel_source, options=compile_options, backend=_detect_gpu_backend())
+
             if verbose:
                 print("[GPU] DEBUG: Kernel compilation successful")
         except Exception as e:
@@ -2089,31 +2200,33 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     # CRITICAL: Call the global PhaseRecord initialization kernel every time
     # This must happen on every execution, not just when compiling a new module,
     # because GPU memory may have been reset and g_phase_records_array needs initialization
-    try:
-        init_records_kernel = module.get_function("init_all_gpu_phase_records")
-        init_records_kernel((1,), (1,), args=())
-        cp.cuda.runtime.deviceSynchronize()
-        if verbose:
-            print("[GPU] Global PhaseRecords initialized on GPU.")
-    except Exception as e:
-        if verbose:
-            print(f"[GPU] ERROR: PhaseRecord initialization failed: {e}")
-        raise
+    # (the CPU backend's driver calls init itself before the OpenMP loop).
+    if not _cpu_backend_mode:
+        try:
+            init_records_kernel = module.get_function("init_all_gpu_phase_records")
+            init_records_kernel((1,), (1,), args=())
+            cp.cuda.runtime.deviceSynchronize()
+            if verbose:
+                print("[GPU] Global PhaseRecords initialized on GPU.")
+        except Exception as e:
+            if verbose:
+                print(f"[GPU] ERROR: PhaseRecord initialization failed: {e}")
+            raise
 
-    try:
-        top_level_kernel = module.get_function("top_level_equilibrium_kernel")
-        if verbose:
-            print(f"[GPU] DEBUG: Successfully got top_level_equilibrium_kernel function: {top_level_kernel}")
-    except Exception as e:
-        if verbose:
-            print(f"[GPU] ERROR: Failed to get top_level_equilibrium_kernel function: {e}")
-        raise
+        try:
+            top_level_kernel = module.get_function("top_level_equilibrium_kernel")
+            if verbose:
+                print(f"[GPU] DEBUG: Successfully got top_level_equilibrium_kernel function: {top_level_kernel}")
+        except Exception as e:
+            if verbose:
+                print(f"[GPU] ERROR: Failed to get top_level_equilibrium_kernel function: {e}")
+            raise
 
     
     # 3. Prepare data for GPU (pass dynamic sizes for proper array dimensioning)
     # Use properties from wks.eq to avoid duplicate calculations
     (num_total_conditions_pts, condition_args_np, global_spec_scalars, global_spec_arrays,
-     initial_phase_data_arrays, grid_data_device_struct_np, properties) = _prepare_gpu_data(wks_obj, unique_py_models, py_phase_name_to_unique_idx_map, dynamic_sizes, properties=cpu_style_properties, grid=grid)
+     initial_phase_data_arrays, grid_data_device_struct_np, grid_block_indices_np, properties) = _prepare_gpu_data(wks_obj, unique_py_models, py_phase_name_to_unique_idx_map, dynamic_sizes, properties=cpu_style_properties, grid=grid)
     
     debug_log(f"  gpu_num_conditions: {num_total_conditions_pts}", verbose)
     if condition_args_np is not None:
@@ -2212,16 +2325,16 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         try:
             # CRITICAL FIX: Transfer aligned double arrays instead of byte arrays
             # system_spec_bytes is already a double array from _pack_struct_to_bytes
-            system_spec_gpu = cp.asarray(system_spec_bytes, dtype=cp.float64)
+            system_spec_gpu = xp.asarray(system_spec_bytes, dtype=np.float64)
             # Cast back to uint8 for kernel compatibility but keep alignment
-            system_spec_gpu = system_spec_gpu.view(cp.uint8)
+            system_spec_gpu = system_spec_gpu.view(np.uint8)
             
             # DEBUG: Print alignment info
             if verbose:
-                print(f"[GPU] DEBUG: system_spec_gpu pointer = {system_spec_gpu.data.ptr}, alignment = {system_spec_gpu.data.ptr % 8}")
+                print(f"[GPU] DEBUG: system_spec_gpu pointer = {_dev_ptr(system_spec_gpu)}, alignment = {_dev_ptr(system_spec_gpu) % 8}")
             # condition_args_bytes is already a double array from _pack_struct_to_bytes
-            condition_args_gpu = cp.asarray(condition_args_bytes, dtype=cp.float64)
-            condition_args_gpu = condition_args_gpu.view(cp.uint8)
+            condition_args_gpu = xp.asarray(condition_args_bytes, dtype=np.float64)
+            condition_args_gpu = condition_args_gpu.view(np.uint8)
             
             # DEBUG: Check condition_args bytes to see if the issue is in packing
             if verbose:
@@ -2234,7 +2347,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             # CRITICAL FIX: condition_args_bytes is already a double array
             # The kernel expects to cast it to ConditionArgsSingle*, which has double[8] state_variables_values
             # So we can pass it as a flat double array
-            condition_args_gpu_doubles = cp.asarray(condition_args_bytes, dtype=cp.float64)
+            condition_args_gpu_doubles = xp.asarray(condition_args_bytes, dtype=np.float64)
             if verbose:
                 print(f"[GPU] DEBUG: condition_args as doubles - shape: {condition_args_gpu_doubles.shape}")
                 print(f"[GPU] DEBUG: First 8 doubles: {condition_args_bytes[:8]}")
@@ -2245,7 +2358,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             # CRITICAL FIX: Keep initial_phase_data as float64, not uint8
             # The GPU kernel expects double* data, not uint8*
             # IMPORTANT: Flatten the 2D array to 1D to avoid stride issues
-            initial_phase_data_gpu = cp.asarray(initial_phase_data_struct.flatten(), dtype=cp.float64)
+            initial_phase_data_gpu = xp.asarray(initial_phase_data_struct.flatten(), dtype=np.float64)
             if verbose:
                 print(f"[GPU] DEBUG: After cp.asarray and flatten - GPU array shape: {initial_phase_data_gpu.shape}, dtype: {initial_phase_data_gpu.dtype}")
                 print(f"[GPU] DEBUG: GPU array sample values: [0]={float(initial_phase_data_gpu[0])}, [44]={float(initial_phase_data_gpu[44]) if len(initial_phase_data_gpu) > 44 else 'N/A'}")
@@ -2253,24 +2366,24 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                 # Chemical potentials are at offset 40-43 for first condition
                 if len(initial_phase_data_gpu) > 43:
                     print(f"[GPU] DEBUG: Condition 0 chemical potentials (40-43): {[float(initial_phase_data_gpu[i]) for i in range(40, min(44, len(initial_phase_data_gpu)))]}")
-            results_gpu = cp.frombuffer(results_bytes, dtype=cp.uint8)
+            results_gpu = _from_bytes(results_bytes)
             
             # Ensure arrays are contiguous for proper pointer access
-            system_spec_gpu = cp.ascontiguousarray(system_spec_gpu)
-            condition_args_gpu = cp.ascontiguousarray(condition_args_gpu)
-            initial_phase_data_gpu = cp.ascontiguousarray(initial_phase_data_gpu)
-            results_gpu = cp.ascontiguousarray(results_gpu)
+            system_spec_gpu = xp.ascontiguousarray(system_spec_gpu)
+            condition_args_gpu = xp.ascontiguousarray(condition_args_gpu)
+            initial_phase_data_gpu = xp.ascontiguousarray(initial_phase_data_gpu)
+            results_gpu = xp.ascontiguousarray(results_gpu)
             
             # CRITICAL: Ensure proper alignment for struct access
             # GPU requires 8-byte alignment for double access
-            if system_spec_gpu.data.ptr % 8 != 0:
-                print(f"[GPU] WARNING: system_spec_gpu not 8-byte aligned: {system_spec_gpu.data.ptr}")
-            if condition_args_gpu_doubles.data.ptr % 8 != 0:
-                print(f"[GPU] WARNING: condition_args_gpu_doubles not 8-byte aligned: {condition_args_gpu_doubles.data.ptr}")
-            if initial_phase_data_gpu.data.ptr % 8 != 0:
-                print(f"[GPU] WARNING: initial_phase_data_gpu not 8-byte aligned: {initial_phase_data_gpu.data.ptr}")
-            if results_gpu.data.ptr % 8 != 0:
-                print(f"[GPU] WARNING: results_gpu not 8-byte aligned: {results_gpu.data.ptr}")
+            if _dev_ptr(system_spec_gpu) % 8 != 0:
+                print(f"[GPU] WARNING: system_spec_gpu not 8-byte aligned: {_dev_ptr(system_spec_gpu)}")
+            if _dev_ptr(condition_args_gpu_doubles) % 8 != 0:
+                print(f"[GPU] WARNING: condition_args_gpu_doubles not 8-byte aligned: {_dev_ptr(condition_args_gpu_doubles)}")
+            if _dev_ptr(initial_phase_data_gpu) % 8 != 0:
+                print(f"[GPU] WARNING: initial_phase_data_gpu not 8-byte aligned: {_dev_ptr(initial_phase_data_gpu)}")
+            if _dev_ptr(results_gpu) % 8 != 0:
+                print(f"[GPU] WARNING: results_gpu not 8-byte aligned: {_dev_ptr(results_gpu)}")
             
             if verbose:
                 print("[GPU] DEBUG: Using uint8 byte array approach")
@@ -2284,19 +2397,27 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     except Exception as e:
         raise
 
-    # Prepare grid data for GPU kernel
+    # Prepare grid data for GPU kernel: one self-describing block per statevar
+    # combination (e.g. per T value), laid out back-to-back. Each thread selects
+    # its block via grid_block_indices and the fixed per-block byte stride.
+    grid_block_stride_bytes = 0
+    grid_block_indices_gpu = None
     if grid_data_device_struct_np is not None:
         try:
-            # Pack grid data struct to bytes for CuPy compatibility
+            grid_block_stride_bytes = int(grid_data_device_struct_np.dtype.itemsize)
             grid_data_bytes = _pack_struct_to_bytes(grid_data_device_struct_np)
-            grid_data_gpu = cp.frombuffer(grid_data_bytes, dtype=cp.uint8)
-            grid_data_ptr_for_kernel = grid_data_gpu.data.ptr
+            grid_data_gpu = _from_bytes(grid_data_bytes)
+            grid_data_ptr_for_kernel = _dev_ptr(grid_data_gpu)
+            grid_block_indices_gpu = xp.asarray(grid_block_indices_np, dtype=np.int32)
             if verbose:
-                print(f"[GPU] Grid data transferred to GPU successfully ({len(grid_data_bytes)} bytes)")
+                print(f"[GPU] Grid data transferred to GPU successfully ({len(grid_data_bytes)} bytes, "
+                      f"{grid_data_device_struct_np.shape[0]} block(s), stride {grid_block_stride_bytes} B)")
         except Exception as e:
             if verbose:
                 print(f"[GPU] Warning: Failed to transfer grid data: {e}")
             grid_data_ptr_for_kernel = 0
+            grid_block_stride_bytes = 0
+            grid_block_indices_gpu = None
     else:
         grid_data_ptr_for_kernel = 0  # Fallback to nullptr
         if verbose:
@@ -2310,10 +2431,10 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     if debug_enabled:
         print(f"[GPU] Creating debug arrays to track solver steps...")
         # Debug arrays to track solver state at each iteration
-        debug_arrays['gm_history'] = cp.zeros((num_total_conditions_pts, debug_step_count), dtype=cp.float64)
-        debug_arrays['mu_history'] = cp.zeros((num_total_conditions_pts, debug_step_count, dynamic_sizes['MAX_COMPONENTS']), dtype=cp.float64)
-        debug_arrays['convergence_history'] = cp.zeros((num_total_conditions_pts, debug_step_count), dtype=cp.int32)
-        debug_arrays['iteration_count'] = cp.zeros(num_total_conditions_pts, dtype=cp.int32)
+        debug_arrays['gm_history'] = xp.zeros((num_total_conditions_pts, debug_step_count), dtype=np.float64)
+        debug_arrays['mu_history'] = xp.zeros((num_total_conditions_pts, debug_step_count, dynamic_sizes['MAX_COMPONENTS']), dtype=np.float64)
+        debug_arrays['convergence_history'] = xp.zeros((num_total_conditions_pts, debug_step_count), dtype=np.int32)
+        debug_arrays['iteration_count'] = xp.zeros(num_total_conditions_pts, dtype=np.int32)
     
     # 6b. Create global memory arrays for solver stack overflow fix
     if verbose:
@@ -2323,53 +2444,67 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     MAX_SVD_DIM = dynamic_sizes['MAX_COMPONENTS'] + dynamic_sizes['MAX_PHASES'] + dynamic_sizes['MAX_STATEVARS'] + dynamic_sizes['MAX_FIXED_MOLE_FRACTION_CONDITIONS'] + 2  # 4+4+4+4+2=18
     MAX_PHASE_MATRIX_DIM = dynamic_sizes['MAX_DOF_PER_PHASE'] + dynamic_sizes['MAX_INTERNAL_CONSTRAINTS']  # 4+4=8
     MAX_DOF_SIZE = dynamic_sizes['MAX_STATEVARS'] + dynamic_sizes['MAX_DOF_PER_PHASE']  # 4+4=8
-    # Size equilibrium matrix correctly to replace stack arrays
-    # Calculate dynamically based on problem size:
-    # Rows: 2 * MAX_PHASES + MAX_COMPONENTS + 1
-    # Cols: MAX_COMPONENTS + MAX_PHASES + MAX_STATEVARS
-    MAX_EQ_MATRIX_ROWS = 2 * dynamic_sizes['MAX_PHASES'] + dynamic_sizes['MAX_COMPONENTS'] + 1
-    MAX_EQ_MATRIX_COLS = dynamic_sizes['MAX_COMPONENTS'] + dynamic_sizes['MAX_PHASES'] + dynamic_sizes['MAX_STATEVARS']
-    MAX_EQ_MATRIX_SIZE = MAX_EQ_MATRIX_ROWS * MAX_EQ_MATRIX_COLS
-    MAX_EQ_SOLN_LEN = MAX_EQ_MATRIX_COLS  # Solution vector size matches columns
+    # Equilibrium-matrix work-array strides: MUST come from dynamic_sizes so the
+    # Python allocations match the kernel's -D-defined slicing strides exactly
+    # (a mismatch here caused out-of-bounds writes and nondeterminism at scale).
+    MAX_EQ_MATRIX_ROWS = dynamic_sizes['MAX_EQ_MATRIX_ROWS']
+    MAX_EQ_MATRIX_COLS = dynamic_sizes['MAX_EQ_SOLN_LEN']
+    MAX_EQ_MATRIX_SIZE = dynamic_sizes['MAX_EQ_MATRIX_SIZE']
+    MAX_EQ_SOLN_LEN = dynamic_sizes['MAX_EQ_SOLN_LEN']
     # Calculate threads early for memory allocation
-    threads_per_block = 256
+    # One condition per thread; block size is tunable (PYCGPU_BLOCK) since the
+    # per-thread state is huge and occupancy/locality trade off with block size.
+    # 64 measured fastest for 21-phase AlCuFe (4.30s vs 4.91s at 256) and is
+    # neutral for small systems; smaller blocks also load-balance heterogeneous
+    # per-condition iteration counts better.
+    threads_per_block = int(os.environ.get('PYCGPU_BLOCK', 64))
     blocks_per_grid_temp = (num_total_conditions_pts + threads_per_block - 1) // threads_per_block
     total_threads_for_allocation = blocks_per_grid_temp * threads_per_block
+    # Memory-safety validation mode (PYCGPU_GUARD=1): double every work-array
+    # allocation; threads use even slices, odd slices are magic-filled guards
+    # scanned after the run. Magic in thread slices also flushes out any
+    # read-before-write, which shows up as garbage results or a crash.
+    _guard_mode = bool(os.environ.get('PYCGPU_GUARD'))
+    if _guard_mode:
+        total_threads_for_allocation *= 2
     
     # Global memory arrays [total_threads, array_size] for per-thread allocation
     # CRITICAL: Must allocate for ALL threads that will be launched, not just num_conditions
     global_memory_arrays = {}
     # Use cp.empty for work arrays that are immediately overwritten - 5-7x faster allocation
-    global_memory_arrays['A_lstsq_copy'] = cp.empty((total_threads_for_allocation, MAX_SVD_DIM * MAX_SVD_DIM), dtype=cp.float64)
-    global_memory_arrays['U_lstsq'] = cp.empty((total_threads_for_allocation, MAX_SVD_DIM * MAX_SVD_DIM), dtype=cp.float64)
-    global_memory_arrays['V_lstsq'] = cp.empty((total_threads_for_allocation, MAX_SVD_DIM * MAX_SVD_DIM), dtype=cp.float64)
-    global_memory_arrays['singular_values_lstsq'] = cp.empty((total_threads_for_allocation, MAX_SVD_DIM), dtype=cp.float64)
-    global_memory_arrays['superdiag_lstsq'] = cp.empty((total_threads_for_allocation, MAX_SVD_DIM), dtype=cp.float64)
-    global_memory_arrays['U_inv'] = cp.empty((total_threads_for_allocation, MAX_PHASE_MATRIX_DIM * MAX_PHASE_MATRIX_DIM), dtype=cp.float64)
-    global_memory_arrays['V_inv'] = cp.empty((total_threads_for_allocation, MAX_PHASE_MATRIX_DIM * MAX_PHASE_MATRIX_DIM), dtype=cp.float64)
-    global_memory_arrays['singular_values_inv'] = cp.empty((total_threads_for_allocation, MAX_PHASE_MATRIX_DIM), dtype=cp.float64)
-    global_memory_arrays['superdiag_inv'] = cp.empty((total_threads_for_allocation, MAX_PHASE_MATRIX_DIM), dtype=cp.float64)
-    global_memory_arrays['work_inv'] = cp.empty((total_threads_for_allocation, MAX_PHASE_MATRIX_DIM * MAX_PHASE_MATRIX_DIM), dtype=cp.float64)
-    global_memory_arrays['x_dof'] = cp.empty((total_threads_for_allocation, MAX_DOF_SIZE), dtype=cp.float64)
-    global_memory_arrays['grad'] = cp.empty((total_threads_for_allocation, MAX_DOF_SIZE), dtype=cp.float64)
-    global_memory_arrays['hess'] = cp.empty((total_threads_for_allocation, MAX_DOF_SIZE * MAX_DOF_SIZE), dtype=cp.float64)
-    global_memory_arrays['masses'] = cp.empty((total_threads_for_allocation, dynamic_sizes['MAX_COMPONENTS']), dtype=cp.float64)
-    global_memory_arrays['mass_jac'] = cp.empty((total_threads_for_allocation, dynamic_sizes['MAX_COMPONENTS'] * MAX_DOF_SIZE), dtype=cp.float64)
-    global_memory_arrays['phase_matrix'] = cp.empty((total_threads_for_allocation, MAX_PHASE_MATRIX_DIM * MAX_PHASE_MATRIX_DIM), dtype=cp.float64)
-    global_memory_arrays['equilibrium_matrix'] = cp.empty((total_threads_for_allocation, MAX_EQ_MATRIX_SIZE), dtype=cp.float64)
-    global_memory_arrays['equilibrium_rhs'] = cp.empty((total_threads_for_allocation, MAX_EQ_MATRIX_ROWS), dtype=cp.float64)
-    global_memory_arrays['eq_soln'] = cp.empty((total_threads_for_allocation, MAX_EQ_SOLN_LEN), dtype=cp.float64)
+    global_memory_arrays['A_lstsq_copy'] = xp.empty((total_threads_for_allocation, MAX_SVD_DIM * MAX_SVD_DIM), dtype=np.float64)
+    global_memory_arrays['U_lstsq'] = xp.empty((total_threads_for_allocation, MAX_SVD_DIM * MAX_SVD_DIM), dtype=np.float64)
+    global_memory_arrays['V_lstsq'] = xp.empty((total_threads_for_allocation, MAX_SVD_DIM * MAX_SVD_DIM), dtype=np.float64)
+    global_memory_arrays['singular_values_lstsq'] = xp.empty((total_threads_for_allocation, MAX_SVD_DIM), dtype=np.float64)
+    global_memory_arrays['superdiag_lstsq'] = xp.empty((total_threads_for_allocation, MAX_SVD_DIM), dtype=np.float64)
+    global_memory_arrays['U_inv'] = xp.empty((total_threads_for_allocation, MAX_PHASE_MATRIX_DIM * MAX_PHASE_MATRIX_DIM), dtype=np.float64)
+    global_memory_arrays['V_inv'] = xp.empty((total_threads_for_allocation, MAX_PHASE_MATRIX_DIM * MAX_PHASE_MATRIX_DIM), dtype=np.float64)
+    global_memory_arrays['singular_values_inv'] = xp.empty((total_threads_for_allocation, MAX_PHASE_MATRIX_DIM), dtype=np.float64)
+    global_memory_arrays['superdiag_inv'] = xp.empty((total_threads_for_allocation, MAX_PHASE_MATRIX_DIM), dtype=np.float64)
+    global_memory_arrays['work_inv'] = xp.empty((total_threads_for_allocation, MAX_PHASE_MATRIX_DIM * MAX_PHASE_MATRIX_DIM), dtype=np.float64)
+    global_memory_arrays['x_dof'] = xp.empty((total_threads_for_allocation, MAX_DOF_SIZE), dtype=np.float64)
+    global_memory_arrays['grad'] = xp.empty((total_threads_for_allocation, MAX_DOF_SIZE), dtype=np.float64)
+    global_memory_arrays['hess'] = xp.empty((total_threads_for_allocation, MAX_DOF_SIZE * MAX_DOF_SIZE), dtype=np.float64)
+    global_memory_arrays['masses'] = xp.empty((total_threads_for_allocation, dynamic_sizes['MAX_COMPONENTS']), dtype=np.float64)
+    global_memory_arrays['mass_jac'] = xp.empty((total_threads_for_allocation, dynamic_sizes['MAX_COMPONENTS'] * MAX_DOF_SIZE), dtype=np.float64)
+    global_memory_arrays['phase_matrix'] = xp.empty((total_threads_for_allocation, MAX_PHASE_MATRIX_DIM * MAX_PHASE_MATRIX_DIM), dtype=np.float64)
+    global_memory_arrays['equilibrium_matrix'] = xp.empty((total_threads_for_allocation, MAX_EQ_MATRIX_SIZE), dtype=np.float64)
+    global_memory_arrays['equilibrium_rhs'] = xp.empty((total_threads_for_allocation, MAX_EQ_MATRIX_ROWS), dtype=np.float64)
+    global_memory_arrays['eq_soln'] = xp.empty((total_threads_for_allocation, MAX_EQ_SOLN_LEN), dtype=np.float64)
     
     # CRITICAL FIX: Allocate SystemState in global memory to avoid stack overflow
     # SystemState is too large for GPU thread stack (~100KB+ per thread)
-    SYSTEM_STATE_SIZE = 50000  # Size in doubles, matching gpu_codegen.py
-    global_memory_arrays['system_states'] = cp.empty((total_threads_for_allocation, SYSTEM_STATE_SIZE), dtype=cp.float64)
+    # Per-thread SystemState slot (doubles) — computed per system in
+    # compute_dynamic_kernel_sizes and passed to the kernel as -DSYSTEM_STATE_SIZE;
+    # a static_assert in eqsolver.h guarantees sizeof(SystemState) fits.
+    SYSTEM_STATE_SIZE = dynamic_sizes['SYSTEM_STATE_SIZE']
+    global_memory_arrays['system_states'] = xp.empty((total_threads_for_allocation, SYSTEM_STATE_SIZE), dtype=np.float64)
 
     # Additional SystemState arrays moved from stack to global memory
     # Each thread gets its own section via striding: thread_idx * array_size
-    global_memory_arrays['delta_ms'] = cp.empty((total_threads_for_allocation, dynamic_sizes['MAX_PHASES'] * dynamic_sizes['MAX_COMPONENTS']), dtype=cp.float64)
-    global_memory_arrays['phase_compositions'] = cp.empty((total_threads_for_allocation, dynamic_sizes['MAX_PHASES'] * dynamic_sizes['MAX_COMPONENTS']), dtype=cp.float64)
-    global_memory_arrays['phase_amounts_per_mole_atoms'] = cp.empty((total_threads_for_allocation, dynamic_sizes['MAX_PHASES'] * dynamic_sizes['MAX_COMPONENTS']), dtype=cp.float64)
+    global_memory_arrays['delta_ms'] = xp.empty((total_threads_for_allocation, dynamic_sizes['MAX_PHASES'] * dynamic_sizes['MAX_COMPONENTS']), dtype=np.float64)
+    global_memory_arrays['phase_compositions'] = xp.empty((total_threads_for_allocation, dynamic_sizes['MAX_PHASES'] * dynamic_sizes['MAX_COMPONENTS']), dtype=np.float64)
+    global_memory_arrays['phase_amounts_per_mole_atoms'] = xp.empty((total_threads_for_allocation, dynamic_sizes['MAX_PHASES'] * dynamic_sizes['MAX_COMPONENTS']), dtype=np.float64)
     
     # CRITICAL: CompositionSet arrays to prevent stack overflow
     # Each CompositionSet needs space for DOF values and other data
@@ -2377,34 +2512,52 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     compset_size_doubles = 2 + dynamic_sizes['MAX_STATEVARS'] + dynamic_sizes['MAX_DOF_PER_PHASE'] + dynamic_sizes['MAX_COMPONENTS'] + 10  # Extra for other fields
 
     # Create WorkArrays struct for AMD compatibility (reduces kernel parameters from 28+ to 16)
+    # CRITICAL FIX FOR AMD: Use proper struct layout matching C definition
+    # The WorkArrays struct in C expects: struct WorkArrays { double* arrays[23]; }
+    # We need to ensure proper alignment and type matching
     work_arrays_ptrs = np.zeros(23, dtype=np.uint64)  # Expanded for additional SystemState arrays
-    work_arrays_ptrs[0] = global_memory_arrays['A_lstsq_copy'].data.ptr
-    work_arrays_ptrs[1] = global_memory_arrays['U_lstsq'].data.ptr
-    work_arrays_ptrs[2] = global_memory_arrays['V_lstsq'].data.ptr
-    work_arrays_ptrs[3] = global_memory_arrays['singular_values_lstsq'].data.ptr
-    work_arrays_ptrs[4] = global_memory_arrays['superdiag_lstsq'].data.ptr
-    work_arrays_ptrs[5] = global_memory_arrays['U_inv'].data.ptr
-    work_arrays_ptrs[6] = global_memory_arrays['V_inv'].data.ptr
-    work_arrays_ptrs[7] = global_memory_arrays['singular_values_inv'].data.ptr
-    work_arrays_ptrs[8] = global_memory_arrays['superdiag_inv'].data.ptr
-    work_arrays_ptrs[9] = global_memory_arrays['work_inv'].data.ptr
-    work_arrays_ptrs[10] = global_memory_arrays['x_dof'].data.ptr
-    work_arrays_ptrs[11] = global_memory_arrays['grad'].data.ptr
-    work_arrays_ptrs[12] = global_memory_arrays['hess'].data.ptr
-    work_arrays_ptrs[13] = global_memory_arrays['masses'].data.ptr
-    work_arrays_ptrs[14] = global_memory_arrays['mass_jac'].data.ptr
-    work_arrays_ptrs[15] = global_memory_arrays['phase_matrix'].data.ptr
-    work_arrays_ptrs[16] = global_memory_arrays['equilibrium_matrix'].data.ptr
-    work_arrays_ptrs[17] = global_memory_arrays['equilibrium_rhs'].data.ptr
-    work_arrays_ptrs[18] = global_memory_arrays['eq_soln'].data.ptr
-    work_arrays_ptrs[19] = global_memory_arrays['system_states'].data.ptr
-    work_arrays_ptrs[20] = global_memory_arrays['delta_ms'].data.ptr  # NEW: delta_ms array
-    work_arrays_ptrs[21] = global_memory_arrays['phase_compositions'].data.ptr  # NEW: phase_compositions array
-    work_arrays_ptrs[22] = global_memory_arrays['phase_amounts_per_mole_atoms'].data.ptr  # NEW: _phase_amounts_per_mole_atoms_arr
-    work_arrays_gpu = cp.asarray(work_arrays_ptrs)
-    global_memory_arrays['removed_compsets'] = cp.zeros((total_threads_for_allocation, dynamic_sizes['MAX_PHASES'] * compset_size_doubles), dtype=cp.float64)
-    global_memory_arrays['compsets_before_solve'] = cp.zeros((total_threads_for_allocation, dynamic_sizes['MAX_PHASES'] * compset_size_doubles), dtype=cp.float64)
-    global_memory_arrays['compsets_before_final_solve'] = cp.zeros((total_threads_for_allocation, dynamic_sizes['MAX_PHASES'] * compset_size_doubles), dtype=cp.float64)
+    work_arrays_ptrs[0] = _dev_ptr(global_memory_arrays['A_lstsq_copy'])
+    work_arrays_ptrs[1] = _dev_ptr(global_memory_arrays['U_lstsq'])
+    work_arrays_ptrs[2] = _dev_ptr(global_memory_arrays['V_lstsq'])
+    work_arrays_ptrs[3] = _dev_ptr(global_memory_arrays['singular_values_lstsq'])
+    work_arrays_ptrs[4] = _dev_ptr(global_memory_arrays['superdiag_lstsq'])
+    work_arrays_ptrs[5] = _dev_ptr(global_memory_arrays['U_inv'])
+    work_arrays_ptrs[6] = _dev_ptr(global_memory_arrays['V_inv'])
+    work_arrays_ptrs[7] = _dev_ptr(global_memory_arrays['singular_values_inv'])
+    work_arrays_ptrs[8] = _dev_ptr(global_memory_arrays['superdiag_inv'])
+    work_arrays_ptrs[9] = _dev_ptr(global_memory_arrays['work_inv'])
+    work_arrays_ptrs[10] = _dev_ptr(global_memory_arrays['x_dof'])
+    work_arrays_ptrs[11] = _dev_ptr(global_memory_arrays['grad'])
+    work_arrays_ptrs[12] = _dev_ptr(global_memory_arrays['hess'])
+    work_arrays_ptrs[13] = _dev_ptr(global_memory_arrays['masses'])
+    work_arrays_ptrs[14] = _dev_ptr(global_memory_arrays['mass_jac'])
+    work_arrays_ptrs[15] = _dev_ptr(global_memory_arrays['phase_matrix'])
+    work_arrays_ptrs[16] = _dev_ptr(global_memory_arrays['equilibrium_matrix'])
+    work_arrays_ptrs[17] = _dev_ptr(global_memory_arrays['equilibrium_rhs'])
+    work_arrays_ptrs[18] = _dev_ptr(global_memory_arrays['eq_soln'])
+    work_arrays_ptrs[19] = _dev_ptr(global_memory_arrays['system_states'])
+    work_arrays_ptrs[20] = _dev_ptr(global_memory_arrays['delta_ms'])  # NEW: delta_ms array
+    work_arrays_ptrs[21] = _dev_ptr(global_memory_arrays['phase_compositions'])  # NEW: phase_compositions array
+    work_arrays_ptrs[22] = _dev_ptr(global_memory_arrays['phase_amounts_per_mole_atoms'])  # NEW: _phase_amounts_per_mole_atoms_arr
+
+    # CRITICAL: Ensure all pointers are valid before passing to kernel
+    for i, ptr in enumerate(work_arrays_ptrs):
+        if ptr == 0:
+            raise RuntimeError(f"WorkArrays pointer {i} is null! This will cause AMD GPU crash.")
+
+    # CRITICAL FIX FOR AMD: Ensure proper struct alignment
+    # The kernel expects struct WorkArrays { double* arrays[23]; }
+    # We must ensure the array is properly typed as pointer array, not uint64 array
+    # AMD/HIP may be stricter about type checking than CUDA
+    work_arrays_gpu = xp.asarray(work_arrays_ptrs, dtype=np.uint64)  # Explicitly use uint64 for pointers
+    global_memory_arrays['removed_compsets'] = xp.zeros((total_threads_for_allocation, dynamic_sizes['MAX_PHASES'] * compset_size_doubles), dtype=np.float64)
+    global_memory_arrays['compsets_before_solve'] = xp.zeros((total_threads_for_allocation, dynamic_sizes['MAX_PHASES'] * compset_size_doubles), dtype=np.float64)
+    global_memory_arrays['compsets_before_final_solve'] = xp.zeros((total_threads_for_allocation, dynamic_sizes['MAX_PHASES'] * compset_size_doubles), dtype=np.float64)
+
+    _GUARD_MAGIC = 1.23456789e300
+    if _guard_mode:
+        for _ga in global_memory_arrays.values():
+            _ga.fill(_GUARD_MAGIC)
     
     # CRITICAL: SystemState struct handling
     # SystemState contains pointers (phase_record*) and cannot be stored as a flat double array!
@@ -2419,6 +2572,14 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     
     
     # 7. Launch kernel
+    # The kernel calls energy functions through function pointers, so ptxas cannot
+    # statically size the per-thread stack and the CUDA default (1 KB) applies.
+    # Overflowing it silently corrupts other threads' local memory, which showed up
+    # as nondeterministic results at batch sizes ≳200 conditions.
+    if not _cpu_backend_mode:
+        if cp.cuda.runtime.deviceGetLimit(cp.cuda.runtime.cudaLimitStackSize) < 65536:
+            cp.cuda.runtime.deviceSetLimit(cp.cuda.runtime.cudaLimitStackSize, 65536)
+
     # Already calculated above: threads_per_block = 256
     blocks_per_grid = blocks_per_grid_temp  # Use the same value calculated for memory allocation
     
@@ -2436,7 +2597,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         # DEBUG: Verify initial phase data that gets sent to GPU
         print("[GPU] DEBUG: Verifying initial phase data AFTER GPU transfer...")
         try:
-            initial_phase_data_cpu = cp.asnumpy(initial_phase_data_gpu)
+            initial_phase_data_cpu = _to_numpy(initial_phase_data_gpu)
             print(f"[GPU] DEBUG: initial_phase_data_gpu type: {type(initial_phase_data_gpu)}")
             print(f"[GPU] DEBUG: initial_phase_data_gpu shape: {getattr(initial_phase_data_gpu, 'shape', 'no shape')}")
             print(f"[GPU] DEBUG: initial_phase_data_gpu dtype: {getattr(initial_phase_data_gpu, 'dtype', 'no dtype')}")
@@ -2463,6 +2624,8 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     gpu_arrays = [system_spec_gpu, condition_args_gpu, condition_args_gpu_doubles, initial_phase_data_gpu, results_gpu]
     if grid_data_device_struct_np is not None:
         gpu_arrays.append(grid_data_gpu)
+    if grid_block_indices_gpu is not None:
+        gpu_arrays.append(grid_block_indices_gpu)
     if debug_enabled:
         gpu_arrays.extend(debug_arrays.values())
     # Add global memory arrays to prevent garbage collection
@@ -2481,45 +2644,49 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     
     if wks_obj.verbose:
         print(f"[GPU] Passing to kernel: condition_data_stride={condition_data_stride} (max_statevars={max_statevars_scalar} + max_components={max_components_scalar})")
-    
+
     # Now use the proper struct pointers for the kernel call
     # Try different argument formats to see which one works
     if debug_enabled:
         kernel_args_v1 = (
-            system_spec_gpu.data.ptr,           # const SystemSpecification* global_spec_ptr
-            condition_args_gpu_doubles.data.ptr,        # const ConditionArgsSingle* condition_args_list_ptr - FIX: use doubles
-            results_gpu.data.ptr,               # EquilibriumResultSingle* results_list_ptr
+            _dev_ptr(system_spec_gpu),           # const SystemSpecification* global_spec_ptr
+            _dev_ptr(condition_args_gpu_doubles),        # const ConditionArgsSingle* condition_args_list_ptr - FIX: use doubles
+            _dev_ptr(results_gpu),               # EquilibriumResultSingle* results_list_ptr
             num_total_conditions_pts,           # int num_conditions_total
             condition_data_stride,              # int condition_stride - CRITICAL FIX for multi-condition support
             max_statevars_scalar,               # int python_max_statevars - Python's MAX_STATEVARS value
-            initial_phase_data_gpu.data.ptr,    # const void* initial_phase_data_ptr
+            _dev_ptr(initial_phase_data_gpu),    # const void* initial_phase_data_ptr
             initial_phase_data_stride,          # int initial_phase_data_stride - CRITICAL FIX
             system_spec_stride,                 # int system_spec_stride - CRITICAL FIX for SystemSpec array
             grid_data_ptr_for_kernel,           # const DeviceGrid* grid_data_ptr
-            debug_arrays['gm_history'].data.ptr,    # double* debug_gm_history
-            debug_arrays['mu_history'].data.ptr,    # double* debug_mu_history
-            debug_arrays['convergence_history'].data.ptr,  # int* debug_convergence_history
-            debug_arrays['iteration_count'].data.ptr,      # int* debug_iteration_count
+            _dev_ptr(debug_arrays['gm_history']),    # double* debug_gm_history
+            _dev_ptr(debug_arrays['mu_history']),    # double* debug_mu_history
+            _dev_ptr(debug_arrays['convergence_history']),  # int* debug_convergence_history
+            _dev_ptr(debug_arrays['iteration_count']),      # int* debug_iteration_count
             debug_step_count,                    # int debug_max_steps
             # WorkArrays struct containing all 20 global memory arrays
-            work_arrays_gpu.data.ptr            # const WorkArrays* work_arrays
+            _dev_ptr(work_arrays_gpu),           # const WorkArrays* work_arrays
+            _dev_ptr(grid_block_indices_gpu) if grid_block_indices_gpu is not None else 0,  # const int* grid_block_indices
+            np.int64(grid_block_stride_bytes)   # long long grid_block_stride_bytes
         )
     else:
         kernel_args_v1 = (
-            system_spec_gpu.data.ptr,           # const SystemSpecification* global_spec_ptr
-            condition_args_gpu_doubles.data.ptr,        # const ConditionArgsSingle* condition_args_list_ptr - FIX: use doubles
-            results_gpu.data.ptr,               # EquilibriumResultSingle* results_list_ptr
+            _dev_ptr(system_spec_gpu),           # const SystemSpecification* global_spec_ptr
+            _dev_ptr(condition_args_gpu_doubles),        # const ConditionArgsSingle* condition_args_list_ptr - FIX: use doubles
+            _dev_ptr(results_gpu),               # EquilibriumResultSingle* results_list_ptr
             num_total_conditions_pts,           # int num_conditions_total
             condition_data_stride,              # int condition_stride - CRITICAL FIX for multi-condition support
             max_statevars_scalar,               # int python_max_statevars - Python's MAX_STATEVARS value
-            initial_phase_data_gpu.data.ptr,    # const void* initial_phase_data_ptr
+            _dev_ptr(initial_phase_data_gpu),    # const void* initial_phase_data_ptr
             initial_phase_data_stride,          # int initial_phase_data_stride - CRITICAL FIX
             system_spec_stride,                 # int system_spec_stride - CRITICAL FIX for SystemSpec array
             grid_data_ptr_for_kernel,           # const DeviceGrid* grid_data_ptr
             0, 0, 0, 0,                         # null debug arrays (4 pointers)
             0,                                  # debug_max_steps = 0 when debug disabled
             # WorkArrays struct containing all 20 global memory arrays
-            work_arrays_gpu.data.ptr            # const WorkArrays* work_arrays
+            _dev_ptr(work_arrays_gpu),           # const WorkArrays* work_arrays
+            _dev_ptr(grid_block_indices_gpu) if grid_block_indices_gpu is not None else 0,  # const int* grid_block_indices
+            np.int64(grid_block_stride_bytes)   # long long grid_block_stride_bytes
         )
     
     # Alternative: try passing arrays directly instead of pointers
@@ -2551,25 +2718,25 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     # Alternative: try converting pointers to integers
     if debug_enabled:
         kernel_args_v3 = (
-            int(system_spec_gpu.data.ptr),      # Convert to int
-            int(condition_args_gpu.data.ptr),   # Convert to int
-            int(results_gpu.data.ptr),          # Convert to int
+            int(_dev_ptr(system_spec_gpu)),      # Convert to int
+            int(_dev_ptr(condition_args_gpu)),   # Convert to int
+            int(_dev_ptr(results_gpu)),          # Convert to int
             int(num_total_conditions_pts),      # Already int
-            int(initial_phase_data_gpu.data.ptr), # Convert to int
+            int(_dev_ptr(initial_phase_data_gpu)), # Convert to int
             int(grid_data_ptr_for_kernel),      # Convert to int
-            int(debug_arrays['gm_history'].data.ptr),
-            int(debug_arrays['mu_history'].data.ptr),
-            int(debug_arrays['convergence_history'].data.ptr),
-            int(debug_arrays['iteration_count'].data.ptr),
+            int(_dev_ptr(debug_arrays['gm_history'])),
+            int(_dev_ptr(debug_arrays['mu_history'])),
+            int(_dev_ptr(debug_arrays['convergence_history'])),
+            int(_dev_ptr(debug_arrays['iteration_count'])),
             int(debug_step_count)
         )
     else:
         kernel_args_v3 = (
-            int(system_spec_gpu.data.ptr),      # Convert to int
-            int(condition_args_gpu.data.ptr),   # Convert to int
-            int(results_gpu.data.ptr),          # Convert to int
+            int(_dev_ptr(system_spec_gpu)),      # Convert to int
+            int(_dev_ptr(condition_args_gpu)),   # Convert to int
+            int(_dev_ptr(results_gpu)),          # Convert to int
             int(num_total_conditions_pts),      # Already int
-            int(initial_phase_data_gpu.data.ptr), # Convert to int
+            int(_dev_ptr(initial_phase_data_gpu)), # Convert to int
             int(grid_data_ptr_for_kernel),      # Convert to int
             0, 0, 0, 0, 0                       # null debug arrays
         )
@@ -2582,39 +2749,75 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     
     # SEGMENT 20: GPU KERNEL EXECUTION (replaces CPU minimizer run loop)
     
-    try:
-        
-        # Launch the main equilibrium kernel
-        top_level_kernel(
-            (blocks_per_grid,), (threads_per_block,),
-            kernel_args_v1)
-        
-            
-    except Exception as e:
-        # Try backup approaches
-        for i, args in enumerate([kernel_args_v2, kernel_args_v3], 2):
-            try:
-                top_level_kernel((blocks_per_grid,), (threads_per_block,), args)
-                if verbose:
-                    print(f"[GPU] ✓ Backup approach {i} worked!")
-                break
-            except Exception as backup_e:
-                if verbose:
-                    print(f"[GPU] ✗ Backup approach {i} failed: {backup_e}")
-                if i == 3:  # Last attempt
-                    if verbose:
-                        print(f"[GPU] ERROR: All kernel approaches failed")
-                    raise e  # Raise the original kernel error
+    if _cpu_backend_mode:
+        # All buffers are host numpy arrays in this mode, and work_arrays_gpu is
+        # a uint64 table of HOST addresses — the solver runs in place, no copies.
+        from pycalphad.gpu.cpu_backend import run_cpu_backend
+        run_cpu_backend(
+            module,
+            system_spec=system_spec_gpu,
+            condition_args_doubles=condition_args_gpu_doubles,
+            results=results_gpu,
+            num_conditions=num_total_conditions_pts,
+            condition_stride=condition_data_stride,
+            python_max_statevars=max_statevars_scalar,
+            initial_phase_data=initial_phase_data_gpu,
+            initial_phase_data_stride=initial_phase_data_stride,
+            system_spec_stride=system_spec_stride,
+            grid_data=grid_data_gpu if grid_data_device_struct_np is not None else None,
+            grid_block_indices=grid_block_indices_gpu if grid_data_device_struct_np is not None else None,
+            grid_block_stride_bytes=grid_block_stride_bytes,
+            work_arrays_ptr_table=work_arrays_gpu,
+            verbose=verbose)
+    else:
+        try:
 
-    cp.cuda.runtime.deviceSynchronize()
-    
+            # Launch the main equilibrium kernel
+            top_level_kernel(
+                (blocks_per_grid,), (threads_per_block,),
+                kernel_args_v1)
+
+
+        except Exception as e:
+            # Try backup approaches
+            for i, args in enumerate([kernel_args_v2, kernel_args_v3], 2):
+                try:
+                    top_level_kernel((blocks_per_grid,), (threads_per_block,), args)
+                    if verbose:
+                        print(f"[GPU] ✓ Backup approach {i} worked!")
+                    break
+                except Exception as backup_e:
+                    if verbose:
+                        print(f"[GPU] ✗ Backup approach {i} failed: {backup_e}")
+                    if i == 3:  # Last attempt
+                        if verbose:
+                            print(f"[GPU] ERROR: All kernel approaches failed")
+                        raise e  # Raise the original kernel error
+
+    if not _cpu_backend_mode:
+        cp.cuda.runtime.deviceSynchronize()
+
+    if _guard_mode:
+        # Scan the interleaved guard slices: any non-magic value means a thread
+        # wrote outside its own slice (the class of bug that breaks AMD).
+        _guard_clean = True
+        for _gn, _ga in global_memory_arrays.items():
+            _gv = _to_numpy(_ga.reshape(_ga.shape[0] // 2, 2, -1)[:, 1, :])
+            _bad = np.nonzero(_gv != _GUARD_MAGIC)
+            if _bad[0].size:
+                _guard_clean = False
+                print(f"[GUARD] {_gn}: {_bad[0].size} corrupted guard doubles; "
+                      f"threads={np.unique(_bad[0])[:8].tolist()} offsets={_bad[1][:8].tolist()} "
+                      f"values={_gv[_bad][:4].tolist()}")
+        print(f"[GUARD] scan complete: {'CLEAN - no out-of-slice writes' if _guard_clean else 'CORRUPTION DETECTED'}")
+
     # Force flush of any kernel output
     import sys
     sys.stdout.flush()
     
     # Check for CUDA errors
     try:
-        err = cp.cuda.runtime.getLastError()
+        err = 0 if _cpu_backend_mode else cp.cuda.runtime.getLastError()
         if err != 0:
             if verbose:
                 print(f"[GPU] CUDA Error after kernel: {err}")
@@ -2632,10 +2835,10 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             print(f"\n[GPU] ===== SOLVER DEBUG ANALYSIS =====")
         try:
             # Transfer debug arrays back from GPU
-            gm_history = cp.asnumpy(debug_arrays['gm_history'])
-            mu_history = cp.asnumpy(debug_arrays['mu_history'])
-            convergence_history = cp.asnumpy(debug_arrays['convergence_history'])
-            iteration_count = cp.asnumpy(debug_arrays['iteration_count'])
+            gm_history = _to_numpy(debug_arrays['gm_history'])
+            mu_history = _to_numpy(debug_arrays['mu_history'])
+            convergence_history = _to_numpy(debug_arrays['convergence_history'])
+            iteration_count = _to_numpy(debug_arrays['iteration_count'])
             
             for cond_idx in range(min(num_total_conditions_pts, 3)):  # Show first 3 conditions
                 if verbose:
@@ -2676,7 +2879,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         # Process results from GPU execution
         # Transfer flat array back from GPU (updated approach)
         # The results_gpu is stored as uint8 bytes, but contains double data
-        results_bytes = cp.asnumpy(results_gpu)
+        results_bytes = _to_numpy(results_gpu)
         
         # Convert bytes to doubles (results are stored as doubles in GPU memory)
         raw_doubles = results_bytes.view(np.float64)

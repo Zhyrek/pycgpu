@@ -694,40 +694,25 @@ __device__ void Singular_Value_Decomposition_Solve(double* U, double* D, double*
    int i,j,k;
    double *pu, *pv;
    double dum;
-   double s_max, rcond;
-   int effective_rank;
+   double s_max;
 
-   // Set minimum tolerance based on machine precision
-   dum = DBL_EPSILON * D[0] * (double) ncols;
-   if (tolerance < dum) tolerance = dum;
-   
-   // Determine effective rank using relative condition number threshold
-   // CRITICAL FIX: Changed from 1e-10 to 1e-16 to match LAPACK behavior exactly
-   rcond = 1e-16;  // Match LAPACK's default tolerance for better handling of ill-conditioned systems
+   // LAPACK dgelsd semantics (CPU minimizer.pyx:29-52 with rcond passed as
+   // `tolerance`): singular values <= rcond * sigma_max are treated as ZERO;
+   // included values contribute (u_j . b / sigma_j) v_j with NO damping and
+   // NO machine-epsilon floor on the cutoff.
    s_max = D[0];   // Largest singular value
-   effective_rank = 0;
-   
-   for (i = 0; i < ncols; i++) {
-       if (D[i] > rcond * s_max && D[i] > tolerance) {
-           effective_rank++;
-       }
-   }
 
-   // Solve using only the well-conditioned subspace
    for ( i = 0, pv = V; i < ncols; i++, pv += ncols) {
       x[i] = 0.0;
-      for (j = 0; j < effective_rank; j++) {
-         if (D[j] > tolerance && D[j] > rcond * s_max) {
+      for (j = 0; j < ncols; j++) {
+         if (D[j] > tolerance * s_max) {
             // Compute U'*B for this singular value
             for (k = 0, dum = 0.0, pu = U; k < nrows; k++, pu += ncols)
                dum += *(pu + j) * B[k];
-            
-            // Apply damping for better numerical stability
-            double damping = D[j] / (D[j] + tolerance);
-            x[i] += damping * dum * *(pv + j) / D[j];
+            x[i] += dum * *(pv + j) / D[j];
          }
       }
-   } 
+   }
 }
 //Or, solve the transpose system, for underdetermined systems (m < n)
 //U and V are defined as the orthogonal matrices obtained from decomposing A.T
@@ -739,40 +724,23 @@ __device__ void Singular_Value_Decomposition_SolveT(double* U, double* D, double
    int i,j,k;
    double *pu, *pv;
    double dum;
-   double s_max, rcond;
-   int effective_rank;
+   double s_max;
 
-   // Set minimum tolerance based on machine precision
-   dum = DBL_EPSILON * D[0] * (double) ncols;
-   if (tolerance < dum) tolerance = dum;
-   
-   // Determine effective rank using relative condition number threshold
-   // CRITICAL FIX: Changed from 1e-10 to 1e-16 to match LAPACK behavior exactly
-   rcond = 1e-16;  // Match LAPACK's default tolerance for better handling of ill-conditioned systems
+   // LAPACK dgelsd semantics: singular values <= tolerance * sigma_max are
+   // treated as ZERO; no damping, no machine-epsilon floor (see Solve above).
    s_max = D[0];   // Largest singular value
-   effective_rank = 0;
-   
-   for (i = 0; i < ncols; i++) {
-       if (D[i] > rcond * s_max && D[i] > tolerance) {
-           effective_rank++;
-       }
-   }
 
-   // Solve using only the well-conditioned subspace
    for ( i = 0, pu = U; i < nrows; i++, pu += ncols) {
       x[i] = 0.0;
-      for (j = 0, pv = V; j < effective_rank; j++, pv += ncols) {
-         if (D[j] > tolerance && D[j] > rcond * s_max) {
+      for (j = 0, pv = V; j < ncols; j++, pv += ncols) {
+         if (D[j] > tolerance * s_max) {
             // Compute V'*B for this singular value
             for (k = 0, dum = 0.0; k < ncols; k++)
                dum += *(pv + k) * B[k];
-            
-            // Apply damping for better numerical stability
-            double damping = D[j] / (D[j] + tolerance);
-            x[i] += damping * dum * *(pu + j) / D[j];
+            x[i] += dum * *(pu + j) / D[j];
          }
       }
-   } 
+   }
 }
 
 
@@ -1014,5 +982,91 @@ __device__ int dgelsd_device(double* A, int m, int n, double* B, int nrhs,
         }
     }
     
+    return 0;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+//  int Jacobi_SVD(double* A, int nrows, int ncols,                           //
+//                 double* U, double* singular_values, double* V)             //
+//                                                                            //
+//  One-sided (Hestenes) Jacobi SVD (the algorithm behind LAPACK's dgesvj).  //
+//  Kept as a validated ALTERNATIVE engine for svd_stability_test.py.         //
+//  Measured verdict (2026-07-10): for general dense matrices, this, the      //
+//  Golub-Reinsch routine above, AND LAPACK dgesdd/dgelsd all deliver the     //
+//  same eps*cond(A) forward accuracy against ground truth — small singular   //
+//  values of a general matrix are simply not determined more precisely by    //
+//  its entries. (Jacobi's high relative accuracy only materializes for       //
+//  special structures, e.g. well-conditioned-times-diagonal scalings.)       //
+//  The CPU/GPU trajectory divergences on near-duplicate composition sets     //
+//  are therefore same-size noise in different directions, not an accuracy    //
+//  deficit of svd.c versus LAPACK.                                           //
+//                                                                            //
+//  A is nrows x ncols row-major with nrows >= ncols and is DESTROYED.        //
+//  U (nrows x ncols) and V (ncols x ncols) receive the singular vectors,     //
+//  singular_values the (descending-sorted) singular values, compatible with  //
+//  Singular_Value_Decomposition_Solve above.                                 //
+////////////////////////////////////////////////////////////////////////////////
+__device__ int Jacobi_SVD(double* A, int nrows, int ncols,
+                          double* U, double* singular_values, double* V)
+{
+    for (int i = 0; i < ncols * ncols; ++i) V[i] = 0.0;
+    for (int i = 0; i < ncols; ++i) V[i * ncols + i] = 1.0;
+
+    const double tol = 1.0e-15;   // relative off-diagonal threshold (~eps)
+    const int max_sweeps = 60;
+
+    for (int sweep = 0; sweep < max_sweeps; ++sweep) {
+        int rotated = 0;
+        for (int p = 0; p < ncols - 1; ++p) {
+            for (int q = p + 1; q < ncols; ++q) {
+                double app = 0.0, aqq = 0.0, apq = 0.0;
+                for (int i = 0; i < nrows; ++i) {
+                    const double x = A[i * ncols + p];
+                    const double y = A[i * ncols + q];
+                    app += x * x;
+                    aqq += y * y;
+                    apq += x * y;
+                }
+                if (apq == 0.0 || fabs(apq) <= tol * sqrt(app * aqq)) continue;
+                rotated = 1;
+                const double tau = (aqq - app) / (2.0 * apq);
+                const double t = (tau >= 0.0)
+                    ? 1.0 / (tau + sqrt(1.0 + tau * tau))
+                    : 1.0 / (tau - sqrt(1.0 + tau * tau));
+                const double c = 1.0 / sqrt(1.0 + t * t);
+                const double s = t * c;
+                for (int i = 0; i < nrows; ++i) {
+                    const double x = A[i * ncols + p];
+                    const double y = A[i * ncols + q];
+                    A[i * ncols + p] = c * x - s * y;
+                    A[i * ncols + q] = s * x + c * y;
+                }
+                for (int i = 0; i < ncols; ++i) {
+                    const double x = V[i * ncols + p];
+                    const double y = V[i * ncols + q];
+                    V[i * ncols + p] = c * x - s * y;
+                    V[i * ncols + q] = s * x + c * y;
+                }
+            }
+        }
+        if (!rotated) break;
+    }
+
+    for (int j = 0; j < ncols; ++j) {
+        double nrm = 0.0;
+        for (int i = 0; i < nrows; ++i) {
+            const double x = A[i * ncols + j];
+            nrm += x * x;
+        }
+        nrm = sqrt(nrm);
+        singular_values[j] = nrm;
+        if (nrm > 0.0) {
+            for (int i = 0; i < nrows; ++i) U[i * ncols + j] = A[i * ncols + j] / nrm;
+        } else {
+            for (int i = 0; i < nrows; ++i) U[i * ncols + j] = 0.0;
+        }
+    }
+
+    Sort_by_Decreasing_Singular_Values(nrows, ncols, singular_values, U, V);
     return 0;
 }

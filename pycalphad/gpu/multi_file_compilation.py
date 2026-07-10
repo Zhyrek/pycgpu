@@ -226,7 +226,7 @@ __global__ void equilibrium_kernel(
             
         return compiled_objects
     
-    def link_phases_to_kernel(self, compiled_objects: Dict[str, str]) -> cp.RawModule:
+    def link_phases_to_kernel(self, compiled_objects: Dict[str, str]) -> "cp.RawModule":
         """
         Link all compiled phase objects together with the main kernel.
         

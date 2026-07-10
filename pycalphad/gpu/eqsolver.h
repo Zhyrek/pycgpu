@@ -3,6 +3,15 @@
 
 #include "minimizer.h" // REQUIRED: Contains SystemSpecification, SystemState, constants, etc.
 
+// Each thread's SystemState lives in a global-memory slot of SYSTEM_STATE_SIZE
+// doubles (allocated Python-side with the same constant). If the struct outgrows
+// the slot, threads corrupt their neighbors' state — fail the build instead.
+#ifndef SYSTEM_STATE_SIZE
+#define SYSTEM_STATE_SIZE 50000
+#endif
+static_assert(sizeof(SystemState) <= SYSTEM_STATE_SIZE * sizeof(double),
+              "SystemState does not fit its per-thread global-memory slot");
+
 // --- Helper Structs for GPU Data ---
 
 // To represent the grid data (from pycalphad calculate output) on the GPU
@@ -85,7 +94,8 @@ __device__ bool identify_candidate_phase_to_add(
     const CompositionSet* removed_compsets, // Array of recently removed CompositionSets
     int num_removed_compsets               // Number of removed compsets
 ) {
-    if (grid_data->num_grid_points_total == 0) return false;
+    // CRITICAL FIX: Check for NULL grid_data before dereferencing
+    if (grid_data == nullptr || grid_data->num_grid_points_total == 0) return false;
 
     // Calculate driving forces for all points in the grid
     // double driving_forces_on_grid[MAX_GRID_POINTS]; // MAX_GRID_POINTS needs to be a define
@@ -160,8 +170,10 @@ __device__ bool identify_candidate_phase_to_add(
         
         // Check distinctness against current compsets (matching CPU logic lines 62-72)
         for (int cs_idx = 0; cs_idx < current_sys_state->num_compsets; ++cs_idx) {
-            if (current_sys_state->compsets[cs_idx].phase_record == nullptr || 
-                current_sys_state->phase_amt[cs_idx] < MIN_PHASE_FRACTION) continue;
+            // CPU deletes only NP <= 0 compsets before add_new_phases (solver.py:301),
+            // then checks distinctness against ALL remaining compsets (eqsolver.pyx:79).
+            if (current_sys_state->compsets[cs_idx].phase_record == nullptr ||
+                current_sys_state->phase_amt[cs_idx] <= 0.0) continue;
 
             if (current_sys_state->compsets[cs_idx].phase_record == final_candidate_phase_record) {
                 // Same phase type, check overall composition (using X, not site fractions)
@@ -193,8 +205,24 @@ __device__ bool identify_candidate_phase_to_add(
 }
 
 __device__ int get_phase_record_index(const DevicePhaseData* phase_data, int grid_phase_id) {
+    // CRITICAL FIX: Check for NULL phase_data first
+    if (phase_data == nullptr) {
+        return -1; // No phase data available
+    }
+
+    // CRITICAL FIX: Check for NULL mapping array
+    if (phase_data->grid_phase_id_to_record_index == nullptr) {
+        // FALLBACK: When no mapping array exists, assume phase ID directly corresponds to record index
+        // This is valid when phase IDs are 0-indexed and contiguous
+        if (grid_phase_id < 0 || grid_phase_id >= phase_data->num_unique_phase_records) {
+            return -1; // Phase ID out of range for direct indexing
+        }
+        return grid_phase_id; // Use phase ID as record index directly
+    }
+
+    // Use the mapping array if available
     if (grid_phase_id < 0 || grid_phase_id > phase_data->max_grid_phase_id) {
-        return -1; // Invalid phase ID
+        return -1; // Invalid phase ID for mapping
     }
     return phase_data->grid_phase_id_to_record_index[grid_phase_id];
 }
@@ -227,7 +255,8 @@ __device__ bool identify_nearly_stable_phases(
     double minimum_df) {
 
     *num_candidates_found = 0;
-    if (grid_data->num_grid_points_total == 0) return false;
+    // CRITICAL FIX: Check for NULL grid_data before dereferencing
+    if (grid_data == nullptr || grid_data->num_grid_points_total == 0) return false;
 
     // Calculate driving forces for all points on the grid (can be large)
     // Ideally, process this on the fly or use a shared memory buffer if block-parallel.
@@ -326,8 +355,8 @@ typedef struct InitialPhaseDataSingle {
 // Forward declaration of run_loop (defined in minimizer.h with global memory support)
 __device__ bool run_loop(
     int thread_id,
-    SystemSpecification* spec, 
-    SystemState* state, 
+    SystemSpecification* spec,
+    SystemState* state,
     int max_iterations,
     const DeviceGrid* grid_data,
     const DevicePhaseData* phase_data,
@@ -343,7 +372,8 @@ __device__ bool run_loop(
     double* mass_jac,
     double* x_dof,
     double* grad,
-    double* hess
+    double* hess,
+    double* work_inv
 );
 
 // --- ACTUAL SOPHISTICATED SOLVER USING GLOBAL MEMORY ---
@@ -644,7 +674,9 @@ __device__ void solve_equilibrium_at_condition(
             }
             continue;
         }
-        if (phase_amount <= MIN_PHASE_FRACTION) {
+        // CPU (eqsolver.pyx:268) floors phase_amt at MIN_PHASE_FRACTION and KEEPS the
+        // phase; the Python side already applied that floor, so only skip truly empty slots.
+        if (phase_amount < MIN_PHASE_FRACTION) {
             // DEBUG: Mark phase amount too small
             if (thread_id == 0 && i == 0) {
                 result->X_phases[21] = -2.0; // Phase amount too small marker
@@ -969,9 +1001,10 @@ __device__ void solve_equilibrium_at_condition(
     
     // CRITICAL: Set up free_stable_compset_indices array
     // This tells the solver which composition sets are free to vary
+    // CPU (minimizer.pyx:792) requires NP > 0 for membership.
     current_sys_state.num_free_stable_compsets = 0;
     for (int i = 0; i < current_sys_state.num_compsets; ++i) {
-        if (!current_sys_state.compsets[i].fixed && i < MAX_PHASES) {
+        if (!current_sys_state.compsets[i].fixed && current_sys_state.compsets[i].NP > 0.0 && i < MAX_PHASES) {
             current_sys_state.free_stable_compset_indices[current_sys_state.num_free_stable_compsets] = i;
             current_sys_state.num_free_stable_compsets++;
         }
@@ -1080,20 +1113,17 @@ __device__ void solve_equilibrium_at_condition(
         for (int comp_idx = 0; comp_idx < current_spec.num_components; ++comp_idx) {
             phase_comp_sum += formulamoles[comp_idx];
         }
-        
-        // CRITICAL FIX: Normalize phase compositions to mole fractions like CPU does
-        // The CPU uses normalized compositions (X values) for the equilibrium matrix
-        // For single-sublattice phases (e.g. LIQUID), sum=1 so no change
-        // For multi-sublattice phases (e.g. C15 with AU2BI), sum=3 so we get X(AU)=2/3, X(BI)=1/3
+
+        // CPU SystemState constructor (minimizer.pyx:810) stores RAW formulamoles
+        // (moles per formula unit) in phase_compositions, NOT normalized fractions.
+        for (int comp_idx = 0; comp_idx < current_spec.num_components; ++comp_idx) {
+            current_sys_state.phase_compositions[idx * MAX_COMPONENTS + comp_idx] = formulamoles[comp_idx];
+        }
+        // CPU (minimizer.pyx:814) converts phase_amt from moles of atoms to moles of
+        // FORMULA UNITS: phase_amt[idx] /= phase_comp_sum. Without this, multi-atom
+        // formula units (e.g. AL5FE2 with 7 atoms/f.u.) start with a wrong system_amount.
         if (phase_comp_sum > 1e-12) {
-            for (int comp_idx = 0; comp_idx < current_spec.num_components; ++comp_idx) {
-                current_sys_state.phase_compositions[idx * MAX_COMPONENTS + comp_idx] = formulamoles[comp_idx] / phase_comp_sum;
-            }
-        } else {
-            // Fallback if sum is zero
-            for (int comp_idx = 0; comp_idx < current_spec.num_components; ++comp_idx) {
-                current_sys_state.phase_compositions[idx * MAX_COMPONENTS + comp_idx] = formulamoles[comp_idx];
-            }
+            current_sys_state.phase_amt[idx] /= phase_comp_sum;
         }
         
         // Debug output
@@ -1132,7 +1162,11 @@ __device__ void solve_equilibrium_at_condition(
     // (eqsolver.pyx lines 108-142) which adds metastable phases before solving
     const double minimum_df = -1000.0;  // Same threshold as CPU
     
-    if (grid_data != nullptr && thread_id == 0) {
+    // CPU runs add_nearly_stable for EVERY condition (eqsolver.pyx:287); the old
+    // `&& thread_id == 0` gate silently skipped metastable seeding for all batch
+    // threads except the first (single-condition traces are always thread 0,
+    // which is why this never showed up in them).
+    if (grid_data != nullptr) {
         // Verbose output for debugging
         #ifdef VERBOSE_DEBUG
         printf("GPU DEBUG: Starting add_nearly_stable phase addition\\n");
@@ -1330,10 +1364,12 @@ __device__ void solve_equilibrium_at_condition(
             }
         }
         
-        // Update free stable indices after adding phases
+        // Update free stable indices after adding phases.
+        // CPU (minimizer.pyx:792) only includes compsets with NP > 0, so the
+        // NP=0 nearly-stable compsets stay OUT of the initial free-stable set.
         current_sys_state.num_free_stable_compsets = 0;
         for (int i = 0; i < current_sys_state.num_compsets; ++i) {
-            if (!current_sys_state.compsets[i].fixed && i < MAX_PHASES) {
+            if (!current_sys_state.compsets[i].fixed && current_sys_state.compsets[i].NP > 0.0 && i < MAX_PHASES) {
                 current_sys_state.free_stable_compset_indices[current_sys_state.num_free_stable_compsets] = i;
                 current_sys_state.num_free_stable_compsets++;
             }
@@ -1419,8 +1455,9 @@ __device__ void solve_equilibrium_at_condition(
             #endif
         }
         
-        // Calculate energy using the same function as the first calculation (obj, not formulaobj)
-        css->energy = cs->phase_record->obj(cs->dof);
+        // CPU recompute (minimizer.pyx:933) sets csst.energy from formulaobj
+        // (per formula unit); obj is Model.GM per mole of atoms.
+        css->energy = cs->phase_record->formulaobj(cs->dof);
         
         // DEBUG: Check energy result - energies should be negative for this system!
         if (thread_id == 0) {
@@ -1464,9 +1501,9 @@ __device__ void solve_equilibrium_at_condition(
     // Try initial solve
     bool converged = run_loop(
         thread_id,              // Pass thread_id for debug output
-        &current_spec, 
-        &current_sys_state, 
-        50, // max_iterations - reduced for first attempt
+        &current_spec,
+        &current_sys_state,
+        1000, // max_iterations - CPU solver.py:288 uses run_loop(state, 1000)
         grid_data,              // Pass grid data for phase search
         phase_data,             // Pass phase data for phase search
         // Pass global memory arrays to avoid stack overflow
@@ -1482,96 +1519,115 @@ __device__ void solve_equilibrium_at_condition(
         mass_jac,           // replaces local jacobian arrays
         x_dof,              // replaces local DOF arrays
         grad,               // replaces local gradient arrays
-        hess                // replaces local hessian arrays
+        hess,               // replaces local hessian arrays
+        work_inv            // global memory for LU inversion scratch
     );
     
-    // CRITICAL FIX: If converged, try adding new phases from grid
-    // This matches CPU behavior of searching for additional compositions
-    if (converged && grid_data != nullptr && phase_data != nullptr) {
-        // Build list of removed composition sets (empty for now)
-        CompositionSet removed_compsets[1];
-        int num_removed = 0;
-        
-        // Get current state variables
-        double state_variables[MAX_STATEVARS];
-        for (int i = 0; i < current_spec.num_statevars && i < MAX_STATEVARS; ++i) {
-            if (current_sys_state.num_compsets > 0) {
-                state_variables[i] = current_sys_state.compsets[0].dof[i];
-            } else {
-                state_variables[i] = 0.0;
+    // CPU outer loop (eqsolver.pyx:308-371): solve, then add_new_phases(df > 1e-4);
+    // while a phase was added, re-solve, up to 10 adds. The CPU calls add_new_phases
+    // after every solve regardless of convergence, and removed_compsets is always
+    // empty on CPU (eqsolver.pyx:249).
+    if (grid_data != nullptr && phase_data != nullptr) {
+        for (int outer_iter = 0; outer_iter < 10; ++outer_iter) {
+            double state_variables[MAX_STATEVARS];
+            for (int i = 0; i < current_spec.num_statevars && i < MAX_STATEVARS; ++i) {
+                state_variables[i] = (current_sys_state.num_compsets > 0) ?
+                    current_sys_state.compsets[0].dof[i] : 0.0;
             }
-        }
-        
-        // Search for best phase to add from grid
-        int candidate_grid_idx;
-        double candidate_df;
-        bool found_phase = identify_candidate_phase_to_add(&candidate_grid_idx, &candidate_df, &current_sys_state, &current_spec,
-                                                          grid_data, phase_data, state_variables, 1e-4,
-                                                          removed_compsets, num_removed);
-        
-        if (found_phase && candidate_grid_idx >= 0 && current_sys_state.num_compsets < MAX_PHASES) {
-            // Add the new phase composition set
+
+            int candidate_grid_idx;
+            double candidate_df;
+            bool found_phase = identify_candidate_phase_to_add(&candidate_grid_idx, &candidate_df, &current_sys_state, &current_spec,
+                                                              grid_data, phase_data, state_variables, 1e-4,
+                                                              nullptr, 0);
+            if (!found_phase || candidate_grid_idx < 0 || current_sys_state.num_compsets >= MAX_PHASES) break;
+
+            int phase_id = grid_data->PhaseID_ptr[candidate_grid_idx];
+            int phase_record_idx = get_phase_record_index(phase_data, phase_id);
+            if (phase_record_idx < 0 || phase_record_idx >= phase_data->num_unique_phase_records) break;
+
             int new_cs_idx = current_sys_state.num_compsets;
             CompositionSet* new_cs = &current_sys_state.compsets[new_cs_idx];
-            
-            // Get phase record from grid
-            int phase_id = grid_data->PhaseID_ptr[candidate_grid_idx];
-            int phase_record_idx = phase_data->grid_phase_id_to_record_index[phase_id];
-            
-            if (phase_record_idx >= 0 && phase_record_idx < phase_data->num_unique_phase_records) {
-                new_cs->phase_record = &phase_data->phase_records_array[phase_record_idx];
-                new_cs->fixed = false;
-                new_cs->NP = 1e-10;  // Start with small amount
-                
-                // Copy site fractions from grid
-                for (int dof_idx = 0; dof_idx < new_cs->phase_record->phase_dof && dof_idx < MAX_DOF_PER_PHASE; ++dof_idx) {
-                    new_cs->dof[current_spec.num_statevars + dof_idx] = 
-                        grid_data->Y_ptr[candidate_grid_idx * grid_data->phase_dof_stride_Y + dof_idx];
-                }
-                
-                // Copy compositions from grid
-                for (int comp_idx = 0; comp_idx < current_spec.num_components && comp_idx < MAX_COMPONENTS; ++comp_idx) {
-                    new_cs->X[comp_idx] = 
-                        grid_data->X_ptr[candidate_grid_idx * grid_data->num_components_stride_X + comp_idx];
-                }
-                
-                // Update system state
-                current_sys_state.phase_amt[new_cs_idx] = 1e-10;
-                current_sys_state.num_compsets++;
-                current_sys_state.num_free_stable_compsets++;
-                current_sys_state.free_stable_compset_indices[current_sys_state.num_free_stable_compsets-1] = new_cs_idx;
-                
-                #ifdef VERBOSE_DEBUG
-                if (thread_id == 0) {
-                    printf("GPU DEBUG: Added new phase from grid - cs_idx=%d, phase_id=%d, df=%.6e\\n",
-                           new_cs_idx, phase_id, candidate_df);
-                    printf("GPU DEBUG: Restarting solver with new phase\\n");
-                }
-                #endif
-                
-                // Run solver again with the new phase
-                converged = run_loop(
-                    thread_id,
-                    &current_spec,
-                    &current_sys_state,
-                    150, // more iterations for second attempt
-                    grid_data,
-                    phase_data,
-                    equilibrium_matrix,
-                    equilibrium_rhs,
-                    eq_soln,
-                    A_lstsq_copy,
-                    U_lstsq,
-                    V_lstsq,
-                    singular_values_lstsq,
-                    superdiag_lstsq,
-                    masses,
-                    mass_jac,
-                    x_dof,
-                    grad,
-                    hess
-                );
+            CompsetState* new_css = &current_sys_state.cs_states[new_cs_idx];
+
+            new_cs->phase_record = &phase_data->phase_records_array[phase_record_idx];
+            new_cs->init(new_cs->phase_record);
+            new_cs->fixed = false;
+
+            for (int sv_idx = 0; sv_idx < current_spec.num_statevars; ++sv_idx) {
+                new_cs->dof[sv_idx] = state_variables[sv_idx];
             }
+            for (int dof_idx = 0; dof_idx < new_cs->phase_record->phase_dof && dof_idx < MAX_DOF_PER_PHASE; ++dof_idx) {
+                new_cs->dof[current_spec.num_statevars + dof_idx] =
+                    grid_data->Y_ptr[candidate_grid_idx * grid_data->phase_dof_stride_Y + dof_idx];
+            }
+
+            // CPU (eqsolver.pyx:89) adds the new phase with NP = 1e-6 moles of atoms
+            new_cs->NP = 1e-6;
+            new_css->init(&current_spec, new_cs);
+            new_cs->update(&new_cs->dof[current_spec.num_statevars], new_cs->NP, new_cs->dof, current_spec.num_statevars);
+
+            // Fresh CPU SystemState (minimizer.pyx:810-814): raw formulamoles in
+            // phase_compositions; phase_amt converted to moles of formula units.
+            double formulamoles_new[MAX_COMPONENTS];
+            for (int comp_idx = 0; comp_idx < MAX_COMPONENTS; ++comp_idx) formulamoles_new[comp_idx] = 0.0;
+            if (new_cs->phase_record->formulamole_obj != nullptr) {
+                new_cs->phase_record->formulamole_obj(formulamoles_new, new_cs->dof);
+            }
+            double phase_comp_sum_new = 0.0;
+            for (int comp_idx = 0; comp_idx < current_spec.num_components; ++comp_idx) {
+                current_sys_state.phase_compositions[new_cs_idx * MAX_COMPONENTS + comp_idx] = formulamoles_new[comp_idx];
+                phase_comp_sum_new += formulamoles_new[comp_idx];
+            }
+            current_sys_state.phase_amt[new_cs_idx] = (phase_comp_sum_new > 1e-12) ? (1e-6 / phase_comp_sum_new) : 1e-6;
+            current_sys_state.num_compsets++;
+
+            #ifdef VERBOSE_DEBUG
+            if (thread_id == 0) {
+                printf("GPU DEBUG: Outer loop %d added phase from grid - cs_idx=%d, phase_id=%d, df=%.6e\\n",
+                       outer_iter, new_cs_idx, phase_id, candidate_df);
+            }
+            #endif
+
+            // CPU builds a FRESH SystemState for the next solve (minimizer.pyx:777-801):
+            // counters reset, and compsets with NP <= 0 were deleted from the list
+            // beforehand (solver.py:309). Deletion is emulated by blocking their
+            // re-addition in change_phases (candidate requires times_compset_removed < 4).
+            current_sys_state.iterations_since_last_phase_change = 0;
+            current_sys_state.mass_residual = 1e10;
+            current_sys_state.num_free_stable_compsets = 0;
+            for (int i = 0; i < current_sys_state.num_compsets; ++i) {
+                current_sys_state.metastable_phase_iterations[i] = 0;
+                bool active = (current_sys_state.compsets[i].phase_record != nullptr) &&
+                              (current_sys_state.phase_amt[i] > 0.0);
+                current_sys_state.times_compset_removed[i] = active ? 0 : 1000000;
+                if (active && !current_sys_state.compsets[i].fixed) {
+                    current_sys_state.free_stable_compset_indices[current_sys_state.num_free_stable_compsets++] = i;
+                }
+            }
+
+            converged = run_loop(
+                thread_id,
+                &current_spec,
+                &current_sys_state,
+                1000, // max_iterations - CPU solver.py:288 uses run_loop(state, 1000)
+                grid_data,
+                phase_data,
+                equilibrium_matrix,
+                equilibrium_rhs,
+                eq_soln,
+                A_lstsq_copy,
+                U_lstsq,
+                V_lstsq,
+                singular_values_lstsq,
+                superdiag_lstsq,
+                masses,
+                mass_jac,
+                x_dof,
+                grad,
+                hess,
+                work_inv
+            );
         }
     }
     
@@ -1587,21 +1643,10 @@ __device__ void solve_equilibrium_at_condition(
         result->final_chemical_potentials[i] = current_sys_state.chemical_potentials[i];
     }
     
-    // CRITICAL FIX: Synchronize phase_amt with CompositionSet NP values after solver
-    // The solver updates NP but phase_amt array might not be synchronized
-    // IMPORTANT: Only sync active phases (phase_amt > 0) to avoid overwriting consolidated phases
-    for (int i = 0; i < current_sys_state.num_compsets; ++i) {
-        // Only sync if the phase is active (not removed/consolidated)
-        if (current_sys_state.phase_amt[i] > MIN_PHASE_FRACTION) {
-            current_sys_state.phase_amt[i] = current_sys_state.compsets[i].NP;
-        }
-        if (thread_id == 0 && i < 2) {
-            #ifdef VERBOSE_DEBUG
-            printf("GPU DEBUG: After solver sync - compset %d: NP=%f, phase_amt=%f\\n", 
-                   i, current_sys_state.compsets[i].NP, current_sys_state.phase_amt[i]);
-            #endif
-        }
-    }
+    // NOTE: phase_amt stays in formula units throughout the solve (matching CPU
+    // SystemState.phase_amt). CPU's final compset.NP equals phase_amt * moles-of-atoms
+    // per formula unit, set by the last recompute() before convergence; no extra
+    // synchronization or renormalization happens on the CPU side.
 
     // CRITICAL FIX: NO FINAL PHASE CONSOLIDATION!
     // The CPU does NOT perform any phase consolidation after convergence.
@@ -1609,22 +1654,6 @@ __device__ void solve_equilibrium_at_condition(
 
     double final_gm_calc = 0.0;
     int stable_phase_count = 0;
-    
-    // CRITICAL FIX: Calculate sum of phase_amt to normalize to mole fractions
-    // Match CPU behavior - include ALL phases, no threshold filtering
-    double sum_phase_amt = 0.0;
-    for (int i = 0; i < current_sys_state.num_compsets; ++i) {
-        // CPU includes all phases in the sum, no threshold check
-        sum_phase_amt += current_sys_state.phase_amt[i];
-    }
-    if (sum_phase_amt < 1e-15) sum_phase_amt = 1.0;  // Avoid division by zero
-    
-    if (thread_id == 0) {
-        #ifdef VERBOSE_DEBUG
-        printf("GPU DEBUG: final calc - num_compsets=%d, sum_phase_amt=%f (including ALL phases - no threshold)\\n", 
-               current_sys_state.num_compsets, sum_phase_amt);
-        #endif
-    }
     
     for (int i = 0; i < current_sys_state.num_compsets; ++i) {
         if (thread_id == 0) {
@@ -1636,19 +1665,18 @@ __device__ void solve_equilibrium_at_condition(
         // CRITICAL FIX: Include ALL phases to match CPU behavior
         // CPU does not filter phases by amount in the final result
         {
-            // CRITICAL FIX: Normalize phase_amt to get mole fraction for GM calculation
-            double phase_mole_fraction = current_sys_state.phase_amt[i] / sum_phase_amt;
-            
-            // CRITICAL FIX: Convert G (per formula unit) to GM (per mole of atoms)
-            // cs_states[i].energy contains G from formulaobj, but we need GM
-            // GM = G / (sum of site ratios) = G / (sum of moles in formula unit)
-            // The sum of moles in formula unit is the sum of phase_compositions for this phase
+            // Convert G (per formula unit) to GM (per mole of atoms):
+            // moles of atoms per formula unit = sum of phase_compositions (raw formulamoles)
             double moles_per_formula_unit = 0.0;
             for (int c = 0; c < current_spec.num_components; ++c) {
                 moles_per_formula_unit += current_sys_state.phase_compositions[i * MAX_COMPONENTS + c];
             }
             if (moles_per_formula_unit < 1e-12) moles_per_formula_unit = 1.0;  // Avoid division by zero
-            
+
+            // CPU final NP (eqsolver.pyx uses compset.NP) = phase_amt (formula units)
+            // * moles of atoms per formula unit; NOT renormalized by the sum.
+            double phase_mole_fraction = current_sys_state.phase_amt[i] * moles_per_formula_unit;
+
             double gm_per_mole_atoms = current_sys_state.cs_states[i].energy / moles_per_formula_unit;
             final_gm_calc += phase_mole_fraction * gm_per_mole_atoms;
             

@@ -60,3 +60,9 @@ env/
 !pycalphad/gpu/*.h
 !pycalphad/gpu/*.c
 !pycalphad/gpu/*.cu
+
+# GPU kernel caches and debug dumps
+.pycgpu_kernels/
+important_tests/.pycgpu_kernels/
+generated_equilibrium_kernel*.cu
+.claude/

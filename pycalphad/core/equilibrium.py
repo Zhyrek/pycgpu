@@ -15,8 +15,9 @@ from pycalphad.core.debug_output import init_debug_output, close_debug_output, d
 
 def equilibrium(dbf, comps, phases, conditions, output=None, model=None,
                 verbose=False, calc_opts=None, to_xarray=True,
-                parameters=None, solver=None, phase_records=None, 
-                gpu=False, force_cpu=False, fallback_on_error=True, **kwargs):
+                parameters=None, solver=None, phase_records=None,
+                gpu=False, force_cpu=False, fallback_on_error=True,
+                backend=None, robust_phase_removal=None, **kwargs):
     """
     Calculate the equilibrium state of a system containing the specified
     components and phases, under the specified conditions.
@@ -57,6 +58,17 @@ def equilibrium(dbf, comps, phases, conditions, output=None, model=None,
         Force CPU calculation even if GPU is available (useful for testing and comparison).
     fallback_on_error : bool, optional
         Automatically fall back to CPU if GPU calculation fails (default True).
+    backend : str, optional
+        Accelerated solver backend: 'cuda' (CuPy/CUDA GPU) or 'cpp' (C++/OpenMP
+        on the host, no CUDA required). Passing a backend implies gpu=True.
+        Default (None): 'cuda', or 'cpp' if the PYCGPU_CPU environment variable is set.
+    robust_phase_removal : bool, optional
+        Count phase removals from consolidation toward the per-compset removal
+        budget, so add/collapse/re-add cycles on near-duplicate composition sets
+        terminate instead of consuming the iteration budget. Applies to both the
+        reference CPU solver and the accelerated backends. Default (None): off,
+        unless the PYCALPHAD_ROBUST_REMOVAL / PYCGPU_ROBUST environment
+        variables are set.
 
     Returns
     -------
@@ -66,14 +78,44 @@ def equilibrium(dbf, comps, phases, conditions, output=None, model=None,
     --------
     None yet.
     """
+    import os
+    if backend is not None:
+        if backend not in ('cuda', 'cpp'):
+            raise ValueError(f"backend must be 'cuda' or 'cpp', got {backend!r}")
+        gpu = True
+
     if gpu:
-        from ..gpu.gpu_equilibrium import equilibrium_gpu
-        # GPU mode handles its own debug output
-        return equilibrium_gpu(dbf, comps, phases, conditions, output=output, model=model,
-                             verbose=verbose, calc_opts=calc_opts, to_xarray=to_xarray,
-                             parameters=parameters, solver=solver, phase_records=phase_records,
-                             force_cpu=force_cpu, fallback_on_error=fallback_on_error, **kwargs)
-    
+        # Environment variables steer the accelerated pipeline; set them for the
+        # duration of the call so explicit kwargs win, then restore.
+        overrides = {}
+        if backend is not None:
+            overrides['PYCGPU_CPU'] = '1' if backend == 'cpp' else ''
+        if robust_phase_removal is not None:
+            overrides['PYCGPU_ROBUST'] = '1' if robust_phase_removal else ''
+        saved = {k: os.environ.get(k) for k in overrides}
+        try:
+            for k, val in overrides.items():
+                if val:
+                    os.environ[k] = val
+                else:
+                    os.environ.pop(k, None)
+            from ..gpu.gpu_equilibrium import equilibrium_gpu
+            # GPU mode handles its own debug output
+            return equilibrium_gpu(dbf, comps, phases, conditions, output=output, model=model,
+                                 verbose=verbose, calc_opts=calc_opts, to_xarray=to_xarray,
+                                 parameters=parameters, solver=solver, phase_records=phase_records,
+                                 force_cpu=force_cpu, fallback_on_error=fallback_on_error, **kwargs)
+        finally:
+            for k, old in saved.items():
+                if old is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = old
+
+    if robust_phase_removal is not None:
+        from pycalphad.core.minimizer import set_robust_removal
+        set_robust_removal(bool(robust_phase_removal))
+
     # Initialize debug output for CPU mode only
     init_debug_output(enabled=verbose, mode="CPU")
     

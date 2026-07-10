@@ -425,7 +425,7 @@ def compile_phases_truly_separate(wks_obj, phase_codes: List[Tuple[int, str, str
                                  phase_init_calls: str,
                                  dynamic_sizes: Dict[str, int],
                                  verbose: bool = False,
-                                 cache_key: Optional[str] = None) -> cp.RawModule:
+                                 cache_key: Optional[str] = None) -> "cp.RawModule":
     """
     Main entry point for true separate compilation.
     

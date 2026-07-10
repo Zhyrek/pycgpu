@@ -92,7 +92,7 @@ class GPUKernelManager:
                         compile_options: Optional[Tuple[str, ...]] = None,
                         metadata: Optional[Dict[str, Any]] = None,
                         tdb_hash: Optional[str] = None,
-                        verbose: bool = False) -> cp.RawModule:
+                        verbose: bool = False) -> "cp.RawModule":
         """
         Compile a GPU kernel and save it to disk for later use.
         

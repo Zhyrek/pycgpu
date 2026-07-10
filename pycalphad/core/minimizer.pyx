@@ -13,6 +13,24 @@ from libc.stdio cimport printf
 # Set to True to enable debug output, False to suppress it
 cdef bint DEBUG_MODE = False
 
+# Opt-in robustness experiment (PYCALPHAD_ROBUST_REMOVAL=1): count compsets
+# removed by remove_and_consolidate_phases toward times_compset_removed, so an
+# add->collapse->re-add cycle on a near-duplicate compset terminates after
+# MAX_ALLOWED_TIMES_COMPSET_REMOVED attempts instead of consuming the whole
+# iteration budget (change_phases only re-adds candidates removed < 4 times,
+# but historically only counted its OWN removals).
+import os as _os
+cdef bint ROBUST_REMOVAL = bool(_os.environ.get('PYCALPHAD_ROBUST_REMOVAL'))
+
+def set_robust_removal(bint enabled):
+    """Enable or disable robust phase-removal counting (see comment above).
+
+    Also settable via the PYCALPHAD_ROBUST_REMOVAL environment variable,
+    which only takes effect at import time.
+    """
+    global ROBUST_REMOVAL
+    ROBUST_REMOVAL = enabled
+
 # Python-accessible function to control debug output
 def set_debug_mode(bint enabled):
     """Enable or disable debug output in minimizer.
@@ -1557,6 +1575,9 @@ cdef bint remove_and_consolidate_phases(SystemSpecification spec, SystemState st
                 comp_idx = spec.fixed_chemical_potential_indices[cp_idx]
                 state.chemical_potentials[comp_idx] = spec.initial_chemical_potentials[comp_idx]
         else:
+            if ROBUST_REMOVAL:
+                for idx in compset_indices_to_remove:
+                    state.times_compset_removed[idx] += 1
             state.free_stable_compset_indices = np.array(sorted(set(state.free_stable_compset_indices) - compset_indices_to_remove), dtype=np.int32)
             phases_changed = True
     return phases_changed

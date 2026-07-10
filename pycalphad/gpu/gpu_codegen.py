@@ -138,7 +138,35 @@ def compute_dynamic_kernel_sizes(wks_obj: Workspace) -> Dict[str, int]:
         "MAX_GRID_POINTS": 10000,  # Keep reasonable default for grid
         "MIN_PHASE_FRACTION": 1e-6,  # Keep constant
     }
-    
+
+    # CRITICAL: The equilibrium-matrix work-array strides MUST be passed as -D
+    # defines. The kernel has #ifndef fallbacks (1000/50/50) for these; if they
+    # differ from the Python-side allocation strides, threads index past the end
+    # of the allocations and silently corrupt other buffers (this caused
+    # nondeterministic results for batches beyond ~150 conditions).
+    eq_rows = 2 * computed_sizes["MAX_PHASES"] + computed_sizes["MAX_COMPONENTS"] + 1
+    eq_cols = computed_sizes["MAX_COMPONENTS"] + computed_sizes["MAX_PHASES"] + computed_sizes["MAX_STATEVARS"]
+    computed_sizes["MAX_EQ_MATRIX_ROWS"] = eq_rows
+    computed_sizes["MAX_EQ_SOLN_LEN"] = eq_cols
+    computed_sizes["MAX_EQ_MATRIX_SIZE"] = eq_rows * eq_cols
+
+    # Per-thread SystemState slot size in doubles. Mirrors the SystemState /
+    # CompsetState / CompositionSet layouts in minimizer.h with a 1.3x margin;
+    # a static_assert in eqsolver.h fails the build if the struct outgrows it.
+    # (The old fixed 50000 was TOO SMALL for 21-phase systems — the in-kernel
+    # memset spilled into the next thread's slot — and 10x too big for small
+    # systems, wasting memory locality.)
+    S = computed_sizes["MAX_STATEVARS"]
+    D = computed_sizes["MAX_DOF_PER_PHASE"]
+    C = computed_sizes["MAX_COMPONENTS"]
+    I = computed_sizes["MAX_INTERNAL_CONSTRAINTS"]
+    P = computed_sizes["MAX_PHASES"]
+    csst_doubles = (2 * (S + D) + (S + D) ** 2 + C + C * (S + D) + 2 * (D + I) ** 2
+                    + 3 * D + D * S + C * D + I + (S + D) + I * (S + D) + 32)
+    compset_doubles = 4 + (S + D) + C + 12
+    state_doubles = P * (csst_doubles + compset_doubles + 8) + 8 * C + 4 * S + 128
+    computed_sizes["SYSTEM_STATE_SIZE"] = int(state_doubles * 1.3)
+
     return computed_sizes
 
 
@@ -2258,31 +2286,35 @@ def _nb_internal_cons_jac_from_model(model_obj: Model, model_c_idx: int, wks_obj
     return notebook_source_from_expr(constraints, "internal_cons_jac", model_obj, model_c_idx, wks_obj, expr_type="grad", c_output_type="void", validate=validate, verbose=verbose)
 
 def _nb_mass_obj_from_model(model_obj: Model, model_c_idx: int, wks_obj: Workspace, validate: bool = True, verbose: bool = False) -> str:
-    # Generate mass fractions (elemental composition) for each component
+    # Output indexed by NONVACANT components only, matching CPU PhaseRecord._masses
+    # (indexed by nonvacant_elements). VA must be SKIPPED, not emitted as a zero
+    # slot: VA is not guaranteed to sort last (e.g. AL < VA < ZN), and a zero slot
+    # in the middle shifts every later component's index off by one.
     mass_funcs = []
     for comp in wks_obj.components:
-        if comp == 'VA':  # Vacancy has zero mass
-            mass_funcs.append(0.0)
-        else:
-            # Get molar mass contribution for this component  
-            mass_funcs.append(model_obj.moles(comp))
+        if comp.name == 'VA':
+            continue
+        mass_funcs.append(model_obj.moles(comp))
     return notebook_source_from_expr(mass_funcs, "mass_obj", model_obj, model_c_idx, wks_obj, expr_type="func", c_output_type="void", validate=validate, verbose=verbose)
 
 def _nb_formulamole_obj_from_model(model_obj: Model, model_c_idx: int, wks_obj: Workspace, validate: bool = True, verbose: bool = False) -> str:
-    # CRITICAL FIX: Generate formulamole for ALL components (matching CPU expectation)
-    # The CPU code expects values for all components, not just nonvacant elements
+    # Output indexed by NONVACANT components only, matching CPU
+    # PhaseRecord._formulamoles (indexed by nonvacant_elements) and the
+    # formulamole_grad generator below. VA must be SKIPPED, not emitted as a
+    # zero slot: VA is not guaranteed to sort last (e.g. AL < VA < ZN), and a
+    # zero slot in the middle shifts every later component's index off by one.
     import symengine
     funcs = []
     for comp in wks_obj.components:
         comp_name = comp.name
-        if comp_name == 'VA':  # Vacancy has zero moles
-            funcs.append(symengine.Float(0.0))
-        elif comp_name in model_obj.nonvacant_elements:
+        if comp_name == 'VA':
+            continue
+        if comp_name in model_obj.nonvacant_elements:
             funcs.append(model_obj.moles(comp_name, per_formula_unit=True))
         else:
             # Component not in this phase - zero moles
             funcs.append(symengine.Float(0.0))
-    
+
     if not funcs:
         fname = notebook_model_c_func_name_prefix(model_c_idx) + "formulamole_obj"
         return f"__device__ void {fname}(double* out, const double* x) {{ /* No components */ }}\n\n"
@@ -2344,22 +2376,28 @@ def _nb_formulamole_grad_from_model(model_obj: Model, model_c_idx: int, wks_obj:
                     if verbose:
                         print(f"[GPU CODEGEN] Sublattice {subl_idx}: dependent {dependent_sf} = 1 - sum({independent_sfs})")
     
-    for el in model_obj.nonvacant_elements:
-        moles_expr = model_obj.moles(el, per_formula_unit=True)
+    # Rows indexed by SYSTEM nonvacant components (same order as mass_obj /
+    # formulamole_obj above), zero row for components absent from this phase.
+    nonvacant_comps = [c.name for c in wks_obj.components if c.name != 'VA']
+    for el in nonvacant_comps:
+        if el in model_obj.nonvacant_elements:
+            moles_expr = model_obj.moles(el, per_formula_unit=True)
+        else:
+            moles_expr = symengine.Float(0.0)
         # CRITICAL FIX: Do NOT apply dependent substitutions to match CPU behavior
         # The CPU treats all site fractions as independent variables
         # if dependent_subs:
         #     # Convert to symengine expression and substitute
         #     moles_expr = moles_expr.xreplace(dependent_subs)
         funcs.append(moles_expr)
-    
+
     # Always print debug info for moles expressions
     if verbose:
         print(f"[GPU CODEGEN] _nb_formulamole_grad_from_model for {model_obj.phase_name}:")
-        print(f"  nonvacant_elements: {model_obj.nonvacant_elements}")
+        print(f"  nonvacant components (system order): {nonvacant_comps}")
         print(f"  Number of functions: {len(funcs)}")
         print(f"  Dependent substitutions IDENTIFIED but NOT APPLIED to match CPU: {dependent_subs}")
-        for i, el in enumerate(model_obj.nonvacant_elements):
+        for i, el in enumerate(nonvacant_comps):
             print(f"  moles({el}) = {funcs[i]}")
     
     if not funcs:
@@ -2631,6 +2669,8 @@ def _generate_full_gpu_source(wks_obj: Workspace,
 #include <stdio.h>          // For printf debugging
 
 // --- WorkArrays struct to reduce kernel parameters for AMD compatibility ---
+// CRITICAL FIX FOR AMD: Define WorkArrays carefully for cross-platform compatibility
+// AMD/HIP may be stricter about struct alignment and pointer dereferencing
 typedef struct WorkArrays {{
     double* arrays[23];  // Pack all work array pointers together (expanded for SystemState arrays)
 }} WorkArrays;
@@ -2851,21 +2891,37 @@ __global__ void top_level_equilibrium_kernel(
     int* debug_iteration_count,         // Array: [num_conditions]
     int debug_max_steps,                // Maximum debug steps to track
     // WORK ARRAYS STRUCT: All 20 global memory arrays packed into a single struct pointer
-    const WorkArrays* work_arrays       // Struct containing all 20 work array pointers
+    const WorkArrays* work_arrays,      // Struct containing all 20 work array pointers
+    // Per-condition grid block selection: the calculate() grid has one block of
+    // points per statevar combination (e.g. per T); each condition must use ITS
+    // block (energies are T-dependent).
+    const int* grid_block_indices,      // [num_conditions] index into grid blocks (may be null)
+    long long grid_block_stride_bytes   // byte stride between grid blocks (0 = single shared block)
 ) {{
     int tid = blockDim.x * blockIdx.x + threadIdx.x;
-    
+
     if (tid < 3) {{
         #ifdef VERBOSE_DEBUG
         printf("GPU DEBUG: top_level_equilibrium_kernel STARTED with tid=%d, num_conditions=%d\\n", tid, num_conditions_total);
         #endif
     }}
-    
+
+    // CRITICAL FIX FOR AMD: Check bounds BEFORE any pointer arithmetic
+    // AMD GPUs may fault on invalid pointer calculations even if never dereferenced
+    if (tid >= num_conditions_total) {{
+        return;  // Exit immediately for threads beyond valid conditions
+    }}
+
     // GLOBAL MEMORY SETUP: Calculate thread-specific offsets for global memory arrays
     // Each thread gets its own slice of the global memory arrays
-    // CRITICAL: We must check that tid < num_conditions before using it as array index
-    // For now, use tid but ensure bounds checking happens before any array access
-    int thread_idx = tid;  // Will be bounded by condition_idx check later
+    // Now safe to use tid as array index since we've verified tid < num_conditions_total
+    int thread_idx = tid;  // Safe after bounds check
+    #ifdef PYCGPU_GUARD_SLICES
+    // Memory-safety validation mode (env PYCGPU_GUARD=1): every thread uses the
+    // even slice of a doubled allocation; the odd slices are magic-filled guards
+    // that Python scans after the run to detect any cross-slice (OOB) writes.
+    thread_idx = tid * 2;
+    #endif
     
     // Define missing constants for global memory array sizing
     #ifndef MAX_EQ_MATRIX_SIZE
@@ -2891,45 +2947,73 @@ __global__ void top_level_equilibrium_kernel(
     const int MASS_JAC_SIZE = MAX_COMPONENTS * DOF_SIZE;  // 4*8 = 32
     const int CONSTRAINT_MATRIX_SIZE = (MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS) * (MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS);
     
-    // Unpack WorkArrays struct pointers and calculate thread-specific offsets
-    double* thread_A_lstsq_copy = work_arrays && work_arrays->arrays[0] ? &work_arrays->arrays[0][thread_idx * SVD_MN_SIZE] : nullptr;
-    double* thread_U_lstsq = work_arrays && work_arrays->arrays[1] ? &work_arrays->arrays[1][thread_idx * SVD_MN_SIZE] : nullptr;
-    double* thread_V_lstsq = work_arrays && work_arrays->arrays[2] ? &work_arrays->arrays[2][thread_idx * SVD_NN_SIZE] : nullptr;
-    double* thread_singular_values_lstsq = work_arrays && work_arrays->arrays[3] ? &work_arrays->arrays[3][thread_idx * SVD_N_SIZE] : nullptr;
-    double* thread_superdiag_lstsq = work_arrays && work_arrays->arrays[4] ? &work_arrays->arrays[4][thread_idx * SVD_N_SIZE] : nullptr;
-    double* thread_U_inv = work_arrays && work_arrays->arrays[5] ? &work_arrays->arrays[5][thread_idx * PHASE_MATRIX_SIZE] : nullptr;
-    double* thread_V_inv = work_arrays && work_arrays->arrays[6] ? &work_arrays->arrays[6][thread_idx * PHASE_MATRIX_SIZE] : nullptr;
-    double* thread_singular_values_inv = work_arrays && work_arrays->arrays[7] ? &work_arrays->arrays[7][thread_idx * MAX_PHASE_MATRIX_DIM] : nullptr;
-    double* thread_superdiag_inv = work_arrays && work_arrays->arrays[8] ? &work_arrays->arrays[8][thread_idx * MAX_PHASE_MATRIX_DIM] : nullptr;
-    double* thread_work_inv = work_arrays && work_arrays->arrays[9] ? &work_arrays->arrays[9][thread_idx * PHASE_MATRIX_SIZE] : nullptr;
-    double* thread_x_dof = work_arrays && work_arrays->arrays[10] ? &work_arrays->arrays[10][thread_idx * DOF_SIZE] : nullptr;
-    double* thread_grad = work_arrays && work_arrays->arrays[11] ? &work_arrays->arrays[11][thread_idx * DOF_SIZE] : nullptr;
-    double* thread_hess = work_arrays && work_arrays->arrays[12] ? &work_arrays->arrays[12][thread_idx * HESS_SIZE] : nullptr;
-    double* thread_masses = work_arrays && work_arrays->arrays[13] ? &work_arrays->arrays[13][thread_idx * MAX_COMPONENTS] : nullptr;
-    double* thread_mass_jac = work_arrays && work_arrays->arrays[14] ? &work_arrays->arrays[14][thread_idx * MASS_JAC_SIZE] : nullptr;
-    double* thread_phase_matrix = work_arrays && work_arrays->arrays[15] ? &work_arrays->arrays[15][thread_idx * CONSTRAINT_MATRIX_SIZE] : nullptr;
-    double* thread_equilibrium_matrix = work_arrays && work_arrays->arrays[16] ? &work_arrays->arrays[16][thread_idx * MAX_EQ_MATRIX_SIZE] : nullptr;
-    double* thread_equilibrium_rhs = work_arrays && work_arrays->arrays[17] ? &work_arrays->arrays[17][thread_idx * MAX_EQ_MATRIX_ROWS] : nullptr;
-    double* thread_eq_soln = work_arrays && work_arrays->arrays[18] ? &work_arrays->arrays[18][thread_idx * MAX_EQ_SOLN_LEN] : nullptr;
-    // Additional SystemState arrays to reduce stack usage
-    double* thread_delta_ms = work_arrays && work_arrays->arrays[20] ? &work_arrays->arrays[20][thread_idx * (MAX_PHASES * MAX_COMPONENTS)] : nullptr;
-    double* thread_phase_compositions = work_arrays && work_arrays->arrays[21] ? &work_arrays->arrays[21][thread_idx * (MAX_PHASES * MAX_COMPONENTS)] : nullptr;
-    double* thread_phase_amounts_per_mole_atoms = work_arrays && work_arrays->arrays[22] ? &work_arrays->arrays[22][thread_idx * (MAX_PHASES * MAX_COMPONENTS)] : nullptr;
+    // CRITICAL FIX FOR AMD: Safely unpack WorkArrays struct
+    // AMD GPUs may have stricter memory access checking
+    // Cast and check each pointer access carefully
+    double* thread_A_lstsq_copy = nullptr;
+    double* thread_U_lstsq = nullptr;
+    double* thread_V_lstsq = nullptr;
+    double* thread_singular_values_lstsq = nullptr;
+    double* thread_superdiag_lstsq = nullptr;
+    double* thread_U_inv = nullptr;
+    double* thread_V_inv = nullptr;
+    double* thread_singular_values_inv = nullptr;
+    double* thread_superdiag_inv = nullptr;
+    double* thread_work_inv = nullptr;
+    double* thread_x_dof = nullptr;
+    double* thread_grad = nullptr;
+    double* thread_hess = nullptr;
+    double* thread_masses = nullptr;
+    double* thread_mass_jac = nullptr;
+    double* thread_phase_matrix = nullptr;
+    double* thread_equilibrium_matrix = nullptr;
+    double* thread_equilibrium_rhs = nullptr;
+    double* thread_eq_soln = nullptr;
+    double* thread_delta_ms = nullptr;
+    double* thread_phase_compositions = nullptr;
+    double* thread_phase_amounts_per_mole_atoms = nullptr;
+
+    if (work_arrays != nullptr) {{
+        // Cast to double** to access as array of pointers
+        // This avoids struct member access which may fail on AMD
+        double** work_ptrs = (double**)work_arrays;
+
+        if (work_ptrs[0]) thread_A_lstsq_copy = &work_ptrs[0][thread_idx * SVD_MN_SIZE];
+        if (work_ptrs[1]) thread_U_lstsq = &work_ptrs[1][thread_idx * SVD_MN_SIZE];
+        if (work_ptrs[2]) thread_V_lstsq = &work_ptrs[2][thread_idx * SVD_NN_SIZE];
+        if (work_ptrs[3]) thread_singular_values_lstsq = &work_ptrs[3][thread_idx * SVD_N_SIZE];
+        if (work_ptrs[4]) thread_superdiag_lstsq = &work_ptrs[4][thread_idx * SVD_N_SIZE];
+        if (work_ptrs[5]) thread_U_inv = &work_ptrs[5][thread_idx * PHASE_MATRIX_SIZE];
+        if (work_ptrs[6]) thread_V_inv = &work_ptrs[6][thread_idx * PHASE_MATRIX_SIZE];
+        if (work_ptrs[7]) thread_singular_values_inv = &work_ptrs[7][thread_idx * MAX_PHASE_MATRIX_DIM];
+        if (work_ptrs[8]) thread_superdiag_inv = &work_ptrs[8][thread_idx * MAX_PHASE_MATRIX_DIM];
+        if (work_ptrs[9]) thread_work_inv = &work_ptrs[9][thread_idx * PHASE_MATRIX_SIZE];
+        if (work_ptrs[10]) thread_x_dof = &work_ptrs[10][thread_idx * DOF_SIZE];
+        if (work_ptrs[11]) thread_grad = &work_ptrs[11][thread_idx * DOF_SIZE];
+        if (work_ptrs[12]) thread_hess = &work_ptrs[12][thread_idx * HESS_SIZE];
+        if (work_ptrs[13]) thread_masses = &work_ptrs[13][thread_idx * MAX_COMPONENTS];
+        if (work_ptrs[14]) thread_mass_jac = &work_ptrs[14][thread_idx * MASS_JAC_SIZE];
+        if (work_ptrs[15]) thread_phase_matrix = &work_ptrs[15][thread_idx * CONSTRAINT_MATRIX_SIZE];
+        if (work_ptrs[16]) thread_equilibrium_matrix = &work_ptrs[16][thread_idx * MAX_EQ_MATRIX_SIZE];
+        if (work_ptrs[17]) thread_equilibrium_rhs = &work_ptrs[17][thread_idx * MAX_EQ_MATRIX_ROWS];
+        if (work_ptrs[18]) thread_eq_soln = &work_ptrs[18][thread_idx * MAX_EQ_SOLN_LEN];
+        // Skip 19 - handled separately for system_states
+        if (work_ptrs[20]) thread_delta_ms = &work_ptrs[20][thread_idx * (MAX_PHASES * MAX_COMPONENTS)];
+        if (work_ptrs[21]) thread_phase_compositions = &work_ptrs[21][thread_idx * (MAX_PHASES * MAX_COMPONENTS)];
+        if (work_ptrs[22]) thread_phase_amounts_per_mole_atoms = &work_ptrs[22][thread_idx * (MAX_PHASES * MAX_COMPONENTS)];
+    }}
 
     // MIRROR CPU LOGIC: Start with what definitely works on CPU
-    if (tid < num_conditions_total && results_list_ptr_raw != nullptr) {{
+    // We've already checked tid < num_conditions_total above, so safe to proceed
+    if (results_list_ptr_raw != nullptr) {{
         // Cast to simple double array for efficient GPU memory access
         double* results_array = (double*)results_list_ptr_raw;
-        
+
         // Use direct indexing - must match Python side calculation exactly
         // Layout: GM, chemical_potentials[MAX_COMPONENTS], phase_amounts[MAX_PHASES], converged, num_stable_phases, temp, pressure, success_marker, Y_phases[MAX_PHASES * MAX_DOF_PER_PHASE], X_phases[MAX_PHASES * MAX_COMPONENTS], phase_ids[MAX_PHASES]
         int condition_idx = tid;
-        
-        // CRITICAL FIX: Check bounds BEFORE any memory access
-        // This prevents threads beyond num_conditions from writing to unallocated memory
-        if (condition_idx >= num_conditions_total) {{
-            return;  // Exit early for threads that don't have valid conditions
-        }}
+
+        // No need for redundant bounds check - already done at function entry
         
         int results_per_condition = 7 + MAX_COMPONENTS + MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * MAX_COMPONENTS) + MAX_PHASES;  // CRITICAL FIX: Include phase_ids
         int base_offset = condition_idx * results_per_condition;
@@ -3686,7 +3770,14 @@ __global__ void top_level_equilibrium_kernel(
             EquilibriumResultSingle equilibrium_result;
             DevicePhaseData device_phase_data;
             InitialPhaseDataSingle initial_phase_data_single;
-            DeviceGrid* device_grid = (DeviceGrid*)grid_data_ptr_raw;
+            // Select this condition's grid block (per-T energies); falls back to the
+            // shared base pointer when block info is absent.
+            const void* my_grid_block_raw = grid_data_ptr_raw;
+            if (grid_data_ptr_raw != nullptr && grid_block_indices != nullptr && grid_block_stride_bytes > 0) {{
+                my_grid_block_raw = (const void*)((const char*)grid_data_ptr_raw +
+                    (long long)grid_block_indices[condition_idx] * grid_block_stride_bytes);
+            }}
+            DeviceGrid* device_grid = (DeviceGrid*)my_grid_block_raw;
             
             // Set up condition args - copy actual state variables from Python
             // The SystemSpecification tells us which state variables are actually in use
@@ -3814,7 +3905,7 @@ __global__ void top_level_equilibrium_kernel(
                 thread_x_dof, thread_grad, thread_hess,
                 thread_masses, thread_mass_jac, thread_phase_matrix,
                 thread_equilibrium_matrix, thread_equilibrium_rhs, thread_eq_soln,
-                work_arrays && work_arrays->arrays[19] ? &work_arrays->arrays[19][thread_idx * SYSTEM_STATE_SIZE] : nullptr,
+                work_arrays ? &((double**)work_arrays)[19][thread_idx * SYSTEM_STATE_SIZE] : nullptr,
                 thread_delta_ms,  // Pass delta_ms global memory pointer
                 thread_phase_compositions,  // Pass phase_compositions global memory pointer
                 thread_phase_amounts_per_mole_atoms  // Pass phase_amounts_per_mole_atoms global memory pointer

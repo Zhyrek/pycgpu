@@ -72,6 +72,7 @@ from pycalphad.core.debug_output import init_debug_output, close_debug_output, d
 # Import code generation functions from separate module
 from .gpu_codegen import (
     _generate_c_code_for_phase_models,
+    _unique_models_for_gpu,
     _generate_full_gpu_source,
     _get_c_define,
     compute_dynamic_kernel_sizes
@@ -2029,29 +2030,30 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             print(f"[GPU DEBUG] Starting NP shape: {cpu_style_properties.NP.shape}")
 
     
-    # 1. Generate C code for phase models with validation
-    try:
-        model_funcs_c, pr_init_calls_c, unique_py_models, py_phase_name_to_unique_idx_map = \
-            _generate_c_code_for_phase_models(wks_obj, include_hess=True, validate=validate_code)
-        num_unique_models_for_gpu = len(unique_py_models)
-        
-    except Exception as e:
-        if "CodeValidationError" in str(type(e)):
-            if verbose:
-                print(f"[GPU] Code validation failed: {e}")
-            if not validate_code:
+    # 1. Deduplicate phase models (cheap, needed on every call). The expensive
+    # C code generation only happens on kernel-cache misses (see below).
+    unique_py_models, py_phase_name_to_unique_idx_map = \
+        _unique_models_for_gpu(wks_obj, validate=validate_code)
+    num_unique_models_for_gpu = len(unique_py_models)
+
+    def _run_model_codegen():
+        """Heavy per-model C string generation, with the validation fallback."""
+        try:
+            funcs_c, init_calls_c, _, _ = \
+                _generate_c_code_for_phase_models(wks_obj, include_hess=True, validate=validate_code)
+        except Exception as e:
+            if "CodeValidationError" in str(type(e)) and not validate_code:
                 if verbose:
+                    print(f"[GPU] Code validation failed: {e}")
                     print("[GPU] Continuing without validation...")
-                model_funcs_c, pr_init_calls_c, unique_py_models, py_phase_name_to_unique_idx_map = \
+                funcs_c, init_calls_c, _, _ = \
                     _generate_c_code_for_phase_models(wks_obj, include_hess=True, validate=False)
-                num_unique_models_for_gpu = len(unique_py_models)
             else:
                 raise
-        else:
-            raise
+        return funcs_c, init_calls_c
 
     if verbose:
-        print(f"[GPU] Generated C code for {num_unique_models_for_gpu} unique phase models.")
+        print(f"[GPU] {num_unique_models_for_gpu} unique phase models (C codegen deferred to cache miss).")
         print(f"[GPU] Modular compilation threshold: 8 phases")
         print(f"[GPU] Will use modular compilation: {num_unique_models_for_gpu > 8}")
 
@@ -2113,6 +2115,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                 print(f"[GPU] Cache miss - compiling new GPU module")
                 print(f"[GPU] Cache key: {cache_key}")
 
+            model_funcs_c, pr_init_calls_c = _run_model_codegen()
             full_kernel_source = _generate_full_gpu_source(wks_obj, model_funcs_c, pr_init_calls_c, num_unique_models_for_gpu)
 
             # Save to disk cache

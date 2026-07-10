@@ -2411,29 +2411,23 @@ def _nb_formulamole_grad_from_model(model_obj: Model, model_c_idx: int, wks_obj:
     return notebook_source_from_expr(funcs, "formulamole_grad", model_obj, model_c_idx, wks_obj, expr_type="grad", c_output_type="void", validate=validate, verbose=verbose)
 
 
-def _generate_c_code_for_phase_models(wks_obj: Workspace, include_hess: bool = False, validate: bool = True):
-    """
-    Generates C __device__ functions for phase properties and
-    C code snippets for initializing PhaseRecord structs on the GPU.
-    
-    Args:
-        validate: Whether to validate generated code (default True)
-    """
-    if wks_obj.verbose:
-        print("[GPU] Generating C code for phase models...")
+def _unique_models_for_gpu(wks_obj: Workspace, validate: bool = True):
+    """Deduplicated Model list + phase-name-to-index map for the GPU pipeline.
 
+    Cheap (no C code generation) so it can run on every call; the expensive
+    string generation in _generate_c_code_for_phase_models only needs to run
+    on kernel-cache misses.
+    """
     unique_py_models = []
     py_phase_name_to_unique_idx_map = {}
-    validation_warnings = []
-    
+
     # Build list of unique models (by phase name)
     # IMPORTANT: Sort phases to ensure deterministic ordering for kernel caching
     for ph_name in sorted(wks_obj.phases):
         if ph_name not in py_phase_name_to_unique_idx_map:
             py_phase_name_to_unique_idx_map[ph_name] = len(unique_py_models)
             unique_py_models.append(wks_obj.models[ph_name])
-    
-    # DEBUG: Print the phase name to index mapping
+
     if wks_obj.verbose:
         print(f"[GPU] Phase name to unique index mapping: {py_phase_name_to_unique_idx_map}")
 
@@ -2443,11 +2437,28 @@ def _generate_c_code_for_phase_models(wks_obj: Workspace, include_hess: bool = F
             raise CodeValidationError(
                 f"Too many unique phases: {len(unique_py_models)} > MAX_PHASES ({_get_c_define('MAX_PHASES')})"
             )
-        
+
         if len(wks_obj.components) > _get_c_define("MAX_COMPONENTS"):
             raise CodeValidationError(
                 f"Too many components: {len(wks_obj.components)} > MAX_COMPONENTS ({_get_c_define('MAX_COMPONENTS')})"
             )
+
+    return unique_py_models, py_phase_name_to_unique_idx_map
+
+
+def _generate_c_code_for_phase_models(wks_obj: Workspace, include_hess: bool = False, validate: bool = True):
+    """
+    Generates C __device__ functions for phase properties and
+    C code snippets for initializing PhaseRecord structs on the GPU.
+
+    Args:
+        validate: Whether to validate generated code (default True)
+    """
+    if wks_obj.verbose:
+        print("[GPU] Generating C code for phase models...")
+
+    validation_warnings = []
+    unique_py_models, py_phase_name_to_unique_idx_map = _unique_models_for_gpu(wks_obj, validate)
 
     # Generate C functions for all unique models
     all_model_device_functions_c_code = ""

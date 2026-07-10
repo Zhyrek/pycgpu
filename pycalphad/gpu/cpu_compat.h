@@ -17,3 +17,8 @@ inline thread_local pycgpu_cpu_dim3 threadIdx = {0u, 0u, 0u};
 inline thread_local pycgpu_cpu_dim3 blockIdx  = {0u, 0u, 0u};
 inline thread_local pycgpu_cpu_dim3 blockDim  = {0u, 1u, 1u};
 inline thread_local pycgpu_cpu_dim3 gridDim   = {1u, 1u, 1u};
+
+#include <chrono>
+inline long long clock64() {
+    return std::chrono::steady_clock::now().time_since_epoch().count();
+}

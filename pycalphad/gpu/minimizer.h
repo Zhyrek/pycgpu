@@ -34,6 +34,18 @@ __device__ void lstsq(double* A, int nrows, int ncols, double* b, double toleran
 #define MIN_PHASE_FRACTION 1e-6
 #define COMP_DIFFERENCE_TOL 1e-4
 
+#ifdef PYCGPU_PROF
+// Per-thread cycle accumulators for kernel-time attribution (PYCGPU_PROF=1).
+// Zeroed at run_loop entry; printed in run_loop's [PROF] line.
+#define PYCGPU_PROF_MAXT 8192
+__device__ long long g_prof_recompute[PYCGPU_PROF_MAXT];
+__device__ long long g_prof_fill[PYCGPU_PROF_MAXT];
+__device__ long long g_prof_lstsq[PYCGPU_PROF_MAXT];
+__device__ long long g_prof_hess[PYCGPU_PROF_MAXT];   // formulahess evaluations
+__device__ long long g_prof_inv[PYCGPU_PROF_MAXT];    // phase-matrix LU inversions
+__device__ long long g_prof_funcs[PYCGPU_PROF_MAXT];  // other generated funcs (obj/grad/mole)
+#endif
+
 #ifndef MAX_EQ_SOLN_LEN
 #define MAX_EQ_SOLN_LEN 50
 #endif
@@ -842,7 +854,13 @@ typedef struct SystemState {
             // CPU doesn't check update_amount bounds
             // CRITICAL FIX: Pass the actual workspace DOF to update, not the model DOF
             // The update function expects workspace state variables, not model state variables
+            #ifdef PYCGPU_PROF
+            long long prof_f0 = clock64();
+            #endif
             compset->update(&compset->dof[spec->num_statevars], update_amount, compset->dof, spec->num_statevars);
+            #ifdef PYCGPU_PROF
+            if (thread_id < PYCGPU_PROF_MAXT) g_prof_funcs[thread_id] += clock64() - prof_f0;
+            #endif
             
             // csst->energy will be G per formula unit (from pr->formulaobj)
             // Pass full workspace DOF to energy calculation, matching CPU behavior
@@ -1007,7 +1025,13 @@ typedef struct SystemState {
                 #endif
                 // Temporary array to hold the reduced Hessian output from CSE functions
                 double temp_hess[(MAX_DOF_PER_PHASE + 1) * (MAX_DOF_PER_PHASE + 1)];
+                #ifdef PYCGPU_PROF
+                long long prof_h0 = clock64();
+                #endif
                 pr->formulahess(temp_hess, compset->dof);
+                #ifdef PYCGPU_PROF
+                if (thread_id < PYCGPU_PROF_MAXT) g_prof_hess[thread_id] += clock64() - prof_h0;
+                #endif
                 
                 // DEBUG: Print raw Hessian output
                 #ifdef VERBOSE_DEBUG
@@ -1096,7 +1120,13 @@ typedef struct SystemState {
                 // CSE gradient functions output reduced gradient in the correct order
                 // Expected order: [dG/dT, dG/dY1, dG/dY2, ...]
                 double temp_grad[1 + MAX_DOF_PER_PHASE];  // Temporary array for reduced gradient
+                #ifdef PYCGPU_PROF
+                long long prof_f1 = clock64();
+                #endif
                 pr->formulagrad(temp_grad, compset->dof);
+                #ifdef PYCGPU_PROF
+                if (thread_id < PYCGPU_PROF_MAXT) g_prof_funcs[thread_id] += clock64() - prof_f1;
+                #endif
                 
                 // Zero out the full gradient array first
                 for (int i = 0; i < csst->grad_length; ++i) {
@@ -1167,7 +1197,13 @@ typedef struct SystemState {
                 // Temporary array for reduced constraint Jacobian
                 // CSE outputs flat array: [dC1/dT, dC1/dY1, dC1/dY2, ..., dC2/dT, dC2/dY1, ...]
                 double temp_cons_jac[(1 + MAX_DOF_PER_PHASE) * MAX_INTERNAL_CONSTRAINTS];
+                #ifdef PYCGPU_PROF
+                long long prof_f2 = clock64();
+                #endif
                 pr->internal_cons_jac(temp_cons_jac, compset->dof);
+                #ifdef PYCGPU_PROF
+                if (thread_id < PYCGPU_PROF_MAXT) g_prof_funcs[thread_id] += clock64() - prof_f2;
+                #endif
                 
                 // Zero out the full constraint Jacobian first
                 for (int i = 0; i < pr->num_internal_cons * (spec->num_statevars + pr->phase_dof); ++i) {
@@ -1233,7 +1269,13 @@ typedef struct SystemState {
             // CRITICAL FIX: Use LU decomposition instead of SVD to match CPU behavior exactly
             // CPU uses LAPACK's dgesv (LU decomposition with partial pivoting)
             // GPU was using SVD which produces different results for constrained matrices
+            #ifdef PYCGPU_PROF
+            long long prof_i0 = clock64();
+            #endif
             invert_matrix_lu(csst->full_e_matrix, csst->full_e_matrix_dim, work_inv);
+            #ifdef PYCGPU_PROF
+            if (thread_id < PYCGPU_PROF_MAXT) g_prof_inv[thread_id] += clock64() - prof_i0;
+            #endif
             
             // DEBUG: Check full_e_matrix after inversion for BOTH phases
             #ifdef VERBOSE_DEBUG
@@ -3343,7 +3385,14 @@ __device__ void solve_state(
         }
     }
     
+    #ifdef PYCGPU_PROF
+    long long prof_ss_t0 = clock64();
+    #endif
     state->recompute(spec, work_inv);
+    #ifdef PYCGPU_PROF
+    if (thread_id < PYCGPU_PROF_MAXT) g_prof_recompute[thread_id] += clock64() - prof_ss_t0;
+    prof_ss_t0 = clock64();
+    #endif
 
     // The old manual update loop is not needed since recompute handles everything
     
@@ -3364,6 +3413,9 @@ __device__ void solve_state(
     // Call fill_equilibrium_system with global memory arrays
     fill_equilibrium_system(equilibrium_matrix, equilibrium_matrix_cols,
                            equilibrium_rhs, spec, state);
+    #ifdef PYCGPU_PROF
+    if (thread_id < PYCGPU_PROF_MAXT) g_prof_fill[thread_id] += clock64() - prof_ss_t0;
+    #endif
     
     // DEBUG: Check RHS after fill_equilibrium_system
     #ifdef VERBOSE_DEBUG
@@ -3412,9 +3464,15 @@ __device__ void solve_state(
     
     // Call lstsq with correct signature
     // CRITICAL FIX: Use same tolerance as CPU (1e-16) instead of 1e-12
-    lstsq(A_lstsq_copy, equilibrium_matrix_rows, equilibrium_matrix_cols, 
-          equilibrium_rhs, 1e-16, 
+    #ifdef PYCGPU_PROF
+    prof_ss_t0 = clock64();
+    #endif
+    lstsq(A_lstsq_copy, equilibrium_matrix_rows, equilibrium_matrix_cols,
+          equilibrium_rhs, 1e-16,
           U_lstsq, V_lstsq, singular_values_lstsq, superdiag_lstsq);
+    #ifdef PYCGPU_PROF
+    if (thread_id < PYCGPU_PROF_MAXT) g_prof_lstsq[thread_id] += clock64() - prof_ss_t0;
+    #endif
     
     // The solution should be in equilibrium_rhs after lstsq completes
     
@@ -3498,7 +3556,22 @@ __device__ bool run_loop(
     double step_size = 1.0;
     bool converged = false;
     bool phases_changed_iter;
-    
+
+    #ifdef PYCGPU_PROF
+    // Per-thread segment cycle counters (enable with PYCGPU_PROF=1; prints one
+    // line per thread at loop exit). Used to attribute kernel wall time.
+    long long prof_solve = 0, prof_rc = 0, prof_chg = 0, prof_adv = 0, prof_t0 = 0;
+    int prof_iters = 0, prof_chg_calls = 0;
+    if (thread_id < PYCGPU_PROF_MAXT) {
+        g_prof_recompute[thread_id] = 0;
+        g_prof_fill[thread_id] = 0;
+        g_prof_lstsq[thread_id] = 0;
+        g_prof_hess[thread_id] = 0;
+        g_prof_inv[thread_id] = 0;
+        g_prof_funcs[thread_id] = 0;
+    }
+    #endif
+
     // Use global memory for eq_soln instead of local array
     int eq_soln_len;
     
@@ -3654,11 +3727,18 @@ __device__ bool run_loop(
         }
         
         // Call solve_state with global memory arrays
+        #ifdef PYCGPU_PROF
+        prof_iters = iteration_count + 1;
+        prof_t0 = clock64();
+        #endif
         solve_state(spec, state, eq_soln, eq_soln_len,
                    equilibrium_matrix, equilibrium_rhs,
                    A_lstsq_copy, U_lstsq, V_lstsq,
                    singular_values_lstsq, superdiag_lstsq, thread_id,
                    work_inv);
+        #ifdef PYCGPU_PROF
+        prof_solve += clock64() - prof_t0;
+        #endif
         
         // DEBUG: After solve_state
         if ((iteration_count < 3 || iteration_count % 50 == 0) && thread_id == 0) { 
@@ -3734,7 +3814,14 @@ __device__ bool run_loop(
         // We use those compositions for consolidation checks to match CPU behavior
         
         // Phase change operations (these should be safe, no large arrays)
-        if (remove_and_consolidate_phases(spec, state)) {
+        #ifdef PYCGPU_PROF
+        prof_t0 = clock64();
+        #endif
+        bool rc_phases_changed = remove_and_consolidate_phases(spec, state);
+        #ifdef PYCGPU_PROF
+        prof_rc += clock64() - prof_t0;
+        #endif
+        if (rc_phases_changed) {
             phases_changed_iter = true;
             if (thread_id < 3 && iteration_count < 3) {
                 #ifdef VERBOSE_DEBUG
@@ -3764,7 +3851,15 @@ __device__ bool run_loop(
         
         if (convergence_result) {
             // Try to add phases if converged
-            if (change_phases(spec, state, grid_data, phase_data)) {
+            #ifdef PYCGPU_PROF
+            prof_t0 = clock64();
+            prof_chg_calls++;
+            #endif
+            bool chg_phases_changed = change_phases(spec, state, grid_data, phase_data);
+            #ifdef PYCGPU_PROF
+            prof_chg += clock64() - prof_t0;
+            #endif
+            if (chg_phases_changed) {
                 phases_changed_iter = true;
                 if (thread_id < 3 && iteration_count < 3) {
                     #ifdef VERBOSE_DEBUG
@@ -3814,7 +3909,13 @@ __device__ bool run_loop(
         // CRITICAL FIX: Skip advance_state if phases changed (match CPU behavior)
         if (!phases_changed_iter) {
             // Call advance_state (this should be safe, no large arrays)
+            #ifdef PYCGPU_PROF
+            prof_t0 = clock64();
+            #endif
             advance_state(spec, state, eq_soln, eq_soln_len, step_size);
+            #ifdef PYCGPU_PROF
+            prof_adv += clock64() - prof_t0;
+            #endif
         } else {
             if (thread_id < 3 && iteration_count < 3) {
                 #ifdef VERBOSE_DEBUG
@@ -3897,7 +3998,19 @@ __device__ bool run_loop(
             #endif
         }
     }
-    
+
+    #ifdef PYCGPU_PROF
+    printf("[PROF] tid=%d iters=%d conv=%d solve=%.1f rc=%.1f chg=%.1f(calls=%d) adv=%.1f | recompute=%.1f fill=%.1f lstsq=%.1f hess=%.1f inv=%.1f funcs=%.1f Mcyc\n",
+           thread_id, prof_iters, converged ? 1 : 0,
+           prof_solve / 1e6, prof_rc / 1e6, prof_chg / 1e6, prof_chg_calls, prof_adv / 1e6,
+           thread_id < PYCGPU_PROF_MAXT ? g_prof_recompute[thread_id] / 1e6 : -1.0,
+           thread_id < PYCGPU_PROF_MAXT ? g_prof_fill[thread_id] / 1e6 : -1.0,
+           thread_id < PYCGPU_PROF_MAXT ? g_prof_lstsq[thread_id] / 1e6 : -1.0,
+           thread_id < PYCGPU_PROF_MAXT ? g_prof_hess[thread_id] / 1e6 : -1.0,
+           thread_id < PYCGPU_PROF_MAXT ? g_prof_inv[thread_id] / 1e6 : -1.0,
+           thread_id < PYCGPU_PROF_MAXT ? g_prof_funcs[thread_id] / 1e6 : -1.0);
+    #endif
+
     return converged;
 }
 

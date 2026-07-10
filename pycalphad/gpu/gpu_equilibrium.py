@@ -5,6 +5,7 @@
 
 import numpy as np
 import os
+import time
 
 # CUDA environment is now compatible with GCC 13.3
 
@@ -2085,7 +2086,9 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         "guard:" + str(bool(os.environ.get('PYCGPU_GUARD'))),
         "backend:" + ("cpu" if os.environ.get('PYCGPU_CPU') else "gpu"),
         "fmad:" + str(bool(os.environ.get('PYCGPU_NOFMAD'))),
-        "robust:" + str(bool(os.environ.get('PYCGPU_ROBUST')))
+        "robust:" + str(bool(os.environ.get('PYCGPU_ROBUST'))),
+        "maxiter:" + os.environ.get('PYCGPU_MAXITER', ''),
+        "prof:" + str(bool(os.environ.get('PYCGPU_PROF')))
     ]
     cache_key_input = "|".join(cache_key_parts)
     cache_key = hashlib.md5(cache_key_input.encode()).hexdigest()
@@ -2161,6 +2164,12 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                 # Robust-removal experiment: consolidation removals count toward
                 # times_compset_removed (see minimizer.h remove_and_consolidate).
                 define_flags.append('-DPYCGPU_ROBUST_REMOVAL')
+            if os.environ.get('PYCGPU_MAXITER'):
+                # Newton-loop iteration budget override (CPU parity default 1000).
+                define_flags.append(f"-DPYCGPU_MAXITER={int(os.environ['PYCGPU_MAXITER'])}")
+            if os.environ.get('PYCGPU_PROF'):
+                # Per-thread run_loop segment cycle profiler (prints [PROF] lines).
+                define_flags.append('-DPYCGPU_PROF')
 
             if os.environ.get('PYCGPU_CPU'):
                 # CPU-C++ backend: compile the same generated source with g++/OpenMP.
@@ -2182,6 +2191,8 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                 # build — the C++ backend needed -ffp-contract=off for parity.
                 fmad = ['--fmad=false'] if os.environ.get('PYCGPU_NOFMAD') else []
                 compile_options = tuple(['-std=c++11', opt_level] + fmad + define_flags)
+                if os.environ.get('PYCGPU_TIME'):
+                    print(f"[GPU TIME] compile options: {' '.join(compile_options)}")
                 module = cp.RawModule(code=full_kernel_source, options=compile_options, backend=_detect_gpu_backend())
 
             if verbose:
@@ -2773,6 +2784,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         try:
 
             # Launch the main equilibrium kernel
+            _t_kernel0 = time.time()
             top_level_kernel(
                 (blocks_per_grid,), (threads_per_block,),
                 kernel_args_v1)
@@ -2796,6 +2808,9 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
 
     if not _cpu_backend_mode:
         cp.cuda.runtime.deviceSynchronize()
+        if os.environ.get('PYCGPU_TIME'):
+            print(f"[GPU TIME] kernel wall: {time.time() - _t_kernel0:.3f} s "
+                  f"({num_total_conditions_pts} conditions, block={threads_per_block})")
 
     if _guard_mode:
         # Scan the interleaved guard slices: any non-magic value means a thread

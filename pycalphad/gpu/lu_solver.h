@@ -102,18 +102,24 @@ __device__ void lu_solve(const double* LU, int n, const int* ipiv, double* b) {
 }
 
 __device__ void invert_matrix_lu(double* A, int n, double* work) {
-    // Invert matrix A in-place using LU decomposition
-    // work is a temporary array of size n*n
-    
-    // Copy A to work
+    // Invert matrix A in-place using LU decomposition.
+    // The O(n^3) pivoting runs on a thread-LOCAL buffer, not the global-memory
+    // `work` slice: local memory is per-thread interleaved (coalesced) and
+    // L1-cached, which beats the per-thread global scratch for the many small
+    // phase-matrix inversions. Arithmetic is unchanged (bit-identical results);
+    // `work` stays in the signature for the existing call chain.
+    double lu_local[MAX_LU_DIM * MAX_LU_DIM];
+    (void)work;
+
+    // Copy A to the local buffer
     for (int i = 0; i < n * n; i++) {
-        work[i] = A[i];
+        lu_local[i] = A[i];
     }
-    
+
     int ipiv[MAX_LU_DIM];
-    
+
     // LU decomposition
-    int info = lu_decomposition(work, n, ipiv);
+    int info = lu_decomposition(lu_local, n, ipiv);
     if (info != 0) {
         // Singular matrix - set to identity (or could use pseudo-inverse)
         for (int i = 0; i < n; i++) {
@@ -134,7 +140,7 @@ __device__ void invert_matrix_lu(double* A, int n, double* work) {
         }
         
         // Solve for this column
-        lu_solve(work, n, ipiv, col);
+        lu_solve(lu_local, n, ipiv, col);
         
         // Store result in output matrix
         for (int i = 0; i < n; i++) {

@@ -2727,6 +2727,28 @@ __device__ void gpu_debug_log_array(const char* message, const double* arr, int 
 {eqsolver_h_source}
 
 // --- Dynamically Generated __device__ Model Functions ---
+// Strength-reduced pow for the generated model functions (CUDA/HIP only):
+// every exponent the codegen emits is a small integer literal, and libdevice
+// pow costs ~100+ cycles vs single digits for an inlined multiply chain that
+// the compiler constant-folds. Accuracy differs from libdevice pow by <=1-2
+// ulp -- the same eps-class distance from the CPU's correctly-rounded glibc
+// pow as libdevice itself. The C++ backend is excluded so it stays
+// bit-identical to CPU pycalphad. Defined AFTER all system headers (math.h)
+// so the function-like macro cannot mangle their pow declarations; it only
+// rewrites calls in the generated functions below.
+#if defined(__CUDACC__) || defined(__HIP__)
+__device__ inline double pycgpu_pow(double b, double e) {{
+    int ei = (int)e;
+    if ((double)ei == e && ei > -64 && ei < 64) {{
+        unsigned int n = ei < 0 ? (unsigned int)(-ei) : (unsigned int)ei;
+        double r = 1.0, p = b;
+        while (n) {{ if (n & 1u) r *= p; p *= p; n >>= 1u; }}
+        return ei < 0 ? 1.0 / r : r;
+    }}
+    return (pow)(b, e);
+}}
+#define pow(b, e) pycgpu_pow((b), (e))
+#endif
 {model_functions_c_code}
 
 // --- Global Device-Side PhaseRecord Array ---

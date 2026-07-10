@@ -9,6 +9,12 @@
 #ifndef SYSTEM_STATE_SIZE
 #define SYSTEM_STATE_SIZE 50000
 #endif
+// Newton-loop iteration budget. CPU parity value is 1000 (solver.py:288);
+// tunable via -D for perf experiments (never-converging conditions spin to the
+// cap and bound kernel wall time, since the launch waits for the slowest thread).
+#ifndef PYCGPU_MAXITER
+#define PYCGPU_MAXITER 1000
+#endif
 static_assert(sizeof(SystemState) <= SYSTEM_STATE_SIZE * sizeof(double),
               "SystemState does not fit its per-thread global-memory slot");
 
@@ -1503,7 +1509,7 @@ __device__ void solve_equilibrium_at_condition(
         thread_id,              // Pass thread_id for debug output
         &current_spec,
         &current_sys_state,
-        1000, // max_iterations - CPU solver.py:288 uses run_loop(state, 1000)
+        PYCGPU_MAXITER, // max_iterations - CPU solver.py:288 uses run_loop(state, 1000)
         grid_data,              // Pass grid data for phase search
         phase_data,             // Pass phase data for phase search
         // Pass global memory arrays to avoid stack overflow
@@ -1610,7 +1616,7 @@ __device__ void solve_equilibrium_at_condition(
                 thread_id,
                 &current_spec,
                 &current_sys_state,
-                1000, // max_iterations - CPU solver.py:288 uses run_loop(state, 1000)
+                PYCGPU_MAXITER, // max_iterations - CPU solver.py:288 uses run_loop(state, 1000)
                 grid_data,
                 phase_data,
                 equilibrium_matrix,

@@ -20,6 +20,21 @@ from pycalphad.core.hyperplane import hyperplane
 MIN_PHASE_FRACTION = 1e-6
 
 
+def _combo_of_point(points, n_combos, grid_T=None, grid_P=None):
+    """Map each point to its statevar-combo index in the grid's C-order
+    (P axis outer, T axis inner when both vary). grid_T/grid_P override the
+    axes when the grid covers MORE combos than the point list touches."""
+    uT = np.asarray(grid_T) if grid_T is not None else np.unique(points.T)
+    uP = np.asarray(grid_P) if grid_P is not None else np.unique(points.P)
+    if n_combos == len(uT):
+        return np.searchsorted(uT, points.T)
+    if n_combos == len(uP) * len(uT):
+        return (np.searchsorted(uP, points.P) * len(uT)
+                + np.searchsorted(uT, points.T))
+    raise ValueError(f"grid has {n_combos} statevar combos; expected "
+                     f"{len(uT)} or {len(uP) * len(uT)}")
+
+
 class PointList:
     """A batch of independent condition points for one system.
 
@@ -54,7 +69,7 @@ class PointList:
         return self.T.shape[0]
 
 
-def point_hull(points, grid, nonvacant_elements, phase_names_of_grid=None):
+def point_hull(points, grid, nonvacant_elements, grid_T=None, grid_P=None):
     """Per-point lower convex hull (twin of pycalphad lower_convex_hull).
 
     Parameters
@@ -87,18 +102,7 @@ def point_hull(points, grid, nonvacant_elements, phase_names_of_grid=None):
         grid_Phase = grid_Phase.reshape(-1, grid_Phase.shape[-1])
     n_combos = grid_GM.shape[0]
 
-    # map point -> statevar combo index: unique (P, T) in the same C-order
-    # the grid was calculated with (P axis outer, T axis inner when both vary)
-    uP = np.unique(points.P)
-    uT = np.unique(points.T)
-    if n_combos == len(uT):
-        combo_of_point = np.searchsorted(uT, points.T)
-    elif n_combos == len(uP) * len(uT):
-        combo_of_point = (np.searchsorted(uP, points.P) * len(uT)
-                          + np.searchsorted(uT, points.T))
-    else:
-        raise ValueError(f"grid has {n_combos} statevar combos; expected "
-                         f"{len(uT)} or {len(uP) * len(uT)}")
+    combo_of_point = _combo_of_point(points, n_combos, grid_T, grid_P)
 
     # phase-restriction masks are shared per (combo, phase)
     mask_cache = {}
@@ -463,7 +467,7 @@ class PointBatchSolver:
     # --------------------------------------------------------------- launch
     def solve(self, points, hull, grid, spec_row0, state_variables,
               nonvacant_elements, restrict_grid_views=None,
-              max_solver_iterations=1000):
+              max_solver_iterations=1000, grid_T=None, grid_P=None):
         """Launch one batch. Returns dict with per-point flat results.
 
         grid: calculate() result (to_xarray=False) covering the points'
@@ -490,15 +494,8 @@ class PointBatchSolver:
         grid_blocks, block_shape = _prepare_grid_data_for_gpu_from_calculate_result(
             grid_src, self.name_to_idx, MP, MDOF, MC, self.verbose)
         # map each point to its statevar-combo block (same C-order as point_hull)
-        uP, uT = np.unique(points.P), np.unique(points.T)
         n_blocks = int(np.prod(block_shape))
-        if n_blocks == len(uT):
-            gbi = np.searchsorted(uT, points.T).astype(np.int32)
-        elif n_blocks == len(uP) * len(uT):
-            gbi = (np.searchsorted(uP, points.P) * len(uT)
-                   + np.searchsorted(uT, points.T)).astype(np.int32)
-        else:
-            raise ValueError(f"unexpected block count {n_blocks}")
+        gbi = _combo_of_point(points, n_blocks, grid_T, grid_P).astype(np.int32)
 
         # work arrays (23 slots; layout mirrors gpu_equilibrium.py:2566+)
         MFIX = int(ds['MAX_FIXED_MOLE_FRACTION_CONDITIONS'])

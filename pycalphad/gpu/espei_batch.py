@@ -1,30 +1,29 @@
 """Batched ZPF driving-force evaluation for ESPEI on the accelerated backends.
 
 Replaces ESPEI's per-vertex serial Workspace solves (``estimate_hyperplane`` +
-``driving_force_to_hyperplane`` in ``espei.error_functions.zpf_error``) with a
-small number of batched ``equilibrium()`` calls on the c++/CUDA backends:
+``driving_force_to_hyperplane`` in ``espei.error_functions.zpf_error``) with
+point-list batch launches (pycalphad.gpu.point_solver):
 
-- all hyperplane vertices with full composition conditions become ONE
-  all-phase batch per (X-component) group;
-- all "isolated phase" driving-force vertices become ONE single-phase batch
-  per (phase, X-component) group;
+- all hyperplane vertices with full composition conditions ride ONE all-phase
+  launch;
+- driving-force vertices ride ONE single-phase launch per distinct phase
+  (phase-filtered grid blocks; no kernel changes);
 - vertices the batch path cannot serve exactly (missing composition
   conditions -> sampling estimate, disordered configurations, near-pure-edge
   compositions) fall back to ESPEI's own serial code paths.
 
-The batches are cartesian (unique T x unique X per group) and results are
-extracted per vertex, so duplicate vertex conditions are solved once. The
-driving-force/weight assembly reproduces ``calculate_zpf_driving_forces``
+Driving-force/weight assembly reproduces ``calculate_zpf_driving_forces``
 semantics exactly (vertex ordering, NaN-hyperplane -> zero driving force,
 underdetermined-vertex exclusion from the hyperplane average).
 
-This module intentionally does not import ESPEI at module level; it is
-designed to be driven from an ESPEI residual class (the registry is
-pluggable) or a test harness that already has ``zpf_data``.
+Per ``driving_forces(parameters)`` call the parameter-dependent work is: one
+``calculate()`` grid over the unique temperatures, the per-point hulls, and
+the launches — the point lists, spec template, and compiled solver are built
+once in ``__init__``.
 """
-from collections import defaultdict
-
 import numpy as np
+
+from pycalphad.gpu.point_solver import PointList, point_hull, PointBatchSolver
 
 # Compositions outside this window go to the serial fallback: the accelerated
 # capability gate routes dilute conditions to the reference path anyway, and
@@ -51,30 +50,58 @@ def _batchable(vertex):
 
 
 class BatchedZPFCalculator:
-    """Batched drop-in for ``calculate_zpf_driving_forces``.
+    """Batched drop-in for ``calculate_zpf_driving_forces`` (C++ backend).
 
     Parameters
     ----------
     zpf_data : output of ``espei.error_functions.zpf_error.get_zpf_data``
     param_names : sorted fit-parameter symbol names (str order must match
         ``extract_parameters``, e.g. ['VV0000', 'VV0001'])
-    backend : 'c++' or 'gpu' (accelerated pycalphad backend name)
+    pdens : grid point density for the shared energy grid (matches the
+        default the backend equilibrium path uses)
     """
 
-    def __init__(self, zpf_data, param_names, backend='c++'):
+    def __init__(self, zpf_data, param_names, pdens=60, verbose=False):
         self.zpf_data = zpf_data
         self.param_names = [str(p) for p in param_names]
-        self.backend = backend
+        self.pdens = pdens
+        self.verbose = verbose
+
+        region0 = self.zpf_data[0]['phase_regions'][0]
+        self.species = region0.species
+        self.phases = list(region0.phases)
+        self.models = dict(region0.models)
+        self.dbf = self.zpf_data[0]['dbf']
+        self.prf = region0.hyperplane_vertices[0].phase_record_factory \
+            if region0.hyperplane_vertices else region0.vertices[0].phase_record_factory
+        self.nonvacant = sorted(
+            {el.upper() for sp in self.species for el in sp.constituents} - {'VA'})
+        self.ncomp = len(self.nonvacant)
+        self.state_variables = self.prf.state_variables
+
         self._plan()
+
+        self.solver = PointBatchSolver(self.species, self.phases, self.models,
+                                       self.prf, robust=True, verbose=verbose)
+        # phase_dof per model index, for the underdetermined-vertex rule
+        self.dof_of_model = {}
+        for ph in self.phases:
+            self.dof_of_model[self.solver.name_to_idx[ph]] = self.prf[ph].phase_dof
+        if self._hyp_rows:
+            T0, P0, comp0, x0 = self._hyp_rows[0][3:]
+            self.spec_row0 = self.solver.build_spec_row0(
+                {'N': 1.0, 'P': P0, 'T': T0, 'X0': x0}, self.nonvacant[comp0])
+        else:
+            self.spec_row0 = None
 
     # ------------------------------------------------------------------ plan
     def _plan(self):
-        """Enumerate vertex solves and group them into cartesian batches."""
-        # job records: (dg, pr, kind, index-within-kind, vertex)
-        self.hyp_jobs = {}      # (dg, pr, hv) -> ('batch', group_key, T, x) | ('serial',)
-        self.df_jobs = {}       # (dg, pr, vi) -> ('batch', group_key, T, x) | ('serial',)
-        hyp_groups = defaultdict(set)   # (x_comp,) -> set of (P, T, xval)
-        iso_groups = defaultdict(set)   # (phase, x_comp) -> set of (P, T, xval)
+        """Enumerate vertex solves into point-list rows (parameter-free)."""
+        # job maps: (dg, pr, hv/vi) -> ('hyp', row) | ('iso', phase, row) | ('serial',)
+        self.hyp_jobs = {}
+        self.df_jobs = {}
+        self._hyp_rows = []                 # (dg, pr, hv, T, P, comp_idx, xval)
+        self._iso_rows = {}                 # phase -> list of rows
 
         for dg, data in enumerate(self.zpf_data):
             for pr, region in enumerate(data['phase_regions']):
@@ -85,81 +112,95 @@ class BatchedZPFCalculator:
                         continue  # contributes nothing to the hyperplane
                     if _batchable(vtx):
                         xkey, xval = _vertex_x_condition(vtx)
-                        gk = (str(xkey),)
-                        hyp_groups[gk].add((P, T, float(xval)))
-                        self.hyp_jobs[(dg, pr, hv)] = ('batch', gk, P, T, float(xval))
+                        comp_idx = self.nonvacant.index(str(xkey)[2:])
+                        self.hyp_jobs[(dg, pr, hv)] = ('hyp', len(self._hyp_rows))
+                        self._hyp_rows.append((dg, pr, hv, T, P, comp_idx, float(xval)))
                     else:
                         self.hyp_jobs[(dg, pr, hv)] = ('serial',)
                 for vi, vtx in enumerate(region.vertices):
                     if _batchable(vtx):
                         xkey, xval = _vertex_x_condition(vtx)
-                        gk = (vtx.phase_name, str(xkey))
-                        iso_groups[gk].add((P, T, float(xval)))
-                        self.df_jobs[(dg, pr, vi)] = ('batch', gk, P, T, float(xval))
+                        comp_idx = self.nonvacant.index(str(xkey)[2:])
+                        rows = self._iso_rows.setdefault(vtx.phase_name, [])
+                        self.df_jobs[(dg, pr, vi)] = ('iso', vtx.phase_name, len(rows))
+                        rows.append((dg, pr, vi, T, P, comp_idx, float(xval)))
                     else:
                         self.df_jobs[(dg, pr, vi)] = ('serial',)
 
-        def _axes(points):
-            Ps = np.array(sorted({p for p, _, _ in points}))
-            Ts = np.array(sorted({t for _, t, _ in points}))
-            Xs = np.array(sorted({x for _, _, x in points}))
-            return Ps, Ts, Xs
+        def _mk_points(rows):
+            n = len(rows)
+            T = np.array([r[3] for r in rows])
+            P = np.array([r[4] for r in rows])
+            X = np.zeros((n, self.ncomp))
+            mask = np.zeros((n, self.ncomp), dtype=bool)
+            for i, r in enumerate(rows):
+                ci, xv = r[5], r[6]
+                X[i, ci] = xv
+                mask[i, ci] = True
+                # dependent components split the remainder (binary: 1-x)
+                rest = np.setdiff1d(np.arange(self.ncomp), [ci])
+                X[i, rest] = (1.0 - xv) / len(rest)
+            return T, P, X, mask
 
-        self.hyp_axes = {gk: _axes(pts) for gk, pts in hyp_groups.items()}
-        self.iso_axes = {gk: _axes(pts) for gk, pts in iso_groups.items()}
+        self._hyp_pts_raw = _mk_points(self._hyp_rows) if self._hyp_rows else None
+        self._iso_pts_raw = {ph: _mk_points(rows)
+                             for ph, rows in self._iso_rows.items()}
+        allT = [r[3] for r in self._hyp_rows]
+        for rows in self._iso_rows.values():
+            allT += [r[3] for r in rows]
+        allP = [r[4] for r in self._hyp_rows]
+        for rows in self._iso_rows.values():
+            allP += [r[4] for r in rows]
+        self._unique_T = np.unique(np.asarray(allT)) if allT else np.array([300.0])
+        assert len(np.unique(allP)) <= 1, "mixed pressures not supported yet"
+        self._P = float(allP[0]) if allP else 101325.0
+        self._grid_phase_masks = None  # built after first grid
 
-        # Shared model/species/phase context (identical across zpf_data by
-        # construction in get_zpf_data for one system).
-        region0 = self.zpf_data[0]['phase_regions'][0]
-        self.species = region0.species
-        self.phases = list(region0.phases)
-        self.models = region0.models
-        self.dbf = self.zpf_data[0]['dbf']
-        self.nonvacant = sorted(
-            {el.upper() for sp in self.species for el in sp.constituents} - {'VA'})
+    # ------------------------------------------------------------ grid + run
+    def _make_grid(self, params_dict):
+        from pycalphad import calculate
+        grid = calculate(self.dbf, [str(s) for s in self.species], self.phases,
+                         model=self.models, fake_points=True,
+                         phase_records=self.prf, output='GM',
+                         parameters=params_dict, to_xarray=False,
+                         pdens=self.pdens, N=1.0, P=self._P,
+                         T=self._unique_T.tolist())
+        return grid
 
-    # ------------------------------------------------------------ batch runs
-    def _run_batches(self, params_dict):
-        """Run all cartesian batches; return per-group result objects."""
-        import pycalphad
-        from pycalphad import equilibrium, variables as v
+    def _filtered_grid(self, grid, phase):
+        """Phase-restricted grid views (rows of `phase` + fake points)."""
+        from types import SimpleNamespace
+        gp = np.asarray(grid.Phase)
+        row0 = gp.reshape(-1, gp.shape[-1])[0]
+        if self._grid_phase_masks is None:
+            self._grid_phase_masks = {}
+        sel = self._grid_phase_masks.get(phase)
+        if sel is None:
+            sel = np.flatnonzero((row0 == phase) | (row0 == '_FAKE_'))
+            self._grid_phase_masks[phase] = sel
+        gm = np.asarray(grid.GM)
+        gx = np.asarray(grid.X)
+        gy = np.asarray(grid.Y)
+        return SimpleNamespace(
+            GM=gm.reshape(-1, gm.shape[-1])[:, sel],
+            X=gx.reshape((-1,) + gx.shape[-2:])[:, sel],
+            Y=gy.reshape((-1,) + gy.shape[-2:])[:, sel],
+            Phase=gp.reshape(-1, gp.shape[-1])[:, sel],
+            attrs={},
+        )
 
-        hyp_results, iso_results = {}, {}
-        with pycalphad.backend(self.backend):
-            for gk, (Ps, Ts, Xs) in self.hyp_axes.items():
-                (xname,) = gk
-                conds = {v.N: 1, v.P: Ps.tolist(), v.T: Ts.tolist(),
-                         v.X(xname[2:]): Xs.tolist()}
-                hyp_results[gk] = equilibrium(
-                    self.dbf, [str(s) for s in self.species], self.phases,
-                    conds, model=self.models, parameters=params_dict)
-            for gk, (Ps, Ts, Xs) in self.iso_axes.items():
-                phase, xname = gk
-                conds = {v.N: 1, v.P: Ps.tolist(), v.T: Ts.tolist(),
-                         v.X(xname[2:]): Xs.tolist()}
-                iso_results[gk] = equilibrium(
-                    self.dbf, [str(s) for s in self.species], [phase],
-                    conds, model=self.models, parameters=params_dict)
-        return hyp_results, iso_results
-
-    @staticmethod
-    def _grid_index(axes, P, T, x):
-        Ps, Ts, Xs = axes
-        return (int(np.searchsorted(Ps, P)), int(np.searchsorted(Ts, T)),
-                int(np.searchsorted(Xs, x)))
-
-    def _extract_mu(self, res, axes, P, T, x):
-        """Per-vertex MU with the reference underdetermined-vertex rule."""
-        pi, ti, xi = self._grid_index(axes, P, T, x)
-        # result dims: N, P, T, X -> squeeze N
-        phase_arr = res.Phase.values[0, pi, ti, xi]
-        Y_arr = res.Y.values[0, pi, ti, xi]
-        mu = np.array([float(res.MU.sel(component=el).values[0, pi, ti, xi])
-                       for el in self.nonvacant])
-        num_phases = int(np.sum(phase_arr != ''))
-        no_internal_dof = bool(np.all(np.isclose(Y_arr, 1.0) | np.isnan(Y_arr)))
-        if num_phases == 1 and no_internal_dof:
-            return np.full_like(mu, np.nan)
+    def _mu_with_underdetermined_rule(self, res, row):
+        """Per-vertex MU; NaN row if single stable phase with no internal dof
+        (reference rule in estimate_hyperplane)."""
+        mu = res['MU'][row, :self.ncomp].copy()
+        stable = np.flatnonzero(res['NP'][row] > 1e-9)
+        if res['num_stable_phases'][row] == 1 or stable.size == 1:
+            k = stable[0] if stable.size else 0
+            model_idx = int(res['phase_ids'][row, k])
+            pdof = self.dof_of_model.get(model_idx, 0)
+            y = res['Y'][row, k, :pdof]
+            if pdof == 0 or np.all(np.isclose(y, 1.0) | np.isnan(y)):
+                return np.full_like(mu, np.nan)
         return mu
 
     # --------------------------------------------------------- serial pieces
@@ -180,7 +221,6 @@ class BatchedZPFCalculator:
         return mu
 
     def _serial_driving_force(self, data, region, vertex, target, parameters):
-        """Reference driving_force_to_hyperplane for non-batchable vertices."""
         from espei.error_functions.zpf_error import driving_force_to_hyperplane
         return driving_force_to_hyperplane(
             target, region, data['dbf'], data['parameter_dict'], vertex,
@@ -191,49 +231,70 @@ class BatchedZPFCalculator:
         """Batched equivalent of ``calculate_zpf_driving_forces``."""
         parameters = np.asarray(parameters, dtype=np.float64)
         params_dict = dict(zip(self.param_names, parameters))
-        hyp_results, iso_results = self._run_batches(params_dict)
+        try:
+            from espei.shadow_functions import update_phase_record_parameters
+            update_phase_record_parameters(self.prf, parameters)
+        except Exception:
+            pass
+
+        grid = self._make_grid(params_dict)
+
+        hyp_res = None
+        if self._hyp_pts_raw is not None:
+            T, P, X, mask = self._hyp_pts_raw
+            prow = np.tile(parameters, (len(T), 1))
+            pts = PointList(T=T, P=P, N=1.0, X=X, x_cond_mask=mask, params=prow)
+            hull = point_hull(pts, grid, self.nonvacant, grid_T=self._unique_T)
+            hyp_res = self.solver.solve(pts, hull, grid, self.spec_row0,
+                                        self.state_variables, self.nonvacant,
+                                        grid_T=self._unique_T)
+
+        iso_res = {}
+        for ph, (T, P, X, mask) in self._iso_pts_raw.items():
+            prow = np.tile(parameters, (len(T), 1))
+            pts = PointList(T=T, P=P, N=1.0, X=X, x_cond_mask=mask,
+                            phase_restrict=np.array([ph] * len(T), dtype=object),
+                            params=prow)
+            hull = point_hull(pts, grid, self.nonvacant, grid_T=self._unique_T)
+            gfilt = self._filtered_grid(grid, ph)
+            iso_res[ph] = self.solver.solve(pts, hull, grid, self.spec_row0,
+                                            self.state_variables, self.nonvacant,
+                                            restrict_grid_views=gfilt,
+                                            grid_T=self._unique_T)
 
         driving_forces, weights = [], []
         for dg, data in enumerate(self.zpf_data):
             data_dfs, data_wts = [], []
             weight = data['weight']
             for pr, region in enumerate(data['phase_regions']):
-                # 1. target hyperplane = nanmean of vertex MU rows
                 rows = []
                 for hv, vtx in enumerate(region.hyperplane_vertices):
                     job = self.hyp_jobs.get((dg, pr, hv))
                     if job is None:
                         continue
-                    if job[0] == 'batch':
-                        _, gk, P, T, x = job
-                        rows.append(self._extract_mu(
-                            hyp_results[gk], self.hyp_axes[gk], P, T, x))
+                    if job[0] == 'hyp':
+                        rows.append(self._mu_with_underdetermined_rule(hyp_res, job[1]))
                     else:
-                        rows.append(self._serial_hyperplane_mu(
-                            region, region.hyperplane_vertices[hv], params_dict))
+                        rows.append(self._serial_hyperplane_mu(region, vtx, params_dict))
                 if rows:
                     with np.errstate(invalid='ignore'):
                         target = np.nanmean(np.asarray(rows), axis=0)
                 else:
-                    target = np.full(len(self.nonvacant), np.nan)
+                    target = np.full(self.ncomp, np.nan)
 
                 if np.any(np.isnan(target)):
                     data_dfs.extend([0] * len(region.vertices))
                     data_wts.extend([weight] * len(region.vertices))
                     continue
 
-                # 2. per-vertex driving forces
                 for vi, vtx in enumerate(region.vertices):
                     job = self.df_jobs[(dg, pr, vi)]
-                    if job[0] == 'batch':
-                        _, gk, P, T, x = job
-                        res = iso_results[gk]
-                        pi, ti, xi = self._grid_index(self.iso_axes[gk], P, T, x)
-                        gm = float(res.GM.values[0, pi, ti, xi])
+                    if job[0] == 'iso':
+                        gm = float(iso_res[job[1]]['GM'][job[2]])
                         df = float(np.dot(target, vtx.composition) - gm)
                     else:
-                        df = self._serial_driving_force(
-                            data, region, vtx, target, parameters)
+                        df = self._serial_driving_force(data, region, vtx,
+                                                        target, parameters)
                     data_dfs.append(df)
                     data_wts.append(weight)
             driving_forces.append(data_dfs)

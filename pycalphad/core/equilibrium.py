@@ -79,9 +79,16 @@ def equilibrium(dbf, comps, phases, conditions, output=None, model=None,
     None yet.
     """
     import os
+    from pycalphad.backend import get_backend, _option_env
+    # Resolution order for the execution backend: explicit per-call kwarg,
+    # else the global set_backend()/PYCALPHAD_BACKEND setting, else 'default'.
+    _global_backend, _global_options = get_backend()
     if backend is not None:
         if backend not in ('cuda', 'cpp'):
             raise ValueError(f"backend must be 'cuda' or 'cpp', got {backend!r}")
+        gpu = True
+    elif _global_backend != 'default' and not force_cpu:
+        backend = _global_backend
         gpu = True
 
     if gpu:
@@ -100,11 +107,12 @@ def equilibrium(dbf, comps, phases, conditions, output=None, model=None,
                 else:
                     os.environ.pop(k, None)
             from ..gpu.gpu_equilibrium import equilibrium_gpu
-            # GPU mode handles its own debug output
-            return equilibrium_gpu(dbf, comps, phases, conditions, output=output, model=model,
-                                 verbose=verbose, calc_opts=calc_opts, to_xarray=to_xarray,
-                                 parameters=parameters, solver=solver, phase_records=phase_records,
-                                 force_cpu=force_cpu, fallback_on_error=fallback_on_error, **kwargs)
+            with _option_env(_global_options):
+                # GPU mode handles its own debug output
+                return equilibrium_gpu(dbf, comps, phases, conditions, output=output, model=model,
+                                     verbose=verbose, calc_opts=calc_opts, to_xarray=to_xarray,
+                                     parameters=parameters, solver=solver, phase_records=phase_records,
+                                     force_cpu=force_cpu, fallback_on_error=fallback_on_error, **kwargs)
         finally:
             for k, old in saved.items():
                 if old is None:

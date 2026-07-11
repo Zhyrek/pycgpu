@@ -145,9 +145,17 @@ def get_grid_evaluator(backend_name, components, phases, models,
     default_min = 0 if kind == 'cpp' else 1_000_000
     min_points = int(os.environ.get('PYCGPU_CALC_MIN_POINTS', default_min))
 
+    # Fit parameters (factory.param_values) ride in trailing dof slots; read
+    # LIVE at call time so per-step updates (e.g. ESPEI MCMC poking
+    # param_values in place) take effect without rebuilding anything.
+    n_params = len(getattr(phase_record_factory, 'param_symbols', []) or [])
+
     def evaluate(phase_name, dof, out):
         model_idx = name_to_idx[phase_name]
         n_points = dof.shape[0]
+        if n_params:
+            pv = np.asarray(phase_record_factory.param_values, dtype=np.float64).reshape(-1)[:n_params]
+            dof = np.concatenate([dof, np.broadcast_to(pv, (n_points, n_params))], axis=1)
         dof_stride = dof.shape[1]
         dof_c = np.ascontiguousarray(dof, dtype=np.float64)
         if kind == 'cpp':

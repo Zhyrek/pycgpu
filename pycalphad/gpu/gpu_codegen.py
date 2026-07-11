@@ -143,6 +143,10 @@ def compute_dynamic_kernel_sizes(wks_obj: Workspace) -> Dict[str, int]:
         "MAX_FIXED_MOLE_FRACTION_CONDITIONS": max(safety_minimum, int(actual_components * padding_factor)),
         "MAX_GRID_POINTS": 10000,  # Keep reasonable default for grid
         "MIN_PHASE_FRACTION": 1e-6,  # Keep constant
+        # Fit parameters occupy trailing dof slots (runtime inputs; see
+        # _fit_parameter_symbols). Sized exactly: parameter count changes the
+        # generated code, and the cache key includes dynamic sizes.
+        "MAX_PARAMS": len(_fit_parameter_symbols(wks_obj)),
     }
 
     # CRITICAL: The equilibrium-matrix work-array strides MUST be passed as -D
@@ -269,7 +273,7 @@ def validate_variable_indices(model_obj: Model, wks_obj: Workspace) -> Tuple[int
     
     max_statevars = _get_c_define("MAX_STATEVARS")
     max_dof = _get_c_define("MAX_DOF_PER_PHASE")
-    max_total_vars = max_statevars + max_dof
+    max_total_vars = max_statevars + max_dof + len(_fit_parameter_symbols(wks_obj))
     
     if max_index >= max_total_vars:
         raise CodeValidationError(
@@ -1068,6 +1072,17 @@ def notebook_replace_exp(source: str) -> str:
     return source[:-1] #remove final space now that it's no longer needed
 
 
+def _fit_parameter_symbols(wks_obj):
+    """Fit-parameter symbols carried by the phase-record factory (str-sorted by
+    pycalphad's extract_parameters). Mapped to trailing dof slots
+    x[num_statevars + phase_dof + j] so parameters are RUNTIME inputs of the
+    generated functions (no recompile per parameter set; per-thread parameter
+    vectors enable batching MCMC walkers)."""
+    prf = getattr(wks_obj, 'phase_record_factory', None)
+    syms = list(getattr(prf, 'param_symbols', []) or [])
+    return syms
+
+
 def notebook_get_all_syms_for_model(model_obj: Model, wks_obj: Workspace) -> list:
     """Get all symbols for a model in the correct order for derivatives. Original from Phase_rec.ipynb.txt."""
     import symengine as se
@@ -1084,8 +1099,8 @@ def notebook_get_all_syms_for_model(model_obj: Model, wks_obj: Workspace) -> lis
     
     # This should match exactly what the CPU expects:
     # For BCC_A2: [N, P, T] + [Y(BCC_A2,0,NB), Y(BCC_A2,0,TI)]
-    
-    return state_variables + site_variables
+    # Fit parameters (if any) ride in trailing dof slots after the site fractions.
+    return state_variables + site_variables + _fit_parameter_symbols(wks_obj)
 
 
 def notebook_get_all_sym_names_for_model(model_obj: Model, wks_obj: Workspace) -> list:
@@ -1105,8 +1120,8 @@ def notebook_get_all_sym_names_for_model(model_obj: Model, wks_obj: Workspace) -
     
     # This gives CPU DOF ordering:
     # For BCC_A2: ['N', 'P', 'T'] + ['BCC_A20NB', 'BCC_A20TI'] = indices 0, 1, 2, 3, 4
-    
-    return state_variables + site_variables
+    # Fit parameters (if any) ride in trailing dof slots after the site fractions.
+    return state_variables + site_variables + [str(sym) for sym in _fit_parameter_symbols(wks_obj)]
 
 
 def notebook_convert_var_names(source_str: str, model_obj: Model, wks_obj: Workspace, verbose: bool = False) -> str:

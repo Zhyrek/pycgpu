@@ -479,286 +479,336 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
         'num_phases': np.zeros(num_conditions_total, dtype=np.int32)
     }
     
-    # Fill initial phase data from starting_point() properties for each condition
-    for cond_idx in range(num_conditions_total):
-        # Convert linear condition index to multi-dimensional indices for properties access
-        # Properties have the same shape as gm_array, so we can use the same unravel_index
-        multi_idx = np.unravel_index(cond_idx, gm_array.shape)
+    # Fill initial phase data from starting_point() properties.
+    # FAST PATH (default): fully vectorized over conditions -- the original
+    # per-condition loop cost ~1s at 10k conditions (linear in N).
+    # PYCGPU_PREP_SLOW=1 forces the original loop (verification tooling).
+    if not os.environ.get('PYCGPU_PREP_SLOW'):
+        n_cond = num_conditions_total
+        phase_arr = np.asarray(_extract_values(properties.Phase)).reshape(n_cond, -1)
+        np_arr = np.asarray(_extract_values(properties.NP)).reshape(n_cond, -1).astype(np.float64)
+        mu_arr = np.asarray(_extract_values(properties.MU)).reshape(n_cond, -1).astype(np.float64)
+        y_arr = np.asarray(_extract_values(properties.Y)).reshape(n_cond, phase_arr.shape[1], -1).astype(np.float64)
+        x_arr = np.asarray(_extract_values(properties.X)).reshape(n_cond, phase_arr.shape[1], -1).astype(np.float64)
+
+        # model index per vertex via unique-name LUT (-1 = unknown/_FAKE_/empty)
+        uniq, inv = np.unique(phase_arr, return_inverse=True)
+        lut = np.array([py_phase_name_to_unique_idx_map.get(name, -1)
+                        if name not in ('', '_FAKE_') else -1 for name in uniq], dtype=np.int64)
+        model_idx_arr = lut[inv].reshape(phase_arr.shape)
+
+        valid = (model_idx_arr >= 0) & (np_arr > 1e-10)
+        # Stable compaction: valid vertices first, original order preserved
+        order = np.argsort(~valid, axis=1, kind='stable')
+        valid_sorted = np.take_along_axis(valid, order, axis=1)
+        counts = valid_sorted.sum(axis=1)
+
+        n_slots = min(max_phases_per_condition, phase_arr.shape[1])
+        slot_order = order[:, :n_slots]
+        slot_valid = valid_sorted[:, :n_slots]
+        rows_s = np.broadcast_to(np.arange(n_cond)[:, None], (n_cond, n_slots))
+
+        initial_phase_data_arrays['num_phases'][:] = np.minimum(counts, max_phases_per_condition).astype(np.int32)
+        mu_cols = min(mu_arr.shape[1], max_components)
+        initial_phase_data_arrays['chemical_potentials'][:, :mu_cols] = mu_arr[:, :mu_cols]
+
+        pid = model_idx_arr[rows_s, slot_order]
+        initial_phase_data_arrays['phase_indices'][:, :n_slots] = np.where(slot_valid, pid, 0)
+
+        amounts = np.maximum(np_arr[rows_s, slot_order], MIN_PHASE_FRACTION)
+        initial_phase_data_arrays['phase_amounts'][:, :n_slots] = np.where(slot_valid, amounts, 0.0)
+
+        y_cols = min(y_arr.shape[2], max_dof_per_phase)
+        y_g = y_arr[rows_s, slot_order][:, :, :y_cols]
+        initial_phase_data_arrays['site_fractions'][:, :n_slots, :y_cols] = \
+            np.where(slot_valid[:, :, None], y_g, 0.0)
+
+        x_cols = min(x_arr.shape[2], max_components)
+        x_g = x_arr[rows_s, slot_order][:, :, :x_cols]
+        initial_phase_data_arrays['compositions'][:, :n_slots, :x_cols] = \
+            np.where(slot_valid[:, :, None], x_g, 0.0)
+    else:
+        # Fill initial phase data from starting_point() properties for each condition
+        for cond_idx in range(num_conditions_total):
+            # Convert linear condition index to multi-dimensional indices for properties access
+            # Properties have the same shape as gm_array, so we can use the same unravel_index
+            multi_idx = np.unravel_index(cond_idx, gm_array.shape)
         
-        # DEBUG: Log details for first few conditions only
-        if wks_obj.verbose and cond_idx < 5:
-            print(f"[GPU] Processing condition {cond_idx}, multi_idx = {multi_idx}, gm_array.shape = {gm_array.shape}")
-            if cond_idx == 0:
-                print(f"[GPU] Full properties.MU shape: {properties.MU.shape}")
-                if hasattr(properties.MU, 'values'):
-                    mu_array = properties.MU.values
-                else:
-                    mu_array = properties.MU
-                print(f"[GPU] MU array shape: {mu_array.shape}")
-                # Print all MU values to see the pattern
-                print("[GPU] All MU values:")
-                mu_flat = mu_array.flatten()
-                for i in range(0, min(len(mu_flat), 9), 3):  # Print first 3 conditions
-                    print(f"  [{i//3}]: {mu_flat[i:i+3]}")
-        
-        # Extract data from starting_point() properties using proper multi-dimensional indexing
-        # Use safer property access that handles both scalar and array cases
-        try:
-            if hasattr(properties, 'MU') and hasattr(properties.MU, '__getitem__') and len(multi_idx) > 0:
-                mu_values = np.asarray(properties.MU[multi_idx])
-            else:
-                mu_values = np.asarray(properties.MU if hasattr(properties, 'MU') else np.zeros(max_components))
-        except (IndexError, TypeError):
-            # Fallback if indexing fails
-            mu_values = np.asarray(properties.MU if hasattr(properties, 'MU') else np.zeros(max_components))
-            
-        # DEBUG: Log what we extract to verify multi-dimensional access
-        if wks_obj.verbose and cond_idx < 5:
-            mu_summary = mu_values[:3] if hasattr(mu_values, '__len__') and len(mu_values) > 0 else "empty"
-            print(f"[GPU] Condition {cond_idx} - extracted MU: {mu_summary}...")
-        
-        try:
-            if hasattr(properties, 'Phase') and hasattr(properties.Phase, '__getitem__'):
-                phase_values = properties.Phase[multi_idx] if len(multi_idx) > 0 else properties.Phase
-            else:
-                phase_values = properties.Phase if hasattr(properties, 'Phase') else []
-        except (IndexError, TypeError):
-            phase_values = properties.Phase if hasattr(properties, 'Phase') else []
-            
-        # DEBUG: Verify that we're getting different phase data for different conditions
-        if wks_obj.verbose and cond_idx < 5:
-            phase_summary = list(phase_values) if hasattr(phase_values, '__len__') else "scalar"
-            print(f"[GPU] Condition {cond_idx} - extracted Phase: {phase_summary}")
-        
-        try:
-            if hasattr(properties, 'NP') and hasattr(properties.NP, '__getitem__') and len(multi_idx) > 0:
-                np_values = np.asarray(properties.NP[multi_idx])
-            else:
-                np_values = np.asarray(properties.NP if hasattr(properties, 'NP') else np.zeros(max_phases_per_condition))
-        except (IndexError, TypeError):
-            np_values = np.asarray(properties.NP if hasattr(properties, 'NP') else np.zeros(max_phases_per_condition))
-        
-        try:
-            if hasattr(properties, 'X') and hasattr(properties.X, '__getitem__') and len(multi_idx) > 0:
-                x_values = np.asarray(properties.X[multi_idx])
-                # DEBUG: Log the raw extraction
-                if wks_obj.verbose and cond_idx < 2:
-                    print(f"[GPU] DEBUG: Raw properties.X[{multi_idx}] shape: {x_values.shape}")
-                    print(f"[GPU] DEBUG: Raw properties.X[{multi_idx}] content: {x_values}")
-                    # Also check the full X array structure
-                    if cond_idx == 0:
-                        print(f"[GPU] DEBUG: Full properties.X shape: {properties.X.shape}")
-                        print(f"[GPU] DEBUG: properties.X.dims: {properties.X.dims if hasattr(properties.X, 'dims') else 'no dims'}")
-                        print(f"[GPU] DEBUG: properties.X.coords: {properties.X.coords if hasattr(properties.X, 'coords') else 'no coords'}")
-            else:
-                x_values = np.asarray(properties.X if hasattr(properties, 'X') else np.zeros((max_phases_per_condition, max_components)))
-        except (IndexError, TypeError):
-            x_values = np.asarray(properties.X if hasattr(properties, 'X') else np.zeros((max_phases_per_condition, max_components)))
-        
-        try:
-            if hasattr(properties, 'Y') and hasattr(properties.Y, '__getitem__') and len(multi_idx) > 0:
-                y_values = np.asarray(properties.Y[multi_idx])
-            else:
-                y_values = np.asarray(properties.Y if hasattr(properties, 'Y') else np.zeros((max_phases_per_condition, max_dof_per_phase)))
-        except (IndexError, TypeError):
-            y_values = np.asarray(properties.Y if hasattr(properties, 'Y') else np.zeros((max_phases_per_condition, max_dof_per_phase)))
-        
-        # Count active phases and map to indices
-        active_phases = []
-        # Ensure phase_values is iterable and convert to safe format
-        phase_values_safe = np.asarray(phase_values).flatten() if hasattr(phase_values, '__len__') else []
-        np_values_safe = np.asarray(np_values).flatten() if hasattr(np_values, '__len__') else np.zeros(max_phases_per_condition)
-        
-        # DEBUG: Log what phase data we extracted for the first few conditions
-        if wks_obj.verbose and cond_idx < 5:
-            print(f"[GPU] Condition {cond_idx} - phases: {len(phase_values_safe)}, np_values: {len(np_values_safe)}")
-            if len(phase_values_safe) > 0:
-                print(f"[GPU] Condition {cond_idx} - phase_names: {phase_values_safe}")
-            if len(np_values_safe) > 0:
-                print(f"[GPU] Condition {cond_idx} - np_values: {np_values_safe[:3]}...")
-                
-            # Check if this condition has different data from condition 0
-            if cond_idx > 0 and len(np_values_safe) > 0:
-                # Store reference data from condition 0 for comparison
-                if not hasattr(_prepare_gpu_data, '_condition_0_np_values'):
-                    # This shouldn't happen if cond_idx > 0, but just in case
-                    pass
-                else:
-                    ref_np_values = getattr(_prepare_gpu_data, '_condition_0_np_values')
-                    if len(ref_np_values) == len(np_values_safe) and np.allclose(ref_np_values, np_values_safe[:len(ref_np_values)], atol=1e-10):
-                        print(f"[GPU] WARNING: Condition {cond_idx} has IDENTICAL np_values to condition 0! This is the problem.")
+            # DEBUG: Log details for first few conditions only
+            if wks_obj.verbose and cond_idx < 5:
+                print(f"[GPU] Processing condition {cond_idx}, multi_idx = {multi_idx}, gm_array.shape = {gm_array.shape}")
+                if cond_idx == 0:
+                    print(f"[GPU] Full properties.MU shape: {properties.MU.shape}")
+                    if hasattr(properties.MU, 'values'):
+                        mu_array = properties.MU.values
                     else:
-                        print(f"[GPU] GOOD: Condition {cond_idx} has DIFFERENT np_values from condition 0.")
-            elif cond_idx == 0 and len(np_values_safe) > 0:
-                # Store condition 0 data for comparison
-                if len(np_values_safe) >= 3:
-                    _prepare_gpu_data._condition_0_np_values = np_values_safe[:3].copy()
-                else:
-                    _prepare_gpu_data._condition_0_np_values = np_values_safe.copy()
+                        mu_array = properties.MU
+                    print(f"[GPU] MU array shape: {mu_array.shape}")
+                    # Print all MU values to see the pattern
+                    print("[GPU] All MU values:")
+                    mu_flat = mu_array.flatten()
+                    for i in range(0, min(len(mu_flat), 9), 3):  # Print first 3 conditions
+                        print(f"  [{i//3}]: {mu_flat[i:i+3]}")
         
-        # CRITICAL: NO per-condition consolidation! Use original data exactly like CPU.
-        
-        for phase_idx, phase_name in enumerate(phase_values_safe):
-            if phase_name and phase_name != '' and phase_name != '_FAKE_' and phase_idx < max_phases_per_condition:
-                # Safely extract np value
-                if phase_idx < len(np_values_safe):
-                    np_value = float(np_values_safe[phase_idx])
-                else:
-                    np_value = 0.0
-                    
-                # Only include phases with non-zero NP from starting point
-                if phase_name in py_phase_name_to_unique_idx_map and np_value > 1e-10:
-                    active_phases.append((phase_idx, phase_name, py_phase_name_to_unique_idx_map[phase_name]))
-                    # DEBUG: Print phase mapping
-                    if wks_obj.verbose and cond_idx < 5:
-                        print(f"[GPU] Condition {cond_idx} phase {phase_idx}: '{phase_name}' -> unique_idx {py_phase_name_to_unique_idx_map[phase_name]}")
-        
-        # Fill the flat arrays
-        initial_phase_data_arrays['num_phases'][cond_idx] = min(len(active_phases), max_phases_per_condition)
-        
-        # DEBUG: Log the final phase count for the first few conditions
-        if wks_obj.verbose and cond_idx < 5:
-            print(f"[GPU] Condition {cond_idx} - active phases: {len(active_phases)}")
-            if len(active_phases) == 0:
-                print(f"[GPU] WARNING: Condition {cond_idx} has no active phases! This will cause GPU thread failure.")
-        
-        # Safely copy chemical potentials
-        if hasattr(mu_values, '__len__') and len(mu_values) > 0:
-            mu_safe = np.asarray(mu_values).flatten()[:max_components]
-            copy_len = min(len(mu_safe), max_components)
-            initial_phase_data_arrays['chemical_potentials'][cond_idx, :copy_len] = mu_safe[:copy_len]
-        
-        # Check for duplicate phase names (immiscibility gap case)
-        phase_names_in_condition = [phase_name for _, phase_name, _ in active_phases[:max_phases_per_condition]]
-        unique_phase_names = set(phase_names_in_condition)
-        if len(phase_names_in_condition) != len(unique_phase_names):
-            # We have duplicate phase names - this is an immiscibility gap
-            if wks_obj.verbose:
-                print(f"[GPU] INFO: Condition {cond_idx} has duplicate phase names: {phase_names_in_condition}")
-                print(f"[GPU] This indicates an immiscibility gap with multiple instances of the same phase type.")
-            
-            # Count occurrences of each phase
-            phase_counts = {}
-            for phase_name in phase_names_in_condition:
-                phase_counts[phase_name] = phase_counts.get(phase_name, 0) + 1
-            
-            # Log which phases have multiple instances
-            for phase_name, count in phase_counts.items():
-                if count > 1:
-                    if wks_obj.verbose:
-                        print(f"[GPU]   Phase '{phase_name}' appears {count} times (immiscibility)")
-        
-        # FIX: For immiscibility gaps, we need to store which phase model to use,
-        # but phases should be stored contiguously, not by model index
-        if wks_obj.verbose and cond_idx < 2:
-            print(f"[GPU DEBUG] About to process {len(active_phases[:max_phases_per_condition])} active phases for condition {cond_idx}")
-        for i, (orig_phase_idx, phase_name, model_idx) in enumerate(active_phases[:max_phases_per_condition]):
-            # Store the model index for this phase instance (can be duplicated for miscibility gaps)
-            initial_phase_data_arrays['phase_indices'][cond_idx, i] = model_idx
-            # Use the safe np_values_safe array
-            if orig_phase_idx < len(np_values_safe):
-                np_amount = float(np_values_safe[orig_phase_idx])
-            else:
-                np_amount = 0.0
-            
-            # Match CPU behavior: set minimum phase fraction like CPU does in eqsolver.pyx line 265
-            np_amount = max(np_amount, MIN_PHASE_FRACTION)
-            
-            if cond_idx < 2 and wks_obj.verbose:
-                print(f"[GPU DEBUG] Processing phase {phase_name} (cond_idx={cond_idx}, i={i}): np_amount={np_amount:.6f}")
+            # Extract data from starting_point() properties using proper multi-dimensional indexing
+            # Use safer property access that handles both scalar and array cases
             try:
-                phase_record = wks_obj.phase_record_factory[phase_name]
+                if hasattr(properties, 'MU') and hasattr(properties.MU, '__getitem__') and len(multi_idx) > 0:
+                    mu_values = np.asarray(properties.MU[multi_idx])
+                else:
+                    mu_values = np.asarray(properties.MU if hasattr(properties, 'MU') else np.zeros(max_components))
+            except (IndexError, TypeError):
+                # Fallback if indexing fails
+                mu_values = np.asarray(properties.MU if hasattr(properties, 'MU') else np.zeros(max_components))
+            
+            # DEBUG: Log what we extract to verify multi-dimensional access
+            if wks_obj.verbose and cond_idx < 5:
+                mu_summary = mu_values[:3] if hasattr(mu_values, '__len__') and len(mu_values) > 0 else "empty"
+                print(f"[GPU] Condition {cond_idx} - extracted MU: {mu_summary}...")
+        
+            try:
+                if hasattr(properties, 'Phase') and hasattr(properties.Phase, '__getitem__'):
+                    phase_values = properties.Phase[multi_idx] if len(multi_idx) > 0 else properties.Phase
+                else:
+                    phase_values = properties.Phase if hasattr(properties, 'Phase') else []
+            except (IndexError, TypeError):
+                phase_values = properties.Phase if hasattr(properties, 'Phase') else []
+            
+            # DEBUG: Verify that we're getting different phase data for different conditions
+            if wks_obj.verbose and cond_idx < 5:
+                phase_summary = list(phase_values) if hasattr(phase_values, '__len__') else "scalar"
+                print(f"[GPU] Condition {cond_idx} - extracted Phase: {phase_summary}")
+        
+            try:
+                if hasattr(properties, 'NP') and hasattr(properties.NP, '__getitem__') and len(multi_idx) > 0:
+                    np_values = np.asarray(properties.NP[multi_idx])
+                else:
+                    np_values = np.asarray(properties.NP if hasattr(properties, 'NP') else np.zeros(max_phases_per_condition))
+            except (IndexError, TypeError):
+                np_values = np.asarray(properties.NP if hasattr(properties, 'NP') else np.zeros(max_phases_per_condition))
+        
+            try:
+                if hasattr(properties, 'X') and hasattr(properties.X, '__getitem__') and len(multi_idx) > 0:
+                    x_values = np.asarray(properties.X[multi_idx])
+                    # DEBUG: Log the raw extraction
+                    if wks_obj.verbose and cond_idx < 2:
+                        print(f"[GPU] DEBUG: Raw properties.X[{multi_idx}] shape: {x_values.shape}")
+                        print(f"[GPU] DEBUG: Raw properties.X[{multi_idx}] content: {x_values}")
+                        # Also check the full X array structure
+                        if cond_idx == 0:
+                            print(f"[GPU] DEBUG: Full properties.X shape: {properties.X.shape}")
+                            print(f"[GPU] DEBUG: properties.X.dims: {properties.X.dims if hasattr(properties.X, 'dims') else 'no dims'}")
+                            print(f"[GPU] DEBUG: properties.X.coords: {properties.X.coords if hasattr(properties.X, 'coords') else 'no coords'}")
+                else:
+                    x_values = np.asarray(properties.X if hasattr(properties, 'X') else np.zeros((max_phases_per_condition, max_components)))
+            except (IndexError, TypeError):
+                x_values = np.asarray(properties.X if hasattr(properties, 'X') else np.zeros((max_phases_per_condition, max_components)))
+        
+            try:
+                if hasattr(properties, 'Y') and hasattr(properties.Y, '__getitem__') and len(multi_idx) > 0:
+                    y_values = np.asarray(properties.Y[multi_idx])
+                else:
+                    y_values = np.asarray(properties.Y if hasattr(properties, 'Y') else np.zeros((max_phases_per_condition, max_dof_per_phase)))
+            except (IndexError, TypeError):
+                y_values = np.asarray(properties.Y if hasattr(properties, 'Y') else np.zeros((max_phases_per_condition, max_dof_per_phase)))
+        
+            # Count active phases and map to indices
+            active_phases = []
+            # Ensure phase_values is iterable and convert to safe format
+            phase_values_safe = np.asarray(phase_values).flatten() if hasattr(phase_values, '__len__') else []
+            np_values_safe = np.asarray(np_values).flatten() if hasattr(np_values, '__len__') else np.zeros(max_phases_per_condition)
+        
+            # DEBUG: Log what phase data we extracted for the first few conditions
+            if wks_obj.verbose and cond_idx < 5:
+                print(f"[GPU] Condition {cond_idx} - phases: {len(phase_values_safe)}, np_values: {len(np_values_safe)}")
+                if len(phase_values_safe) > 0:
+                    print(f"[GPU] Condition {cond_idx} - phase_names: {phase_values_safe}")
+                if len(np_values_safe) > 0:
+                    print(f"[GPU] Condition {cond_idx} - np_values: {np_values_safe[:3]}...")
+                
+                # Check if this condition has different data from condition 0
+                if cond_idx > 0 and len(np_values_safe) > 0:
+                    # Store reference data from condition 0 for comparison
+                    if not hasattr(_prepare_gpu_data, '_condition_0_np_values'):
+                        # This shouldn't happen if cond_idx > 0, but just in case
+                        pass
+                    else:
+                        ref_np_values = getattr(_prepare_gpu_data, '_condition_0_np_values')
+                        if len(ref_np_values) == len(np_values_safe) and np.allclose(ref_np_values, np_values_safe[:len(ref_np_values)], atol=1e-10):
+                            print(f"[GPU] WARNING: Condition {cond_idx} has IDENTICAL np_values to condition 0! This is the problem.")
+                        else:
+                            print(f"[GPU] GOOD: Condition {cond_idx} has DIFFERENT np_values from condition 0.")
+                elif cond_idx == 0 and len(np_values_safe) > 0:
+                    # Store condition 0 data for comparison
+                    if len(np_values_safe) >= 3:
+                        _prepare_gpu_data._condition_0_np_values = np_values_safe[:3].copy()
+                    else:
+                        _prepare_gpu_data._condition_0_np_values = np_values_safe.copy()
+        
+            # CRITICAL: NO per-condition consolidation! Use original data exactly like CPU.
+        
+            for phase_idx, phase_name in enumerate(phase_values_safe):
+                if phase_name and phase_name != '' and phase_name != '_FAKE_' and phase_idx < max_phases_per_condition:
+                    # Safely extract np value
+                    if phase_idx < len(np_values_safe):
+                        np_value = float(np_values_safe[phase_idx])
+                    else:
+                        np_value = 0.0
+                    
+                    # Only include phases with non-zero NP from starting point
+                    if phase_name in py_phase_name_to_unique_idx_map and np_value > 1e-10:
+                        active_phases.append((phase_idx, phase_name, py_phase_name_to_unique_idx_map[phase_name]))
+                        # DEBUG: Print phase mapping
+                        if wks_obj.verbose and cond_idx < 5:
+                            print(f"[GPU] Condition {cond_idx} phase {phase_idx}: '{phase_name}' -> unique_idx {py_phase_name_to_unique_idx_map[phase_name]}")
+        
+            # Fill the flat arrays
+            initial_phase_data_arrays['num_phases'][cond_idx] = min(len(active_phases), max_phases_per_condition)
+        
+            # DEBUG: Log the final phase count for the first few conditions
+            if wks_obj.verbose and cond_idx < 5:
+                print(f"[GPU] Condition {cond_idx} - active phases: {len(active_phases)}")
+                if len(active_phases) == 0:
+                    print(f"[GPU] WARNING: Condition {cond_idx} has no active phases! This will cause GPU thread failure.")
+        
+            # Safely copy chemical potentials
+            if hasattr(mu_values, '__len__') and len(mu_values) > 0:
+                mu_safe = np.asarray(mu_values).flatten()[:max_components]
+                copy_len = min(len(mu_safe), max_components)
+                initial_phase_data_arrays['chemical_potentials'][cond_idx, :copy_len] = mu_safe[:copy_len]
+        
+            # Check for duplicate phase names (immiscibility gap case)
+            phase_names_in_condition = [phase_name for _, phase_name, _ in active_phases[:max_phases_per_condition]]
+            unique_phase_names = set(phase_names_in_condition)
+            if len(phase_names_in_condition) != len(unique_phase_names):
+                # We have duplicate phase names - this is an immiscibility gap
+                if wks_obj.verbose:
+                    print(f"[GPU] INFO: Condition {cond_idx} has duplicate phase names: {phase_names_in_condition}")
+                    print(f"[GPU] This indicates an immiscibility gap with multiple instances of the same phase type.")
+            
+                # Count occurrences of each phase
+                phase_counts = {}
+                for phase_name in phase_names_in_condition:
+                    phase_counts[phase_name] = phase_counts.get(phase_name, 0) + 1
+            
+                # Log which phases have multiple instances
+                for phase_name, count in phase_counts.items():
+                    if count > 1:
+                        if wks_obj.verbose:
+                            print(f"[GPU]   Phase '{phase_name}' appears {count} times (immiscibility)")
+        
+            # FIX: For immiscibility gaps, we need to store which phase model to use,
+            # but phases should be stored contiguously, not by model index
+            if wks_obj.verbose and cond_idx < 2:
+                print(f"[GPU DEBUG] About to process {len(active_phases[:max_phases_per_condition])} active phases for condition {cond_idx}")
+            for i, (orig_phase_idx, phase_name, model_idx) in enumerate(active_phases[:max_phases_per_condition]):
+                # Store the model index for this phase instance (can be duplicated for miscibility gaps)
+                initial_phase_data_arrays['phase_indices'][cond_idx, i] = model_idx
+                # Use the safe np_values_safe array
+                if orig_phase_idx < len(np_values_safe):
+                    np_amount = float(np_values_safe[orig_phase_idx])
+                else:
+                    np_amount = 0.0
+            
+                # Match CPU behavior: set minimum phase fraction like CPU does in eqsolver.pyx line 265
+                np_amount = max(np_amount, MIN_PHASE_FRACTION)
+            
                 if cond_idx < 2 and wks_obj.verbose:
-                    print(f"[GPU DEBUG] Found phase record for {phase_name}, has site_ratios: {hasattr(phase_record, 'site_ratios')}")
-                    if phase_name == 'ALCU_ZETA':
-                        print(f"[GPU DEBUG] ALCU_ZETA phase_dof: {phase_record.phase_dof}")
-                        # Try to get site ratios from workspace models
+                    print(f"[GPU DEBUG] Processing phase {phase_name} (cond_idx={cond_idx}, i={i}): np_amount={np_amount:.6f}")
+                try:
+                    phase_record = wks_obj.phase_record_factory[phase_name]
+                    if cond_idx < 2 and wks_obj.verbose:
+                        print(f"[GPU DEBUG] Found phase record for {phase_name}, has site_ratios: {hasattr(phase_record, 'site_ratios')}")
+                        if phase_name == 'ALCU_ZETA':
+                            print(f"[GPU DEBUG] ALCU_ZETA phase_dof: {phase_record.phase_dof}")
+                            # Try to get site ratios from workspace models
+                            try:
+                                model = wks_obj.models[phase_name]
+                                if wks_obj.verbose:
+                                    print(f"[GPU DEBUG] ALCU_ZETA model found, has site_ratios: {hasattr(model, 'site_ratios')}")
+                                if hasattr(model, 'site_ratios'):
+                                    site_ratios = model.site_ratios
+                                    if wks_obj.verbose:
+                                        print(f"[GPU DEBUG] ALCU_ZETA model site_ratios: {site_ratios}")
+                                # Try to get from dbf phase
+                                if hasattr(model, '_phase') and hasattr(model._phase, 'sublattices'):
+                                    sublattices = model._phase.sublattices
+                                    site_ratios = [float(subl.site_ratio) for subl in sublattices]
+                                    if wks_obj.verbose:
+                                        print(f"[GPU DEBUG] ALCU_ZETA sublattice site_ratios: {site_ratios}, sum: {sum(site_ratios)}")
+                            except Exception as e:
+                                if wks_obj.verbose:
+                                    print(f"[GPU DEBUG] Error getting ALCU_ZETA model info: {e}")
+                    # Try to get site ratios - first from phase record, then from model
+                    site_ratios = None
+                    if hasattr(phase_record, 'site_ratios') and len(phase_record.site_ratios) > 1:
+                        site_ratios = phase_record.site_ratios
+                    else:
+                        # Try to get from workspace models
                         try:
                             model = wks_obj.models[phase_name]
-                            if wks_obj.verbose:
-                                print(f"[GPU DEBUG] ALCU_ZETA model found, has site_ratios: {hasattr(model, 'site_ratios')}")
-                            if hasattr(model, 'site_ratios'):
+                            if hasattr(model, 'site_ratios') and len(model.site_ratios) > 1:
                                 site_ratios = model.site_ratios
-                                if wks_obj.verbose:
-                                    print(f"[GPU DEBUG] ALCU_ZETA model site_ratios: {site_ratios}")
-                            # Try to get from dbf phase
-                            if hasattr(model, '_phase') and hasattr(model._phase, 'sublattices'):
-                                sublattices = model._phase.sublattices
-                                site_ratios = [float(subl.site_ratio) for subl in sublattices]
-                                if wks_obj.verbose:
-                                    print(f"[GPU DEBUG] ALCU_ZETA sublattice site_ratios: {site_ratios}, sum: {sum(site_ratios)}")
-                        except Exception as e:
-                            if wks_obj.verbose:
-                                print(f"[GPU DEBUG] Error getting ALCU_ZETA model info: {e}")
-                # Try to get site ratios - first from phase record, then from model
-                site_ratios = None
-                if hasattr(phase_record, 'site_ratios') and len(phase_record.site_ratios) > 1:
-                    site_ratios = phase_record.site_ratios
-                else:
-                    # Try to get from workspace models
-                    try:
-                        model = wks_obj.models[phase_name]
-                        if hasattr(model, 'site_ratios') and len(model.site_ratios) > 1:
-                            site_ratios = model.site_ratios
-                    except (KeyError, AttributeError):
-                        pass
+                        except (KeyError, AttributeError):
+                            pass
                 
-                # DO NOT normalize NP by site ratios here - the solver handles this internally
-                # The CPU keeps NP as mole fractions and converts to formula units (phase_amt) internally
-                if site_ratios is not None and cond_idx < 2 and wks_obj.verbose:
-                    site_ratio_sum = sum(site_ratios)
-                    print(f"[GPU] Phase {phase_name} has site_ratios={site_ratios}, sum={site_ratio_sum}, keeping NP={np_amount:.6f} as mole fraction")
-            except (KeyError, AttributeError) as e:
-                # Phase record not found or no site ratio information - use original amount
-                if cond_idx < 2 and wks_obj.verbose:
-                    print(f"[GPU] Warning: Could not get site ratios for phase {phase_name}: {e}")
-                pass
+                    # DO NOT normalize NP by site ratios here - the solver handles this internally
+                    # The CPU keeps NP as mole fractions and converts to formula units (phase_amt) internally
+                    if site_ratios is not None and cond_idx < 2 and wks_obj.verbose:
+                        site_ratio_sum = sum(site_ratios)
+                        print(f"[GPU] Phase {phase_name} has site_ratios={site_ratios}, sum={site_ratio_sum}, keeping NP={np_amount:.6f} as mole fraction")
+                except (KeyError, AttributeError) as e:
+                    # Phase record not found or no site ratio information - use original amount
+                    if cond_idx < 2 and wks_obj.verbose:
+                        print(f"[GPU] Warning: Could not get site ratios for phase {phase_name}: {e}")
+                    pass
                     
-            initial_phase_data_arrays['phase_amounts'][cond_idx, i] = np_amount
+                initial_phase_data_arrays['phase_amounts'][cond_idx, i] = np_amount
             
-            # DEBUG: Log what we're storing for first few conditions
-            if wks_obj.verbose and cond_idx < 5:
-                print(f"[GPU] Condition {cond_idx} phase instance {i}: {phase_name} uses model_idx {model_idx} (amount={np_amount:.6f})")
+                # DEBUG: Log what we're storing for first few conditions
+                if wks_obj.verbose and cond_idx < 5:
+                    print(f"[GPU] Condition {cond_idx} phase instance {i}: {phase_name} uses model_idx {model_idx} (amount={np_amount:.6f})")
             
-            # Copy site fractions (Y values)
-            if y_values.ndim >= 2 and orig_phase_idx < y_values.shape[0]:
-                y_row = y_values[orig_phase_idx][:max_dof_per_phase]
-                initial_phase_data_arrays['site_fractions'][cond_idx, i, :len(y_row)] = y_row
-            elif y_values.ndim == 1:
-                # For 1D array, we can't index by phase - this is likely single phase data
-                y_row = y_values[:max_dof_per_phase]
-                initial_phase_data_arrays['site_fractions'][cond_idx, i, :len(y_row)] = y_row
+                # Copy site fractions (Y values)
+                if y_values.ndim >= 2 and orig_phase_idx < y_values.shape[0]:
+                    y_row = y_values[orig_phase_idx][:max_dof_per_phase]
+                    initial_phase_data_arrays['site_fractions'][cond_idx, i, :len(y_row)] = y_row
+                elif y_values.ndim == 1:
+                    # For 1D array, we can't index by phase - this is likely single phase data
+                    y_row = y_values[:max_dof_per_phase]
+                    initial_phase_data_arrays['site_fractions'][cond_idx, i, :len(y_row)] = y_row
                 
-                # DEBUG: Print site fractions being copied for first condition
-                if cond_idx == 0 and wks_obj.verbose:
-                    print(f"[GPU] DEBUG: Copying site fractions for condition {cond_idx}, phase {i}:")
-                    print(f"  orig_phase_idx: {orig_phase_idx}")
-                    print(f"  y_values.shape: {y_values.shape}")
-                    print(f"  y_row from y_values[{orig_phase_idx}]: {y_row}")
-                    print(f"  Stored at initial_phase_data_arrays['site_fractions'][{cond_idx}, {i}, :]: {initial_phase_data_arrays['site_fractions'][cond_idx, i, :len(y_row)]}")
+                    # DEBUG: Print site fractions being copied for first condition
+                    if cond_idx == 0 and wks_obj.verbose:
+                        print(f"[GPU] DEBUG: Copying site fractions for condition {cond_idx}, phase {i}:")
+                        print(f"  orig_phase_idx: {orig_phase_idx}")
+                        print(f"  y_values.shape: {y_values.shape}")
+                        print(f"  y_row from y_values[{orig_phase_idx}]: {y_row}")
+                        print(f"  Stored at initial_phase_data_arrays['site_fractions'][{cond_idx}, {i}, :]: {initial_phase_data_arrays['site_fractions'][cond_idx, i, :len(y_row)]}")
             
-            # Copy compositions (X values)
-            if wks_obj.verbose and cond_idx < 2:
-                print(f"[GPU] DEBUG: x_values shape: {x_values.shape}, orig_phase_idx: {orig_phase_idx}")
-                if hasattr(x_values, 'flatten'):
-                    print(f"[GPU] DEBUG: x_values content: {x_values.flatten()[:10]}")
+                # Copy compositions (X values)
+                if wks_obj.verbose and cond_idx < 2:
+                    print(f"[GPU] DEBUG: x_values shape: {x_values.shape}, orig_phase_idx: {orig_phase_idx}")
+                    if hasattr(x_values, 'flatten'):
+                        print(f"[GPU] DEBUG: x_values content: {x_values.flatten()[:10]}")
             
-            if x_values.ndim >= 2 and orig_phase_idx < x_values.shape[0]:
-                x_row = x_values[orig_phase_idx][:max_components]
-                initial_phase_data_arrays['compositions'][cond_idx, i, :len(x_row)] = x_row
+                if x_values.ndim >= 2 and orig_phase_idx < x_values.shape[0]:
+                    x_row = x_values[orig_phase_idx][:max_components]
+                    initial_phase_data_arrays['compositions'][cond_idx, i, :len(x_row)] = x_row
                 
-                if wks_obj.verbose and cond_idx < 2:
-                    print(f"[GPU] DEBUG: Copied X for phase {i}: {x_row}")
-            elif x_values.ndim == 1:
-                # For 1D array, we can't index by phase - likely single phase or need reshaping
-                x_row = x_values[:max_components]
-                initial_phase_data_arrays['compositions'][cond_idx, i, :len(x_row)] = x_row
+                    if wks_obj.verbose and cond_idx < 2:
+                        print(f"[GPU] DEBUG: Copied X for phase {i}: {x_row}")
+                elif x_values.ndim == 1:
+                    # For 1D array, we can't index by phase - likely single phase or need reshaping
+                    x_row = x_values[:max_components]
+                    initial_phase_data_arrays['compositions'][cond_idx, i, :len(x_row)] = x_row
                 
-                if wks_obj.verbose and cond_idx < 2:
-                    print(f"[GPU] DEBUG: Copied X for phase {i} from 1D array: {x_row}")
-            else:
-                if wks_obj.verbose and cond_idx < 2:
-                    print(f"[GPU] DEBUG: Could not copy X for phase {i} (x_values.ndim={x_values.ndim}, shape={getattr(x_values, 'shape', 'no shape')})")
+                    if wks_obj.verbose and cond_idx < 2:
+                        print(f"[GPU] DEBUG: Copied X for phase {i} from 1D array: {x_row}")
+                else:
+                    if wks_obj.verbose and cond_idx < 2:
+                        print(f"[GPU] DEBUG: Could not copy X for phase {i} (x_values.ndim={x_values.ndim}, shape={getattr(x_values, 'shape', 'no shape')})")
+
 
     # Create grid data from fresh calculate() results  
     if wks_obj.verbose:
@@ -785,9 +835,8 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
     grid_block_indices_np = np.zeros(num_conditions_total, dtype=np.int32)
     if grid_data_device_struct_np is not None and grid_block_shape is not None:
         k = len(grid_block_shape)
-        for ci in range(num_conditions_total):
-            mi = np.unravel_index(ci, gm_array.shape)
-            grid_block_indices_np[ci] = np.ravel_multi_index(tuple(mi[:k]), grid_block_shape)
+        mi = np.unravel_index(np.arange(num_conditions_total), gm_array.shape)
+        grid_block_indices_np[:] = np.ravel_multi_index(tuple(mi[:k]), grid_block_shape).astype(np.int32)
 
     return (num_conditions_total, condition_args_np, global_spec_scalars, global_spec_arrays,
             initial_phase_data_arrays, grid_data_device_struct_np, grid_block_indices_np, properties)

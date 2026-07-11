@@ -41,8 +41,6 @@ def create_system_specifications_array(wks_obj, num_conditions, dynamic_sizes, p
     max_phases = dynamic_sizes["MAX_PHASES"]
     max_fixed_mole = dynamic_sizes["MAX_FIXED_MOLE_FRACTION_CONDITIONS"]
     
-    # Create arrays to hold all SystemSpecs
-    all_specs = []
     
     # Extract condition arrays
     import pycalphad.variables as v
@@ -87,11 +85,8 @@ def create_system_specifications_array(wks_obj, num_conditions, dynamic_sizes, p
     if verbose:
         print(f"[GPU] Grid shape: {grid_shape} (T × {' × '.join(['X('+c+')' for c in x_components])})")
     
-    # Create one SystemSpecification per condition
-    for condition_idx in range(num_conditions):
-        if verbose:
-            print(f"\n[GPU] Creating SystemSpecification for condition {condition_idx}")
-        
+    def _build_one(condition_idx):
+        """Build the padded flat spec for one condition (original per-condition path)."""
         # Calculate multi-dimensional indices
         indices = []
         remaining = condition_idx
@@ -99,20 +94,12 @@ def create_system_specifications_array(wks_obj, num_conditions, dynamic_sizes, p
             indices.append(remaining % dim_size)
             remaining //= dim_size
         indices.append(remaining)  # Temperature index
-        indices.reverse()  # Put back in correct order: [temp_idx, x_cu_idx, x_fe_idx, ...]
-        
+        indices.reverse()  # [temp_idx, x_cu_idx, x_fe_idx, ...]
+
         temp_idx = indices[0]
-        x_indices = {comp: indices[i+1] for i, comp in enumerate(x_components)}
-        
-        # For backward compatibility with binary systems
+        x_indices = {comp: indices[i + 1] for i, comp in enumerate(x_components)}
         comp_idx = x_indices[x_components[0]] if x_components else 0
-        
-        if verbose:
-            print(f"  Condition {condition_idx}: temp_idx={temp_idx}")
-            for comp in x_components:
-                print(f"    X({comp})_idx={x_indices[comp]}")
-        
-        # Create base arrays for this condition
+
         global_spec_np = np.zeros(50, dtype=np.float64)  # Scalar fields
         global_spec_arrays = {
             'initial_chemical_potentials': np.zeros(max_components, dtype=np.float64),
@@ -124,98 +111,126 @@ def create_system_specifications_array(wks_obj, num_conditions, dynamic_sizes, p
             'fixed_statevar_indices': np.full(max_statevars, -1, dtype=np.int32),
             'fixed_stable_compset_indices': np.full(max_phases, -1, dtype=np.int32)
         }
-        
-        # Create a temporary workspace object with single-point conditions
+
         class TempWorkspace:
             def __init__(self, original_wks, condition_idx, temp_idx, x_indices):
                 self.components = original_wks.components
                 self.phase_record_factory = original_wks.phase_record_factory
                 self.verbose = original_wks.verbose
-                
-                # Copy conditions but use single-point values based on calculated indices
                 self.conditions = {}
                 for key, value in original_wks.conditions.items():
                     value_array = np.asarray(value)
                     if value_array.size > 1:
-                        # Multi-point condition - use appropriate index based on variable type
                         if key == v.T:
-                            # Temperature - use temp_idx
                             self.conditions[key] = float(value_array.flatten()[temp_idx])
                         elif hasattr(key, 'species') and key.species != 'VA':
-                            # Composition variable - find which component and use its index
                             comp_str = str(key.species) if not isinstance(key.species, str) else key.species
                             if comp_str in x_indices:
-                                idx = x_indices[comp_str]
-                                self.conditions[key] = float(value_array.flatten()[idx])
+                                self.conditions[key] = float(value_array.flatten()[x_indices[comp_str]])
                             else:
-                                # Fallback for unexpected composition variables
                                 self.conditions[key] = float(value_array.flatten()[0])
                         else:
-                            # Other multi-point conditions - use condition_idx as fallback
                             if condition_idx < value_array.size:
                                 self.conditions[key] = float(value_array.flatten()[condition_idx])
                             else:
                                 self.conditions[key] = float(value_array.flatten()[-1])
                     else:
-                        # Single-point condition - use for all
                         self.conditions[key] = float(value_array.item())
-                
-                if verbose:
-                    for comp in x_components:
-                        x_var = v.X(comp)
-                        if x_var in self.conditions:
-                            print(f"  X({comp}) = {self.conditions[x_var]}")
-                    print(f"  T = {self.conditions[v.T]}")
-        
-        # Create temporary workspace with single-point conditions
+
         temp_wks = TempWorkspace(wks_obj, condition_idx, temp_idx, x_indices)
-        
-        # Create properties subset for this specific condition
-        # For ternary systems, pass the composition indices dictionary instead of single comp_idx
         if len(x_components) > 1:
             properties_subset = PropertiesSubset(properties, condition_idx, temp_idx, x_indices, verbose=verbose)
         else:
-            # Binary system - maintain backward compatibility
             properties_subset = PropertiesSubset(properties, condition_idx, temp_idx, comp_idx, verbose=verbose)
-        
-        # Populate the SystemSpecification for this condition
-        _populate_system_specification(global_spec_np, global_spec_arrays, temp_wks, 
-                                     dynamic_sizes, properties_subset)
-        
-        # Create flat double array instead of struct to avoid alignment issues
-        spec_doubles = create_flat_system_specification(global_spec_np, global_spec_arrays, 
-                                                       dynamic_sizes)
-        
-        # Apply padding to avoid cache conflicts
-        spec_doubles_padded = apply_safe_padding(spec_doubles, verbose=verbose)
-        
+
+        _populate_system_specification(global_spec_np, global_spec_arrays, temp_wks,
+                                       dynamic_sizes, properties_subset)
+        spec_doubles = create_flat_system_specification(global_spec_np, global_spec_arrays,
+                                                        dynamic_sizes)
+        return apply_safe_padding(spec_doubles, verbose=verbose)
+
+    # FAST PATH: the flat spec is condition-invariant except for
+    #   initial_chemical_potentials (per-condition starting MU from the hull) and
+    #   prescribed_mole_fraction_rhs (per-condition X values).
+    # Build condition 0 through the original machinery, tile it, and overwrite
+    # those two field groups vectorized. The per-condition Python loop cost ~5s
+    # at 10k conditions (pint conversions + object churn per condition).
+    # PYCGPU_SPEC_SLOW=1 forces the original loop (verification tooling).
+    import os as _os
+    mu_full = np.asarray(properties.MU) if hasattr(properties, 'MU') else None
+    fast_ok = (
+        not _os.environ.get('PYCGPU_SPEC_SLOW')
+        and mu_full is not None
+        and mu_full.ndim >= 3
+        and mu_full.shape[:2] == (1, 1)
+        and mu_full.size == num_conditions * mu_full.shape[-1]
+    )
+
+    if fast_ok:
+        spec0 = _build_one(0)
+        specs_array = np.tile(spec0, (num_conditions, 1))
+
+        # Multi-dim index arrays for every condition (same little-endian
+        # decomposition as _build_one, which matches C-order flattening of
+        # the [T, X1, X2, ...] grid).
+        rem = np.arange(num_conditions)
+        dim_indices = []
+        for dim_size in reversed(grid_shape[1:]):
+            dim_indices.append(rem % dim_size)
+            rem = rem // dim_size
+        dim_indices.append(rem)
+        dim_indices.reverse()
+        x_idx_arrs = {comp: dim_indices[i + 1] for i, comp in enumerate(x_components)}
+
+        # Flat-layout offsets (create_flat_system_specification order; padding
+        # appends at the end so offsets are stable). NOTE: the flat packer pins
+        # MAX_FIXED_MOLE_FRACTION_CONDITIONS = MAX_COMPONENTS.
+        MC = int(dynamic_sizes["MAX_COMPONENTS"])
+        off_mu = 3
+        off_rhs = 3 + MC + MC * MC
+
+        # prescribed_mole_fraction_rhs: same constraint enumeration order as
+        # _populate_system_specification (conditions dict order, nonvacant only).
+        nonvacant = [c for c in wks_obj.components[:MC] if 'VA' not in str(c).upper()]
+        nonvacant_names = [str(c).upper() for c in nonvacant]
+        constraint_count = 0
+        for cond, value in wks_obj.conditions.items():
+            if isinstance(cond, v.MoleFraction) and cond.phase_name is None and constraint_count < MC:
+                el = str(cond)[2:]
+                if el not in nonvacant_names:
+                    continue
+                varr = np.asarray(value).flatten()
+                if el in x_idx_arrs and varr.size > 1:
+                    vals = varr[x_idx_arrs[el]]
+                else:
+                    vals = np.full(num_conditions, float(varr.flat[0]))
+                specs_array[:, off_rhs + constraint_count] = vals
+                constraint_count += 1
+
+        # initial_chemical_potentials: FREE chempots take per-condition starting
+        # values from properties.MU (C-order flatten matches the condition index);
+        # FIXED chempots (a MU condition) are condition-invariant, already in spec0.
+        n_mu_comp = mu_full.shape[-1]
+        mu_flat = np.ascontiguousarray(mu_full).reshape(num_conditions, n_mu_comp)
+        for comp_idx, comp in enumerate(nonvacant):
+            if v.ChemicalPotential(comp) in wks_obj.conditions:
+                continue
+            if comp_idx < n_mu_comp:
+                specs_array[:, off_mu + comp_idx] = mu_flat[:, comp_idx]
+
         if verbose:
-            print(f"[GPU] Condition {condition_idx} - SystemSpec fields from flat array:")
-            print(f"  temp_idx={temp_idx}, comp_idx={comp_idx}")
-            print(f"  num_statevars: {int(spec_doubles_padded[0])}")
-            print(f"  num_components: {int(spec_doubles_padded[1])}")
-            print(f"  prescribed_system_amount: {spec_doubles_padded[2]}")
-            print(f"  initial_chemical_potentials[0]: {spec_doubles_padded[3]}")
-            print(f"  initial_chemical_potentials[1]: {spec_doubles_padded[4]}")
-            
-            # Calculate offset to prescribed_mole_fraction_rhs
-            offset = 3 + dynamic_sizes["MAX_COMPONENTS"] + (dynamic_sizes["MAX_FIXED_MOLE_FRACTION_CONDITIONS"] * dynamic_sizes["MAX_COMPONENTS"])
-            print(f"  prescribed_mole_fraction_rhs[0]: {spec_doubles_padded[offset]} (should be X(TI) for this condition)")
-            print(f"  First 10 doubles: {spec_doubles_padded[:10]}")
-        
-        all_specs.append(spec_doubles_padded)
-    
-    # Stack all specs into a single array
-    # Shape: (num_conditions, spec_size_in_doubles)
+            print(f"[GPU] SystemSpecification array built via fast path "
+                  f"({num_conditions} conditions x {specs_array.shape[1]} doubles)")
+        return specs_array.reshape(-1)
+
+    # SLOW PATH (fallback / PYCGPU_SPEC_SLOW=1): original per-condition loop.
+    all_specs = [_build_one(condition_idx) for condition_idx in range(num_conditions)]
     specs_array = np.vstack(all_specs)
-    
+
     if verbose:
         print(f"\n[GPU] Created SystemSpecification array:")
         print(f"  Shape: {specs_array.shape}")
         print(f"  Total size: {specs_array.nbytes} bytes")
         print(f"  Specs per condition: {specs_array.shape[1]} doubles")
-    
-    # Flatten for GPU transfer
-    specs_flat = specs_array.flatten()
-    
-    return specs_flat
+
+    return specs_array.flatten()

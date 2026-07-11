@@ -359,80 +359,39 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
             meshgrids = []
         
         
-        # Map each thread index to its specific condition combination
-        for idx in range(num_conditions_total):
-            
-            # Extract state variables values for this condition point
-            state_vals = np.zeros(max_statevars)
-            # Extract composition values for this condition point  
-            comp_vals = np.zeros(max_components_scalar)
-            
-            # Pack state variables in the order expected by the generated functions
-            # The GPU functions expect variables in the same order as CPU functions
-            import pycalphad.variables as v
-            
-            # Pack state variables in the order they appear in state_variables
-            for sv_idx, sv in enumerate(state_variables):
-                if sv_idx < max_statevars_scalar:
-                    if len(meshgrids) > 0 and idx < np.prod(meshgrids[0].shape):
-                        # Use meshgrid for proper mapping
-                        multi_idx = np.unravel_index(idx, meshgrids[0].shape)
-                        
-                        if sv in condition_names:
-                            grid_idx = condition_names.index(sv)
-                            if grid_idx < len(meshgrids):
-                                state_vals[sv_idx] = float(meshgrids[grid_idx][multi_idx])
-                            else:
-                                state_vals[sv_idx] = 0.0
-                        else:
-                            state_vals[sv_idx] = 0.0
-                    else:
-                        # Fallback case
-                        if sv in unitless_conds:
-                            sv_values = np.asarray(unitless_conds[sv])
-                            if sv_values.size == 1:
-                                state_vals[sv_idx] = float(sv_values.item())
-                            elif idx < sv_values.size:
-                                state_vals[sv_idx] = float(sv_values.flat[idx])
-                            else:
-                                state_vals[sv_idx] = float(sv_values.flat[idx % sv_values.size])
-                        else:
-                            state_vals[sv_idx] = 0.0
-            
-            # Handle composition variables
-            import pycalphad.variables as v
-            for comp_idx, component in enumerate(wks_obj.components[:max_components_scalar]):
-                x_var = v.MoleFraction(component)
-                
-                if len(meshgrids) > 0 and idx < np.prod(meshgrids[0].shape):
-                    # Use meshgrid
-                    if x_var in condition_names:
-                        grid_idx = condition_names.index(x_var)
-                        if grid_idx < len(meshgrids):
-                            comp_vals[comp_idx] = float(meshgrids[grid_idx][multi_idx])
+        # Map each thread index to its specific condition combination.
+        # Vectorized over conditions: the flat condition index equals the
+        # C-order flat index into the meshgrid (the old per-condition loop used
+        # np.unravel_index(idx, shape) + fancy indexing, which is the same
+        # mapping); at 1M conditions the per-condition Python loop was minutes.
+        idx_all = np.arange(num_conditions_total)
+        _mesh_size = int(np.prod(meshgrids[0].shape)) if len(meshgrids) > 0 else 0
+
+        def _condition_column(var):
+            """Per-condition values of one condition variable, over all conditions."""
+            col = np.zeros(num_conditions_total, dtype=np.float64)
+            in_mesh = idx_all < _mesh_size  # all False when no meshgrids
+            if in_mesh.any() and var in condition_names:
+                grid_idx = condition_names.index(var)
+                if grid_idx < len(meshgrids):
+                    flat = np.ascontiguousarray(meshgrids[grid_idx]).reshape(-1)
+                    col[in_mesh] = flat[idx_all[in_mesh]]
+            out = ~in_mesh
+            if out.any() and var in unitless_conds:
+                vals = np.asarray(unitless_conds[var]).reshape(-1)
+                if vals.size == 1:
+                    col[out] = float(vals[0])
                 else:
-                    # Fallback
-                    if x_var in unitless_conds:
-                        x_values = np.asarray(unitless_conds[x_var])
-                        if x_values.size == 1:
-                            comp_vals[comp_idx] = float(x_values.item())
-                        elif idx < x_values.size:
-                            comp_vals[comp_idx] = float(x_values.flat[idx])
-                        else:
-                            comp_vals[comp_idx] = float(x_values.flat[idx % x_values.size])
-            
-            # Pack both state variables and composition values into the condition array
-            # Format: [state_vars (MAX_STATEVARS), mole_fractions (MAX_COMPONENTS)]
-            condition_data = np.zeros(condition_data_size)
-            condition_data[:max_statevars_scalar] = state_vals[:max_statevars_scalar]
-            condition_data[max_statevars_scalar:] = comp_vals
-            
-            # DEBUG: Print what we're storing for first condition
-            if idx == 0 and wks_obj.verbose:
-                print(f"[GPU] DEBUG: Condition {idx} state_vals before packing: {state_vals}")
-                print(f"[GPU] DEBUG: Condition {idx} condition_data after packing: {condition_data}")
-            
-            condition_args_np[idx] = condition_data
+                    col[out] = vals[idx_all[out] % vals.size]
+            return col
+
+        for sv_idx, sv in enumerate(state_variables[:max_statevars_scalar]):
+            condition_args_np[:, sv_idx] = _condition_column(sv)
+        for comp_idx, component in enumerate(wks_obj.components[:max_components_scalar]):
+            condition_args_np[:, max_statevars_scalar + comp_idx] = _condition_column(v.MoleFraction(component))
+
+        if wks_obj.verbose:
+            print(f"[GPU] DEBUG: Condition 0 condition_data after packing: {condition_args_np[0]}")
         
                 
     except Exception as e:

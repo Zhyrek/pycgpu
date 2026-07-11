@@ -87,6 +87,43 @@ calls:
   `EnsembleSampler.log_prob_fn` accepting the (n_walkers, n_params)
   matrix), so no emcee fork is needed.
 
+## Status update (2026-07-11)
+
+**Step 1 (equilibrium-path runtime parameters) is COMPLETE and validated**:
+the batch NaN bug traced to unfilled trailing fit-param dof slots in the
+initial-phase-data energy evaluation (stack-local array; CUDA silently read
+zeros, C++ read stale stack). Fixed in gpu_codegen.py; c++/CUDA match the
+Python reference to ~2e-7 max |dGM| across parameter sets; full stock suite
+green under PYCALPHAD_BACKEND=c++.
+
+**Tier 3 v1 exists** (`pycalphad.gpu.espei_batch.BatchedZPFCalculator`):
+reproduces `calculate_zpf_driving_forces` semantics on batched backend
+calls. Correctness on Cu-Mg (7 real ZPF datasets, 476 driving forces):
+469/476 within 1 J/mol of reference (7 outliers <= 17 J/mol ~ 0.02 sigma).
+Performance: 10.7 s warm vs 1.94 s reference — cartesian grouping solves
+42,770 conditions for 476 vertices (182 unique T x 235 unique X). Verdict:
+**a point-list batch entry is mandatory**; cartesian batching cannot serve
+ZPF data shapes (dense unique temperatures).
+
+### Point-list entry design (v2, the real Tier 3)
+The pipeline already flattens grids to per-condition rows, so build those
+rows directly from a vertex list:
+
+- per-point condition args / spec rows (fit_params live in each spec row's
+  core tail -> per-point/per-walker parameter vectors are free);
+- per-point phase restriction WITHOUT kernel changes: grid_block_indices is
+  already per-condition, so an IsolatedPhase vertex points at a grid block
+  filtered to its single phase (grid search can then only re-add that
+  phase) — mixed all-phase + single-phase vertices ride ONE launch;
+- starting points: run the existing hull machinery per unique-T block and
+  extract the needed rows;
+- per-likelihood costs after prep caching: grid re-eval on the CACHED
+  sample dof matrix (points are parameter-independent; only energies
+  change), vectorized hull, param poke into cached spec rows, one launch,
+  flat-array extraction (no xarray). Estimated ~0.5-0.7 s/likelihood on
+  C++ (~3-4x); Tier 4 walker batching then amortizes launch+glue across
+  the ensemble where CUDA wins big.
+
 ## Suggested order of work
 
 1. Equilibrium-path runtime parameters (trailing slots filled at

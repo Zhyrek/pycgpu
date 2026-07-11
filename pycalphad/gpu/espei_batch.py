@@ -619,18 +619,30 @@ class BatchedZPFCalculator:
             Y=np.broadcast_to(t.Y[0], (W * t.nT,) + t.Y.shape[1:]),
             Phase=np.broadcast_to(t.Phase[0], (W * t.nT, t.M)), attrs={})
 
-    def _walker_major(self, raw, params_matrix):
+    def _walker_major(self, raw, params_matrix, key=None):
         """Tile a point group walker-major with per-walker parameter rows and
-        explicit (walker*nT + t) combo indices."""
+        explicit (walker*nT + t) combo indices. The tiled point list is
+        STATIC across MCMC steps (only the parameter rows change), so it is
+        cached per (group, ensemble size) and params are poked in place."""
         T, P, X, mask = raw
         W = len(params_matrix)
         n = len(T)
-        nT = len(self._unique_T)
-        t_idx = np.searchsorted(self._unique_T, T)
-        combo = np.repeat(np.arange(W), n) * nT + np.tile(t_idx, W)
-        pts = PointList(T=np.tile(T, W), P=np.tile(P, W), N=1.0,
-                        X=np.tile(X, (W, 1)), x_cond_mask=np.tile(mask, (W, 1)),
-                        params=np.repeat(np.asarray(params_matrix, dtype=np.float64), n, axis=0))
+        cache = getattr(self, '_wm_cache', None)
+        if cache is None:
+            self._wm_cache = cache = {}
+        entry = cache.get((key, W)) if key is not None else None
+        if entry is None:
+            nT = len(self._unique_T)
+            t_idx = np.searchsorted(self._unique_T, T)
+            combo = np.repeat(np.arange(W), n) * nT + np.tile(t_idx, W)
+            pts = PointList(T=np.tile(T, W), P=np.tile(P, W), N=1.0,
+                            X=np.tile(X, (W, 1)), x_cond_mask=np.tile(mask, (W, 1)),
+                            params=np.empty((W * n, len(self.param_names))))
+            if key is not None:
+                cache[(key, W)] = (pts, combo)
+            entry = (pts, combo)
+        pts, combo = entry
+        pts.params[:] = np.repeat(np.asarray(params_matrix, dtype=np.float64), n, axis=0)
         return pts, combo, n
 
     def driving_forces_ensemble(self, params_matrix):
@@ -653,7 +665,7 @@ class BatchedZPFCalculator:
 
         hyp_res, n_hyp = None, 0
         if self._hyp_pts_raw is not None:
-            pts, combo, n_hyp = self._walker_major(self._hyp_pts_raw, params_matrix)
+            pts, combo, n_hyp = self._walker_major(self._hyp_pts_raw, params_matrix, key='hyp')
             t = self._grid_tmpl
             hull = device_point_hull(pts, self.solver, t.X[0], grid.GM, combo,
                                      t.Phase[0], t.Y[0], self.nonvacant)
@@ -664,7 +676,7 @@ class BatchedZPFCalculator:
 
         iso_res, n_iso = {}, {}
         for ph, raw in self._iso_pts_raw.items():
-            pts, combo, n_ph = self._walker_major(raw, params_matrix)
+            pts, combo, n_ph = self._walker_major(raw, params_matrix, key=ph)
             pts.phase_restrict[:] = ph
             gfilt = self._filtered_grid(grid, ph)
             t = self._grid_tmpl

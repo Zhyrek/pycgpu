@@ -262,6 +262,13 @@ class BatchedZPFCalculator:
                                             restrict_grid_views=gfilt,
                                             grid_T=self._unique_T)
 
+        return self._assemble(hyp_res, iso_res, parameters, params_dict)
+
+    def _assemble(self, hyp_res, iso_res, parameters, params_dict,
+                  row_off_hyp=0, row_off_iso=None):
+        """Driving-force/weight assembly (reference semantics). Row offsets
+        select a walker's slice out of walker-major batched results."""
+        row_off_iso = row_off_iso or {}
         driving_forces, weights = [], []
         for dg, data in enumerate(self.zpf_data):
             data_dfs, data_wts = [], []
@@ -273,7 +280,8 @@ class BatchedZPFCalculator:
                     if job is None:
                         continue
                     if job[0] == 'hyp':
-                        rows.append(self._mu_with_underdetermined_rule(hyp_res, job[1]))
+                        rows.append(self._mu_with_underdetermined_rule(
+                            hyp_res, row_off_hyp + job[1]))
                     else:
                         rows.append(self._serial_hyperplane_mu(region, vtx, params_dict))
                 if rows:
@@ -290,7 +298,7 @@ class BatchedZPFCalculator:
                 for vi, vtx in enumerate(region.vertices):
                     job = self.df_jobs[(dg, pr, vi)]
                     if job[0] == 'iso':
-                        gm = float(iso_res[job[1]]['GM'][job[2]])
+                        gm = float(iso_res[job[1]]['GM'][row_off_iso.get(job[1], 0) + job[2]])
                         df = float(np.dot(target, vtx.composition) - gm)
                     else:
                         df = self._serial_driving_force(data, region, vtx,
@@ -300,6 +308,115 @@ class BatchedZPFCalculator:
             driving_forces.append(data_dfs)
             weights.append(data_wts)
         return driving_forces, weights
+
+    # ----------------------------------------------------- walker batching
+    def _stacked_grids(self, params_matrix):
+        """One grid per walker, stacked along the statevar-combo axis.
+
+        Sampling points are parameter-independent — only GM changes — so
+        X/Y/Phase are tiled views of walker 0's arrays."""
+        from types import SimpleNamespace
+        gm_rows = []
+        first = None
+        for pvec in params_matrix:
+            params_dict = dict(zip(self.param_names, pvec))
+            try:
+                from espei.shadow_functions import update_phase_record_parameters
+                update_phase_record_parameters(self.prf, np.asarray(pvec, dtype=np.float64))
+            except Exception:
+                pass
+            g = self._make_grid(params_dict)
+            gm = np.asarray(g.GM)
+            gm_rows.append(gm.reshape(-1, gm.shape[-1]))
+            if first is None:
+                gx = np.asarray(g.X)
+                gy = np.asarray(g.Y)
+                gp = np.asarray(g.Phase)
+                first = (gx.reshape((-1,) + gx.shape[-2:]),
+                         gy.reshape((-1,) + gy.shape[-2:]),
+                         gp.reshape(-1, gp.shape[-1]))
+        W = len(params_matrix)
+        return SimpleNamespace(
+            GM=np.concatenate(gm_rows, axis=0),
+            X=np.tile(first[0], (W, 1, 1)),
+            Y=np.tile(first[1], (W, 1, 1)),
+            Phase=np.tile(first[2], (W, 1)),
+            attrs={},
+        )
+
+    def _walker_major(self, raw, params_matrix):
+        """Tile a point group walker-major with per-walker parameter rows and
+        explicit (walker*nT + t) combo indices."""
+        T, P, X, mask = raw
+        W = len(params_matrix)
+        n = len(T)
+        nT = len(self._unique_T)
+        t_idx = np.searchsorted(self._unique_T, T)
+        combo = np.repeat(np.arange(W), n) * nT + np.tile(t_idx, W)
+        pts = PointList(T=np.tile(T, W), P=np.tile(P, W), N=1.0,
+                        X=np.tile(X, (W, 1)), x_cond_mask=np.tile(mask, (W, 1)),
+                        params=np.repeat(np.asarray(params_matrix, dtype=np.float64), n, axis=0))
+        return pts, combo, n
+
+    def driving_forces_ensemble(self, params_matrix):
+        """Batched driving forces for an ENSEMBLE of parameter vectors.
+
+        One all-phase launch + one launch per restricted phase covers every
+        (walker, vertex) pair. Returns a list of (driving_forces, weights)
+        pairs, one per walker, each identical in structure to
+        ``driving_forces(params_matrix[w])``.
+        """
+        params_matrix = np.atleast_2d(np.asarray(params_matrix, dtype=np.float64))
+        W = len(params_matrix)
+        grid = self._stacked_grids(params_matrix)
+
+        hyp_res, n_hyp = None, 0
+        if self._hyp_pts_raw is not None:
+            pts, combo, n_hyp = self._walker_major(self._hyp_pts_raw, params_matrix)
+            hull = point_hull(pts, grid, self.nonvacant, combo_idx=combo)
+            hyp_res = self.solver.solve(pts, hull, grid, self.spec_row0,
+                                        self.state_variables, self.nonvacant,
+                                        combo_idx=combo)
+
+        iso_res, n_iso = {}, {}
+        for ph, raw in self._iso_pts_raw.items():
+            pts, combo, n_ph = self._walker_major(raw, params_matrix)
+            pts.phase_restrict[:] = ph
+            hull = point_hull(pts, grid, self.nonvacant, combo_idx=combo)
+            gfilt = self._filtered_grid(grid, ph)
+            iso_res[ph] = self.solver.solve(pts, hull, grid, self.spec_row0,
+                                            self.state_variables, self.nonvacant,
+                                            restrict_grid_views=gfilt,
+                                            combo_idx=combo)
+            n_iso[ph] = n_ph
+
+        out = []
+        for w, pvec in enumerate(params_matrix):
+            params_dict = dict(zip(self.param_names, pvec))
+            try:
+                from espei.shadow_functions import update_phase_record_parameters
+                update_phase_record_parameters(self.prf, pvec)
+            except Exception:
+                pass
+            out.append(self._assemble(
+                hyp_res, iso_res, pvec, params_dict,
+                row_off_hyp=w * n_hyp,
+                row_off_iso={ph: w * n for ph, n in n_iso.items()}))
+        return out
+
+    def log_prob_ensemble(self, params_matrix, data_weight=1.0):
+        """(n_walkers,) ZPF log-likelihood vector for emcee vectorize=True."""
+        from scipy.stats import norm
+        results = self.driving_forces_ensemble(params_matrix)
+        lps = np.empty(len(results))
+        for w, (dfs, wts) in enumerate(results):
+            d = np.concatenate([np.asarray(x, dtype=np.float64) for x in dfs])
+            v = np.concatenate([np.asarray(x, dtype=np.float64) for x in wts])
+            if np.any(np.isinf(d) | np.isnan(d)):
+                lps[w] = -np.inf
+            else:
+                lps[w] = float(np.sum(norm.logpdf(d, loc=0, scale=1000 / data_weight / v)))
+        return lps
 
     def likelihood(self, parameters, data_weight=1.0):
         """Batched equivalent of ``calculate_zpf_error``."""

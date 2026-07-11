@@ -20,10 +20,17 @@ from pycalphad.core.hyperplane import hyperplane
 MIN_PHASE_FRACTION = 1e-6
 
 
-def _combo_of_point(points, n_combos, grid_T=None, grid_P=None):
+def _combo_of_point(points, n_combos, grid_T=None, grid_P=None, combo_idx=None):
     """Map each point to its statevar-combo index in the grid's C-order
     (P axis outer, T axis inner when both vary). grid_T/grid_P override the
-    axes when the grid covers MORE combos than the point list touches."""
+    axes when the grid covers MORE combos than the point list touches;
+    combo_idx passes fully explicit per-point indices (e.g. walker-major
+    stacked grids where the combo axis is walker x T)."""
+    if combo_idx is not None:
+        ci = np.asarray(combo_idx, dtype=np.int64)
+        if ci.shape[0] != len(points) or ci.min() < 0 or ci.max() >= n_combos:
+            raise ValueError("combo_idx out of range for grid")
+        return ci
     uT = np.asarray(grid_T) if grid_T is not None else np.unique(points.T)
     uP = np.asarray(grid_P) if grid_P is not None else np.unique(points.P)
     if n_combos == len(uT):
@@ -69,7 +76,8 @@ class PointList:
         return self.T.shape[0]
 
 
-def point_hull(points, grid, nonvacant_elements, grid_T=None, grid_P=None):
+def point_hull(points, grid, nonvacant_elements, grid_T=None, grid_P=None,
+               combo_idx=None):
     """Per-point lower convex hull (twin of pycalphad lower_convex_hull).
 
     Parameters
@@ -102,7 +110,7 @@ def point_hull(points, grid, nonvacant_elements, grid_T=None, grid_P=None):
         grid_Phase = grid_Phase.reshape(-1, grid_Phase.shape[-1])
     n_combos = grid_GM.shape[0]
 
-    combo_of_point = _combo_of_point(points, n_combos, grid_T, grid_P)
+    combo_of_point = _combo_of_point(points, n_combos, grid_T, grid_P, combo_idx)
 
     # phase-restriction masks are shared per (combo, phase)
     mask_cache = {}
@@ -467,7 +475,8 @@ class PointBatchSolver:
     # --------------------------------------------------------------- launch
     def solve(self, points, hull, grid, spec_row0, state_variables,
               nonvacant_elements, restrict_grid_views=None,
-              max_solver_iterations=1000, grid_T=None, grid_P=None):
+              max_solver_iterations=1000, grid_T=None, grid_P=None,
+              combo_idx=None):
         """Launch one batch. Returns dict with per-point flat results.
 
         grid: calculate() result (to_xarray=False) covering the points'
@@ -495,7 +504,7 @@ class PointBatchSolver:
             grid_src, self.name_to_idx, MP, MDOF, MC, self.verbose)
         # map each point to its statevar-combo block (same C-order as point_hull)
         n_blocks = int(np.prod(block_shape))
-        gbi = _combo_of_point(points, n_blocks, grid_T, grid_P).astype(np.int32)
+        gbi = _combo_of_point(points, n_blocks, grid_T, grid_P, combo_idx).astype(np.int32)
 
         # work arrays (23 slots; layout mirrors gpu_equilibrium.py:2566+)
         MFIX = int(ds['MAX_FIXED_MOLE_FRACTION_CONDITIONS'])

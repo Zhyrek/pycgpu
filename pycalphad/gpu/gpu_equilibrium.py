@@ -1978,10 +1978,13 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         print(f"[GPU DEBUG] Grid calculated with shape: {grid.GM.shape}")
         print("[GPU DEBUG] Running starting_point()...")
     
-    # Call starting_point exactly like CPU does
-    cpu_style_properties = starting_point(unitless_conds, state_variables, 
-                                         wks_obj.phase_record_factory, grid, 
-                                         verbose=verbose)
+    # Call starting_point exactly like CPU does — parallelized across forked
+    # workers over a composition axis for large grids (bit-identical to serial;
+    # see parallel_hull.py; PYCGPU_HULL_PROCS=1 forces serial).
+    from pycalphad.gpu.parallel_hull import parallel_starting_point
+    cpu_style_properties = parallel_starting_point(unitless_conds, state_variables,
+                                                   wks_obj.phase_record_factory, grid,
+                                                   verbose=verbose)
     
     if verbose:
         print(f"[GPU DEBUG] Starting point calculated")

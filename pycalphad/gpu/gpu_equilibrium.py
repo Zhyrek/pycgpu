@@ -2211,6 +2211,12 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                 # Robust-removal experiment: consolidation removals count toward
                 # times_compset_removed (see minimizer.h remove_and_consolidate).
                 define_flags.append('-DPYCGPU_ROBUST_REMOVAL')
+            if os.environ.get('PYCGPU_OUTER_ADD'):
+                # STUDY flag (task #4): compile in the CPU-style outer
+                # add_new_phases loop with a correctly parsed grid. Default
+                # builds omit the loop entirely (it was born dead — see
+                # eqsolver.h notes).
+                define_flags.append('-DPYCGPU_OUTER_ADD')
             if os.environ.get('PYCGPU_PROF'):
                 # Per-thread run_loop segment cycle profiler (prints [PROF] lines).
                 define_flags.append('-DPYCGPU_PROF')

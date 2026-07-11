@@ -86,6 +86,14 @@ __device__ int argmax_gpu(const double* arr, int size) {
  * @param num_removed_compsets Number of compsets in removed_compsets array.
  * @return True if a candidate phase is identified (caller then adds it), false otherwise.
  */
+#ifdef PYCGPU_OUTER_ADD
+// STUDY-ONLY (task #4): correct implementation of the CPU outer
+// add_new_phases candidate search. The historical version of this
+// function dereferenced the raw grid block as a pointer-struct and
+// therefore NEVER ran (num_grid_points_total read NaN-padding bytes
+// = 0 since the original 2025-07-17 commit). Enabled only under
+// -DPYCGPU_OUTER_ADD with a correctly parsed DeviceGrid built by the
+// caller; default builds contain no outer add loop at all.
 __device__ bool identify_candidate_phase_to_add(
     int* candidate_phase_grid_idx,         // Output: index in grid for the phase to add
     double* candidate_driving_force,       // Output: driving force of the candidate
@@ -207,6 +215,7 @@ __device__ bool identify_candidate_phase_to_add(
     
     return false;
 }
+#endif // PYCGPU_OUTER_ADD
 
 __device__ int get_phase_record_index(const DevicePhaseData* phase_data, int grid_phase_id) {
     // CRITICAL FIX: Check for NULL phase_data first
@@ -246,85 +255,6 @@ __device__ int get_phase_record_index(const DevicePhaseData* phase_data, int gri
  * @param minimum_df Minimum driving force to consider.
  * @return True if any nearly stable phases were identified, false otherwise.
  */
-__device__ bool identify_nearly_stable_phases(
-    int* candidate_phases_to_add_grid_indices, // Output array
-    double* candidate_phases_df,               // Output array for their DFs
-    int* num_candidates_found,                 // Output count
-    int max_candidates_to_find,
-    const SystemState* current_sys_state,
-    const SystemSpecification* spec,
-    const DeviceGrid* grid_data,
-    const DevicePhaseData* phase_data,
-    const double* state_variables_values,
-    double minimum_df) {
-
-    *num_candidates_found = 0;
-    // CRITICAL FIX: Check for NULL grid_data before dereferencing
-    if (grid_data == nullptr || grid_data->num_grid_points_total == 0) return false;
-
-    // Calculate driving forces for all points on the grid (can be large)
-    // Ideally, process this on the fly or use a shared memory buffer if block-parallel.
-    // For a single thread processing one condition, we iterate.
-    // double all_driving_forces_on_grid[MAX_GRID_POINTS]; // Problematic for stack
-    // Instead, iterate per phase type.
-
-    for (int record_idx = 0; record_idx < phase_data->num_unique_phase_records; ++record_idx) {
-        // Check if this phase type (record_idx) is already in current_sys_state
-        bool phase_type_entered = false;
-        for (int cs_idx = 0; cs_idx < current_sys_state->num_compsets; ++cs_idx) {
-             if (current_sys_state->compsets[cs_idx].phase_record == nullptr || current_sys_state->phase_amt[cs_idx] < MIN_PHASE_FRACTION) continue;
-            // Compare by checking if the phase_record pointer matches one in the global array
-            const PhaseRecord* pr_in_compset = current_sys_state->compsets[cs_idx].phase_record;
-            if (pr_in_compset == &phase_data->phase_records_array[record_idx]) {
-                phase_type_entered = true;
-                break;
-            }
-        }
-        if (phase_type_entered) continue;
-
-        // This phase type is not in the current set. Find its best point on the grid.
-        // record_idx corresponds to grid phase ID in our mapping
-        if (record_idx >= grid_data->num_mappable_phases_in_grid) continue; // Phase not in grid map
-        int grid_start_idx = grid_data->phase_grid_indices_start[record_idx];
-        int grid_stop_idx = grid_data->phase_grid_indices_stop[record_idx];
-        int num_points_for_this_phase = grid_stop_idx - grid_start_idx;
-
-        if (num_points_for_this_phase <= 0) continue;
-
-        double largest_df_for_this_phase_type = -INFINITY;
-        int best_grid_idx_for_this_phase_type = -1;
-
-        for (int i = 0; i < num_points_for_this_phase; ++i) {
-            int current_grid_point_abs_idx = grid_start_idx + i;
-            if (grid_data->PhaseID_ptr[current_grid_point_abs_idx] != record_idx) continue; // Should match if grid map is correct
-
-            double current_potential_energy = 0.0;
-            for (int comp_idx = 0; comp_idx < spec->num_components; ++comp_idx) {
-                current_potential_energy += grid_data->X_ptr[current_grid_point_abs_idx * grid_data->num_components_stride_X + comp_idx] *
-                                            current_sys_state->chemical_potentials[comp_idx];
-            }
-            double df = current_potential_energy - grid_data->GM_ptr[current_grid_point_abs_idx];
-
-            if (df > largest_df_for_this_phase_type) {
-                largest_df_for_this_phase_type = df;
-                best_grid_idx_for_this_phase_type = current_grid_point_abs_idx;
-            }
-        }
-
-        if (largest_df_for_this_phase_type >= minimum_df && best_grid_idx_for_this_phase_type != -1) {
-            if (*num_candidates_found < max_candidates_to_find) {
-                candidate_phases_to_add_grid_indices[*num_candidates_found] = best_grid_idx_for_this_phase_type;
-                candidate_phases_df[*num_candidates_found] = largest_df_for_this_phase_type;
-                (*num_candidates_found)++;
-            } else {
-                // Found more candidates than space, could prioritize by DF later if needed
-                break; 
-            }
-        }
-    } // end loop global_pr_idx
-
-    return (*num_candidates_found > 0);
-}
 
 // --- Main single-condition solver (moved from previous response, adapted) ---
 // Note: Hook functions (pre_solve_hook, post_solve_hook) are implemented in minimizer.h
@@ -1574,18 +1504,50 @@ __device__ void solve_equilibrium_at_condition(
     // while a phase was added, re-solve, up to 10 adds. The CPU calls add_new_phases
     // after every solve regardless of convergence, and removed_compsets is always
     // empty on CPU (eqsolver.pyx:249).
-    // NOTE: identify_candidate_phase_to_add dereferences grid_data as a
-    // pointer-struct DeviceGrid, but the buffer holds the raw self-describing
-    // block: its num_grid_points_total read lands on the first Y double's
-    // bytes (NaN padding, low word 0), so this outer add loop has always
-    // been inert in legacy layouts (see the add_new_phases parity-study
-    // follow-up). In external-pointer mode (header flag, walker ensembles)
-    // those bytes are a device pointer's low word — nonzero — which would
-    // wake the loop up with garbage pointers. Skip it explicitly there to
-    // preserve the validated (inert) behavior bit-for-bit.
-    const bool grid_is_ext_mode = (grid_data != nullptr) &&
-        (((const int*)grid_data)[7] == 1);
-    if (grid_data != nullptr && phase_data != nullptr && !grid_is_ext_mode) {
+#ifdef PYCGPU_OUTER_ADD
+    // STUDY-ONLY (task #4): the CPU outer add loop (eqsolver.pyx:308-371)
+    // against a CORRECTLY parsed grid. Historically this loop was inert
+    // (see identify_candidate_phase_to_add note); default builds omit it,
+    // preserving every validated baseline bit-for-bit.
+    DeviceGrid _outer_grid_struct;
+    const DeviceGrid* outer_grid = nullptr;
+    if (grid_data != nullptr) {
+        const char* _b = (const char*)grid_data;
+        const int* _si = (const int*)_b;
+        const size_t _hdr = 8 * sizeof(int);
+        const size_t _yo = _hdr;
+        const size_t _xo = _yo + _si[3] * sizeof(double);
+        const size_t _go = _xo + _si[4] * sizeof(double);
+        const size_t _po = _go + _si[5] * sizeof(double);
+        const size_t _ro = _po + _si[6] * sizeof(int);
+        if (_si[7] == 1) {
+            _outer_grid_struct.Y_ptr = *(const double* const*)(_b + _yo);
+            _outer_grid_struct.X_ptr = *(const double* const*)(_b + _xo);
+            _outer_grid_struct.GM_ptr = *(const double* const*)(_b + _go);
+            _outer_grid_struct.PhaseID_ptr = *(const int* const*)(_b + _po);
+        } else {
+            _outer_grid_struct.Y_ptr = (const double*)(_b + _yo);
+            _outer_grid_struct.X_ptr = (const double*)(_b + _xo);
+            _outer_grid_struct.GM_ptr = (const double*)(_b + _go);
+            _outer_grid_struct.PhaseID_ptr = (const int*)(_b + _po);
+        }
+        _outer_grid_struct.num_grid_points_total = _si[0];
+        _outer_grid_struct.phase_dof_stride_Y = _si[1];
+        _outer_grid_struct.num_components_stride_X = _si[2];
+        _outer_grid_struct.phase_grid_indices_start = (const int*)(_b + _ro);
+        // start/stop arrays are back to back; count is the trailing int
+        {
+            // num_mappable is stored after both range arrays; recover it by
+            // walking from the known dtype layout on the Python side is not
+            // possible here, so pass the phase count from phase_data instead.
+            _outer_grid_struct.num_mappable_phases_in_grid =
+                phase_data != nullptr ? phase_data->num_unique_phase_records : 0;
+            _outer_grid_struct.phase_grid_indices_stop = (const int*)(_b + _ro)
+                + _outer_grid_struct.num_mappable_phases_in_grid;
+        }
+        outer_grid = &_outer_grid_struct;
+    }
+    if (outer_grid != nullptr && phase_data != nullptr) {
         for (int outer_iter = 0; outer_iter < 10; ++outer_iter) {
             double state_variables[MAX_STATEVARS];
             for (int i = 0; i < current_spec.num_statevars && i < MAX_STATEVARS; ++i) {
@@ -1596,11 +1558,11 @@ __device__ void solve_equilibrium_at_condition(
             int candidate_grid_idx;
             double candidate_df;
             bool found_phase = identify_candidate_phase_to_add(&candidate_grid_idx, &candidate_df, &current_sys_state, &current_spec,
-                                                              grid_data, phase_data, state_variables, 1e-4,
+                                                              outer_grid, phase_data, state_variables, 1e-4,
                                                               nullptr, 0);
             if (!found_phase || candidate_grid_idx < 0 || current_sys_state.num_compsets >= MAX_PHASES) break;
 
-            int phase_id = grid_data->PhaseID_ptr[candidate_grid_idx];
+            int phase_id = outer_grid->PhaseID_ptr[candidate_grid_idx];
             int phase_record_idx = get_phase_record_index(phase_data, phase_id);
             if (phase_record_idx < 0 || phase_record_idx >= phase_data->num_unique_phase_records) break;
 
@@ -1617,7 +1579,7 @@ __device__ void solve_equilibrium_at_condition(
             }
             for (int dof_idx = 0; dof_idx < new_cs->phase_record->phase_dof && dof_idx < MAX_DOF_PER_PHASE; ++dof_idx) {
                 new_cs->dof[current_spec.num_statevars + dof_idx] =
-                    grid_data->Y_ptr[candidate_grid_idx * grid_data->phase_dof_stride_Y + dof_idx];
+                    outer_grid->Y_ptr[candidate_grid_idx * outer_grid->phase_dof_stride_Y + dof_idx];
             }
             for (int pj = 0; pj < current_spec.num_params && pj < MAX_PARAMS; ++pj) {
                 new_cs->dof[current_spec.num_statevars + new_cs->phase_record->phase_dof + pj] = current_spec.fit_params[pj];
@@ -1672,7 +1634,7 @@ __device__ void solve_equilibrium_at_condition(
                 &current_spec,
                 &current_sys_state,
                 max_solver_iterations, // max_iterations - CPU solver.py:288 uses run_loop(state, 1000)
-                grid_data,
+                outer_grid,
                 phase_data,
                 equilibrium_matrix,
                 equilibrium_rhs,
@@ -1695,6 +1657,7 @@ __device__ void solve_equilibrium_at_condition(
             }
         }
     }
+#endif // PYCGPU_OUTER_ADD
 
     // DEBUG: Store whether solver was called and returned
     if (thread_id == 0) {

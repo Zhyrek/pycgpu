@@ -115,6 +115,13 @@ def get_grid_evaluator(backend_name, components, phases, models,
     _, name_to_idx = _unique_models_for_gpu(shim, validate=False)
     kind, fn = entry
 
+    # Below these workload sizes the reference LLVM callables win: the
+    # accelerated paths pay fixed per-call costs (OpenMP wake / H2D+D2H
+    # transfers) that only amortize on large point sets. Measured crossovers
+    # on AuBi/AlCuFe; override with PYCGPU_CALC_MIN_POINTS.
+    default_min = 100_000 if kind == 'cpp' else 1_000_000
+    min_points = int(os.environ.get('PYCGPU_CALC_MIN_POINTS', default_min))
+
     def evaluate(phase_name, dof, out):
         model_idx = name_to_idx[phase_name]
         n_points = dof.shape[0]
@@ -134,4 +141,5 @@ def get_grid_evaluator(backend_name, components, phases, models,
             cp.cuda.runtime.deviceSynchronize()
             out[:] = cp.asnumpy(d_out)
 
+    evaluate.min_points = min_points
     return evaluate

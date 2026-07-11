@@ -268,10 +268,13 @@ def _compute_phase_values(components, statevar_dict, str_phase_local_conditions,
     if parameter_array_length == 0:
         # No parameters specified
         phase_output = np.zeros(dof.shape[0], order='C')
-        if accel_evaluator is not None:
+        if accel_evaluator is not None and dof.shape[0] >= getattr(accel_evaluator, 'min_points', 0):
             # Accelerated backend (see pycalphad.set_backend): evaluate the
             # energy over the sampled points with the generated GPU/C++
             # functions; everything else in this routine stays unchanged.
+            # Small point sets stay on the reference callables, which win
+            # below the per-call overhead crossover (mapping makes thousands
+            # of small calculate calls).
             accel_evaluator(phase_record.phase_name, dof, phase_output)
         else:
             phase_record.prop_2d(phase_output, dof, output.encode('utf-8'))

@@ -9,6 +9,10 @@ This module deliberately does NOT modify the reference CPU code: the hull
 twin below calls the same Cython ``hyperplane()`` routine the reference
 ``lower_convex_hull`` uses, over point arrays instead of a cartesian grid.
 """
+import hashlib
+import os
+from types import SimpleNamespace
+
 import numpy as np
 
 from pycalphad.core.hyperplane import hyperplane
@@ -341,3 +345,209 @@ def build_initial_phase_data(points, hull, py_phase_name_to_unique_idx_map,
     x_g = x_arr[rows_s, slot_order][:, :, :x_cols]
     ipd['compositions'][:, :n_slots, :x_cols] = np.where(slot_valid[:, :, None], x_g, 0.0)
     return ipd
+
+
+# --------------------------------------------------------------------------
+# Solver acquisition + launch (C++ backend)
+# --------------------------------------------------------------------------
+
+_solver_cache = {}
+
+
+class PointBatchSolver:
+    """Compile/acquire the batch solver for one system and launch point lists.
+
+    Follows gpu_calculate._build_module's standalone acquisition pattern: the
+    generated full kernel source (disk-cached by model expressions + statevar
+    layout) compiled via cpu_backend.build_cpu_library exposes BOTH the grid
+    evaluator and pycgpu_cpu_run_all, so no part of the calculate_equilibrium_gpu
+    monolith is needed.
+    """
+
+    def __init__(self, components, phases, models, phase_record_factory,
+                 robust=True, verbose=False):
+        self.verbose = verbose
+        shim = SimpleNamespace(components=list(components), phases=list(phases),
+                               models=models, phase_record_factory=phase_record_factory,
+                               conditions={}, verbose=verbose)
+        self.shim = shim
+        from pycalphad.gpu.gpu_codegen import (compute_dynamic_kernel_sizes,
+                                               _unique_models_for_gpu,
+                                               _generate_c_code_for_phase_models,
+                                               _generate_full_gpu_source)
+        from pycalphad.gpu.gpu_equilibrium import _kernel_cache_dir
+        self.dynamic_sizes = compute_dynamic_kernel_sizes(shim)
+        define_flags = [f'-D{k}={v}' for k, v in self.dynamic_sizes.items()]
+        if robust:
+            define_flags.append('-DPYCGPU_ROBUST_REMOVAL')
+
+        gpu_dir = os.path.dirname(os.path.abspath(__file__))
+        hasher = hashlib.md5()
+        for hdr in ("svd.c", "phase_rec.h", "comp_set.h", "lu_solver.h",
+                    "minimizer.h", "eqsolver.h", "gpu_codegen.py"):
+            with open(os.path.join(gpu_dir, hdr), "rb") as f:
+                hasher.update(f.read())
+        model_hasher = hashlib.md5()
+        for ph in sorted(shim.phases):
+            model_hasher.update(ph.encode())
+            model_hasher.update(str(shim.models[ph].GM).encode())
+        key_input = "|".join([
+            "pointsolve", ",".join(sorted(shim.phases)),
+            ",".join(sorted(c.name for c in shim.components)),
+            "statevars:" + ",".join(str(sv) for sv in shim.phase_record_factory.state_variables),
+            "models:" + model_hasher.hexdigest(),
+            str(sorted(self.dynamic_sizes.items())), hasher.hexdigest(),
+        ])
+        cache_key = hashlib.md5(key_input.encode()).hexdigest()
+        cache_dir = _kernel_cache_dir()
+        cache_file = cache_dir / f"{cache_key}.cu"
+        if cache_file.exists():
+            full_source = cache_file.read_text()
+        else:
+            model_funcs_c, pr_init_calls_c, unique_models, _ = \
+                _generate_c_code_for_phase_models(shim, include_hess=True, validate=False)
+            full_source = _generate_full_gpu_source(shim, model_funcs_c, pr_init_calls_c,
+                                                    len(unique_models))
+            cache_file.write_text(full_source)
+
+        from pycalphad.gpu.cpu_backend import build_cpu_library
+        self.lib = build_cpu_library(full_source, define_flags,
+                                     cache_dir=str(cache_dir), verbose=verbose)
+        _, self.name_to_idx = _unique_models_for_gpu(shim, validate=False)
+
+        ds = self.dynamic_sizes
+        self.MC = int(ds['MAX_COMPONENTS'])
+        self.MP = int(ds['MAX_PHASES'])
+        self.MSV = int(ds['MAX_STATEVARS'])
+        self.MDOF = int(ds['MAX_DOF_PER_PHASE'])
+        self.results_per_condition = (7 + self.MC + self.MP
+                                      + self.MP * self.MDOF
+                                      + self.MP * self.MC + self.MP)
+
+    # ---------------------------------------------------------------- spec0
+    def build_spec_row0(self, point0_conds, x_component):
+        """Padded flat spec row for a representative point.
+
+        point0_conds: dict {'N':1.0,'P':...,'T':...}; x_component: element name
+        of the prescribed mole fraction (value taken from the point later —
+        rhs/coefs/MU/params are overwritten per point by build_spec_rows).
+        """
+        import pycalphad.variables as v
+        from pycalphad.gpu.gpu_equilibrium import _populate_system_specification
+        from pycalphad.gpu.gpu_systemspec_flat import (create_flat_system_specification,
+                                                       apply_safe_padding)
+        conds = {v.N: point0_conds.get('N', 1.0), v.P: point0_conds['P'],
+                 v.T: point0_conds['T'], v.X(x_component): point0_conds['X0']}
+        shim = SimpleNamespace(components=self.shim.components,
+                               phases=self.shim.phases,
+                               models=self.shim.models,
+                               phase_record_factory=self.shim.phase_record_factory,
+                               conditions=conds, verbose=False)
+        scalars = np.zeros(50, dtype=np.float64)
+        MC, MSV, MP = self.MC, self.MSV, self.MP
+        MFIX = int(self.dynamic_sizes['MAX_FIXED_MOLE_FRACTION_CONDITIONS'])
+        arrays = {
+            'initial_chemical_potentials': np.zeros(MC, dtype=np.float64),
+            'prescribed_mole_fraction_coefficients': np.zeros((MFIX, MC), dtype=np.float64),
+            'prescribed_mole_fraction_rhs': np.zeros(MFIX, dtype=np.float64),
+            'free_chemical_potential_indices': np.full(MC, -1, dtype=np.int32),
+            'free_statevar_indices': np.full(MSV, -1, dtype=np.int32),
+            'fixed_chemical_potential_indices': np.full(MC, -1, dtype=np.int32),
+            'fixed_statevar_indices': np.full(MSV, -1, dtype=np.int32),
+            'fixed_stable_compset_indices': np.full(MP, -1, dtype=np.int32),
+        }
+        _populate_system_specification(scalars, arrays, shim, self.dynamic_sizes, None)
+        row = create_flat_system_specification(scalars, arrays, self.dynamic_sizes)
+        return apply_safe_padding(row, verbose=False)
+
+    # --------------------------------------------------------------- launch
+    def solve(self, points, hull, grid, spec_row0, state_variables,
+              nonvacant_elements, restrict_grid_views=None,
+              max_solver_iterations=1000):
+        """Launch one batch. Returns dict with per-point flat results.
+
+        grid: calculate() result (to_xarray=False) covering the points'
+        statevar combos. restrict_grid_views: optional pre-filtered grid shim
+        replacing `grid` for block packing (single-phase batches).
+        """
+        from pycalphad.gpu.gpu_equilibrium import (
+            _create_initial_phase_data_struct_array,
+            _prepare_grid_data_for_gpu_from_calculate_result)
+        from pycalphad.gpu.cpu_backend import run_cpu_backend
+        ds = self.dynamic_sizes
+        n = len(points)
+        MC, MP, MSV, MDOF = self.MC, self.MP, self.MSV, self.MDOF
+
+        cond_args = build_condition_args(points, state_variables,
+                                         [str(c) for c in self.shim.components],
+                                         MSV, MC, nonvacant_elements)
+        specs = build_spec_rows(points, spec_row0, hull, ds, nonvacant_elements)
+        ipd_arrays = build_initial_phase_data(points, hull, self.name_to_idx, ds)
+        ipd_struct = _create_initial_phase_data_struct_array(ipd_arrays, n, ds, False)
+        ipd_stride = ipd_struct.shape[1]
+
+        grid_src = restrict_grid_views if restrict_grid_views is not None else grid
+        grid_blocks, block_shape = _prepare_grid_data_for_gpu_from_calculate_result(
+            grid_src, self.name_to_idx, MP, MDOF, MC, self.verbose)
+        # map each point to its statevar-combo block (same C-order as point_hull)
+        uP, uT = np.unique(points.P), np.unique(points.T)
+        n_blocks = int(np.prod(block_shape))
+        if n_blocks == len(uT):
+            gbi = np.searchsorted(uT, points.T).astype(np.int32)
+        elif n_blocks == len(uP) * len(uT):
+            gbi = (np.searchsorted(uP, points.P) * len(uT)
+                   + np.searchsorted(uT, points.T)).astype(np.int32)
+        else:
+            raise ValueError(f"unexpected block count {n_blocks}")
+
+        # work arrays (23 slots; layout mirrors gpu_equilibrium.py:2566+)
+        MFIX = int(ds['MAX_FIXED_MOLE_FRACTION_CONDITIONS'])
+        MIC = int(ds['MAX_INTERNAL_CONSTRAINTS'])
+        SVD = MP + MFIX + MC + MSV + 2
+        PMD = MDOF + MIC
+        DOFS = MSV + MDOF
+        EQM = int(ds['MAX_EQ_MATRIX_SIZE'])
+        EQR = int(ds['MAX_EQ_MATRIX_ROWS'])
+        EQS = int(ds['MAX_EQ_SOLN_LEN'])
+        SSS = int(ds['SYSTEM_STATE_SIZE'])
+        tpb = 64
+        nt = ((n + tpb - 1) // tpb) * tpb
+        wa_shapes = [SVD * SVD, SVD * SVD, SVD * SVD, SVD, SVD,
+                     PMD * PMD, PMD * PMD, PMD, PMD, PMD * PMD,
+                     DOFS, DOFS, DOFS * DOFS, MC, MC * DOFS, PMD * PMD,
+                     EQM, EQR, EQS, SSS, MP * MC, MP * MC, MP * MC]
+        self._work = [np.empty((nt, s), dtype=np.float64) for s in wa_shapes]
+        ptr_table = np.array([w.ctypes.data for w in self._work], dtype=np.uint64)
+
+        results = np.zeros(n * self.results_per_condition, dtype=np.float64)
+        run_cpu_backend(self.lib,
+                        system_spec=np.ascontiguousarray(specs.reshape(-1)),
+                        condition_args_doubles=np.ascontiguousarray(cond_args.reshape(-1)),
+                        results=results,
+                        num_conditions=n,
+                        condition_stride=cond_args.shape[1],
+                        python_max_statevars=MSV,
+                        initial_phase_data=np.ascontiguousarray(ipd_struct.reshape(-1)),
+                        initial_phase_data_stride=ipd_stride,
+                        system_spec_stride=specs.shape[1],
+                        grid_data=grid_blocks,
+                        grid_block_indices=gbi,
+                        grid_block_stride_bytes=int(grid_blocks.dtype.itemsize),
+                        work_arrays_ptr_table=ptr_table,
+                        max_solver_iterations=max_solver_iterations,
+                        verbose=self.verbose)
+
+        r = results.reshape(n, self.results_per_condition)
+        y0 = 6 + MC + MP
+        x0 = y0 + MP * MDOF
+        pid0 = x0 + MP * MC
+        return {
+            'GM': r[:, 0].copy(),
+            'MU': r[:, 1:1 + MC].copy(),
+            'NP': r[:, 1 + MC:1 + MC + MP].copy(),
+            'converged': r[:, 1 + MC + MP] > 0.5,
+            'num_stable_phases': r[:, 2 + MC + MP].astype(np.int32),
+            'Y': r[:, y0:x0].reshape(n, MP, MDOF).copy(),
+            'X': r[:, x0:pid0].reshape(n, MP, MC).copy(),
+            'phase_ids': r[:, pid0:pid0 + MP].astype(np.int32),
+        }

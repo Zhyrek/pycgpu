@@ -155,18 +155,18 @@ def point_hull(points, grid, nonvacant_elements, grid_T=None, grid_P=None,
             comps_view = np.array((_x_row0 if _x_shared else grid_X[combo])[back_map])
             ener_view = np.ascontiguousarray(grid_GM[combo][back_map])
 
-        # fixed linear-combination rows: one per prescribed X + the N row.
-        # Mirrors lower_convex_hull's MoleFraction / SystemMolesType handling.
+        # fixed linear-combination rows: the reference (lower_convex_hull)
+        # iterates conditions in sorted-key order, so the N (SystemMolesType)
+        # row comes FIRST, then the X rows in component order. Row order
+        # changes dgesv pivoting for 3+ components — keep it exact.
         xmask = points.x_cond_mask[i]
-        coefs = []
-        rhs = []
+        coefs = [np.ones(ncomp)]              # N condition first
+        rhs = [points.N[i]]
         for c in np.flatnonzero(xmask):
             row = np.zeros(ncomp)
             row[c] = 1.0
             coefs.append(row)
             rhs.append(points.X[i, c])
-        coefs.append(np.ones(ncomp))          # N condition
-        rhs.append(points.N[i])
         coefs = np.atleast_2d(np.asarray(coefs, dtype=np.float64))
         rhs = np.asarray(rhs, dtype=np.float64)
 
@@ -667,20 +667,21 @@ def device_point_hull(points, solver, X_row, GM_rows, combo_idx, Phase_row,
     fixed_idx = np.full((n, ncomp), -1, dtype=np.int32)
     nfixed = np.zeros(n, dtype=np.int32)
 
-    # lincomb rows: one per prescribed X + the N row (same construction as
-    # point_hull); constraint counts are uniform per batch by construction.
+    # lincomb rows in the reference's sorted-key order: N row FIRST, then
+    # one row per prescribed X (row order changes dgesv pivoting for 3+
+    # components); constraint counts are uniform per batch by construction.
     n_x = int(points.x_cond_mask[0].sum())
     max_lc = n_x + 1
     coefs = np.zeros((n, max_lc, ncomp), dtype=np.float64)
     rhs = np.zeros((n, max_lc), dtype=np.float64)
     nlc = np.full(n, max_lc, dtype=np.int32)
+    coefs[:, 0, :] = 1.0
+    rhs[:, 0] = points.N
     rows_i, cols_c = np.nonzero(points.x_cond_mask)
     slot = np.concatenate([np.arange(c) for c in
                            np.bincount(rows_i, minlength=n)]) if rows_i.size else rows_i
-    coefs[rows_i, slot, cols_c] = 1.0
-    rhs[rows_i, slot] = points.X[rows_i, cols_c]
-    coefs[:, n_x, :] = 1.0
-    rhs[:, n_x] = points.N
+    coefs[rows_i, 1 + slot, cols_c] = 1.0
+    rhs[rows_i, 1 + slot] = points.X[rows_i, cols_c]
 
     mu = np.zeros((n, ncomp), dtype=np.float64)
     oe = np.zeros(n, dtype=np.float64)
@@ -746,9 +747,126 @@ def device_point_hull(points, solver, X_row, GM_rows, combo_idx, Phase_row,
         oe = np.where(recompute, np.divide(new_e, molesum,
                                            out=np.zeros_like(new_e),
                                            where=molesum != 0), oe)
-        Phase[fake] = ''
+        Phase[:, :ncomp][fake] = ''
         NP[:, :ncomp][fake] = np.nan
         Xv[:, :ncomp][fake] = np.nan
         Yv[:, :ncomp][fake] = np.nan
     return {'GM': oe, 'MU': mu, 'NP': NP, 'points_idx': sx.astype(np.int32),
             'Phase': Phase, 'X': Xv, 'Y': Yv}
+
+
+def get_point_solver(components, phases, models, phase_record_factory,
+                     robust=True, backend='cpp', verbose=False):
+    """In-process cached PointBatchSolver (compiled artifacts are disk/cupy
+    cached; this avoids re-running codegen bookkeeping per equilibrium call)."""
+    mh = hashlib.md5()
+    for ph in sorted(phases):
+        mh.update(ph.encode())
+        mh.update(str(models[ph].GM).encode())
+    key = (backend, robust, tuple(sorted(phases)),
+           tuple(sorted(getattr(c, 'name', str(c)) for c in components)),
+           tuple(str(sv) for sv in phase_record_factory.state_variables),
+           mh.hexdigest())
+    entry = _solver_cache.get(key)
+    if entry is None:
+        entry = PointBatchSolver(components, phases, models, phase_record_factory,
+                                 robust=robust, verbose=verbose, backend=backend)
+        _solver_cache[key] = entry
+    return entry
+
+
+def device_starting_point(unitless_conds, state_variables, phase_record_factory,
+                          grid, solver, verbose=False):
+    """Compiled-hull replacement for starting_point() on the accelerated
+    equilibrium path (PYCGPU_DEVICE_HULL=1).
+
+    Valid for the capability-gated condition set (N / P / T / X only,
+    fully determined). Returns a LightDataset with the same variables,
+    coordinate order, and array semantics as pycalphad's starting_point —
+    the hull values themselves come from hyperplane.h, which is verified
+    bit-identical to the Cython hyperplane().
+    """
+    from collections import OrderedDict
+    from pycalphad.core.light_dataset import LightDataset
+    from pycalphad import __version__ as pycalphad_version
+    import pycalphad.variables as v
+
+    active_phases = sorted(phase_record_factory.keys()) if hasattr(phase_record_factory, 'keys') else None
+    nonvacant = None
+    for ph in solver.shim.phases:
+        nonvacant = phase_record_factory[ph].nonvacant_elements
+        break
+    nonvacant = list(nonvacant)
+    ncomp = len(nonvacant)
+
+    conds_items = list(unitless_conds.items())
+    axes = [np.atleast_1d(np.asarray(val, dtype=np.float64)) for _, val in conds_items]
+    shape = tuple(len(a) for a in axes)
+    n = int(np.prod(shape))
+    mesh = np.meshgrid(*axes, indexing='ij') if n > 1 or len(axes) > 1 else \
+        [a.reshape(1) for a in axes]
+    cols = {str(k): m.reshape(-1) for (k, _), m in zip(conds_items, mesh)}
+
+    T = cols.get('T')
+    P = cols.get('P', np.full(n, 101325.0))
+    N = cols.get('N', np.ones(n))
+    X = np.zeros((n, ncomp))
+    mask = np.zeros((n, ncomp), dtype=bool)
+    for key, colv in cols.items():
+        if key.startswith('X_'):
+            ci = nonvacant.index(key[2:])
+            X[:, ci] = colv
+            mask[:, ci] = True
+    # dependent component by mass balance (single unknown under the gate)
+    free = ~mask[0]
+    if free.sum() == 1:
+        X[:, free] = (1.0 - X[:, mask[0]].sum(axis=1))[:, None]
+
+    pts = PointList(T=T, P=P, N=N, X=X, x_cond_mask=mask)
+
+    # statevar-combo index per point (C-order over the statevar axes, which
+    # lead the conditions ordering under the gate: N, P, T sort before X_*)
+    sv_names = [str(k) for k, _ in conds_items if str(k) in ('N', 'P', 'T')]
+    sv_axes = [np.unique(np.atleast_1d(np.asarray(dict(cols)[s]))) for s in sv_names]
+    sv_sizes = [len(a) for a in sv_axes]
+    combo = np.zeros(n, dtype=np.int64)
+    stride = 1
+    for name, ax, size in zip(reversed(sv_names), reversed(sv_axes), reversed(sv_sizes)):
+        combo += np.searchsorted(ax, cols[name]).astype(np.int64) * stride
+        stride *= size
+
+    gm = np.asarray(grid.GM)
+    M = gm.shape[-1]
+    GM_rows = np.ascontiguousarray(gm.reshape(-1, M))
+    gx = np.asarray(grid.X).reshape((-1,) + np.asarray(grid.X).shape[-2:])
+    gy = np.asarray(grid.Y).reshape((-1,) + np.asarray(grid.Y).shape[-2:])
+    gp = np.asarray(grid.Phase).reshape(-1, M)
+
+    hull = device_point_hull(pts, solver, np.ascontiguousarray(gx[0]), GM_rows,
+                             combo, gp[0], np.ascontiguousarray(gy[0]), nonvacant)
+
+    # ---- LightDataset with starting_point's exact structure ----
+    max_phase_name_len = max(max(len(x) for x in solver.shim.phases), 6)
+    maximum_internal_dof = gy.shape[-1]
+    coord_dict = OrderedDict((str(k), np.atleast_1d(np.asarray(val)))
+                             for k, val in conds_items)
+    coord_dict['vertex'] = np.arange(ncomp + 1)
+    coord_dict['component'] = nonvacant
+    conds_as_strings = [str(k) for k, _ in conds_items]
+
+    ds_vars = {
+        'NP': (conds_as_strings + ['vertex'],
+               hull['NP'].reshape(shape + (ncomp + 1,))),
+        'GM': (conds_as_strings, hull['GM'].reshape(shape)),
+        'MU': (conds_as_strings + ['component'],
+               hull['MU'].reshape(shape + (ncomp,))),
+        'X': (conds_as_strings + ['vertex', 'component'],
+              hull['X'].reshape(shape + (ncomp + 1, ncomp))),
+        'Y': (conds_as_strings + ['vertex', 'internal_dof'],
+              hull['Y'].reshape(shape + (ncomp + 1, maximum_internal_dof))),
+        'Phase': (conds_as_strings + ['vertex'],
+                  hull['Phase'].astype('U%s' % max_phase_name_len)
+                  .reshape(shape + (ncomp + 1,))),
+    }
+    return LightDataset(ds_vars, coords=coord_dict,
+                        attrs={'engine': 'pycalphad %s' % pycalphad_version})

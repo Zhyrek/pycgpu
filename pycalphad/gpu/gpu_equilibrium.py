@@ -2054,9 +2054,24 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     # workers over a composition axis for large grids (bit-identical to serial;
     # see parallel_hull.py; PYCGPU_HULL_PROCS=1 forces serial).
     from pycalphad.gpu.parallel_hull import parallel_starting_point
-    cpu_style_properties = parallel_starting_point(unitless_conds, state_variables,
-                                                   wks_obj.phase_record_factory, grid,
-                                                   verbose=verbose)
+    if os.environ.get('PYCGPU_DEVICE_HULL'):
+        # Compiled per-condition hull (hyperplane.h; bit-identical to the
+        # Cython hyperplane) instead of the serial/forked CPU loop. Env-gated
+        # while it accumulates mileage; intended default for the backends.
+        from pycalphad.gpu.point_solver import get_point_solver, device_starting_point
+        _hull_solver = get_point_solver(
+            wks_obj.components, list(wks_obj.phases), dict(wks_obj.models.unwrap()),
+            wks_obj.phase_record_factory,
+            robust=bool(os.environ.get('PYCGPU_ROBUST', '1')),
+            backend='cpp' if os.environ.get('PYCGPU_CPU') else 'cuda',
+            verbose=verbose)
+        cpu_style_properties = device_starting_point(
+            unitless_conds, state_variables, wks_obj.phase_record_factory,
+            grid, _hull_solver, verbose=verbose)
+    else:
+        cpu_style_properties = parallel_starting_point(unitless_conds, state_variables,
+                                                       wks_obj.phase_record_factory, grid,
+                                                       verbose=verbose)
     
     if verbose:
         print(f"[GPU DEBUG] Starting point calculated")

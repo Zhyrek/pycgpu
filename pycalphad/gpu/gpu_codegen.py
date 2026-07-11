@@ -2897,6 +2897,24 @@ __global__ void grid_eval_kernel(int model_idx, const double* dof, double* out,
     out[i] = g_phase_records_array[model_idx].obj(&dof[i * (long long)dof_stride]);
 }}
 
+// Walker-grid energy evaluation: rows are one phase's cached sample dofs
+// (T-combo major, column minor, WITHOUT trailing parameter slots); the
+// kernel assembles [dof_row..., params...] locally and writes into the
+// combo-major GM buffer at (row/ncols)*row_stride + col_start + row%ncols.
+__global__ void grid_eval_params_kernel(
+    int model_idx, const double* dof, const double* params, int n_params,
+    long long n_rows, int dof_stride, double* out_base,
+    int ncols, int col_start, long long row_stride)
+{{
+    long long i = (long long)blockDim.x * blockIdx.x + threadIdx.x;
+    if (i >= n_rows) return;
+    double x[MAX_STATEVARS + MAX_DOF_PER_PHASE + MAX_PARAMS];
+    for (int k = 0; k < dof_stride; ++k) x[k] = dof[i * dof_stride + k];
+    for (int k = 0; k < n_params && k < MAX_PARAMS; ++k) x[dof_stride + k] = params[k];
+    out_base[(i / ncols) * row_stride + col_start + (i % ncols)] =
+        g_phase_records_array[model_idx].obj(x);
+}}
+
 // Per-condition lower convex hull (device twin of pycalphad's
 // lower_convex_hull/hyperplane): one thread per condition. Each condition
 // selects its grid sample via a flat base ROW into the (rows x N) X buffer

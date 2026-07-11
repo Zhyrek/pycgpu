@@ -559,6 +559,49 @@ class BatchedZPFCalculator:
             'cpp', self.species, self.phases, self.models, self.prf,
             verbose=self.verbose)
 
+    def _ext_blocks(self, key, W, Y_ptr, X_ptr, PID_ptr, GM_ptr, M, tmpl_block):
+        """Compact external-pointer DeviceGrid blocks (grid_ext_mode=1): each
+        (walker, T) block is ~100 bytes of header + pointers; Y/X/PhaseID are
+        shared walker-invariant buffers, GM points into the per-walker energy
+        buffer. Built once per (group, W) — zero per-step block traffic."""
+        cache = getattr(self, '_ext_block_cache', None)
+        if cache is None:
+            self._ext_block_cache = cache = {}
+        hit = cache.get((key, W))
+        if hit is not None:
+            return hit
+        nT = len(self._unique_T)
+        n_ph = int(tmpl_block['num_mappable_phases_in_grid'])
+        dtype = [('num_grid_points_total', 'i4'), ('phase_dof_stride_Y', 'i4'),
+                 ('num_components_stride_X', 'i4'), ('actual_y_data_size', 'i4'),
+                 ('actual_x_data_size', 'i4'), ('actual_gm_data_size', 'i4'),
+                 ('actual_phase_id_data_size', 'i4'), ('ext_mode', 'i4'),
+                 ('Y_ext', 'u8'), ('X_ext', 'u8'), ('GM_ext', 'u8'), ('PID_ext', 'u8'),
+                 ('phase_grid_indices_start', f'{n_ph}i4'),
+                 ('phase_grid_indices_stop', f'{n_ph}i4'),
+                 ('num_mappable_phases_in_grid', 'i4')]
+        pad = (-np.dtype(dtype).itemsize) % 8
+        if pad:
+            dtype.append(('_tail_pad', f'{pad}u1'))
+        blocks = np.zeros(W * nT, dtype=dtype)
+        blocks['num_grid_points_total'] = M
+        blocks['phase_dof_stride_Y'] = int(tmpl_block['phase_dof_stride_Y'])
+        blocks['num_components_stride_X'] = int(tmpl_block['num_components_stride_X'])
+        blocks['actual_y_data_size'] = 1
+        blocks['actual_x_data_size'] = 1
+        blocks['actual_gm_data_size'] = 1
+        blocks['actual_phase_id_data_size'] = 2
+        blocks['ext_mode'] = 1
+        blocks['Y_ext'] = Y_ptr
+        blocks['X_ext'] = X_ptr
+        blocks['PID_ext'] = PID_ptr
+        blocks['GM_ext'] = GM_ptr + np.arange(W * nT, dtype=np.uint64) * (M * 8)
+        blocks['phase_grid_indices_start'] = tmpl_block['phase_grid_indices_start']
+        blocks['phase_grid_indices_stop'] = tmpl_block['phase_grid_indices_stop']
+        blocks['num_mappable_phases_in_grid'] = n_ph
+        cache[(key, W)] = blocks
+        return blocks
+
     def _blocks_from_template(self, key, grid_src, GM_rows):
         """DeviceGrid blocks for stacked walker grids: struct-pack ONE combo
         set through the reference packer, then tile and overwrite the GM
@@ -594,6 +637,107 @@ class BatchedZPFCalculator:
         m = big['GM_ptr_data'].shape[1]
         big['GM_ptr_data'][:] = GM_rows[:, :m]
         return big
+
+    def _legacy_tmpl_block(self, key):
+        """One legacy-packed block of this group (header/stride/phase-range
+        source for the compact ext blocks)."""
+        cache = getattr(self, '_legacy_blk_cache', None)
+        if cache is None:
+            self._legacy_blk_cache = cache = {}
+        blk = cache.get(key)
+        if blk is None:
+            from types import SimpleNamespace
+            from pycalphad.gpu.gpu_equilibrium import \
+                _prepare_grid_data_for_gpu_from_calculate_result
+            self._ensure_grid_template()
+            t = self._grid_tmpl
+            ds = self.solver.dynamic_sizes
+            sel = None if key == 'all' else self._grid_phase_masks[key]
+            one = SimpleNamespace(
+                GM=t.GM_fake[:1] if False else (np.zeros((1, t.M)) if sel is None
+                                                else np.zeros((1, sel.size))),
+                X=(t.X[:1] if sel is None else t.X[:1, sel]),
+                Y=(t.Y[:1] if sel is None else t.Y[:1, sel]),
+                Phase=(t.Phase[:1] if sel is None else t.Phase[:1, sel]),
+                attrs={})
+            blocks, _ = _prepare_grid_data_for_gpu_from_calculate_result(
+                one, self.solver.name_to_idx, int(ds['MAX_PHASES']),
+                int(ds['MAX_DOF_PER_PHASE']), int(ds['MAX_COMPONENTS']), False)
+            blk = blocks[0]
+            cache[key] = blk
+        return blk
+
+    def _group_buffers(self, key):
+        """Persistent walker-invariant grid arrays for one launch group
+        ('all' or a restricted phase): Y, X, PhaseID (+ device copies and
+        per-phase dof matrices on CUDA). Built once."""
+        cache = getattr(self, '_group_buf_cache', None)
+        if cache is None:
+            self._group_buf_cache = cache = {}
+        buf = cache.get(key)
+        if buf is not None:
+            return buf
+        self._ensure_grid_template()
+        t = self._grid_tmpl
+        if key == 'all':
+            sel = None
+            Y = np.ascontiguousarray(t.Y[0])
+            X = np.ascontiguousarray(t.X[0])
+            Phase = t.Phase[0]
+        else:
+            sel = self._grid_phase_masks[key]
+            Y = np.ascontiguousarray(t.Y[0][sel])
+            X = np.ascontiguousarray(t.X[0][sel])
+            Phase = t.Phase[0][sel]
+        pid = np.full(Phase.shape[0], -1, dtype=np.int32)
+        for name, idx in self.solver.name_to_idx.items():
+            pid[Phase == name] = idx
+        buf = {'sel': sel, 'Y': Y, 'X': X, 'PID': pid, 'M': X.shape[0]}
+        if self.backend == 'cuda':
+            cp = self.solver._cp
+            buf['dY'] = cp.asarray(Y)
+            buf['dX'] = cp.asarray(X)
+            buf['dPID'] = cp.asarray(pid)
+        cache[key] = buf
+        return buf
+
+    def _walker_gm_device(self, params_matrix):
+        """Per-walker grid energies computed ON DEVICE (grid_eval_params_kernel
+        over the cached sample dofs); returns (device_gm (W*nT, M), host copy).
+        Fake-point energies are parameter-independent and pre-filled."""
+        cp = self.solver._cp
+        t = self._grid_tmpl
+        W = len(params_matrix)
+        nT = t.nT
+        cache = getattr(self, '_dev_gm_cache', None)
+        if cache is None:
+            self._dev_gm_cache = cache = {}
+        entry = cache.get(W)
+        if entry is None:
+            d_gm = cp.empty((W * nT, t.M), dtype=cp.float64)
+            # fake cols: same per combo; tile template fakes across walkers
+            fake_host = np.tile(t.GM_fake, (W, 1))
+            d_gm[:, t.fake_cols] = cp.asarray(fake_host)
+            d_dofs = {ph: cp.asarray(rows) for ph, rows in t.phase_dofs.items()}
+            kern = self.solver.module.get_function('grid_eval_params_kernel')
+            cache[W] = entry = (d_gm, d_dofs, kern)
+        d_gm, d_dofs, kern = entry
+        d_params = cp.asarray(np.ascontiguousarray(params_matrix, dtype=np.float64))
+        n_par = d_params.shape[1]
+        tpb = 128
+        for w in range(W):
+            base = d_gm[w * nT:(w + 1) * nT]
+            for ph, cols in t.phase_cols.items():
+                rows = d_dofs[ph]
+                n_rows = rows.shape[0]
+                kern(((n_rows + tpb - 1) // tpb,), (tpb,),
+                     (np.int32(self.solver.name_to_idx[ph]), rows,
+                      d_params[w], np.int32(n_par),
+                      np.int64(n_rows), np.int32(rows.shape[1]),
+                      base, np.int32(cols.size), np.int32(int(cols[0])),
+                      np.int64(t.M)))
+        cp.cuda.runtime.deviceSynchronize()
+        return d_gm, cp.asnumpy(d_gm)
 
     def _stacked_grids_fast(self, params_matrix):
         """Per-walker GM via the generated evaluator on cached sample dofs."""
@@ -661,7 +805,49 @@ class BatchedZPFCalculator:
                     params_matrix[cs:cs + self.walker_chunk]))
             return out
         W = len(params_matrix)
-        grid = self._stacked_grids_fast(params_matrix)
+        if self.backend == 'cuda':
+            self._ensure_grid_template()
+            # device path: walker energies computed on device; ONE D2H of the
+            # GM buffer serves the hull/sample-df host code; ext blocks carry
+            # device pointers with zero per-step block re-upload.
+            from types import SimpleNamespace
+            d_gm, gm_host = self._walker_gm_device(params_matrix)
+            t = self._grid_tmpl
+            grid = SimpleNamespace(
+                GM=gm_host,
+                X=np.broadcast_to(t.X[0], (W * t.nT,) + t.X.shape[1:]),
+                Y=np.broadcast_to(t.Y[0], (W * t.nT,) + t.Y.shape[1:]),
+                Phase=np.broadcast_to(t.Phase[0], (W * t.nT, t.M)), attrs={})
+            self._d_gm_current = d_gm
+        else:
+            grid = self._stacked_grids_fast(params_matrix)
+            self._d_gm_current = None
+            self._ensure_grid_template()
+
+        def _blocks_for(key, gfilt_gm_host):
+            buf = self._group_buffers(key)
+            if self.backend == 'cuda':
+                cp = self.solver._cp
+                if key == 'all':
+                    d_g = self._d_gm_current
+                else:
+                    dcache = getattr(self, '_dev_gmf_cache', None)
+                    if dcache is None:
+                        self._dev_gmf_cache = dcache = {}
+                    d_g = self._d_gm_current[:, cp.asarray(buf['sel'])]
+                    dcache[key] = d_g  # keep alive through the launch
+                return self._ext_blocks(key, W, int(buf['dY'].data.ptr),
+                                        int(buf['dX'].data.ptr),
+                                        int(buf['dPID'].data.ptr),
+                                        int(d_g.data.ptr), buf['M'],
+                                        self._legacy_tmpl_block(key))
+            # cpp: host pointers; GM host buffer must stay referenced
+            self._host_gm_keepalive = getattr(self, '_host_gm_keepalive', {})
+            self._host_gm_keepalive[key] = gfilt_gm_host
+            return self._ext_blocks(key, W, buf['Y'].ctypes.data,
+                                    buf['X'].ctypes.data, buf['PID'].ctypes.data,
+                                    gfilt_gm_host.ctypes.data, buf['M'],
+                                    self._legacy_tmpl_block(key))
 
         hyp_res, n_hyp = None, 0
         if self._hyp_pts_raw is not None:
@@ -669,7 +855,8 @@ class BatchedZPFCalculator:
             t = self._grid_tmpl
             hull = device_point_hull(pts, self.solver, t.X[0], grid.GM, combo,
                                      t.Phase[0], t.Y[0], self.nonvacant)
-            blocks = self._blocks_from_template('all', grid, grid.GM)
+            gm_all = np.ascontiguousarray(grid.GM)
+            blocks = _blocks_for('all', gm_all)
             hyp_res = self.solver.solve(pts, hull, grid, self.spec_row0,
                                         self.state_variables, self.nonvacant,
                                         combo_idx=combo, grid_blocks=blocks)
@@ -681,13 +868,14 @@ class BatchedZPFCalculator:
             gfilt = self._filtered_grid(grid, ph)
             t = self._grid_tmpl
             sel = self._grid_phase_masks[ph]
+            gm_f = np.ascontiguousarray(np.asarray(gfilt.GM))
             hull = device_point_hull(pts, self.solver,
                                      np.ascontiguousarray(t.X[0][sel]),
-                                     np.asarray(gfilt.GM), combo,
+                                     gm_f, combo,
                                      t.Phase[0][sel],
                                      np.ascontiguousarray(t.Y[0][sel]),
                                      self.nonvacant)
-            blocks = self._blocks_from_template(ph, gfilt, np.asarray(gfilt.GM))
+            blocks = _blocks_for(ph, gm_f)
             iso_res[ph] = self.solver.solve(pts, hull, grid, self.spec_row0,
                                             self.state_variables, self.nonvacant,
                                             restrict_grid_views=gfilt,

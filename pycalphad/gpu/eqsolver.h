@@ -1216,19 +1216,39 @@ __device__ void solve_equilibrium_at_condition(
         const int actual_x_data_size = size_info[4];
         const int actual_gm_data_size = size_info[5];
         const int actual_phase_id_data_size = size_info[6];
+        // External-pointer mode (walker-batched ensembles): the previously
+        // unused padding int is a mode flag. When 1, each data region holds
+        // an 8-byte pointer to the actual array instead of inline data
+        // (region sizes are then y=1, x=1, gm=1 doubles and phase_id=2
+        // ints, keeping the offset arithmetic below unchanged). This lets
+        // many tiny blocks share walker-invariant Y/X/PhaseID buffers and
+        // per-walker GM buffers computed on device, with zero per-step
+        // block re-upload.
+        const int grid_ext_mode = size_info[7];
         
         // Calculate offsets based on the ACTUAL sizes from Python
-        const size_t size_header_bytes = 8 * sizeof(int); // 7 int fields + 1 padding = 32 bytes (8-byte aligned)
+        const size_t size_header_bytes = 8 * sizeof(int); // 7 int fields + 1 mode flag = 32 bytes (8-byte aligned)
         const size_t y_data_offset = size_header_bytes;
         const size_t x_data_offset = y_data_offset + actual_y_data_size * sizeof(double);
         const size_t gm_data_offset = x_data_offset + actual_x_data_size * sizeof(double);
         const size_t phase_id_data_offset = gm_data_offset + actual_gm_data_size * sizeof(double);
         
-        // Set up pointers to the inline arrays using calculated offsets
-        const double* Y_ptr = (const double*)(grid_data_bytes + y_data_offset);
-        const double* X_ptr = (const double*)(grid_data_bytes + x_data_offset);
-        const double* GM_ptr = (const double*)(grid_data_bytes + gm_data_offset);
-        const int* PhaseID_ptr = (const int*)(grid_data_bytes + phase_id_data_offset);
+        // Set up pointers to the arrays: inline (legacy) or external
+        const double* Y_ptr;
+        const double* X_ptr;
+        const double* GM_ptr;
+        const int* PhaseID_ptr;
+        if (grid_ext_mode == 1) {
+            Y_ptr = *(const double* const*)(grid_data_bytes + y_data_offset);
+            X_ptr = *(const double* const*)(grid_data_bytes + x_data_offset);
+            GM_ptr = *(const double* const*)(grid_data_bytes + gm_data_offset);
+            PhaseID_ptr = *(const int* const*)(grid_data_bytes + phase_id_data_offset);
+        } else {
+            Y_ptr = (const double*)(grid_data_bytes + y_data_offset);
+            X_ptr = (const double*)(grid_data_bytes + x_data_offset);
+            GM_ptr = (const double*)(grid_data_bytes + gm_data_offset);
+            PhaseID_ptr = (const int*)(grid_data_bytes + phase_id_data_offset);
+        }
         
         #ifdef VERBOSE_DEBUG
         printf("GPU DEBUG: Grid data - num_points=%d, dof_stride=%d, comp_stride=%d\\n",
@@ -1554,7 +1574,18 @@ __device__ void solve_equilibrium_at_condition(
     // while a phase was added, re-solve, up to 10 adds. The CPU calls add_new_phases
     // after every solve regardless of convergence, and removed_compsets is always
     // empty on CPU (eqsolver.pyx:249).
-    if (grid_data != nullptr && phase_data != nullptr) {
+    // NOTE: identify_candidate_phase_to_add dereferences grid_data as a
+    // pointer-struct DeviceGrid, but the buffer holds the raw self-describing
+    // block: its num_grid_points_total read lands on the first Y double's
+    // bytes (NaN padding, low word 0), so this outer add loop has always
+    // been inert in legacy layouts (see the add_new_phases parity-study
+    // follow-up). In external-pointer mode (header flag, walker ensembles)
+    // those bytes are a device pointer's low word — nonzero — which would
+    // wake the loop up with garbage pointers. Skip it explicitly there to
+    // preserve the validated (inert) behavior bit-for-bit.
+    const bool grid_is_ext_mode = (grid_data != nullptr) &&
+        (((const int*)grid_data)[7] == 1);
+    if (grid_data != nullptr && phase_data != nullptr && !grid_is_ext_mode) {
         for (int outer_iter = 0; outer_iter < 10; ++outer_iter) {
             double state_variables[MAX_STATEVARS];
             for (int i = 0; i < current_spec.num_statevars && i < MAX_STATEVARS; ++i) {

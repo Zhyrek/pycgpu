@@ -2863,6 +2863,15 @@ __global__ void minimal_equilibrium_kernel(
 }}
 
 // --- Kernel to Initialize Global PhaseRecords ---
+// Grid energy evaluation for the accelerated calculate() backend: one
+// thread per sample point, dof rows in workspace format [statevars..., Y...].
+__global__ void grid_eval_kernel(int model_idx, const double* dof, double* out,
+                                 long long n_points, int dof_stride) {{
+    long long i = (long long)blockDim.x * blockIdx.x + threadIdx.x;
+    if (i >= n_points) return;
+    out[i] = g_phase_records_array[model_idx].obj(&dof[i * (long long)dof_stride]);
+}}
+
 __global__ void init_all_gpu_phase_records() {{
     #ifdef VERBOSE_DEBUG
     if (threadIdx.x == 0 && blockIdx.x == 0) {{

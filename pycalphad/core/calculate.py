@@ -188,7 +188,7 @@ def _sample_phase_constitution(model, sampler, fixed_grid, pdens, phase_local_co
 def _compute_phase_values(components, statevar_dict, str_phase_local_conditions,
                           points, phase_record, output, maximum_internal_dof, broadcast=True,
                           parameters=None, fake_points=False,
-                          largest_energy=None):
+                          largest_energy=None, accel_evaluator=None):
     """
     Calculate output values for a particular phase.
 
@@ -268,7 +268,13 @@ def _compute_phase_values(components, statevar_dict, str_phase_local_conditions,
     if parameter_array_length == 0:
         # No parameters specified
         phase_output = np.zeros(dof.shape[0], order='C')
-        phase_record.prop_2d(phase_output, dof, output.encode('utf-8'))
+        if accel_evaluator is not None:
+            # Accelerated backend (see pycalphad.set_backend): evaluate the
+            # energy over the sampled points with the generated GPU/C++
+            # functions; everything else in this routine stays unchanged.
+            accel_evaluator(phase_record.phase_name, dof, phase_output)
+        else:
+            phase_record.prop_2d(phase_output, dof, output.encode('utf-8'))
     else:
         # Vectorized parameter arrays
         phase_output = np.zeros((dof.shape[0], parameter_array_length), order='C')
@@ -479,6 +485,23 @@ def calculate(dbf, comps, phases, mode=None, output='GM', fake_points=False, bro
     plc_shape = tuple(len(x) for x in phase_local_conditions.values())
     # TODO: move state variable conditions into conditions dict
 
+    # Accelerated energy evaluation (pycalphad.set_backend('c++'|'gpu')):
+    # only the GM evaluation over sampled points moves to the backend; the
+    # sampling and dataset assembly below are unchanged. Any failure to build
+    # the accelerated evaluator falls back silently to the reference path.
+    accel_evaluator = None
+    from pycalphad.backend import get_backend as _get_backend
+    _accel_backend, _ = _get_backend()
+    if _accel_backend in ('cpp', 'cuda') and output == 'GM' and len(extract_parameters(parameters)[1]) == 0:
+        try:
+            from pycalphad.gpu.gpu_calculate import get_grid_evaluator
+            accel_evaluator = get_grid_evaluator(_accel_backend, comps,
+                                                 sorted(active_phases), models,
+                                                 phase_records)
+        except Exception as _accel_err:
+            warnings.warn(f"Accelerated calculate() unavailable, using reference path: {_accel_err!r}")
+            accel_evaluator = None
+
     for phase_name in sorted(active_phases):
         mod = models[phase_name]
         phase_record = phase_records[phase_name]
@@ -513,7 +536,8 @@ def calculate(dbf, comps, phases, mode=None, output='GM', fake_points=False, bro
         phase_ds = _compute_phase_values(nonvacant_components, str_statevar_dict, str_phase_local_conditions,
                                          points, phase_record, output,
                                          maximum_internal_dof, broadcast=broadcast, parameters=parameters,
-                                         largest_energy=float(largest_energy), fake_points=fp)
+                                         largest_energy=float(largest_energy), fake_points=fp,
+                                         accel_evaluator=accel_evaluator)
         all_phase_data.append(phase_ds)
 
     fp_offset = len(nonvacant_elements) if fake_points else 0

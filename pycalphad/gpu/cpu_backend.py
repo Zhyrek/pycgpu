@@ -42,6 +42,17 @@ def _compile_command(lib_path, src_path, defines):
 _CPU_DRIVER_SRC = r"""
 // ===== CPU backend driver (appended by pycalphad.gpu.cpu_backend) =====
 #include <omp.h>
+
+extern "C" void pycgpu_cpu_grid_eval(int model_idx, const double* dof, double* out,
+                                     long long n_points, int dof_stride)
+{
+    init_all_gpu_phase_records();
+    #pragma omp parallel for schedule(static)
+    for (long long i = 0; i < n_points; ++i) {
+        out[i] = g_phase_records_array[model_idx].obj(&dof[i * (long long)dof_stride]);
+    }
+}
+
 extern "C" void pycgpu_cpu_run_all(
     const void* global_spec_ptr_raw,
     const void* condition_args_list_ptr_raw,

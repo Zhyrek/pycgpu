@@ -93,3 +93,42 @@ def test_invalid_backend_rejected(load_database):
     with pytest.raises(ValueError, match="backend"):
         equilibrium(dbf, ['AL', 'ZN', 'VA'], list(dbf.phases.keys()), CONDS,
                     backend='opencl')
+
+@select_database("alzn_mey.tdb")
+def test_set_backend_api(load_database):
+    import pycalphad
+    dbf = load_database()
+    comps = ['AL', 'ZN', 'VA']
+    phases = list(dbf.phases.keys())
+    ref = equilibrium(dbf, comps, phases, CONDS)
+    # invalid names / options fail eagerly
+    with pytest.raises(ValueError):
+        pycalphad.set_backend('opencl')
+    with pytest.raises(TypeError):
+        pycalphad.set_backend('default', warp=9)
+    assert pycalphad.get_backend()[0] == 'default'
+    if not _has_cpp_compiler():
+        pytest.skip("no C++ compiler")
+    # context manager scoping + result agreement
+    with pycalphad.backend('c++'):
+        assert pycalphad.get_backend()[0] == 'cpp'
+        res = equilibrium(dbf, comps, phases, CONDS)
+    assert pycalphad.get_backend()[0] == 'default'
+    np.testing.assert_allclose(res.GM.values, ref.GM.values, atol=GM_ATOL)
+
+
+@needs_cpp
+@select_database("alzn_mey.tdb")
+def test_accelerated_calculate_cpp(load_database):
+    import pycalphad
+    from pycalphad import calculate
+    dbf = load_database()
+    comps = ['AL', 'ZN', 'VA']
+    phases = list(dbf.phases.keys())
+    ref = calculate(dbf, comps, phases, T=[500, 600], P=101325, N=1)
+    with pycalphad.backend('c++'):
+        res = calculate(dbf, comps, phases, T=[500, 600], P=101325, N=1)
+    assert np.array_equal(ref.X.values, res.X.values)
+    rel = np.nanmax(np.abs(res.GM.values - ref.GM.values) / np.maximum(np.abs(ref.GM.values), 1.0))
+    assert rel < 1e-9, f"accelerated calculate GM rel err {rel}"
+

@@ -2108,7 +2108,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     _header_hash = hashlib.md5()
     # gpu_codegen.py is included because the cached artifact is the GENERATED
     # source: codegen changes must invalidate cached kernels.
-    for _hdr in ("svd.c", "phase_rec.h", "comp_set.h", "lu_solver.h", "minimizer.h",
+    for _hdr in ("svd.c", "phase_rec.h", "comp_set.h", "lu_solver.h", "hyperplane.h", "minimizer.h",
                  "eqsolver.h", "gpu_codegen.py"):
         with open(os.path.join(_gpu_dir, _hdr), "rb") as _f:
             _header_hash.update(_f.read())

@@ -402,7 +402,7 @@ class PointBatchSolver:
 
         gpu_dir = os.path.dirname(os.path.abspath(__file__))
         hasher = hashlib.md5()
-        for hdr in ("svd.c", "phase_rec.h", "comp_set.h", "lu_solver.h",
+        for hdr in ("svd.c", "phase_rec.h", "comp_set.h", "lu_solver.h", "hyperplane.h",
                     "minimizer.h", "eqsolver.h", "gpu_codegen.py"):
             with open(os.path.join(gpu_dir, hdr), "rb") as f:
                 hasher.update(f.read())
@@ -628,3 +628,107 @@ class PointBatchSolver:
             'X': r[:, x0:pid0].reshape(n, MP, MC).copy(),
             'phase_ids': r[:, pid0:pid0 + MP].astype(np.int32),
         }
+
+
+def device_point_hull(points, solver, X_row, GM_rows, combo_idx, Phase_row,
+                      Y_row, nonvacant_elements):
+    """Compiled point hull (hyperplane.h) — same result dict as point_hull.
+
+    Parameters
+    ----------
+    points : PointList (no fixed chemical potentials; X + N conditions)
+    solver : PointBatchSolver (provides the compiled module for its backend)
+    X_row : (m, ncomp) sample compositions — identical for every statevar
+        combo (and walker); pass the phase-filtered copy for restricted sets.
+    GM_rows : (n_combos, m) sample energies per combo.
+    combo_idx : (n,) combo index per point.
+    Phase_row / Y_row : (m,) names and (m, maxdof) site fractions aligned
+        with X_row (for the starting-data extraction).
+    """
+    import ctypes
+    ncomp = len(nonvacant_elements)
+    n = len(points)
+    m = X_row.shape[0]
+    X_row = np.ascontiguousarray(X_row, dtype=np.float64)
+    GM_flat = np.ascontiguousarray(GM_rows, dtype=np.float64).reshape(-1)
+
+    x_base = np.zeros(n, dtype=np.int64)
+    gm_base = (np.asarray(combo_idx, dtype=np.int64) * m)
+    m_points = np.full(n, m, dtype=np.int32)
+    fixed_idx = np.full((n, ncomp), -1, dtype=np.int32)
+    nfixed = np.zeros(n, dtype=np.int32)
+
+    # lincomb rows: one per prescribed X + the N row (same construction as
+    # point_hull); constraint counts are uniform per batch by construction.
+    n_x = int(points.x_cond_mask[0].sum())
+    max_lc = n_x + 1
+    coefs = np.zeros((n, max_lc, ncomp), dtype=np.float64)
+    rhs = np.zeros((n, max_lc), dtype=np.float64)
+    nlc = np.full(n, max_lc, dtype=np.int32)
+    rows_i, cols_c = np.nonzero(points.x_cond_mask)
+    slot = np.concatenate([np.arange(c) for c in
+                           np.bincount(rows_i, minlength=n)]) if rows_i.size else rows_i
+    coefs[rows_i, slot, cols_c] = 1.0
+    rhs[rows_i, slot] = points.X[rows_i, cols_c]
+    coefs[:, n_x, :] = 1.0
+    rhs[:, n_x] = points.N
+
+    mu = np.zeros((n, ncomp), dtype=np.float64)
+    oe = np.zeros(n, dtype=np.float64)
+    fr = np.zeros((n, ncomp + 1), dtype=np.float64)
+    sx = np.zeros((n, ncomp + 1), dtype=np.int32)
+
+    if solver.backend == 'cpp':
+        def p(a):
+            return a.ctypes.data
+        solver.lib.pycgpu_cpu_point_hull(
+            p(X_row), p(GM_flat), p(x_base), p(gm_base), p(m_points),
+            ctypes.c_int(ncomp), p(fixed_idx), p(nfixed),
+            p(coefs), p(rhs), p(nlc), ctypes.c_int(max_lc),
+            p(mu), p(oe), p(fr), p(sx), ctypes.c_int(n))
+    else:
+        cp = solver._cp
+        d = {k: cp.asarray(v) for k, v in
+             dict(X=X_row, GM=GM_flat, xb=x_base, gb=gm_base, mp=m_points,
+                  fi=fixed_idx, nf=nfixed, co=coefs, rh=rhs, nl=nlc,
+                  mu=mu, oe=oe, fr=fr, sx=sx).items()}
+        tpb = 64
+        kern = solver.module.get_function('point_hull_kernel')
+        kern(((n + tpb - 1) // tpb,), (tpb,),
+             (d['X'], d['GM'], d['xb'], d['gb'], d['mp'], np.int32(ncomp),
+              d['fi'], d['nf'], d['co'], d['rh'], d['nl'], np.int32(max_lc),
+              d['mu'], d['oe'], d['fr'], d['sx'], np.int32(n)))
+        cp.cuda.runtime.deviceSynchronize()
+        mu, oe, fr, sx = (cp.asnumpy(d['mu']), cp.asnumpy(d['oe']),
+                          cp.asnumpy(d['fr']), cp.asnumpy(d['sx']))
+
+    # ---- vectorized reference post-processing (matches point_hull) ----
+    # Only the first ncomp vertex slots are meaningful; trailing stays
+    # ''/NaN. Fake vertices dissolve with the non-fake GM recompute.
+    idx = sx[:, :ncomp]
+    phase = Phase_row[idx]                        # (n, ncomp) object/str
+    fake = phase == '_FAKE_'
+    NP = np.full((n, ncomp + 1), np.nan)
+    NP[:, :ncomp] = fr[:, :ncomp]
+    Xv = np.full((n, ncomp + 1, ncomp), np.nan)
+    Yv = np.full((n, ncomp + 1, Y_row.shape[1]), np.nan)
+    Xv[:, :ncomp] = X_row[idx]
+    Yv[:, :ncomp] = Y_row[idx]
+    Phase = np.full((n, ncomp + 1), '', dtype=object)
+    Phase[:, :ncomp] = phase
+    has_fake = fake.any(axis=1)
+    if has_fake.any():
+        gm_at = GM_flat[(gm_base[:, None] + idx)]     # (n, ncomp)
+        w = np.where(fake, 0.0, fr[:, :ncomp])
+        molesum = w.sum(axis=1)
+        new_e = (w * gm_at).sum(axis=1)
+        recompute = has_fake & (molesum != 0)
+        oe = np.where(recompute, np.divide(new_e, molesum,
+                                           out=np.zeros_like(new_e),
+                                           where=molesum != 0), oe)
+        Phase[fake] = ''
+        NP[:, :ncomp][fake] = np.nan
+        Xv[:, :ncomp][fake] = np.nan
+        Yv[:, :ncomp][fake] = np.nan
+    return {'GM': oe, 'MU': mu, 'NP': NP, 'points_idx': sx.astype(np.int32),
+            'Phase': Phase, 'X': Xv, 'Y': Yv}

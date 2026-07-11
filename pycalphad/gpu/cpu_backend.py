@@ -74,6 +74,29 @@ static void __attribute__((noinline)) pycgpu_paint_stack(long long nbytes)
     __asm__ __volatile__("" :: "r"(p) : "memory");
 }
 
+extern "C" void pycgpu_cpu_point_hull(
+    const double* grid_X, const double* grid_GM,
+    const long long* x_base_row, const long long* gm_base_row,
+    const int* m_points, int num_components,
+    const int* fixed_chempot_indices, const int* num_fixed_chempots,
+    const double* lincomb_coefs, const double* lincomb_rhs,
+    const int* num_lincomb, int max_lincomb,
+    double* chemical_potentials, double* out_energy,
+    double* result_fractions, int* result_simplex, int n_conditions)
+{
+    for (int t = 0; t < n_conditions; ++t) {
+        threadIdx.x = (unsigned int)t;
+        blockIdx.x = 0u;
+        blockDim.x = 0u;
+        point_hull_kernel(grid_X, grid_GM, x_base_row, gm_base_row,
+                          m_points, num_components,
+                          fixed_chempot_indices, num_fixed_chempots,
+                          lincomb_coefs, lincomb_rhs, num_lincomb, max_lincomb,
+                          chemical_potentials, out_energy,
+                          result_fractions, result_simplex, n_conditions);
+    }
+}
+
 extern "C" void pycgpu_cpu_run_all(
     const void* global_spec_ptr_raw,
     const void* condition_args_list_ptr_raw,
@@ -159,6 +182,15 @@ def build_cpu_library(full_kernel_source: str, define_flags, cache_dir: str, ver
         print(f"[CPU-C++] Using cached backend library {lib_path}")
 
     lib = ctypes.CDLL(lib_path)
+    hull_fn = lib.pycgpu_cpu_point_hull
+    hull_fn.restype = None
+    hull_fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+                        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int,
+                        ctypes.c_void_p, ctypes.c_void_p,
+                        ctypes.c_void_p, ctypes.c_void_p,
+                        ctypes.c_void_p, ctypes.c_int,
+                        ctypes.c_void_p, ctypes.c_void_p,
+                        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
     fn = lib.pycgpu_cpu_run_all
     fn.restype = None
     fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,

@@ -2691,6 +2691,7 @@ def _generate_full_gpu_source(wks_obj: Workspace,
     phase_rec_h_source = _read_gpu_header("phase_rec.h")
     comp_set_h_source = _read_gpu_header("comp_set.h")
     lu_solver_h_source = _read_gpu_header("lu_solver.h")
+    hyperplane_h_source = _read_gpu_header("hyperplane.h")
     minimizer_h_source = _read_gpu_header("minimizer.h")
     eqsolver_h_source = _read_gpu_header("eqsolver.h")
 
@@ -2751,6 +2752,9 @@ __device__ void gpu_debug_log_array(const char* message, const double* arr, int 
 
 // Content of lu_solver.h (LU decomposition solver)
 {lu_solver_h_source}
+
+// Content of hyperplane.h (device lower-convex-hull tangent search)
+{hyperplane_h_source}
 
 // Content of minimizer.h (defines SystemSpecification, SystemState, run_loop, etc.)
 {minimizer_h_source}
@@ -2891,6 +2895,46 @@ __global__ void grid_eval_kernel(int model_idx, const double* dof, double* out,
     long long i = (long long)blockDim.x * blockIdx.x + threadIdx.x;
     if (i >= n_points) return;
     out[i] = g_phase_records_array[model_idx].obj(&dof[i * (long long)dof_stride]);
+}}
+
+// Per-condition lower convex hull (device twin of pycalphad's
+// lower_convex_hull/hyperplane): one thread per condition. Each condition
+// selects its grid sample via a flat base ROW into the (rows x N) X buffer
+// and aligned GM buffer (walker-stacked and phase-filtered layouts both
+// reduce to this). Chemical potentials are in-out (fixed entries pre-set).
+__global__ void point_hull_kernel(
+    const double* grid_X,        // (x_rows x num_components)
+    const double* grid_GM,       // (gm_rows)
+    const long long* x_base_row, // (n) first X row of this condition's sample
+    const long long* gm_base_row,// (n) first GM row (X repeats across T/walker
+                                 //     combos; GM does not — separate bases
+                                 //     avoid duplicating X for stacked grids)
+    const int* m_points,         // (n) sample rows for this condition
+    int num_components,
+    const int* fixed_chempot_indices,   // (n x num_components), -1-padded
+    const int* num_fixed_chempots,      // (n)
+    const double* lincomb_coefs,        // (n x max_lincomb x num_components)
+    const double* lincomb_rhs,          // (n x max_lincomb)
+    const int* num_lincomb,             // (n)
+    int max_lincomb,
+    double* chemical_potentials,        // (n x num_components) in-out
+    double* out_energy,                 // (n)
+    double* result_fractions,           // (n x (num_components+1))
+    int* result_simplex,                // (n x (num_components+1)) local idx
+    int n_conditions)
+{{
+    int t = (int)(blockDim.x * blockIdx.x + threadIdx.x);
+    if (t >= n_conditions) return;
+    const double* X = &grid_X[x_base_row[t] * (long long)num_components];
+    const double* GM = &grid_GM[gm_base_row[t]];
+    out_energy[t] = pycgpu_hyperplane(
+        X, GM, m_points[t], num_components,
+        &chemical_potentials[(long long)t * num_components],
+        &fixed_chempot_indices[(long long)t * num_components], num_fixed_chempots[t],
+        &lincomb_coefs[(long long)t * max_lincomb * num_components],
+        &lincomb_rhs[(long long)t * max_lincomb], num_lincomb[t],
+        &result_fractions[(long long)t * (num_components + 1)],
+        &result_simplex[(long long)t * (num_components + 1)]);
 }}
 
 __global__ void init_all_gpu_phase_records() {{

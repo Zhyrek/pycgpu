@@ -23,7 +23,8 @@ once in ``__init__``.
 """
 import numpy as np
 
-from pycalphad.gpu.point_solver import PointList, point_hull, PointBatchSolver
+from pycalphad.gpu.point_solver import (PointList, point_hull, PointBatchSolver,
+                                        device_point_hull)
 
 # Compositions outside this window go to the serial fallback: the accelerated
 # capability gate routes dilute conditions to the reference path anyway, and
@@ -513,7 +514,9 @@ class BatchedZPFCalculator:
         hyp_res, n_hyp = None, 0
         if self._hyp_pts_raw is not None:
             pts, combo, n_hyp = self._walker_major(self._hyp_pts_raw, params_matrix)
-            hull = point_hull(pts, grid, self.nonvacant, combo_idx=combo)
+            t = self._grid_tmpl
+            hull = device_point_hull(pts, self.solver, t.X[0], grid.GM, combo,
+                                     t.Phase[0], t.Y[0], self.nonvacant)
             blocks = self._blocks_from_template('all', grid, grid.GM)
             hyp_res = self.solver.solve(pts, hull, grid, self.spec_row0,
                                         self.state_variables, self.nonvacant,
@@ -523,8 +526,15 @@ class BatchedZPFCalculator:
         for ph, raw in self._iso_pts_raw.items():
             pts, combo, n_ph = self._walker_major(raw, params_matrix)
             pts.phase_restrict[:] = ph
-            hull = point_hull(pts, grid, self.nonvacant, combo_idx=combo)
             gfilt = self._filtered_grid(grid, ph)
+            t = self._grid_tmpl
+            sel = self._grid_phase_masks[ph]
+            hull = device_point_hull(pts, self.solver,
+                                     np.ascontiguousarray(t.X[0][sel]),
+                                     np.asarray(gfilt.GM), combo,
+                                     t.Phase[0][sel],
+                                     np.ascontiguousarray(t.Y[0][sel]),
+                                     self.nonvacant)
             blocks = self._blocks_from_template(ph, gfilt, np.asarray(gfilt.GM))
             iso_res[ph] = self.solver.solve(pts, hull, grid, self.spec_row0,
                                             self.state_variables, self.nonvacant,

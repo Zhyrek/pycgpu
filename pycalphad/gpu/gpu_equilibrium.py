@@ -2089,7 +2089,6 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         "backend:" + ("cpu" if os.environ.get('PYCGPU_CPU') else "gpu"),
         "fmad:" + str(bool(os.environ.get('PYCGPU_NOFMAD'))),
         "robust:" + str(bool(os.environ.get('PYCGPU_ROBUST'))),
-        "maxiter:" + os.environ.get('PYCGPU_MAXITER', ''),
         "prof:" + str(bool(os.environ.get('PYCGPU_PROF')))
     ]
     cache_key_input = "|".join(cache_key_parts)
@@ -2167,9 +2166,6 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                 # Robust-removal experiment: consolidation removals count toward
                 # times_compset_removed (see minimizer.h remove_and_consolidate).
                 define_flags.append('-DPYCGPU_ROBUST_REMOVAL')
-            if os.environ.get('PYCGPU_MAXITER'):
-                # Newton-loop iteration budget override (CPU parity default 1000).
-                define_flags.append(f"-DPYCGPU_MAXITER={int(os.environ['PYCGPU_MAXITER'])}")
             if os.environ.get('PYCGPU_PROF'):
                 # Per-thread run_loop segment cycle profiler (prints [PROF] lines).
                 define_flags.append('-DPYCGPU_PROF')
@@ -2659,6 +2655,18 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     if wks_obj.verbose:
         print(f"[GPU] Passing to kernel: condition_data_stride={condition_data_stride} (max_statevars={max_statevars_scalar} + max_components={max_components_scalar})")
 
+    # Newton-loop iteration budget: CPU parity value is 1000 (solver.py:288).
+    # Runtime kernel argument (no recompile). Two-pass driver (PYCGPU_PASS1_ITERS=N):
+    # pass 1 runs everything at the small cap N; conditions that touch the cap are
+    # rerun from their ORIGINAL starting point at the full PYCGPU_MAXITER budget,
+    # which is bit-identical to a single full-budget run (deterministic solver).
+    # Both caps are plain env-var tunables so N can be swept (50/100/150/...)
+    # without recompiling anything.
+    _full_iter_cap = int(os.environ.get('PYCGPU_MAXITER', 1000))
+    _pass1_iters = int(os.environ.get('PYCGPU_PASS1_ITERS', 0) or 0)
+    _twopass_active = 0 < _pass1_iters < _full_iter_cap and not debug_enabled
+    max_solver_iterations = np.int32(_pass1_iters if _twopass_active else _full_iter_cap)
+
     # Now use the proper struct pointers for the kernel call
     # Try different argument formats to see which one works
     if debug_enabled:
@@ -2681,7 +2689,8 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             # WorkArrays struct containing all 20 global memory arrays
             _dev_ptr(work_arrays_gpu),           # const WorkArrays* work_arrays
             _dev_ptr(grid_block_indices_gpu) if grid_block_indices_gpu is not None else 0,  # const int* grid_block_indices
-            np.int64(grid_block_stride_bytes)   # long long grid_block_stride_bytes
+            np.int64(grid_block_stride_bytes),  # long long grid_block_stride_bytes
+            max_solver_iterations               # int max_solver_iterations
         )
     else:
         kernel_args_v1 = (
@@ -2700,7 +2709,8 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             # WorkArrays struct containing all 20 global memory arrays
             _dev_ptr(work_arrays_gpu),           # const WorkArrays* work_arrays
             _dev_ptr(grid_block_indices_gpu) if grid_block_indices_gpu is not None else 0,  # const int* grid_block_indices
-            np.int64(grid_block_stride_bytes)   # long long grid_block_stride_bytes
+            np.int64(grid_block_stride_bytes),  # long long grid_block_stride_bytes
+            max_solver_iterations               # int max_solver_iterations
         )
     
     # Alternative: try passing arrays directly instead of pointers
@@ -2782,6 +2792,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             grid_block_indices=grid_block_indices_gpu if grid_data_device_struct_np is not None else None,
             grid_block_stride_bytes=grid_block_stride_bytes,
             work_arrays_ptr_table=work_arrays_gpu,
+            max_solver_iterations=int(max_solver_iterations),
             verbose=verbose)
     else:
         try:
@@ -2814,6 +2825,79 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         if os.environ.get('PYCGPU_TIME'):
             print(f"[GPU TIME] kernel wall: {time.time() - _t_kernel0:.3f} s "
                   f"({num_total_conditions_pts} conditions, block={threads_per_block})")
+
+    # ---- Two-pass iteration-cap driver (pass 2) ----
+    # Pass 1 above ran with the reduced PYCGPU_PASS1_ITERS cap. Any condition
+    # that exhausted an inner run_loop budget (hit_iteration_cap flag) may be
+    # on a cap-dependent trajectory, so rerun it from the ORIGINAL starting
+    # point at the full budget: deterministic solver => merged results are
+    # bit-identical to a single full-budget launch, but the launch wall time
+    # is no longer bound by spinners in every chunk.
+    if _twopass_active:
+        _res_view = results_gpu.view(np.float64).reshape(
+            num_total_conditions_pts, results_per_condition)
+        _flag_col = 5 + int(dynamic_sizes['MAX_COMPONENTS']) + MAX_PHASES
+        _redo_np = np.nonzero(_to_numpy(_res_view[:, _flag_col]) > 0.5)[0]
+        if verbose or os.environ.get('PYCGPU_TIME'):
+            print(f"[GPU] two-pass: {_redo_np.size}/{num_total_conditions_pts} conditions "
+                  f"hit the {_pass1_iters}-iteration cap; rerunning at {_full_iter_cap}")
+        if _redo_np.size:
+            _redo = xp.asarray(_redo_np)
+            _k = int(_redo_np.size)
+            # Gather per-condition input rows into compact contiguous buffers
+            _sub_spec = xp.ascontiguousarray(
+                system_spec_gpu.view(np.float64).reshape(
+                    num_total_conditions_pts, system_spec_stride)[_redo]).reshape(-1)
+            _sub_cond = xp.ascontiguousarray(
+                condition_args_gpu_doubles.reshape(
+                    num_total_conditions_pts, condition_data_stride)[_redo]).reshape(-1)
+            _sub_ipd = xp.ascontiguousarray(
+                initial_phase_data_gpu.reshape(
+                    num_total_conditions_pts, initial_phase_data_stride)[_redo]).reshape(-1)
+            _sub_gbi = (xp.ascontiguousarray(grid_block_indices_gpu[_redo])
+                        if grid_block_indices_gpu is not None else None)
+            _sub_res = xp.ascontiguousarray(_res_view[_redo]).reshape(-1)
+            if _cpu_backend_mode:
+                run_cpu_backend(
+                    module,
+                    system_spec=_sub_spec,
+                    condition_args_doubles=_sub_cond,
+                    results=_sub_res,
+                    num_conditions=_k,
+                    condition_stride=condition_data_stride,
+                    python_max_statevars=max_statevars_scalar,
+                    initial_phase_data=_sub_ipd,
+                    initial_phase_data_stride=initial_phase_data_stride,
+                    system_spec_stride=system_spec_stride,
+                    grid_data=grid_data_gpu if grid_data_device_struct_np is not None else None,
+                    grid_block_indices=_sub_gbi,
+                    grid_block_stride_bytes=grid_block_stride_bytes,
+                    work_arrays_ptr_table=work_arrays_gpu,
+                    max_solver_iterations=_full_iter_cap,
+                    verbose=verbose)
+            else:
+                _t_pass2 = time.time()
+                _pass2_args = (
+                    _dev_ptr(_sub_spec), _dev_ptr(_sub_cond), _dev_ptr(_sub_res),
+                    _k, condition_data_stride, max_statevars_scalar,
+                    _dev_ptr(_sub_ipd), initial_phase_data_stride, system_spec_stride,
+                    grid_data_ptr_for_kernel,
+                    0, 0, 0, 0, 0,
+                    _dev_ptr(work_arrays_gpu),
+                    _dev_ptr(_sub_gbi) if _sub_gbi is not None else 0,
+                    np.int64(grid_block_stride_bytes),
+                    np.int32(_full_iter_cap))
+                # Pass-2 threads are all long-running divergent spinners; packing
+                # them into one block serializes them on a single SM's FP64 units.
+                # Default block=1 spreads each across its own SM.
+                _pass2_tpb = int(os.environ.get('PYCGPU_PASS2_BLOCK', 1))
+                _pass2_blocks = (_k + _pass2_tpb - 1) // _pass2_tpb
+                top_level_kernel((_pass2_blocks,), (_pass2_tpb,), _pass2_args)
+                cp.cuda.runtime.deviceSynchronize()
+                if os.environ.get('PYCGPU_TIME'):
+                    print(f"[GPU TIME] two-pass pass2 wall: {time.time() - _t_pass2:.3f} s ({_k} conditions)")
+            # Scatter pass-2 results back into the full results buffer
+            _res_view[_redo] = _sub_res.reshape(_k, results_per_condition)
 
     if _guard_mode:
         # Scan the interleaved guard slices: any non-magic value means a thread

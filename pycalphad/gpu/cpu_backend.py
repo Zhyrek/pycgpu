@@ -60,7 +60,8 @@ extern "C" void pycgpu_cpu_run_all(
     int debug_max_steps,
     const void* work_arrays,
     const int* grid_block_indices,
-    long long grid_block_stride_bytes)
+    long long grid_block_stride_bytes,
+    int max_solver_iterations)
 {
     init_all_gpu_phase_records();
     #pragma omp parallel for schedule(dynamic)
@@ -74,7 +75,8 @@ extern "C" void pycgpu_cpu_run_all(
             python_max_statevars, initial_phase_data_ptr, initial_phase_data_stride,
             system_spec_stride, grid_data_ptr_raw, debug_gm_history, debug_mu_history,
             debug_convergence_history, debug_iteration_count, debug_max_steps,
-            (const WorkArrays*)work_arrays, grid_block_indices, grid_block_stride_bytes);
+            (const WorkArrays*)work_arrays, grid_block_indices, grid_block_stride_bytes,
+            max_solver_iterations);
     }
 }
 """
@@ -116,7 +118,8 @@ def build_cpu_library(full_kernel_source: str, define_flags, cache_dir: str, ver
                    ctypes.c_void_p,
                    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
                    ctypes.c_int,
-                   ctypes.c_void_p, ctypes.c_void_p, ctypes.c_longlong]
+                   ctypes.c_void_p, ctypes.c_void_p, ctypes.c_longlong,
+                   ctypes.c_int]
     return lib
 
 
@@ -124,7 +127,7 @@ def run_cpu_backend(lib, *, system_spec, condition_args_doubles, results,
                     num_conditions, condition_stride, python_max_statevars,
                     initial_phase_data, initial_phase_data_stride, system_spec_stride,
                     grid_data, grid_block_indices, grid_block_stride_bytes,
-                    work_arrays_ptr_table, verbose=False):
+                    work_arrays_ptr_table, max_solver_iterations=1000, verbose=False):
     """Run the OpenMP solver directly on host numpy buffers (zero copies).
 
     All array arguments are contiguous host numpy arrays allocated by the
@@ -142,7 +145,8 @@ def run_cpu_backend(lib, *, system_spec, condition_args_doubles, results,
         None, None, None, None, 0,
         _p(work_arrays_ptr_table),
         _p(grid_block_indices),
-        ctypes.c_longlong(grid_block_stride_bytes))
+        ctypes.c_longlong(grid_block_stride_bytes),
+        int(max_solver_iterations))
 
     if verbose:
         print(f"[CPU-C++] Solved {num_conditions} conditions on host (OpenMP)")

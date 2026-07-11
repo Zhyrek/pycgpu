@@ -2929,7 +2929,8 @@ __global__ void top_level_equilibrium_kernel(
     // points per statevar combination (e.g. per T); each condition must use ITS
     // block (energies are T-dependent).
     const int* grid_block_indices,      // [num_conditions] index into grid blocks (may be null)
-    long long grid_block_stride_bytes   // byte stride between grid blocks (0 = single shared block)
+    long long grid_block_stride_bytes,  // byte stride between grid blocks (0 = single shared block)
+    int max_solver_iterations           // Newton-loop budget (CPU parity: 1000; pass 1 of two-pass uses less)
 ) {{
     int tid = blockDim.x * blockIdx.x + threadIdx.x;
 
@@ -3941,7 +3942,8 @@ __global__ void top_level_equilibrium_kernel(
                 work_arrays ? &((double**)work_arrays)[19][thread_idx * SYSTEM_STATE_SIZE] : nullptr,
                 thread_delta_ms,  // Pass delta_ms global memory pointer
                 thread_phase_compositions,  // Pass phase_compositions global memory pointer
-                thread_phase_amounts_per_mole_atoms  // Pass phase_amounts_per_mole_atoms global memory pointer
+                thread_phase_amounts_per_mole_atoms,  // Pass phase_amounts_per_mole_atoms global memory pointer
+                max_solver_iterations
             );
             
             // COMMENTED OUT: Temporary placeholder values (real solver is now being called above)
@@ -4014,7 +4016,9 @@ __global__ void top_level_equilibrium_kernel(
             results_array[base_offset + 2 + MAX_COMPONENTS + MAX_PHASES] = (double)equilibrium_result.num_stable_phases; // Number of stable phases from solver
             results_array[base_offset + 3 + MAX_COMPONENTS + MAX_PHASES] = temp;
             results_array[base_offset + 4 + MAX_COMPONENTS + MAX_PHASES] = pressure;
-            results_array[base_offset + 5 + MAX_COMPONENTS + MAX_PHASES] = equilibrium_result.converged ? 7777.0 : 8888.0; // Real solver marker (7777=converged, 8888=not converged)
+            // Two-pass driver flag: 1.0 if any inner run_loop exhausted its
+            // iteration budget (such conditions must be rerun at the full cap).
+            results_array[base_offset + 5 + MAX_COMPONENTS + MAX_PHASES] = equilibrium_result.hit_iteration_cap ? 1.0 : 0.0;
             
             // Store Y_phases values (site fractions) from equilibrium_result
             // Updated offset to account for all phase amounts being stored

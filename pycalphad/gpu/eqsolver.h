@@ -9,12 +9,10 @@
 #ifndef SYSTEM_STATE_SIZE
 #define SYSTEM_STATE_SIZE 50000
 #endif
-// Newton-loop iteration budget. CPU parity value is 1000 (solver.py:288);
-// tunable via -D for perf experiments (never-converging conditions spin to the
-// cap and bound kernel wall time, since the launch waits for the slowest thread).
-#ifndef PYCGPU_MAXITER
-#define PYCGPU_MAXITER 1000
-#endif
+// Newton-loop iteration budget: CPU parity value is 1000 (solver.py:288),
+// passed at RUNTIME as a kernel argument (max_solver_iterations) so the
+// two-pass driver can run a cheap low-cap pass 1 and rerun only cap-hitting
+// conditions at the full budget, without recompiling.
 static_assert(sizeof(SystemState) <= SYSTEM_STATE_SIZE * sizeof(double),
               "SystemState does not fit its per-thread global-memory slot");
 
@@ -340,6 +338,11 @@ typedef struct EquilibriumResultSingle { // Ensure this is defined (copied from 
     double X_phases[MAX_PHASES * MAX_COMPONENTS];
     double Y_phases[MAX_PHASES * MAX_DOF_PER_PHASE];
     bool converged;
+    // True if ANY inner run_loop exhausted its iteration budget. A cap-hit
+    // feeds the outer add-phases loop, so the trajectory (even a "converged"
+    // one) can differ from a full-budget run: the two-pass driver must rerun
+    // every cap-touching condition, not just unconverged ones.
+    bool hit_iteration_cap;
 } EquilibriumResultSingle;
 
 // Input struct for a single condition
@@ -417,7 +420,8 @@ __device__ void solve_equilibrium_at_condition(
     double* global_system_states, // CRITICAL FIX: SystemState in global memory to avoid stack overflow
     double* delta_ms,            // NEW: Global memory for delta_ms array
     double* phase_compositions,  // NEW: Global memory for phase_compositions array
-    double* phase_amounts_per_mole_atoms  // NEW: Global memory for _phase_amounts_per_mole_atoms_arr
+    double* phase_amounts_per_mole_atoms,  // NEW: Global memory for _phase_amounts_per_mole_atoms_arr
+    int max_solver_iterations    // Newton-loop budget (CPU parity: 1000)
 ) {
     // STACK OVERFLOW FIX: All large arrays are now passed as parameters from global memory
     
@@ -429,7 +433,10 @@ __device__ void solve_equilibrium_at_condition(
     
     // Step 1: Validate inputs and global memory arrays
     if (!A_lstsq_copy || !result || !global_spec_base || !initial_data) {
-        if (result) result->converged = false;
+        if (result) {
+            result->converged = false;
+            result->hit_iteration_cap = false;
+        }
         return; // Cannot proceed without required arrays - memory not allocated yet
     }
     
@@ -1509,7 +1516,7 @@ __device__ void solve_equilibrium_at_condition(
         thread_id,              // Pass thread_id for debug output
         &current_spec,
         &current_sys_state,
-        PYCGPU_MAXITER, // max_iterations - CPU solver.py:288 uses run_loop(state, 1000)
+        max_solver_iterations, // max_iterations - CPU solver.py:288 uses run_loop(state, 1000)
         grid_data,              // Pass grid data for phase search
         phase_data,             // Pass phase data for phase search
         // Pass global memory arrays to avoid stack overflow
@@ -1528,7 +1535,12 @@ __device__ void solve_equilibrium_at_condition(
         hess,               // replaces local hessian arrays
         work_inv            // global memory for LU inversion scratch
     );
-    
+    // run_loop leaves state->iteration at max-1 when it exhausts the budget.
+    // (post_solve_hook exits at exactly max-1 false-positive here, which only
+    // causes a harmless extra pass-2 rerun.)
+    bool hit_iteration_cap = (!converged &&
+        current_sys_state.iteration >= max_solver_iterations - 1);
+
     // CPU outer loop (eqsolver.pyx:308-371): solve, then add_new_phases(df > 1e-4);
     // while a phase was added, re-solve, up to 10 adds. The CPU calls add_new_phases
     // after every solve regardless of convergence, and removed_compsets is always
@@ -1616,7 +1628,7 @@ __device__ void solve_equilibrium_at_condition(
                 thread_id,
                 &current_spec,
                 &current_sys_state,
-                PYCGPU_MAXITER, // max_iterations - CPU solver.py:288 uses run_loop(state, 1000)
+                max_solver_iterations, // max_iterations - CPU solver.py:288 uses run_loop(state, 1000)
                 grid_data,
                 phase_data,
                 equilibrium_matrix,
@@ -1634,16 +1646,21 @@ __device__ void solve_equilibrium_at_condition(
                 hess,
                 work_inv
             );
+            if (!converged &&
+                current_sys_state.iteration >= max_solver_iterations - 1) {
+                hit_iteration_cap = true;
+            }
         }
     }
-    
+
     // DEBUG: Store whether solver was called and returned
     if (thread_id == 0) {
         result->X_phases[15] = converged ? 1.0 : 0.0;  // Convergence result
     }
-    
+
     // Step 7: Store results
     result->converged = converged;
+    result->hit_iteration_cap = hit_iteration_cap;
     
     for (int i = 0; i < current_spec.num_components && i < MAX_COMPONENTS; ++i) {
         result->final_chemical_potentials[i] = current_sys_state.chemical_potentials[i];

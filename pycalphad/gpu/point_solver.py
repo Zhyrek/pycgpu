@@ -112,6 +112,12 @@ def point_hull(points, grid, nonvacant_elements, grid_T=None, grid_P=None,
 
     combo_of_point = _combo_of_point(points, n_combos, grid_T, grid_P, combo_idx)
 
+    # Broadcast (walker-stacked) grids share one X row across all combos
+    # (stride 0): materialize a single writable copy for the Cython
+    # hyperplane(), which requires writable C-contiguous buffers.
+    _x_shared = grid_X.strides[0] == 0
+    _x_row0 = np.array(grid_X[0]) if _x_shared else None  # forced writable copy
+
     # phase-restriction masks are shared per (combo, phase)
     mask_cache = {}
 
@@ -141,12 +147,12 @@ def point_hull(points, grid, nonvacant_elements, grid_T=None, grid_P=None,
         combo = int(combo_of_point[i])
         restrict = points.phase_restrict[i]
         if restrict is None:
-            comps_view = grid_X[combo]
+            comps_view = _x_row0 if _x_shared else grid_X[combo]
             ener_view = grid_GM[combo]
             back_map = None
         else:
             back_map = _mask_for(combo, restrict)
-            comps_view = np.ascontiguousarray(grid_X[combo][back_map])
+            comps_view = np.array((_x_row0 if _x_shared else grid_X[combo])[back_map])
             ener_view = np.ascontiguousarray(grid_GM[combo][back_map])
 
         # fixed linear-combination rows: one per prescribed X + the N row.
@@ -377,8 +383,9 @@ class PointBatchSolver:
     """
 
     def __init__(self, components, phases, models, phase_record_factory,
-                 robust=True, verbose=False):
+                 robust=True, verbose=False, backend='cpp'):
         self.verbose = verbose
+        self.backend = backend
         shim = SimpleNamespace(components=list(components), phases=list(phases),
                                models=models, phase_record_factory=phase_record_factory,
                                conditions={}, verbose=verbose)
@@ -422,9 +429,24 @@ class PointBatchSolver:
                                                     len(unique_models))
             cache_file.write_text(full_source)
 
-        from pycalphad.gpu.cpu_backend import build_cpu_library
-        self.lib = build_cpu_library(full_source, define_flags,
-                                     cache_dir=str(cache_dir), verbose=verbose)
+        if backend == 'cpp':
+            from pycalphad.gpu.cpu_backend import build_cpu_library
+            self.lib = build_cpu_library(full_source, define_flags,
+                                         cache_dir=str(cache_dir), verbose=verbose)
+        elif backend == 'cuda':
+            import cupy as cp
+            self._cp = cp
+            self.module = cp.RawModule(
+                code=full_source,
+                options=tuple(['-std=c++11', '-O2'] + define_flags),
+                backend='nvcc')
+            if cp.cuda.runtime.deviceGetLimit(cp.cuda.runtime.cudaLimitStackSize) < 65536:
+                cp.cuda.runtime.deviceSetLimit(cp.cuda.runtime.cudaLimitStackSize, 65536)
+            self.module.get_function('init_all_gpu_phase_records')((1,), (1,), ())
+            cp.cuda.runtime.deviceSynchronize()
+            self._top_kernel = self.module.get_function('top_level_equilibrium_kernel')
+        else:
+            raise ValueError(f"unknown backend {backend!r} (use 'cpp' or 'cuda')")
         _, self.name_to_idx = _unique_models_for_gpu(shim, validate=False)
 
         ds = self.dynamic_sizes
@@ -476,7 +498,7 @@ class PointBatchSolver:
     def solve(self, points, hull, grid, spec_row0, state_variables,
               nonvacant_elements, restrict_grid_views=None,
               max_solver_iterations=1000, grid_T=None, grid_P=None,
-              combo_idx=None):
+              combo_idx=None, grid_blocks=None):
         """Launch one batch. Returns dict with per-point flat results.
 
         grid: calculate() result (to_xarray=False) covering the points'
@@ -499,11 +521,14 @@ class PointBatchSolver:
         ipd_struct = _create_initial_phase_data_struct_array(ipd_arrays, n, ds, False)
         ipd_stride = ipd_struct.shape[1]
 
-        grid_src = restrict_grid_views if restrict_grid_views is not None else grid
-        grid_blocks, block_shape = _prepare_grid_data_for_gpu_from_calculate_result(
-            grid_src, self.name_to_idx, MP, MDOF, MC, self.verbose)
+        if grid_blocks is None:
+            grid_src = restrict_grid_views if restrict_grid_views is not None else grid
+            grid_blocks, block_shape = _prepare_grid_data_for_gpu_from_calculate_result(
+                grid_src, self.name_to_idx, MP, MDOF, MC, self.verbose)
+            n_blocks = int(np.prod(block_shape))
+        else:
+            n_blocks = grid_blocks.shape[0]
         # map each point to its statevar-combo block (same C-order as point_hull)
-        n_blocks = int(np.prod(block_shape))
         gbi = _combo_of_point(points, n_blocks, grid_T, grid_P, combo_idx).astype(np.int32)
 
         # work arrays (23 slots; layout mirrors gpu_equilibrium.py:2566+)
@@ -517,31 +542,77 @@ class PointBatchSolver:
         EQS = int(ds['MAX_EQ_SOLN_LEN'])
         SSS = int(ds['SYSTEM_STATE_SIZE'])
         tpb = 64
-        nt = ((n + tpb - 1) // tpb) * tpb
         wa_shapes = [SVD * SVD, SVD * SVD, SVD * SVD, SVD, SVD,
                      PMD * PMD, PMD * PMD, PMD, PMD, PMD * PMD,
                      DOFS, DOFS, DOFS * DOFS, MC, MC * DOFS, PMD * PMD,
                      EQM, EQR, EQS, SSS, MP * MC, MP * MC, MP * MC]
-        self._work = [np.empty((nt, s), dtype=np.float64) for s in wa_shapes]
-        ptr_table = np.array([w.ctypes.data for w in self._work], dtype=np.uint64)
+        # Thread-chunked launches bound the dominant work-array memory (same
+        # rationale as PYCGPU_CHUNK in the main pipeline); slices of the
+        # per-condition buffers are zero-copy views and sequential launches
+        # reuse the same work arrays race-free.
+        chunk = int(os.environ.get('PYCGPU_POINT_CHUNK', 65536))
+        chunk = min(n, chunk)
+        nt = ((chunk + tpb - 1) // tpb) * tpb
 
+        spec_flat = np.ascontiguousarray(specs.reshape(-1))
+        cond_flat = np.ascontiguousarray(cond_args.reshape(-1))
+        ipd_flat = np.ascontiguousarray(ipd_struct.reshape(-1))
         results = np.zeros(n * self.results_per_condition, dtype=np.float64)
-        run_cpu_backend(self.lib,
-                        system_spec=np.ascontiguousarray(specs.reshape(-1)),
-                        condition_args_doubles=np.ascontiguousarray(cond_args.reshape(-1)),
-                        results=results,
-                        num_conditions=n,
-                        condition_stride=cond_args.shape[1],
-                        python_max_statevars=MSV,
-                        initial_phase_data=np.ascontiguousarray(ipd_struct.reshape(-1)),
-                        initial_phase_data_stride=ipd_stride,
-                        system_spec_stride=specs.shape[1],
-                        grid_data=grid_blocks,
-                        grid_block_indices=gbi,
-                        grid_block_stride_bytes=int(grid_blocks.dtype.itemsize),
-                        work_arrays_ptr_table=ptr_table,
-                        max_solver_iterations=max_solver_iterations,
-                        verbose=self.verbose)
+        spec_stride = specs.shape[1]
+        cond_stride = cond_args.shape[1]
+        rpc = self.results_per_condition
+        gbs = int(grid_blocks.dtype.itemsize)
+
+        if self.backend == 'cpp':
+            self._work = [np.empty((nt, s), dtype=np.float64) for s in wa_shapes]
+            ptr_table = np.array([w.ctypes.data for w in self._work], dtype=np.uint64)
+            for cs in range(0, n, chunk):
+                ce = min(cs + chunk, n)
+                run_cpu_backend(self.lib,
+                                system_spec=spec_flat[cs * spec_stride:ce * spec_stride],
+                                condition_args_doubles=cond_flat[cs * cond_stride:ce * cond_stride],
+                                results=results[cs * rpc:ce * rpc],
+                                num_conditions=ce - cs,
+                                condition_stride=cond_stride,
+                                python_max_statevars=MSV,
+                                initial_phase_data=ipd_flat[cs * ipd_stride:ce * ipd_stride],
+                                initial_phase_data_stride=ipd_stride,
+                                system_spec_stride=spec_stride,
+                                grid_data=grid_blocks,
+                                grid_block_indices=gbi[cs:ce],
+                                grid_block_stride_bytes=gbs,
+                                work_arrays_ptr_table=ptr_table,
+                                max_solver_iterations=max_solver_iterations,
+                                verbose=self.verbose)
+        else:
+            cp = self._cp
+            d_spec = cp.asarray(spec_flat)
+            d_cond = cp.asarray(cond_flat)
+            d_ipd = cp.asarray(ipd_flat)
+            d_res = cp.asarray(results)
+            d_grid = cp.asarray(np.frombuffer(grid_blocks.tobytes(), dtype=np.uint8))
+            d_gbi = cp.asarray(gbi)
+            d_work = [cp.empty((nt, s), dtype=cp.float64) for s in wa_shapes]
+            d_ptrs = cp.asarray(np.array([w.data.ptr for w in d_work], dtype=np.uint64))
+            for cs in range(0, n, chunk):
+                ce = min(cs + chunk, n)
+                cn = ce - cs
+                args = (int(d_spec.data.ptr + cs * spec_stride * 8),
+                        int(d_cond.data.ptr + cs * cond_stride * 8),
+                        int(d_res.data.ptr + cs * rpc * 8),
+                        np.int32(cn), np.int32(cond_stride), np.int32(MSV),
+                        int(d_ipd.data.ptr + cs * ipd_stride * 8),
+                        np.int32(ipd_stride), np.int32(spec_stride),
+                        int(d_grid.data.ptr),
+                        0, 0, 0, 0, np.int32(0),
+                        int(d_ptrs.data.ptr),
+                        int(d_gbi.data.ptr + cs * 4),
+                        np.int64(gbs),
+                        np.int32(max_solver_iterations))
+                blocks = (cn + tpb - 1) // tpb
+                self._top_kernel((blocks,), (tpb,), args)
+            cp.cuda.runtime.deviceSynchronize()
+            results = cp.asnumpy(d_res)
 
         r = results.reshape(n, self.results_per_condition)
         y0 = 6 + MC + MP

@@ -61,11 +61,21 @@ class BatchedZPFCalculator:
         default the backend equilibrium path uses)
     """
 
-    def __init__(self, zpf_data, param_names, pdens=60, verbose=False):
+    def __init__(self, zpf_data, param_names, pdens=60, verbose=False,
+                 backend='cpp', walker_chunk=64, sample_df='grid'):
         self.zpf_data = zpf_data
         self.param_names = [str(p) for p in param_names]
         self.pdens = pdens
         self.verbose = verbose
+        self.backend = backend
+        self.walker_chunk = int(walker_chunk)
+        # 'grid': vectorized max(mu.X - GM) over the shared grid sample
+        # (fast; different sample set than the reference's fresh pdens=50
+        # draw, so estimates differ within sampling noise, ~0.02 sigma).
+        # 'reference': ESPEI's serial calculate_ per vertex (exact match).
+        self.sample_df = sample_df
+        self._grid_tmpl = None
+        self._grid_eval = None
 
         region0 = self.zpf_data[0]['phase_regions'][0]
         self.species = region0.species
@@ -82,7 +92,8 @@ class BatchedZPFCalculator:
         self._plan()
 
         self.solver = PointBatchSolver(self.species, self.phases, self.models,
-                                       self.prf, robust=True, verbose=verbose)
+                                       self.prf, robust=True, verbose=verbose,
+                                       backend=backend)
         # phase_dof per model index, for the underdetermined-vertex rule
         self.dof_of_model = {}
         for ph in self.phases:
@@ -124,6 +135,11 @@ class BatchedZPFCalculator:
                         rows = self._iso_rows.setdefault(vtx.phase_name, [])
                         self.df_jobs[(dg, pr, vi)] = ('iso', vtx.phase_name, len(rows))
                         rows.append((dg, pr, vi, T, P, comp_idx, float(xval)))
+                    elif vtx.has_missing_comp_cond and not vtx.is_disordered:
+                        # driving force is a sampling ESTIMATE (reference:
+                        # max over a fresh pdens=50 sample of mu.X - GM);
+                        # evaluated vectorized on the shared grid sample.
+                        self.df_jobs[(dg, pr, vi)] = ('sample', vtx.phase_name, T)
                     else:
                         self.df_jobs[(dg, pr, vi)] = ('serial',)
 
@@ -262,10 +278,26 @@ class BatchedZPFCalculator:
                                             restrict_grid_views=gfilt,
                                             grid_T=self._unique_T)
 
-        return self._assemble(hyp_res, iso_res, parameters, params_dict)
+        self._ensure_grid_template()
+        return self._assemble(hyp_res, iso_res, parameters, params_dict,
+                              grid_GM=np.asarray(grid.GM).reshape(-1, np.asarray(grid.GM).shape[-1]))
+
+    def _sample_df(self, grid_GM, combo_off, phase, T, target):
+        """Vectorized sampling estimate: max over the phase's grid sample of
+        target.X - GM (reference: driving_force_to_hyperplane missing-comp
+        branch, which uses a fresh pdens=50 sample; here the shared grid
+        sample serves — same estimator, slightly different sample set)."""
+        t = self._grid_tmpl
+        cols = t.phase_cols.get(phase)
+        if cols is None or cols.size == 0:
+            return 0.0
+        ti = int(np.searchsorted(self._unique_T, T))
+        gm_row = grid_GM[combo_off + ti, cols]
+        x_cols = t.X[0][cols, :self.ncomp]
+        return float(np.max(x_cols @ target - gm_row))
 
     def _assemble(self, hyp_res, iso_res, parameters, params_dict,
-                  row_off_hyp=0, row_off_iso=None):
+                  row_off_hyp=0, row_off_iso=None, grid_GM=None, combo_off=0):
         """Driving-force/weight assembly (reference semantics). Row offsets
         select a walker's slice out of walker-major batched results."""
         row_off_iso = row_off_iso or {}
@@ -300,6 +332,9 @@ class BatchedZPFCalculator:
                     if job[0] == 'iso':
                         gm = float(iso_res[job[1]]['GM'][row_off_iso.get(job[1], 0) + job[2]])
                         df = float(np.dot(target, vtx.composition) - gm)
+                    elif (job[0] == 'sample' and grid_GM is not None
+                          and self.sample_df == 'grid'):
+                        df = self._sample_df(grid_GM, combo_off, job[1], job[2], target)
                     else:
                         df = self._serial_driving_force(data, region, vtx,
                                                         target, parameters)
@@ -344,6 +379,105 @@ class BatchedZPFCalculator:
             attrs={},
         )
 
+    def _ensure_grid_template(self):
+        """One-time: grid structure + per-phase sample dof matrices.
+
+        The sampling (X/Y/Phase and the fake points) is parameter-independent;
+        only real points' GM changes with the fit parameters, and those are
+        re-evaluated directly through the generated evaluator (which appends
+        prf.param_values live)."""
+        if self._grid_tmpl is not None:
+            return
+        from types import SimpleNamespace
+        from pycalphad.gpu.gpu_calculate import get_grid_evaluator
+        g0 = self._make_grid(dict(zip(self.param_names,
+                                      np.zeros(len(self.param_names)))))
+        gm = np.asarray(g0.GM)
+        M = gm.shape[-1]
+        nT = len(self._unique_T)
+        gm2 = gm.reshape(-1, M)
+        gx = np.asarray(g0.X).reshape((-1,) + np.asarray(g0.X).shape[-2:])
+        gy = np.asarray(g0.Y).reshape((-1,) + np.asarray(g0.Y).shape[-2:])
+        gp = np.asarray(g0.Phase).reshape(-1, M)
+        row0 = gp[0]
+        # per-phase dof matrices: rows are (T-combo major, column minor);
+        # Y sampling is identical across T combos.
+        phase_cols, phase_dofs = {}, {}
+        for ph in self.phases:
+            cols = np.flatnonzero(row0 == ph)
+            if cols.size == 0:
+                continue
+            pdof = self.prf[ph].phase_dof
+            y0 = gy[0][cols, :pdof]                      # (ncols, pdof)
+            rows = np.empty((nT * cols.size, 3 + pdof), dtype=np.float64)
+            rows[:, 0] = 1.0
+            rows[:, 1] = self._P
+            rows[:, 2] = np.repeat(self._unique_T, cols.size)
+            rows[:, 3:] = np.tile(y0, (nT, 1))
+            phase_cols[ph] = cols
+            phase_dofs[ph] = np.ascontiguousarray(rows)
+        fake_cols = np.flatnonzero(row0 == '_FAKE_')
+        self._grid_tmpl = SimpleNamespace(
+            M=M, nT=nT, X=gx, Y=gy, Phase=gp, GM_fake=gm2[:, fake_cols].copy(),
+            fake_cols=fake_cols, phase_cols=phase_cols, phase_dofs=phase_dofs)
+        self._grid_eval = get_grid_evaluator(
+            'cpp', self.species, self.phases, self.models, self.prf,
+            verbose=self.verbose)
+
+    def _blocks_from_template(self, key, grid_src, GM_rows):
+        """DeviceGrid blocks for stacked walker grids: struct-pack ONE combo
+        set through the reference packer, then tile and overwrite the GM
+        field vectorized (X/Y/PhaseID are walker-invariant)."""
+        from pycalphad.gpu.gpu_equilibrium import \
+            _prepare_grid_data_for_gpu_from_calculate_result
+        ds = self.solver.dynamic_sizes
+        tmpl = getattr(self, '_block_tmpls', None)
+        if tmpl is None:
+            self._block_tmpls = tmpl = {}
+        entry = tmpl.get(key)
+        if entry is None:
+            from types import SimpleNamespace
+            nT = len(self._unique_T)
+            one = SimpleNamespace(GM=np.asarray(grid_src.GM)[:nT],
+                                  X=np.asarray(grid_src.X)[:nT],
+                                  Y=np.asarray(grid_src.Y)[:nT],
+                                  Phase=np.asarray(grid_src.Phase)[:nT],
+                                  attrs={})
+            blocks, _ = _prepare_grid_data_for_gpu_from_calculate_result(
+                one, self.solver.name_to_idx, int(ds['MAX_PHASES']),
+                int(ds['MAX_DOF_PER_PHASE']), int(ds['MAX_COMPONENTS']), False)
+            tmpl[key] = entry = blocks
+        n_combos = GM_rows.shape[0]
+        W = n_combos // entry.shape[0]
+        big = np.tile(entry, W)
+        m = big['GM_ptr_data'].shape[1]
+        big['GM_ptr_data'][:] = GM_rows[:, :m]
+        return big
+
+    def _stacked_grids_fast(self, params_matrix):
+        """Per-walker GM via the generated evaluator on cached sample dofs."""
+        from types import SimpleNamespace
+        self._ensure_grid_template()
+        t = self._grid_tmpl
+        W = len(params_matrix)
+        GM = np.empty((W * t.nT, t.M), dtype=np.float64)
+        pv = np.asarray(self.prf.param_values, dtype=np.float64).reshape(-1)
+        for w, pvec in enumerate(params_matrix):
+            pv_view = self.prf.param_values
+            np.asarray(pv_view).reshape(-1)[:] = pvec  # in-place, evaluator reads live
+            blk = GM[w * t.nT:(w + 1) * t.nT]
+            blk[:, t.fake_cols] = t.GM_fake
+            for ph, cols in t.phase_cols.items():
+                out = np.empty(t.phase_dofs[ph].shape[0], dtype=np.float64)
+                self._grid_eval(ph, t.phase_dofs[ph], out)
+                blk[:, cols] = out.reshape(t.nT, cols.size)
+        np.asarray(self.prf.param_values).reshape(-1)[:] = pv  # restore
+        return SimpleNamespace(
+            GM=GM,
+            X=np.broadcast_to(t.X[0], (W * t.nT,) + t.X.shape[1:]),
+            Y=np.broadcast_to(t.Y[0], (W * t.nT,) + t.Y.shape[1:]),
+            Phase=np.broadcast_to(t.Phase[0], (W * t.nT, t.M)), attrs={})
+
     def _walker_major(self, raw, params_matrix):
         """Tile a point group walker-major with per-walker parameter rows and
         explicit (walker*nT + t) combo indices."""
@@ -367,16 +501,23 @@ class BatchedZPFCalculator:
         ``driving_forces(params_matrix[w])``.
         """
         params_matrix = np.atleast_2d(np.asarray(params_matrix, dtype=np.float64))
+        if len(params_matrix) > self.walker_chunk:
+            out = []
+            for cs in range(0, len(params_matrix), self.walker_chunk):
+                out.extend(self.driving_forces_ensemble(
+                    params_matrix[cs:cs + self.walker_chunk]))
+            return out
         W = len(params_matrix)
-        grid = self._stacked_grids(params_matrix)
+        grid = self._stacked_grids_fast(params_matrix)
 
         hyp_res, n_hyp = None, 0
         if self._hyp_pts_raw is not None:
             pts, combo, n_hyp = self._walker_major(self._hyp_pts_raw, params_matrix)
             hull = point_hull(pts, grid, self.nonvacant, combo_idx=combo)
+            blocks = self._blocks_from_template('all', grid, grid.GM)
             hyp_res = self.solver.solve(pts, hull, grid, self.spec_row0,
                                         self.state_variables, self.nonvacant,
-                                        combo_idx=combo)
+                                        combo_idx=combo, grid_blocks=blocks)
 
         iso_res, n_iso = {}, {}
         for ph, raw in self._iso_pts_raw.items():
@@ -384,10 +525,11 @@ class BatchedZPFCalculator:
             pts.phase_restrict[:] = ph
             hull = point_hull(pts, grid, self.nonvacant, combo_idx=combo)
             gfilt = self._filtered_grid(grid, ph)
+            blocks = self._blocks_from_template(ph, gfilt, np.asarray(gfilt.GM))
             iso_res[ph] = self.solver.solve(pts, hull, grid, self.spec_row0,
                                             self.state_variables, self.nonvacant,
                                             restrict_grid_views=gfilt,
-                                            combo_idx=combo)
+                                            combo_idx=combo, grid_blocks=blocks)
             n_iso[ph] = n_ph
 
         out = []
@@ -401,7 +543,8 @@ class BatchedZPFCalculator:
             out.append(self._assemble(
                 hyp_res, iso_res, pvec, params_dict,
                 row_off_hyp=w * n_hyp,
-                row_off_iso={ph: w * n for ph, n in n_iso.items()}))
+                row_off_iso={ph: w * n for ph, n in n_iso.items()},
+                grid_GM=grid.GM, combo_off=w * len(self._unique_T)))
         return out
 
     def log_prob_ensemble(self, params_matrix, data_weight=1.0):

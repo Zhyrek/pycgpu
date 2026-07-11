@@ -57,6 +57,9 @@ struct CompositionSet {
         NP = phase_amt;
         // Pass full workspace DOF to energy functions - they now expect workspace format
         energy = phase_record->obj(dof);
+        #ifdef PYCGPU_FP32EMU
+        energy = pycgpu_f32(energy);
+        #endif
         
         // DEBUG: Check memory before mass_obj
         #ifdef VERBOSE_DEBUG
@@ -89,6 +92,9 @@ struct CompositionSet {
         if (phase_record && phase_record->formulamole_obj) {
             // With updated energy functions, pass the full DOF array directly
             phase_record->formulamole_obj(formulamoles, dof);
+            #ifdef PYCGPU_FP32EMU
+            pycgpu_f32_arr(formulamoles, phase_record->nonvacant_elements > 0 ? phase_record->nonvacant_elements : phase_record->num_elements);
+            #endif
         }
         
         // Sum up the moles of atoms per formula unit

@@ -1,6 +1,17 @@
 #ifndef PHASE_REC_H
 #define PHASE_REC_H
 
+#ifdef PYCGPU_FP32EMU
+// FP32-emulation prototype: round values to float precision at the outputs of
+// the generated model functions and the linear-algebra solves, so the FP64
+// kernel behaves as if those stages ran in single precision. Used to answer
+// empirically whether an FP32 solver pass could produce usable warm starts.
+__device__ inline double pycgpu_f32(double v) { return (double)(float)v; }
+__device__ inline void pycgpu_f32_arr(double* a, int n) {
+    for (int i = 0; i < n; ++i) a[i] = (double)(float)a[i];
+}
+#endif
+
 typedef double (*pycgpu_func_t)(const double*);
 typedef void (*pycgpu_array_func_t)(double*, const double*);
 

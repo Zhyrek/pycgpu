@@ -144,7 +144,11 @@ __device__ void invert_matrix_lu(double* A, int n, double* work) {
         
         // Store result in output matrix
         for (int i = 0; i < n; i++) {
+            #ifdef PYCGPU_FP32EMU
+            A[i * n + j] = (double)(float)col[i];
+            #else
             A[i * n + j] = col[i];
+            #endif
         }
     }
 }

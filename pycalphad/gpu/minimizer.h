@@ -614,6 +614,9 @@ typedef struct SystemState {
                         
                         // Call formulamole_grad with workspace DOF
                         compset->phase_record->formulamole_grad(temp_mass_jac, compset->dof);
+                        #ifdef PYCGPU_FP32EMU
+                        pycgpu_f32_arr(temp_mass_jac, MAX_COMPONENTS * (1 + MAX_DOF_PER_PHASE));
+                        #endif
                         
                         // Zero out the full mass_jac array
                         for (int i = 0; i < csst->mass_jac_rows * csst->mass_jac_cols; ++i) {
@@ -1029,6 +1032,9 @@ typedef struct SystemState {
                 long long prof_h0 = clock64();
                 #endif
                 pr->formulahess(temp_hess, compset->dof);
+                #ifdef PYCGPU_FP32EMU
+                pycgpu_f32_arr(temp_hess, (1 + pr->phase_dof) * (1 + pr->phase_dof));
+                #endif
                 #ifdef PYCGPU_PROF
                 if (thread_id < PYCGPU_PROF_MAXT) g_prof_hess[thread_id] += clock64() - prof_h0;
                 #endif
@@ -1124,6 +1130,9 @@ typedef struct SystemState {
                 long long prof_f1 = clock64();
                 #endif
                 pr->formulagrad(temp_grad, compset->dof);
+                #ifdef PYCGPU_FP32EMU
+                pycgpu_f32_arr(temp_grad, 1 + pr->phase_dof);
+                #endif
                 #ifdef PYCGPU_PROF
                 if (thread_id < PYCGPU_PROF_MAXT) g_prof_funcs[thread_id] += clock64() - prof_f1;
                 #endif
@@ -1201,6 +1210,9 @@ typedef struct SystemState {
                 long long prof_f2 = clock64();
                 #endif
                 pr->internal_cons_jac(temp_cons_jac, compset->dof);
+                #ifdef PYCGPU_FP32EMU
+                pycgpu_f32_arr(temp_cons_jac, pr->num_internal_cons * (pr->num_statevars + pr->phase_dof));
+                #endif
                 #ifdef PYCGPU_PROF
                 if (thread_id < PYCGPU_PROF_MAXT) g_prof_funcs[thread_id] += clock64() - prof_f2;
                 #endif
@@ -2571,9 +2583,19 @@ __device__ bool check_convergence(SystemSpecification* spec, SystemState* state)
     // SEGMENT 38: CHECK CONVERGENCE
     gpu_debug_log(38, "Check convergence", state->condition_idx);
     
+#ifdef PYCGPU_FP32EMU
+    // FP32-emulation prototype: solutions are rounded to float precision each
+    // iteration, so the FP64 convergence deltas (1e-10/5e-9) are unreachable.
+    // These limits target the ~1e-7 resolution an actual FP32 pass could
+    // deliver; a subsequent FP64 pass would polish to full tolerance.
+    double ALLOWED_DELTA_Y = 1e-6;
+    double ALLOWED_DELTA_PHASE_AMT = 1e-6;
+    double ALLOWED_DELTA_STATEVAR = 1e-4;
+#else
     double ALLOWED_DELTA_Y = 5e-09;
     double ALLOWED_DELTA_PHASE_AMT = 1e-10;
     double ALLOWED_DELTA_STATEVAR = 1e-5;
+#endif
     
     if (state->condition_idx < 3) {
         gpu_debug_log_value("largest_phase_amt_change", state->largest_phase_amt_change);
@@ -2587,7 +2609,13 @@ __device__ bool check_convergence(SystemSpecification* spec, SystemState* state)
         (state->largest_phase_amt_change < ALLOWED_DELTA_PHASE_AMT) &&
         (state->largest_y_change < ALLOWED_DELTA_Y) &&
         (state->largest_statevar_change < ALLOWED_DELTA_STATEVAR) &&
-        (state->mass_residual < spec->ALLOWED_MASS_RESIDUAL);
+        (state->mass_residual <
+         #ifdef PYCGPU_FP32EMU
+         fmax(spec->ALLOWED_MASS_RESIDUAL, 1e-6)
+         #else
+         spec->ALLOWED_MASS_RESIDUAL
+         #endif
+        );
 
     // Check convergence similar to CPU behavior
     // CPU doesn't require a minimum iteration count for convergence
@@ -3472,6 +3500,9 @@ __device__ void solve_state(
           U_lstsq, V_lstsq, singular_values_lstsq, superdiag_lstsq);
     #ifdef PYCGPU_PROF
     if (thread_id < PYCGPU_PROF_MAXT) g_prof_lstsq[thread_id] += clock64() - prof_ss_t0;
+    #endif
+    #ifdef PYCGPU_FP32EMU
+    pycgpu_f32_arr(equilibrium_rhs, equilibrium_matrix_cols);
     #endif
     
     // The solution should be in equilibrium_rhs after lstsq completes

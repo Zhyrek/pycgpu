@@ -2100,7 +2100,8 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         "backend:" + ("cpu" if os.environ.get('PYCGPU_CPU') else "gpu"),
         "fmad:" + str(bool(os.environ.get('PYCGPU_NOFMAD'))),
         "robust:" + str(bool(os.environ.get('PYCGPU_ROBUST'))),
-        "prof:" + str(bool(os.environ.get('PYCGPU_PROF')))
+        "prof:" + str(bool(os.environ.get('PYCGPU_PROF'))),
+        "fp32emu:" + str(bool(os.environ.get('PYCGPU_FP32EMU')))
     ]
     cache_key_input = "|".join(cache_key_parts)
     cache_key = hashlib.md5(cache_key_input.encode()).hexdigest()
@@ -2180,6 +2181,11 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             if os.environ.get('PYCGPU_PROF'):
                 # Per-thread run_loop segment cycle profiler (prints [PROF] lines).
                 define_flags.append('-DPYCGPU_PROF')
+            if os.environ.get('PYCGPU_FP32EMU'):
+                # FP32-emulation prototype: rounds generated-function outputs and
+                # linear-algebra solutions to float precision + relaxed convergence
+                # limits, to test whether a real FP32 pass could produce warm starts.
+                define_flags.append('-DPYCGPU_FP32EMU')
 
             if os.environ.get('PYCGPU_CPU'):
                 # CPU-C++ backend: compile the same generated source with g++/OpenMP.

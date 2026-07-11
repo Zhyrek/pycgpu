@@ -40,20 +40,14 @@ def create_flat_system_specification(global_spec_scalars, global_spec_arrays, dy
         1    # ALLOWED_MASS_RESIDUAL
     )
     
-    spec_work_doubles = (
-        (MAX_SVD_M * MAX_SVD_N) +  # A_lstsq_copy
-        (MAX_SVD_M * MAX_SVD_N) +  # U_lstsq
-        (MAX_SVD_N * MAX_SVD_N) +  # V_lstsq
-        MAX_SVD_N +  # singular_values_lstsq
-        MAX_SVD_N +  # superdiag_lstsq
-        (MAX_PHASE_MATRIX_DIM * MAX_PHASE_MATRIX_DIM) +  # U_inv
-        (MAX_PHASE_MATRIX_DIM * MAX_PHASE_MATRIX_DIM) +  # V_inv
-        MAX_PHASE_MATRIX_DIM +  # singular_values_inv
-        MAX_PHASE_MATRIX_DIM +  # superdiag_inv
-        (MAX_PHASE_MATRIX_DIM * MAX_PHASE_MATRIX_DIM)  # work_inv
-    )
-    
-    total_doubles = spec_core_doubles + spec_work_doubles
+    # NOTE: this array used to append per-condition SVD/inverse workspaces
+    # (~5800 doubles for a 22-phase system) after the core fields. The kernel
+    # parser only reads the core fields and all work arrays moved to the
+    # separate WorkArrays allocation long ago, so the tail was pure dead
+    # weight: ~75x spec-buffer bloat (640MB at 1M conditions). The kernel
+    # slices by the RUNTIME system_spec_stride argument, so shrinking here
+    # requires no kernel change.
+    total_doubles = spec_core_doubles
     
     # Create flat array
     spec_doubles = np.zeros(total_doubles, dtype=np.float64)

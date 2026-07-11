@@ -3824,6 +3824,10 @@ __global__ void top_level_equilibrium_kernel(
             
             thread_spec.max_num_free_stable_phases = (int)my_spec_doubles[py_offset++];
             thread_spec.ALLOWED_MASS_RESIDUAL = my_spec_doubles[py_offset++];
+            for (int pi = 0; pi < MAX_PARAMS; ++pi) {{
+                thread_spec.fit_params[pi] = my_spec_doubles[py_offset++];
+            }}
+            thread_spec.num_params = (int)my_spec_doubles[py_offset++];
             
             // Work arrays are not copied - they're allocated separately in global memory
             

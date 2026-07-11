@@ -1,3 +1,7 @@
+#ifndef MAX_PARAMS
+#define MAX_PARAMS 0
+#endif
+
 #pragma once
 #include "phase_rec.h"
 
@@ -24,7 +28,10 @@ struct CompositionSet {
     // With workspace having 3 state vars (N, P, T) and phase having 2 site fractions,
     // we need at least 5 elements. But MAX_DOF_PER_PHASE might be set to 4.
     // Increase the size to handle this case.
-    double dof[MAX_STATEVARS + MAX_DOF_PER_PHASE];  // Ensure enough space
+    // Trailing MAX_PARAMS slots hold runtime fit-parameter values (see
+    // gpu_codegen._fit_parameter_symbols): generated functions read them as
+    // x[num_statevars + phase_dof + j]. Never touched by the solver loops.
+    double dof[MAX_STATEVARS + MAX_DOF_PER_PHASE + MAX_PARAMS];
     double X[MAX_COMPONENTS];
     double energy;
     double NP;

@@ -29,6 +29,10 @@ __device__ void invert_matrix(double* matrix, int dim, double* U, double* V,
 __device__ void lstsq(double* A, int nrows, int ncols, double* b, double tolerance,
                       double* U, double* V, double* singular_values, double* superdiag);
 
+#ifndef MAX_PARAMS
+#define MAX_PARAMS 0
+#endif
+
 // From constants.py
 #define MIN_SITE_FRACTION 1e-14
 #define MIN_PHASE_FRACTION 1e-6
@@ -122,6 +126,11 @@ typedef struct SystemSpecification {
     int num_fixed_stable_compsets;
     int max_num_free_stable_phases;
     double ALLOWED_MASS_RESIDUAL;
+    // Runtime fit-parameter values (copied into every compset's trailing dof
+    // slots at initialization; per-condition storage enables per-walker
+    // parameter vectors for batched MCMC ensembles).
+    double fit_params[MAX_PARAMS + 1];
+    int num_params;
 
     // Work arrays removed - now passed as parameters from Python to functions that need them
     // This allows for dynamic allocation based on actual number of conditions

@@ -25,6 +25,7 @@ def create_flat_system_specification(global_spec_scalars, global_spec_arrays, dy
     MAX_PHASE_MATRIX_DIM = MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS
     
     # Calculate total size in doubles
+    MAX_PARAMS = int(dynamic_sizes.get("MAX_PARAMS", 0))
     spec_core_doubles = (
         3 +  # num_statevars, num_components, prescribed_system_amount
         MAX_COMPONENTS +  # initial_chemical_potentials
@@ -37,7 +38,8 @@ def create_flat_system_specification(global_spec_scalars, global_spec_arrays, dy
         (MAX_STATEVARS + 1) +  # fixed_statevar_indices + num_fixed_statevars
         (MAX_PHASES + 1) +  # fixed_stable_compset_indices + num_fixed_stable_compsets
         1 +  # max_num_free_stable_phases
-        1    # ALLOWED_MASS_RESIDUAL
+        1 +  # ALLOWED_MASS_RESIDUAL
+        (MAX_PARAMS + 1)  # fit_params[MAX_PARAMS] + num_params
     )
     
     # NOTE: this array used to append per-condition SVD/inverse workspaces
@@ -164,9 +166,16 @@ def create_flat_system_specification(global_spec_scalars, global_spec_arrays, dy
     # ALLOWED_MASS_RESIDUAL
     spec_doubles[idx] = global_spec_scalars[11]
     idx += 1
-    
-    # Work arrays are already initialized to zero
-    
+
+    # Runtime fit parameters (trailing dof slots in the generated functions)
+    fit_params = np.asarray(global_spec_arrays.get('fit_params', []), dtype=np.float64).reshape(-1)
+    n_params = min(fit_params.size, MAX_PARAMS)
+    for i in range(MAX_PARAMS):
+        spec_doubles[idx] = fit_params[i] if i < n_params else 0.0
+        idx += 1
+    spec_doubles[idx] = float(n_params)
+    idx += 1
+
     return spec_doubles
 
 

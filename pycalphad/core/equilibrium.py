@@ -24,7 +24,14 @@ def _accelerated_conditions_supported(conditions, parameters, solver,
     import numpy as np
     from pycalphad import variables as v
     if parameters:
-        return False
+        # Scalar parameter overrides are supported (runtime fit-parameter
+        # slots in the generated kernels); vectorized parameter sweeps are not.
+        try:
+            for pv in dict(parameters).values():
+                if np.asarray(pv, dtype=np.float64).size != 1:
+                    return False
+        except Exception:
+            return False
     if solver is not None or phase_records is not None:
         return False
     if output not in (None, 'GM'):

@@ -1058,6 +1058,12 @@ def _populate_system_specification(global_spec_np, global_spec_arrays, wks_obj, 
             print(f"[GPU] ERROR in state variable/mole fraction processing: {e}")
         raise
     
+    # Runtime fit parameters from the factory (ESPEI-style symbolic params)
+    _prf = getattr(wks_obj, 'phase_record_factory', None)
+    _pv_raw = getattr(_prf, 'param_values', None)
+    _pv = np.asarray(_pv_raw if _pv_raw is not None else [], dtype=np.float64).reshape(-1)
+    global_spec_arrays['fit_params'] = _pv
+
     global_spec_np[3] = constraint_count  # num_prescribed_mole_fraction_conditions
     # CRITICAL FIX: CPU uses nonvacant_elements.size, but GPU needs to handle full component array
     # The coefficients array has MAX_COMPONENTS columns, but only nonvacant ones are used

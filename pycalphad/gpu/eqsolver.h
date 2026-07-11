@@ -821,6 +821,12 @@ __device__ void solve_equilibrium_at_condition(
         // overall system constraint through the equilibrium conditions.
         
         // DEBUG: Print final DOF array after setup (now in Workspace format)
+
+            // Runtime fit parameters ride in trailing dof slots after this
+            // phase's site fractions (read by the generated functions).
+            for (int pj = 0; pj < current_spec.num_params && pj < MAX_PARAMS; ++pj) {
+                cs->dof[current_spec.num_statevars + cs->phase_record->phase_dof + pj] = current_spec.fit_params[pj];
+            }
         if (thread_id == 0 && current_sys_state.num_compsets < 2) {
             #ifdef VERBOSE_DEBUG
             printf("  Final cs->dof after setup (Workspace format): [");
@@ -1355,6 +1361,9 @@ __device__ void solve_equilibrium_at_condition(
                             cs->dof[current_spec.num_statevars + sf_idx] = Y_ptr[y_idx];
                         }
                     }
+                    for (int pj = 0; pj < current_spec.num_params && pj < MAX_PARAMS; ++pj) {
+                        cs->dof[current_spec.num_statevars + cs->phase_record->phase_dof + pj] = current_spec.fit_params[pj];
+                    }
                     
                     // Set initial phase amount to 0 (metastable)
                     cs->NP = 0.0;
@@ -1578,6 +1587,9 @@ __device__ void solve_equilibrium_at_condition(
             for (int dof_idx = 0; dof_idx < new_cs->phase_record->phase_dof && dof_idx < MAX_DOF_PER_PHASE; ++dof_idx) {
                 new_cs->dof[current_spec.num_statevars + dof_idx] =
                     grid_data->Y_ptr[candidate_grid_idx * grid_data->phase_dof_stride_Y + dof_idx];
+            }
+            for (int pj = 0; pj < current_spec.num_params && pj < MAX_PARAMS; ++pj) {
+                new_cs->dof[current_spec.num_statevars + new_cs->phase_record->phase_dof + pj] = current_spec.fit_params[pj];
             }
 
             // CPU (eqsolver.pyx:89) adds the new phase with NP = 1e-6 moles of atoms

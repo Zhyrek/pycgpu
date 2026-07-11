@@ -132,3 +132,31 @@ def test_accelerated_calculate_cpp(load_database):
     rel = np.nanmax(np.abs(res.GM.values - ref.GM.values) / np.maximum(np.abs(ref.GM.values), 1.0))
     assert rel < 1e-9, f"accelerated calculate GM rel err {rel}"
 
+@needs_cpp
+@select_database("alzn_mey.tdb")
+def test_binplot_grid_method(load_database):
+    import matplotlib
+    matplotlib.use('Agg')
+    import pycalphad
+    from pycalphad import binplot
+    dbf = load_database()
+    conds = {v.X('ZN'): (0, 1, 1 / 30), v.T: (500, 900, 400 / 30), v.P: 101325, v.N: 1}
+    with pycalphad.backend('c++'):
+        ax = binplot(dbf, ['AL', 'ZN', 'VA'], list(dbf.phases.keys()), conds,
+                     method='grid')
+    # Boundary points exist and lie in valid composition range
+    pts = np.concatenate([c.get_offsets() for c in ax.collections if len(c.get_offsets())])
+    assert pts.shape[0] > 20, "expected boundary points from two-phase fields"
+    assert np.all((pts[:, 0] >= 0) & (pts[:, 0] <= 1))
+    assert np.all((pts[:, 1] >= 500) & (pts[:, 1] <= 900))
+    ax.figure.clf()
+
+
+@select_database("alzn_mey.tdb")
+def test_binplot_grid_method_invalid(load_database):
+    from pycalphad import binplot
+    dbf = load_database()
+    conds = {v.X('ZN'): (0, 1, 0.1), v.T: (500, 900, 50), v.P: 101325, v.N: 1}
+    with pytest.raises(ValueError, match="method"):
+        binplot(dbf, ['AL', 'ZN', 'VA'], list(dbf.phases.keys()), conds, method='bogus')
+

@@ -2028,11 +2028,17 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     grid_opts.update({key: value for key, value in str_conds.items() if key in statevar_strings})
     grid_opts['pdens'] = grid_opts.get('pdens', 60)
     
-    grid = calculate(wks_obj.database, wks_obj.components, wks_obj.phases, 
-                    model=wks_obj.models.unwrap(), fake_points=True,
-                    phase_records=wks_obj.phase_record_factory, output='GM', 
-                    parameters=wks_obj.parameters.unwrap(),
-                    to_xarray=False, conditions=local_conds, **grid_opts)
+    # Grid sampling cost scales with the T count; opt-in fork parallelism over
+    # the T axis (PYCGPU_CALC_PROCS / calc_procs option; bit-identical merge).
+    from pycalphad.gpu.parallel_calculate import parallel_calculate
+    grid = parallel_calculate(
+        calculate,
+        (wks_obj.database, wks_obj.components, wks_obj.phases),
+        dict(model=wks_obj.models.unwrap(), fake_points=True,
+             phase_records=wks_obj.phase_record_factory, output='GM',
+             parameters=wks_obj.parameters.unwrap(),
+             to_xarray=False, conditions=local_conds, **grid_opts),
+        t_key='T', verbose=verbose)
     
     if verbose:
         print(f"[GPU DEBUG] Grid calculated with shape: {grid.GM.shape}")
@@ -3083,52 +3089,24 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             # Create a properly formatted results_cpu from the flat array data
             results_cpu = _create_equilibrium_results_struct_array(num_total_conditions_pts, dynamic_sizes)
             
-            # Fill the structured array with data from the flat array (if we have valid data)
-            for i in range(num_total_conditions_pts):
-                # USE GPU RESULTS: Use the optimized GM from the GPU solver
-                results_cpu[i]['final_system_gm'] = results_array[i, 0]  # GPU optimized GM value
-                # Use GPU-calculated chemical potentials (converged values)
-                # The GPU kernel correctly calculates and stores final chemical potentials
-                # Extract chemical potentials from GPU results array - they now start at index 1
-                for j in range(min(len(results_cpu[i]['final_chemical_potentials']), MAX_COMPONENTS)):
-                    if 1 + j < results_array.shape[1]:  # Chemical potentials start at index 1
-                        results_cpu[i]['final_chemical_potentials'][j] = results_array[i, 1 + j]
-                # Update offsets to account for storing all MAX_PHASES phase amounts
-                results_cpu[i]['converged'] = bool(results_array[i, 1+MAX_COMPONENTS+MAX_PHASES] > 0.5)  # Converged flag
-                results_cpu[i]['num_stable_phases'] = int(max(1, results_array[i, 2+MAX_COMPONENTS+MAX_PHASES]))  # At least 1 phase
-                
-                # USE GPU RESULTS: Read ALL phase amounts from the GPU solver
-                # The GPU kernel now stores all MAX_PHASES phase amounts starting at offset 1+MAX_COMPONENTS
-                for ph_idx in range(min(len(results_cpu[i]['NP']), MAX_PHASES)):
-                    if 1 + MAX_COMPONENTS + ph_idx < results_array.shape[1]:
-                        results_cpu[i]['NP'][ph_idx] = results_array[i, 1 + MAX_COMPONENTS + ph_idx]
-                
-                # Extract Y_phases (site fractions) from GPU results
-                # Updated offset to account for all phase amounts being stored
-                y_start_idx = 6 + MAX_COMPONENTS + MAX_PHASES
-                if i < y_phases_flat.shape[0]:
-                    # Copy Y values from flat array to structured array
-                    y_values_for_condition = y_phases_flat[i, :]  # Shape: (MAX_PHASES * MAX_DOF_PER_PHASE,)
-                    if len(results_cpu[i]['Y_phases']) > 0:
-                        copy_len = min(len(y_values_for_condition), len(results_cpu[i]['Y_phases']))
-                        results_cpu[i]['Y_phases'][:copy_len] = y_values_for_condition[:copy_len]
-                
-                # Extract X_phases (mole fractions) from GPU results
-                if i < x_phases_flat.shape[0]:
-                    # Copy X values from flat array to structured array
-                    x_values_for_condition = x_phases_flat[i, :]  # Shape: (MAX_PHASES * MAX_COMPONENTS,)
-                    if len(results_cpu[i]['X_phases']) > 0:
-                        copy_len = min(len(x_values_for_condition), len(results_cpu[i]['X_phases']))
-                        results_cpu[i]['X_phases'][:copy_len] = x_values_for_condition[:copy_len]
-                
-                # Extract phase_ids from GPU results
-                if i < phase_ids_flat.shape[0]:
-                    # Copy phase IDs from flat array to structured array
-                    phase_ids_for_condition = phase_ids_flat[i, :].astype(np.int32)  # Shape: (MAX_PHASES,)
-                    if len(results_cpu[i]['phase_ids']) > 0:
-                        copy_len = min(len(phase_ids_for_condition), len(results_cpu[i]['phase_ids']))
-                        results_cpu[i]['phase_ids'][:copy_len] = phase_ids_for_condition[:copy_len]
-            
+            # Fill the structured array from the flat results (vectorized: the
+            # per-condition Python loop cost ~50s at 1M conditions).
+            n_res = num_total_conditions_pts
+            results_cpu['final_system_gm'] = results_array[:n_res, 0]
+            mc = min(results_cpu['final_chemical_potentials'].shape[1], MAX_COMPONENTS)
+            results_cpu['final_chemical_potentials'][:, :mc] = results_array[:n_res, 1:1+mc]
+            results_cpu['converged'] = results_array[:n_res, 1+MAX_COMPONENTS+MAX_PHASES] > 0.5
+            results_cpu['num_stable_phases'] = np.maximum(
+                1, results_array[:n_res, 2+MAX_COMPONENTS+MAX_PHASES]).astype(np.int32)
+            mp = min(results_cpu['NP'].shape[1], MAX_PHASES)
+            results_cpu['NP'][:, :mp] = results_array[:n_res, 1+MAX_COMPONENTS:1+MAX_COMPONENTS+mp]
+            ny = min(results_cpu['Y_phases'].shape[1], y_phases_flat.shape[1])
+            results_cpu['Y_phases'][:, :ny] = y_phases_flat[:n_res, :ny]
+            nx = min(results_cpu['X_phases'].shape[1], x_phases_flat.shape[1])
+            results_cpu['X_phases'][:, :nx] = x_phases_flat[:n_res, :nx]
+            npid = min(results_cpu['phase_ids'].shape[1], phase_ids_flat.shape[1])
+            results_cpu['phase_ids'][:, :npid] = phase_ids_flat[:n_res, :npid].astype(np.int32)
+
             # CPU parity for FAILED conditions: stock pycalphad reports NaN for
             # conditions the solver could not converge; the GPU used to leak the
             # last Newton iterate (garbage MU up to ~1e13, empty/partial phase

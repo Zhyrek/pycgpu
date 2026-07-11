@@ -38,6 +38,8 @@ Accepted option keywords (apply to accelerated backends):
 * ``max_iters`` (int): full Newton-iteration budget (CPU parity value 1000).
 * ``hull_procs`` (int): worker processes for the starting-point hull
   (default 1 = serial; 0 = auto-scale on large batches).
+* ``calc_procs`` (int): worker processes for grid energy sampling over the
+  temperature axis (default 1 = serial; 0 = auto).
 """
 import os
 import shutil
@@ -61,6 +63,7 @@ _OPTION_ENV = {
     'pass1_iters': ('PYCGPU_PASS1_ITERS', str),
     'max_iters': ('PYCGPU_MAXITER', str),
     'hull_procs': ('PYCGPU_HULL_PROCS', str),
+    'calc_procs': ('PYCGPU_CALC_PROCS', str),
 }
 
 _state = {'backend': None, 'options': {}}

@@ -135,9 +135,14 @@ def equilibrium(dbf, comps, phases, conditions, output=None, model=None,
     _global_backend, _global_options = get_backend()
     _backend_from_global = False
     if backend is not None:
-        if backend not in ('cuda', 'cpp'):
-            raise ValueError(f"backend must be 'cuda' or 'cpp', got {backend!r}")
-        gpu = True
+        from pycalphad.backend import _normalize
+        backend = _normalize(backend)  # accepts 'gpu', 'c++', aliases
+        if backend == 'default':
+            backend = None
+        else:
+            gpu = True
+    if backend is not None:
+        pass
     elif _global_backend != 'default' and not force_cpu:
         # A GLOBAL backend only takes the accelerated path for problem shapes
         # it supports; everything else silently uses the reference solver so

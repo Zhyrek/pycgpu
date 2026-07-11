@@ -3108,6 +3108,22 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                         copy_len = min(len(phase_ids_for_condition), len(results_cpu[i]['phase_ids']))
                         results_cpu[i]['phase_ids'][:copy_len] = phase_ids_for_condition[:copy_len]
             
+            # CPU parity for FAILED conditions: stock pycalphad reports NaN for
+            # conditions the solver could not converge; the GPU used to leak the
+            # last Newton iterate (garbage MU up to ~1e13, empty/partial phase
+            # sets) into the output. Mask everything except the converged flag.
+            _conv_mask = results_cpu['converged']
+            if not _conv_mask.all():
+                _bad = ~_conv_mask
+                results_cpu['final_system_gm'][_bad] = np.nan
+                results_cpu['final_chemical_potentials'][_bad] = np.nan
+                results_cpu['NP'][_bad] = np.nan
+                results_cpu['X_phases'][_bad] = np.nan
+                results_cpu['Y_phases'][_bad] = np.nan
+                results_cpu['num_stable_phases'][_bad] = 0
+                if verbose:
+                    print(f"[GPU] Masked {int(_bad.sum())} unconverged conditions to NaN (CPU parity)")
+
             # Check the converted structured data
             if len(results_cpu) > 0 and verbose:
                 first_result = results_cpu[0]

@@ -1,7 +1,7 @@
 """
 CPU backend (initial pass): compiles the SAME generated kernel source as the
-GPU path into a plain C++ shared library (OpenMP over conditions) and runs it
-on the host. Enabled with PYCGPU_CPU=1 alongside gpu=True.
+GPU path into a plain C++ shared library (single-threaded loop over conditions)
+and runs it on the host. Enabled with PYCGPU_CPU=1 alongside gpu=True.
 
 Reusing the generated source byte-for-byte gives full logic parity with the
 CPU-matched GPU solver; only the execution substrate differs.
@@ -17,11 +17,16 @@ import numpy as np
 
 
 def _compile_command(lib_path, src_path, defines):
-    """Platform-appropriate compile command for the OpenMP backend library.
+    """Platform-appropriate compile command for the backend library.
 
     -ffp-contract=off is REQUIRED for parity with the (non-FMA) reference
     Cython CPU build: with contraction enabled, degenerate phase-selection
     decisions can flip (measured on AlCuFe cond 47).
+
+    The backend is SINGLE-THREADED by design (no OpenMP): one pycalphad call
+    uses one core, and users parallelize by running multiple pycalphad calls
+    in their own threads or processes. This also removes the libgomp/libomp
+    runtime dependency (notably simplifying macOS installs).
     """
     system = platform.system()
     common = ['-std=c++17', '-O3', '-march=native', '-ffp-contract=off',
@@ -30,24 +35,24 @@ def _compile_command(lib_path, src_path, defines):
         cxx = shutil.which('clang++')
         if cxx is None:
             raise RuntimeError("CPU backend needs clang++ (Xcode command line tools) on macOS")
-        # Apple clang has no bundled OpenMP runtime; needs `brew install libomp`.
-        return [cxx, '-Xpreprocessor', '-fopenmp', '-lomp'] + common + defines
+        return [cxx] + common + defines
     cxx = shutil.which('g++') or shutil.which('clang++')
     if cxx is None:
         hint = ("install MinGW-w64 g++ or use WSL" if system == 'Windows'
                 else "install g++ (e.g. `apt install g++`)")
-        raise RuntimeError(f"CPU backend needs a C++17/OpenMP compiler on PATH: {hint}")
-    return [cxx, '-fopenmp'] + common + defines
+        raise RuntimeError(f"CPU backend needs a C++17 compiler on PATH: {hint}")
+    return [cxx] + common + defines
 
 _CPU_DRIVER_SRC = r"""
 // ===== CPU backend driver (appended by pycalphad.gpu.cpu_backend) =====
-#include <omp.h>
+// Single-threaded by design: parallelism is the caller's job (multiple
+// pycalphad calls in threads/processes; thread_local shims in cpu_compat.h
+// keep concurrent calls from different threads safe).
 
 extern "C" void pycgpu_cpu_grid_eval(int model_idx, const double* dof, double* out,
                                      long long n_points, int dof_stride)
 {
     init_all_gpu_phase_records();
-    #pragma omp parallel for schedule(static)
     for (long long i = 0; i < n_points; ++i) {
         out[i] = g_phase_records_array[model_idx].obj(&dof[i * (long long)dof_stride]);
     }
@@ -75,7 +80,6 @@ extern "C" void pycgpu_cpu_run_all(
     int max_solver_iterations)
 {
     init_all_gpu_phase_records();
-    #pragma omp parallel for schedule(dynamic)
     for (int t = 0; t < num_conditions_total; ++t) {
         // Make tid = blockDim.x * blockIdx.x + threadIdx.x == t
         threadIdx.x = (unsigned int)t;
@@ -139,7 +143,7 @@ def run_cpu_backend(lib, *, system_spec, condition_args_doubles, results,
                     initial_phase_data, initial_phase_data_stride, system_spec_stride,
                     grid_data, grid_block_indices, grid_block_stride_bytes,
                     work_arrays_ptr_table, max_solver_iterations=1000, verbose=False):
-    """Run the OpenMP solver directly on host numpy buffers (zero copies).
+    """Run the single-threaded C++ solver directly on host numpy buffers (zero copies).
 
     All array arguments are contiguous host numpy arrays allocated by the
     (backend-agnostic) pipeline; `work_arrays_ptr_table` is the uint64 table of
@@ -160,4 +164,4 @@ def run_cpu_backend(lib, *, system_spec, condition_args_doubles, results,
         int(max_solver_iterations))
 
     if verbose:
-        print(f"[CPU-C++] Solved {num_conditions} conditions on host (OpenMP)")
+        print(f"[CPU-C++] Solved {num_conditions} conditions on host (single-threaded)")

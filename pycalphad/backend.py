@@ -5,9 +5,10 @@ pycalphad ships three execution backends for supported routines (currently
 ``equilibrium``; ``calculate`` energy evaluation where available):
 
 * ``"default"`` — the reference CPU implementation (Cython + LAPACK).
-* ``"c++"``    — the C++/OpenMP backend: the generated solver compiled with
-  the host compiler. Same algorithm, typically 40-80x faster single-core.
-  Thread count follows OMP_NUM_THREADS.
+* ``"c++"``    — the C++ backend: the generated solver compiled with the
+  host compiler. Same algorithm, typically 40-80x faster, SINGLE-THREADED by
+  design — parallelize by running your own pycalphad calls concurrently
+  (calls from multiple threads/processes are safe).
 * ``"gpu"``    — the CUDA backend (CuPy RawModule), one condition per thread.
 
 Usage::
@@ -36,7 +37,7 @@ Accepted option keywords (apply to accelerated backends):
   results are bit-identical to a single full-budget run).
 * ``max_iters`` (int): full Newton-iteration budget (CPU parity value 1000).
 * ``hull_procs`` (int): worker processes for the starting-point hull
-  (1 = serial).
+  (default 1 = serial; 0 = auto-scale on large batches).
 """
 import os
 import shutil
@@ -78,7 +79,7 @@ def _validate(canonical):
     if canonical == 'cpp':
         if shutil.which('g++') is None and shutil.which('clang++') is None:
             raise RuntimeError(
-                "backend 'c++' needs a C++17/OpenMP compiler (g++ or clang++) on PATH. "
+                "backend 'c++' needs a C++17 compiler (g++ or clang++) on PATH. "
                 "Install one (e.g. `apt install g++`, `brew install gcc`, or MinGW-w64/WSL "
                 "on Windows), or use set_backend('default').")
     elif canonical == 'cuda':
@@ -106,7 +107,7 @@ def set_backend(name, **options):
     Parameters
     ----------
     name : str
-        'default' (reference CPU), 'c++' (host OpenMP), or 'gpu' (CUDA).
+        'default' (reference CPU), 'c++' (single-threaded host backend), or 'gpu' (CUDA).
     **options
         Backend tunables; see the module docstring. Options replace any
         previously set options entirely.

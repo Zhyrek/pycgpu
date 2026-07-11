@@ -9,9 +9,10 @@ seed and compiled callables, so the merged result is bit-identical to a
 serial call in the same process.
 
 Controls (env):
-  PYCGPU_HULL_PROCS   number of workers; 1 forces serial; unset = auto
-                      (serial below PYCGPU_HULL_MIN conditions, else cpu_count)
-  PYCGPU_HULL_MIN     auto-enable threshold in conditions (default 512)
+  PYCGPU_HULL_PROCS   number of workers; unset/1 = serial (the default: one
+                      pycalphad call uses one core); 0 = auto (cpu_count
+                      above PYCGPU_HULL_MIN conditions)
+  PYCGPU_HULL_MIN     auto-mode threshold in conditions (default 512)
 """
 import multiprocessing
 import os
@@ -64,12 +65,19 @@ def parallel_starting_point(conditions, state_variables, phase_records, grid,
     for value in conditions.values():
         num_conditions *= np.asarray(value).size
 
+    # OPT-IN parallelism: like the C++ backend, pycalphad defaults to one
+    # core per call so users can parallelize by running their own pycalphad
+    # calls concurrently. Set PYCGPU_HULL_PROCS (or the hull_procs backend
+    # option) to a worker count, or to 0 for auto (cpu_count above the
+    # PYCGPU_HULL_MIN condition threshold, default 512).
     procs_env = os.environ.get('PYCGPU_HULL_PROCS')
-    if procs_env is not None:
-        procs = int(procs_env)
-    else:
+    if procs_env is None:
+        procs = 1
+    elif int(procs_env) == 0:
         min_conds = int(os.environ.get('PYCGPU_HULL_MIN', 512))
         procs = (os.cpu_count() or 1) if num_conditions >= min_conds else 1
+    else:
+        procs = int(procs_env)
 
     split = _pick_split_axis(conditions)
     if procs <= 1 or split is None:

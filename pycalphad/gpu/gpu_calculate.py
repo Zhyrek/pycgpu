@@ -7,8 +7,8 @@ points; the sampling and dataset assembly stay on the CPU. This module builds
 uses and exposes a per-phase evaluator that computes GM over a dof matrix
 with the generated obj functions:
 
-* backend 'cpp':  pycgpu_cpu_grid_eval, OpenMP over points, zero copies
-  (thread count follows OMP_NUM_THREADS).
+* backend 'cpp':  pycgpu_cpu_grid_eval, single-threaded loop over points,
+  zero copies.
 * backend 'cuda': grid_eval_kernel, one point per thread.
 
 Energies computed by the generated functions agree with the reference
@@ -115,11 +115,11 @@ def get_grid_evaluator(backend_name, components, phases, models,
     _, name_to_idx = _unique_models_for_gpu(shim, validate=False)
     kind, fn = entry
 
-    # Below these workload sizes the reference LLVM callables win: the
-    # accelerated paths pay fixed per-call costs (OpenMP wake / H2D+D2H
-    # transfers) that only amortize on large point sets. Measured crossovers
-    # on AuBi/AlCuFe; override with PYCGPU_CALC_MIN_POINTS.
-    default_min = 100_000 if kind == 'cpp' else 1_000_000
+    # The single-threaded C++ path has near-zero per-call overhead and matches
+    # or beats the reference LLVM callables at every measured size, so it is
+    # always used. The CUDA path pays H2D+D2H transfer per call and only wins
+    # on very large point sets. Override with PYCGPU_CALC_MIN_POINTS.
+    default_min = 0 if kind == 'cpp' else 1_000_000
     min_points = int(os.environ.get('PYCGPU_CALC_MIN_POINTS', default_min))
 
     def evaluate(phase_name, dof, out):

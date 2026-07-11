@@ -1,8 +1,11 @@
 #pragma once
 // Compatibility shims so the generated GPU kernel source compiles as plain C++
 // for the CPU backend (PYCGPU_CPU=1). CUDA qualifiers vanish; the thread-index
-// builtins become thread_locals that the OpenMP driver sets per condition so
+// builtins become variables the driver sets per condition so
 // `tid = blockDim.x * blockIdx.x + threadIdx.x` yields the condition index.
+// They stay thread_local NOT for internal parallelism (the backend is
+// single-threaded by design) but so that concurrent pycalphad calls from
+// multiple USER threads (ctypes releases the GIL) cannot race on them.
 #define __device__
 #define __global__
 #define __host__

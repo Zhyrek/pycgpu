@@ -2468,7 +2468,15 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     # neutral for small systems; smaller blocks also load-balance heterogeneous
     # per-condition iteration counts better.
     threads_per_block = int(os.environ.get('PYCGPU_BLOCK', 64))
-    blocks_per_grid_temp = (num_total_conditions_pts + threads_per_block - 1) // threads_per_block
+    # Chunked launches (PYCGPU_CHUNK=N): work arrays are the dominant memory
+    # cost (~SYSTEM_STATE_SIZE+work per thread, e.g. ~0.8MB/thread for 21-phase
+    # AlCuFe), so batches beyond a few thousand conditions exceed VRAM in a
+    # single launch. Chunking allocates work arrays for N threads only and
+    # loops the kernel over contiguous condition slices. Per-condition input/
+    # result buffers stay full-size (they are comparatively small).
+    _chunk_env = int(os.environ.get('PYCGPU_CHUNK', 0) or 0)
+    _chunk_size = min(num_total_conditions_pts, _chunk_env) if _chunk_env > 0 else num_total_conditions_pts
+    blocks_per_grid_temp = (_chunk_size + threads_per_block - 1) // threads_per_block
     total_threads_for_allocation = blocks_per_grid_temp * threads_per_block
     # Memory-safety validation mode (PYCGPU_GUARD=1): double every work-array
     # allocation; threads use even slices, odd slices are magic-filled guards
@@ -2667,158 +2675,72 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     _twopass_active = 0 < _pass1_iters < _full_iter_cap and not debug_enabled
     max_solver_iterations = np.int32(_pass1_iters if _twopass_active else _full_iter_cap)
 
-    # Now use the proper struct pointers for the kernel call
-    # Try different argument formats to see which one works
-    if debug_enabled:
-        kernel_args_v1 = (
-            _dev_ptr(system_spec_gpu),           # const SystemSpecification* global_spec_ptr
-            _dev_ptr(condition_args_gpu_doubles),        # const ConditionArgsSingle* condition_args_list_ptr - FIX: use doubles
-            _dev_ptr(results_gpu),               # EquilibriumResultSingle* results_list_ptr
-            num_total_conditions_pts,           # int num_conditions_total
-            condition_data_stride,              # int condition_stride - CRITICAL FIX for multi-condition support
-            max_statevars_scalar,               # int python_max_statevars - Python's MAX_STATEVARS value
-            _dev_ptr(initial_phase_data_gpu),    # const void* initial_phase_data_ptr
-            initial_phase_data_stride,          # int initial_phase_data_stride - CRITICAL FIX
-            system_spec_stride,                 # int system_spec_stride - CRITICAL FIX for SystemSpec array
-            grid_data_ptr_for_kernel,           # const DeviceGrid* grid_data_ptr
-            _dev_ptr(debug_arrays['gm_history']),    # double* debug_gm_history
-            _dev_ptr(debug_arrays['mu_history']),    # double* debug_mu_history
-            _dev_ptr(debug_arrays['convergence_history']),  # int* debug_convergence_history
-            _dev_ptr(debug_arrays['iteration_count']),      # int* debug_iteration_count
-            debug_step_count,                    # int debug_max_steps
-            # WorkArrays struct containing all 20 global memory arrays
-            _dev_ptr(work_arrays_gpu),           # const WorkArrays* work_arrays
-            _dev_ptr(grid_block_indices_gpu) if grid_block_indices_gpu is not None else 0,  # const int* grid_block_indices
-            np.int64(grid_block_stride_bytes),  # long long grid_block_stride_bytes
-            max_solver_iterations               # int max_solver_iterations
-        )
-    else:
-        kernel_args_v1 = (
-            _dev_ptr(system_spec_gpu),           # const SystemSpecification* global_spec_ptr
-            _dev_ptr(condition_args_gpu_doubles),        # const ConditionArgsSingle* condition_args_list_ptr - FIX: use doubles
-            _dev_ptr(results_gpu),               # EquilibriumResultSingle* results_list_ptr
-            num_total_conditions_pts,           # int num_conditions_total
-            condition_data_stride,              # int condition_stride - CRITICAL FIX for multi-condition support
-            max_statevars_scalar,               # int python_max_statevars - Python's MAX_STATEVARS value
-            _dev_ptr(initial_phase_data_gpu),    # const void* initial_phase_data_ptr
-            initial_phase_data_stride,          # int initial_phase_data_stride - CRITICAL FIX
-            system_spec_stride,                 # int system_spec_stride - CRITICAL FIX for SystemSpec array
-            grid_data_ptr_for_kernel,           # const DeviceGrid* grid_data_ptr
-            0, 0, 0, 0,                         # null debug arrays (4 pointers)
-            0,                                  # debug_max_steps = 0 when debug disabled
-            # WorkArrays struct containing all 20 global memory arrays
-            _dev_ptr(work_arrays_gpu),           # const WorkArrays* work_arrays
-            _dev_ptr(grid_block_indices_gpu) if grid_block_indices_gpu is not None else 0,  # const int* grid_block_indices
-            np.int64(grid_block_stride_bytes),  # long long grid_block_stride_bytes
-            max_solver_iterations               # int max_solver_iterations
-        )
-    
-    # Alternative: try passing arrays directly instead of pointers
-    if debug_enabled:
-        kernel_args_v2 = (
-            system_spec_gpu,                    # Pass array directly
-            condition_args_gpu,                 # Pass array directly  
-            results_gpu,                        # Pass array directly
-            num_total_conditions_pts,           # int num_conditions_total
-            initial_phase_data_gpu,             # Pass array directly
-            grid_data_gpu if grid_data_device_struct_np is not None else 0,  # Pass array or null
-            debug_arrays['gm_history'],         # debug arrays
-            debug_arrays['mu_history'],
-            debug_arrays['convergence_history'],
-            debug_arrays['iteration_count'],
-            debug_step_count
-        )
-    else:
-        kernel_args_v2 = (
-            system_spec_gpu,                    # Pass array directly
-            condition_args_gpu,                 # Pass array directly  
-            results_gpu,                        # Pass array directly
-            num_total_conditions_pts,           # int num_conditions_total
-            initial_phase_data_gpu,             # Pass array directly
-            grid_data_gpu if grid_data_device_struct_np is not None else 0,  # Pass array or null
-            0, 0, 0, 0, 0                       # null debug arrays
-        )
-    
-    # Alternative: try converting pointers to integers
-    if debug_enabled:
-        kernel_args_v3 = (
-            int(_dev_ptr(system_spec_gpu)),      # Convert to int
-            int(_dev_ptr(condition_args_gpu)),   # Convert to int
-            int(_dev_ptr(results_gpu)),          # Convert to int
-            int(num_total_conditions_pts),      # Already int
-            int(_dev_ptr(initial_phase_data_gpu)), # Convert to int
-            int(grid_data_ptr_for_kernel),      # Convert to int
-            int(_dev_ptr(debug_arrays['gm_history'])),
-            int(_dev_ptr(debug_arrays['mu_history'])),
-            int(_dev_ptr(debug_arrays['convergence_history'])),
-            int(_dev_ptr(debug_arrays['iteration_count'])),
-            int(debug_step_count)
-        )
-    else:
-        kernel_args_v3 = (
-            int(_dev_ptr(system_spec_gpu)),      # Convert to int
-            int(_dev_ptr(condition_args_gpu)),   # Convert to int
-            int(_dev_ptr(results_gpu)),          # Convert to int
-            int(num_total_conditions_pts),      # Already int
-            int(_dev_ptr(initial_phase_data_gpu)), # Convert to int
-            int(grid_data_ptr_for_kernel),      # Convert to int
-            0, 0, 0, 0, 0                       # null debug arrays
-        )
-    
-    # Start with the original approach
-    kernel_args = kernel_args_v1
-    
-    
-    # Launch kernel with void* pointers
-    
     # SEGMENT 20: GPU KERNEL EXECUTION (replaces CPU minimizer run loop)
-    
+    # Chunked launcher: loops the solver over contiguous condition slices so the
+    # per-thread work arrays (allocated for _chunk_size threads only) bound the
+    # memory footprint; batches beyond VRAM/RAM run as multiple launches.
+    # Slices of contiguous buffers are zero-copy views on both backends, and
+    # sequential launches on the same stream serialize, so work-array reuse
+    # between chunks is race-free.
+    if debug_enabled and _chunk_size < num_total_conditions_pts:
+        raise RuntimeError("[GPU] PYCGPU_CHUNK is not supported with debug arrays enabled")
+    _spec_f8 = system_spec_gpu.view(np.float64)
+    _res_f8 = results_gpu.view(np.float64)
+    _n_chunks = (num_total_conditions_pts + _chunk_size - 1) // _chunk_size
+    if _n_chunks > 1 and (verbose or os.environ.get('PYCGPU_TIME')):
+        print(f"[GPU] chunked launch: {_n_chunks} chunks of <= {_chunk_size} conditions")
     if _cpu_backend_mode:
-        # All buffers are host numpy arrays in this mode, and work_arrays_gpu is
-        # a uint64 table of HOST addresses — the solver runs in place, no copies.
         from pycalphad.gpu.cpu_backend import run_cpu_backend
-        run_cpu_backend(
-            module,
-            system_spec=system_spec_gpu,
-            condition_args_doubles=condition_args_gpu_doubles,
-            results=results_gpu,
-            num_conditions=num_total_conditions_pts,
-            condition_stride=condition_data_stride,
-            python_max_statevars=max_statevars_scalar,
-            initial_phase_data=initial_phase_data_gpu,
-            initial_phase_data_stride=initial_phase_data_stride,
-            system_spec_stride=system_spec_stride,
-            grid_data=grid_data_gpu if grid_data_device_struct_np is not None else None,
-            grid_block_indices=grid_block_indices_gpu if grid_data_device_struct_np is not None else None,
-            grid_block_stride_bytes=grid_block_stride_bytes,
-            work_arrays_ptr_table=work_arrays_gpu,
-            max_solver_iterations=int(max_solver_iterations),
-            verbose=verbose)
-    else:
-        try:
-
-            # Launch the main equilibrium kernel
-            _t_kernel0 = time.time()
-            top_level_kernel(
-                (blocks_per_grid,), (threads_per_block,),
-                kernel_args_v1)
-
-
-        except Exception as e:
-            # Try backup approaches
-            for i, args in enumerate([kernel_args_v2, kernel_args_v3], 2):
-                try:
-                    top_level_kernel((blocks_per_grid,), (threads_per_block,), args)
-                    if verbose:
-                        print(f"[GPU] ✓ Backup approach {i} worked!")
-                    break
-                except Exception as backup_e:
-                    if verbose:
-                        print(f"[GPU] ✗ Backup approach {i} failed: {backup_e}")
-                    if i == 3:  # Last attempt
-                        if verbose:
-                            print(f"[GPU] ERROR: All kernel approaches failed")
-                        raise e  # Raise the original kernel error
+    _t_kernel0 = time.time()
+    for _cs in range(0, num_total_conditions_pts, _chunk_size):
+        _ce = min(_cs + _chunk_size, num_total_conditions_pts)
+        _cn = _ce - _cs
+        _c_spec = _spec_f8[_cs * system_spec_stride:_ce * system_spec_stride]
+        _c_cond = condition_args_gpu_doubles[_cs * condition_data_stride:_ce * condition_data_stride]
+        _c_res = _res_f8[_cs * results_per_condition:_ce * results_per_condition]
+        _c_ipd = initial_phase_data_gpu[_cs * initial_phase_data_stride:_ce * initial_phase_data_stride]
+        _c_gbi = grid_block_indices_gpu[_cs:_ce] if grid_block_indices_gpu is not None else None
+        if _cpu_backend_mode:
+            # Host numpy buffers; work_arrays_gpu is a uint64 table of HOST
+            # addresses -- the solver runs in place, no copies.
+            run_cpu_backend(
+                module,
+                system_spec=_c_spec,
+                condition_args_doubles=_c_cond,
+                results=_c_res,
+                num_conditions=_cn,
+                condition_stride=condition_data_stride,
+                python_max_statevars=max_statevars_scalar,
+                initial_phase_data=_c_ipd,
+                initial_phase_data_stride=initial_phase_data_stride,
+                system_spec_stride=system_spec_stride,
+                grid_data=grid_data_gpu if grid_data_device_struct_np is not None else None,
+                grid_block_indices=_c_gbi if grid_data_device_struct_np is not None else None,
+                grid_block_stride_bytes=grid_block_stride_bytes,
+                work_arrays_ptr_table=work_arrays_gpu,
+                max_solver_iterations=int(max_solver_iterations),
+                verbose=verbose)
+        else:
+            if debug_enabled:
+                _dbg_args = (_dev_ptr(debug_arrays['gm_history']),
+                             _dev_ptr(debug_arrays['mu_history']),
+                             _dev_ptr(debug_arrays['convergence_history']),
+                             _dev_ptr(debug_arrays['iteration_count']),
+                             debug_step_count)
+            else:
+                _dbg_args = (0, 0, 0, 0, 0)
+            _chunk_args = (
+                _dev_ptr(_c_spec), _dev_ptr(_c_cond), _dev_ptr(_c_res),
+                _cn, condition_data_stride, max_statevars_scalar,
+                _dev_ptr(_c_ipd), initial_phase_data_stride, system_spec_stride,
+                grid_data_ptr_for_kernel,
+                *_dbg_args,
+                _dev_ptr(work_arrays_gpu),
+                _dev_ptr(_c_gbi) if _c_gbi is not None else 0,
+                np.int64(grid_block_stride_bytes),
+                max_solver_iterations)
+            _c_blocks = (_cn + threads_per_block - 1) // threads_per_block
+            top_level_kernel((_c_blocks,), (threads_per_block,), _chunk_args)
 
     if not _cpu_backend_mode:
         cp.cuda.runtime.deviceSynchronize()
@@ -2857,42 +2779,52 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             _sub_gbi = (xp.ascontiguousarray(grid_block_indices_gpu[_redo])
                         if grid_block_indices_gpu is not None else None)
             _sub_res = xp.ascontiguousarray(_res_view[_redo]).reshape(-1)
-            if _cpu_backend_mode:
-                run_cpu_backend(
-                    module,
-                    system_spec=_sub_spec,
-                    condition_args_doubles=_sub_cond,
-                    results=_sub_res,
-                    num_conditions=_k,
-                    condition_stride=condition_data_stride,
-                    python_max_statevars=max_statevars_scalar,
-                    initial_phase_data=_sub_ipd,
-                    initial_phase_data_stride=initial_phase_data_stride,
-                    system_spec_stride=system_spec_stride,
-                    grid_data=grid_data_gpu if grid_data_device_struct_np is not None else None,
-                    grid_block_indices=_sub_gbi,
-                    grid_block_stride_bytes=grid_block_stride_bytes,
-                    work_arrays_ptr_table=work_arrays_gpu,
-                    max_solver_iterations=_full_iter_cap,
-                    verbose=verbose)
-            else:
-                _t_pass2 = time.time()
-                _pass2_args = (
-                    _dev_ptr(_sub_spec), _dev_ptr(_sub_cond), _dev_ptr(_sub_res),
-                    _k, condition_data_stride, max_statevars_scalar,
-                    _dev_ptr(_sub_ipd), initial_phase_data_stride, system_spec_stride,
-                    grid_data_ptr_for_kernel,
-                    0, 0, 0, 0, 0,
-                    _dev_ptr(work_arrays_gpu),
-                    _dev_ptr(_sub_gbi) if _sub_gbi is not None else 0,
-                    np.int64(grid_block_stride_bytes),
-                    np.int32(_full_iter_cap))
-                # Pass-2 threads are all long-running divergent spinners; packing
-                # them into one block serializes them on a single SM's FP64 units.
-                # Default block=1 spreads each across its own SM.
-                _pass2_tpb = int(os.environ.get('PYCGPU_PASS2_BLOCK', 1))
-                _pass2_blocks = (_k + _pass2_tpb - 1) // _pass2_tpb
-                top_level_kernel((_pass2_blocks,), (_pass2_tpb,), _pass2_args)
+            _t_pass2 = time.time()
+            # Pass 2 must respect the same work-array chunk bound as pass 1.
+            for _ps in range(0, _k, _chunk_size):
+                _pe = min(_ps + _chunk_size, _k)
+                _pn = _pe - _ps
+                _p_spec = _sub_spec[_ps * system_spec_stride:_pe * system_spec_stride]
+                _p_cond = _sub_cond[_ps * condition_data_stride:_pe * condition_data_stride]
+                _p_res = _sub_res[_ps * results_per_condition:_pe * results_per_condition]
+                _p_ipd = _sub_ipd[_ps * initial_phase_data_stride:_pe * initial_phase_data_stride]
+                _p_gbi = _sub_gbi[_ps:_pe] if _sub_gbi is not None else None
+                if _cpu_backend_mode:
+                    run_cpu_backend(
+                        module,
+                        system_spec=_p_spec,
+                        condition_args_doubles=_p_cond,
+                        results=_p_res,
+                        num_conditions=_pn,
+                        condition_stride=condition_data_stride,
+                        python_max_statevars=max_statevars_scalar,
+                        initial_phase_data=_p_ipd,
+                        initial_phase_data_stride=initial_phase_data_stride,
+                        system_spec_stride=system_spec_stride,
+                        grid_data=grid_data_gpu if grid_data_device_struct_np is not None else None,
+                        grid_block_indices=_p_gbi,
+                        grid_block_stride_bytes=grid_block_stride_bytes,
+                        work_arrays_ptr_table=work_arrays_gpu,
+                        max_solver_iterations=_full_iter_cap,
+                        verbose=verbose)
+                else:
+                    _pass2_args = (
+                        _dev_ptr(_p_spec), _dev_ptr(_p_cond), _dev_ptr(_p_res),
+                        _pn, condition_data_stride, max_statevars_scalar,
+                        _dev_ptr(_p_ipd), initial_phase_data_stride, system_spec_stride,
+                        grid_data_ptr_for_kernel,
+                        0, 0, 0, 0, 0,
+                        _dev_ptr(work_arrays_gpu),
+                        _dev_ptr(_p_gbi) if _p_gbi is not None else 0,
+                        np.int64(grid_block_stride_bytes),
+                        np.int32(_full_iter_cap))
+                    # Pass-2 threads are all long-running divergent spinners; packing
+                    # them into one block serializes them on a single SM's FP64 units.
+                    # Default block=1 spreads each across its own SM.
+                    _pass2_tpb = int(os.environ.get('PYCGPU_PASS2_BLOCK', 1))
+                    _pass2_blocks = (_pn + _pass2_tpb - 1) // _pass2_tpb
+                    top_level_kernel((_pass2_blocks,), (_pass2_tpb,), _pass2_args)
+            if not _cpu_backend_mode:
                 cp.cuda.runtime.deviceSynchronize()
                 if os.environ.get('PYCGPU_TIME'):
                     print(f"[GPU TIME] two-pass pass2 wall: {time.time() - _t_pass2:.3f} s ({_k} conditions)")

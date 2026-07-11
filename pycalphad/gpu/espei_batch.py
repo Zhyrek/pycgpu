@@ -169,9 +169,143 @@ class BatchedZPFCalculator:
         for rows in self._iso_rows.values():
             allP += [r[4] for r in rows]
         self._unique_T = np.unique(np.asarray(allT)) if allT else np.array([300.0])
+        self._plan_vectorized()
         assert len(np.unique(allP)) <= 1, "mixed pressures not supported yet"
         self._P = float(allP[0]) if allP else 101325.0
         self._grid_phase_masks = None  # built after first grid
+
+    def _plan_vectorized(self):
+        """Index arrays for the vectorized ensemble assembly. Only valid when
+        NO vertex needs the serial fallback (checked; else the per-walker
+        loop assembly runs)."""
+        self._vec_ok = all(j[0] != 'serial' for j in self.hyp_jobs.values()) \
+            and all(j[0] != 'serial' for j in self.df_jobs.values())
+        regions = []           # (dg, weight, hyp_start, hyp_stop, vertex specs)
+        hyp_starts, hyp_stops = [], []
+        vtx = []               # per vertex: (dg, region_idx, kind, ...)
+        hyp_cursor = 0
+        for dg, data in enumerate(self.zpf_data):
+            for pr, region in enumerate(data['phase_regions']):
+                r_id = len(hyp_starts)
+                n_h = sum(1 for hv in range(len(region.hyperplane_vertices))
+                          if (dg, pr, hv) in self.hyp_jobs
+                          and self.hyp_jobs[(dg, pr, hv)][0] == 'hyp')
+                hyp_starts.append(hyp_cursor)
+                hyp_stops.append(hyp_cursor + n_h)
+                hyp_cursor += n_h
+                for vi, v in enumerate(region.vertices):
+                    job = self.df_jobs[(dg, pr, vi)]
+                    if job[0] == 'iso':
+                        vtx.append((dg, r_id, 0, job[1], job[2],
+                                    np.asarray(v.composition, dtype=np.float64), 0.0))
+                    elif job[0] == 'sample':
+                        vtx.append((dg, r_id, 1, job[1], -1, None, job[2]))
+                    else:
+                        vtx.append((dg, r_id, 2, None, -1, None, 0.0))
+                regions.append((dg, data['weight']))
+        self._v_hyp_starts = np.asarray(hyp_starts, dtype=np.intp)
+        self._v_hyp_stops = np.asarray(hyp_stops, dtype=np.intp)
+        self._v_region_dg = np.asarray([r[0] for r in regions], dtype=np.intp)
+        self._v_region_wt = np.asarray([r[1] for r in regions], dtype=np.float64)
+        self._v_vtx = vtx
+        self._v_vtx_region = np.asarray([t[1] for t in vtx], dtype=np.intp)
+        self._v_vtx_dg = np.asarray([t[0] for t in vtx], dtype=np.intp)
+        self._v_vtx_wt = self._v_region_wt[self._v_vtx_region]
+
+    def _assemble_all(self, hyp_res, iso_res, params_matrix, grid_GM):
+        """Vectorized _assemble across the whole ensemble (no serial jobs)."""
+        W = len(params_matrix)
+        nT = len(self._unique_T)
+        ncomp = self.ncomp
+        n_hyp = hyp_res['MU'].shape[0] // W if hyp_res is not None else 0
+        n_reg = len(self._v_hyp_starts)
+        MP = int(self.solver.dynamic_sizes['MAX_PHASES'])
+
+        # per-row MU with the underdetermined rule, vectorized
+        if n_hyp:
+            MU = hyp_res['MU'][:, :ncomp].reshape(W, n_hyp, ncomp).copy()
+            NPh = hyp_res['NP'].reshape(W, n_hyp, MP)
+            ids = hyp_res['phase_ids'].reshape(W, n_hyp, MP)
+            Yh = hyp_res['Y'].reshape(W, n_hyp, MP, -1)
+            nst = hyp_res['num_stable_phases'].reshape(W, n_hyp)
+            stable = NPh > 1e-9
+            scount = stable.sum(-1)
+            single = (nst == 1) | (scount == 1)
+            k = np.argmax(stable, axis=-1)          # first stable; 0 if none
+            model_k = np.take_along_axis(ids, k[..., None], -1)[..., 0]
+            max_model = max(self.dof_of_model) if self.dof_of_model else 0
+            dof_lut = np.zeros(max_model + 1, dtype=np.intp)
+            for mi, pd in self.dof_of_model.items():
+                dof_lut[mi] = pd
+            pdof = dof_lut[np.clip(model_k, 0, max_model)]
+            Yk = np.take_along_axis(Yh, k[..., None, None], 2)[..., 0, :]
+            in_dof = np.arange(Yh.shape[-1])[None, None, :] < pdof[..., None]
+            ok = np.isclose(Yk, 1.0) | np.isnan(Yk) | ~in_dof
+            undet = single & (ok.all(-1) | (pdof == 0))
+            MU[undet] = np.nan
+
+            # region targets: segment nanmean over contiguous hyp rows
+            zed = np.zeros((W, 1, ncomp))
+            csum = np.concatenate([zed, np.cumsum(np.nan_to_num(MU), axis=1)], 1)
+            ccnt = np.concatenate([zed, np.cumsum(~np.isnan(MU), axis=1)], 1)
+            sums = csum[:, self._v_hyp_stops] - csum[:, self._v_hyp_starts]
+            cnts = ccnt[:, self._v_hyp_stops] - ccnt[:, self._v_hyp_starts]
+            with np.errstate(invalid='ignore', divide='ignore'):
+                target = np.where(cnts > 0, sums / cnts, np.nan)   # (W, n_reg, ncomp)
+        else:
+            target = np.full((W, n_reg, ncomp), np.nan)
+        bad_region = np.isnan(target).any(-1)                       # (W, n_reg)
+
+        # per-vertex driving forces
+        n_v = len(self._v_vtx)
+        dfs = np.zeros((W, n_v))
+        t = self._grid_tmpl
+        # iso vertices grouped by phase
+        by_phase_iso = {}
+        by_phase_sample = {}
+        for gvi, spec in enumerate(self._v_vtx):
+            if spec[2] == 0:
+                by_phase_iso.setdefault(spec[3], []).append(gvi)
+            elif spec[2] == 1:
+                by_phase_sample.setdefault(spec[3], []).append(gvi)
+        for ph, gvis in by_phase_iso.items():
+            gvis = np.asarray(gvis, dtype=np.intp)
+            rows = np.asarray([self._v_vtx[g][4] for g in gvis], dtype=np.intp)
+            comp = np.stack([self._v_vtx[g][5] for g in gvis])       # (nv, ncomp)
+            reg = self._v_vtx_region[gvis]
+            n_ph = iso_res[ph]['GM'].shape[0] // W
+            gm = iso_res[ph]['GM'].reshape(W, n_ph)[:, rows]         # (W, nv)
+            tv = target[:, reg, :]                                   # (W, nv, ncomp)
+            dfs[:, gvis] = np.einsum('wvc,vc->wv', tv, comp) - gm
+        for ph, gvis in by_phase_sample.items():
+            gvis = np.asarray(gvis, dtype=np.intp)
+            cols = t.phase_cols.get(ph)
+            reg = self._v_vtx_region[gvis]
+            if cols is None or cols.size == 0:
+                dfs[:, gvis] = 0.0
+                continue
+            t_idx = np.searchsorted(
+                self._unique_T, np.asarray([self._v_vtx[g][6] for g in gvis]))
+            x_cols = t.X[0][cols, :ncomp]                            # (m, ncomp)
+            combo = (np.arange(W)[:, None] * nT) + t_idx[None, :]    # (W, nv)
+            gm = grid_GM[combo][:, :, cols]                          # (W, nv, m)
+            proj = np.einsum('mc,wvc->wvm', x_cols, target[:, reg, :])
+            with np.errstate(invalid='ignore'):
+                dfs[:, gvis] = np.nanmax(proj - gm, axis=-1) \
+                    if np.isnan(proj).any() else np.max(proj - gm, axis=-1)
+
+        # NaN-target regions: zero driving force (reference semantics)
+        dfs = np.where(bad_region[:, self._v_vtx_region], 0.0, dfs)
+
+        # ragged per-data-group lists in original vertex order
+        out = []
+        n_dg = len(self.zpf_data)
+        dg_slices = [np.flatnonzero(self._v_vtx_dg == dg) for dg in range(n_dg)]
+        for w in range(W):
+            d = [dfs[w, sl].tolist() for sl in dg_slices]
+            v = [self._v_vtx_wt[sl].tolist() for sl in dg_slices]
+            out.append((d, v))
+        return out
 
     # ------------------------------------------------------------ grid + run
     def _make_grid(self, params_dict):
@@ -450,7 +584,13 @@ class BatchedZPFCalculator:
             tmpl[key] = entry = blocks
         n_combos = GM_rows.shape[0]
         W = n_combos // entry.shape[0]
-        big = np.tile(entry, W)
+        big_cache = getattr(self, '_big_block_cache', None)
+        if big_cache is None:
+            self._big_block_cache = big_cache = {}
+        big = big_cache.get((key, W))
+        if big is None:
+            big = np.tile(entry, W)
+            big_cache[(key, W)] = big
         m = big['GM_ptr_data'].shape[1]
         big['GM_ptr_data'][:] = GM_rows[:, :m]
         return big
@@ -542,6 +682,8 @@ class BatchedZPFCalculator:
                                             combo_idx=combo, grid_blocks=blocks)
             n_iso[ph] = n_ph
 
+        if self._vec_ok:
+            return self._assemble_all(hyp_res, iso_res, params_matrix, grid.GM)
         out = []
         for w, pvec in enumerate(params_matrix):
             params_dict = dict(zip(self.param_names, pvec))

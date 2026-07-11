@@ -330,11 +330,14 @@ def build_initial_phase_data(points, hull, py_phase_name_to_unique_idx_map,
     amounts = np.maximum(np.nan_to_num(np_arr[rows_s, slot_order]), MIN_PHASE_FRACTION)
     ipd['phase_amounts'][:, :n_slots] = np.where(slot_valid, amounts, 0.0)
 
+    # NaN paddings (Y columns beyond a phase's dof) are copied through
+    # unmodified — the reference pipeline does the same and the kernel bounds
+    # every loop by phase_rec->phase_dof.
     y_cols = min(y_arr.shape[2], MDOF)
-    y_g = np.nan_to_num(y_arr[rows_s, slot_order][:, :, :y_cols])
+    y_g = y_arr[rows_s, slot_order][:, :, :y_cols]
     ipd['site_fractions'][:, :n_slots, :y_cols] = np.where(slot_valid[:, :, None], y_g, 0.0)
 
     x_cols = min(x_arr.shape[2], MC)
-    x_g = np.nan_to_num(x_arr[rows_s, slot_order][:, :, :x_cols])
+    x_g = x_arr[rows_s, slot_order][:, :, :x_cols]
     ipd['compositions'][:, :n_slots, :x_cols] = np.where(slot_valid[:, :, None], x_g, 0.0)
     return ipd

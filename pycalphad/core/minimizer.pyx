@@ -463,7 +463,7 @@ cdef void fill_equilibrium_system(double[::1,:] equilibrium_matrix, double[::1] 
     debug_log(30, f"Fill equilibrium system - residuals (iteration {state.iteration})")
     
     # Show first few residuals for debugging
-    debug_log(f"  equilibrium_rhs[0:3]: {equilibrium_rhs[0]:.15e}, {equilibrium_rhs[1]:.15e}, {equilibrium_rhs[2]:.15e}", DEBUG_MODE)
+    debug_log("  equilibrium_rhs[0:3]: " + ", ".join([f"{v:.15e}" for v in np.asarray(equilibrium_rhs)[:3]]), DEBUG_MODE)
     
     # Add mass residual to fixed component row RHS, plus N=1 row
     component_row_offset = num_stable_phases + num_fixed_phases
@@ -1106,7 +1106,7 @@ cpdef construct_equilibrium_system(SystemSpecification spec, SystemState state, 
     equilibrium_rhs = np.zeros(equilibrium_matrix.shape[0])
     
     debug_log(f"  equilibrium_matrix_shape: {equilibrium_matrix.shape}", True)
-    debug_log(f"  equilibrium_matrix_condition_number: {np.linalg.cond(np.array(equilibrium_matrix)) if equilibrium_matrix.shape[0] < 50 else 'too large':.15e}", True)
+    debug_log("  equilibrium_matrix_condition_number: " + (f"{np.linalg.cond(np.array(equilibrium_matrix)):.15e}" if equilibrium_matrix.shape[0] < 50 else "too large"), True)
     
     if (equilibrium_matrix.shape[0] != equilibrium_matrix.shape[1]):
         raise ValueError('Conditions do not obey Gibbs Phase Rule')
@@ -1301,7 +1301,7 @@ cpdef solve_state(SystemSpecification spec, SystemState state):
           &equilibrium_soln[0], 1e-16)
     
     debug_log(f"  solution_norm: {np.linalg.norm(np.array(equilibrium_soln)):.15e}", True)
-    debug_log(f"  solution_first_3_values: {equilibrium_soln[0]:.15e}, {equilibrium_soln[1]:.15e}, {equilibrium_soln[2]:.15e}", True)
+    debug_log("  solution_first_3_values: " + ", ".join([f"{v:.15e}" for v in np.asarray(equilibrium_soln)[:3]]), True)
 
     # SEGMENT 32: UPDATE CHEMICAL POTENTIALS
     debug_log(32, f"Update chemical potentials (iteration {state.iteration})")

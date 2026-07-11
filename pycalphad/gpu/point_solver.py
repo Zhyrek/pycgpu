@@ -800,6 +800,19 @@ def device_starting_point(unitless_conds, state_variables, phase_record_factory,
     ncomp = len(nonvacant)
 
     conds_items = list(unitless_conds.items())
+    # Reference validation (starting_point:101-110): every non-statevar,
+    # non-phase-local condition consumes one degree of freedom; under/
+    # overdetermined problems must raise the same error here.
+    number_dof = ncomp - 1
+    for k, _ in conds_items:
+        if not (hasattr(k, 'species') or type(k).__name__ == 'LinearCombination'):
+            continue
+        if hasattr(k, 'species') and getattr(k, 'phase_name', None) is not None:
+            continue
+        number_dof -= 1
+    if number_dof != 0:
+        raise ValueError('Number of degrees of freedom is not zero')
+
     axes = [np.atleast_1d(np.asarray(val, dtype=np.float64)) for _, val in conds_items]
     shape = tuple(len(a) for a in axes)
     n = int(np.prod(shape))

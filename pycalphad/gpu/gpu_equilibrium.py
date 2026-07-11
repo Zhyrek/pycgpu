@@ -1941,6 +1941,17 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         force_cpu: Force CPU calculation even if GPU is available (for testing)
     """
     verbose = wks_obj.verbose
+
+    # The code generator supports plain Model energy expressions only.
+    # Subclassed models (MQMQA/quasichemical, custom contributions) must raise
+    # here so global-backend dispatch falls back to the reference solver.
+    from pycalphad.model import Model as _PlainModel
+    for _ph in wks_obj.phases:
+        _m = wks_obj.models[_ph]
+        if type(_m) is not _PlainModel:
+            raise RuntimeError(
+                f"accelerated backends support plain Model instances only; "
+                f"phase {_ph} uses {type(_m).__name__}")
     
     # Check if GPU should be used - NO FALLBACK, FAIL HARD
     # The C++/OpenMP backend (PYCGPU_CPU=1) does not need CUDA or CuPy.
@@ -2090,9 +2101,19 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         with open(os.path.join(_gpu_dir, _hdr), "rb") as _f:
             _header_hash.update(_f.read())
 
+    # The generated kernel embeds the MODEL ENERGY EXPRESSIONS, so the cache
+    # key must fingerprint them: phase/component NAMES alone collide between
+    # different assessments of the same system (e.g. two Al-Ni TDBs), which
+    # served one database's compiled energies for the other.
+    _model_hash = hashlib.md5()
+    for _ph in sorted_phases:
+        _model_hash.update(_ph.encode())
+        _model_hash.update(str(wks_obj.models[_ph].GM).encode())
+
     cache_key_parts = [
         "phases:" + ",".join(sorted_phases),
         "components:" + ",".join(sorted_components),
+        "models:" + _model_hash.hexdigest(),
         "sizes:" + str(sorted(dynamic_sizes.items())),
         "headers:" + _header_hash.hexdigest(),
         "verbose:" + str(verbose),

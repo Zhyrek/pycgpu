@@ -111,12 +111,18 @@ def compute_dynamic_kernel_sizes(wks_obj: Workspace) -> Dict[str, int]:
     actual_components = len(wks_obj.components)
     actual_phases = len(wks_obj.phases)
     
-    # Find maximum DOF per phase across all models
+    # Find maximum DOF and internal-constraint count per phase across all models.
+    # Internal constraints are PER-PHASE (one per sublattice, e.g. a 4-sublattice
+    # ordering model with a VA interstitial sublattice has FIVE) — sizing them
+    # from the number of phases under-allocated for few-phase/many-sublattice
+    # systems and caused out-of-bounds writes (segfault on alnifcc4sl FCC_L12).
     max_dof_per_phase = 0
+    max_internal_cons = 0
     for phase_name in wks_obj.phases:
         model = wks_obj.models[phase_name]
         phase_dof = len(model.site_fractions)
         max_dof_per_phase = max(max_dof_per_phase, phase_dof)
+        max_internal_cons = max(max_internal_cons, len(model.get_internal_constraints()))
     
     # Get state variables count
     if hasattr(wks_obj, 'phase_record_factory') and hasattr(wks_obj.phase_record_factory, 'state_variables'):
@@ -133,7 +139,7 @@ def compute_dynamic_kernel_sizes(wks_obj: Workspace) -> Dict[str, int]:
         "MAX_PHASES": max(safety_minimum, int(actual_phases * padding_factor)),
         "MAX_STATEVARS": max(safety_minimum, int(actual_statevars * padding_factor)),
         "MAX_DOF_PER_PHASE": max(safety_minimum, int(max_dof_per_phase * padding_factor)),
-        "MAX_INTERNAL_CONSTRAINTS": max(safety_minimum, int(actual_phases * padding_factor)),  # Assume one constraint per phase max
+        "MAX_INTERNAL_CONSTRAINTS": max(safety_minimum, int(max_internal_cons * padding_factor) + 1),
         "MAX_FIXED_MOLE_FRACTION_CONDITIONS": max(safety_minimum, int(actual_components * padding_factor)),
         "MAX_GRID_POINTS": 10000,  # Keep reasonable default for grid
         "MIN_PHASE_FRACTION": 1e-6,  # Keep constant

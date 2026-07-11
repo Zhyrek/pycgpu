@@ -106,14 +106,14 @@ def test_set_backend_api(load_database):
         pycalphad.set_backend('opencl')
     with pytest.raises(TypeError):
         pycalphad.set_backend('default', warp=9)
-    assert pycalphad.get_backend()[0] == 'default'
+    _initial = pycalphad.get_backend()  # may be env-selected, not 'default'
     if not _has_cpp_compiler():
         pytest.skip("no C++ compiler")
     # context manager scoping + result agreement
     with pycalphad.backend('c++'):
         assert pycalphad.get_backend()[0] == 'cpp'
         res = equilibrium(dbf, comps, phases, CONDS)
-    assert pycalphad.get_backend()[0] == 'default'
+    assert pycalphad.get_backend() == _initial
     np.testing.assert_allclose(res.GM.values, ref.GM.values, atol=GM_ATOL)
 
 

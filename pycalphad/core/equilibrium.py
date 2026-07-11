@@ -13,6 +13,56 @@ from pycalphad.property_framework import as_property
 from pycalphad.core.debug_output import init_debug_output, close_debug_output, debug_log
 
 
+def _accelerated_conditions_supported(conditions, parameters, solver,
+                                      phase_records, output, extra_kwargs):
+    """Whether the accelerated backends support this equilibrium problem shape.
+
+    Supported: standard N=1 / P / T / X(component) condition grids with no
+    parameter overrides, custom solver, prebuilt phase records, extra outputs,
+    or phase-local / chemical-potential / fixed-phase conditions.
+    """
+    import numpy as np
+    from pycalphad import variables as v
+    if parameters:
+        return False
+    if solver is not None or phase_records is not None:
+        return False
+    if output not in (None, 'GM'):
+        return False
+    if extra_kwargs:
+        return False
+    try:
+        n_x_conds = sum(1 for c in conditions
+                        if isinstance(c, v.MoleFraction) and getattr(c, 'phase_name', None) is None)
+        n_statevar_conds = sum(1 for c in conditions if c in (v.N, v.P, v.T))
+        # Fully-determined standard problems only: every condition is
+        # N/P/T/X and nothing else (under/overdetermined problems must reach
+        # the reference path's validation errors).
+        if n_x_conds + n_statevar_conds != len(conditions):
+            return False
+        for cond, value in conditions.items():
+            if getattr(cond, 'phase_name', None) is not None:
+                return False
+            if cond == v.N:
+                if np.any(np.atleast_1d(np.asarray(value, dtype=object)).astype(float) != 1.0):
+                    return False
+            elif cond == v.P or cond == v.T:
+                continue
+            elif isinstance(cond, v.MoleFraction):
+                # Dilute/zero compositions have dedicated reference-path
+                # handling (clamping + user warnings) the accelerated
+                # solvers do not replicate.
+                if np.any(np.asarray(value, dtype=np.float64) < 1e-9):
+                    return False
+                continue
+            else:
+                # ChemicalPotential, MassFraction, SiteFraction, LinearCombination, ...
+                return False
+    except Exception:
+        return False
+    return True
+
+
 def equilibrium(dbf, comps, phases, conditions, output=None, model=None,
                 verbose=False, calc_opts=None, to_xarray=True,
                 parameters=None, solver=None, phase_records=None,
@@ -83,13 +133,21 @@ def equilibrium(dbf, comps, phases, conditions, output=None, model=None,
     # Resolution order for the execution backend: explicit per-call kwarg,
     # else the global set_backend()/PYCALPHAD_BACKEND setting, else 'default'.
     _global_backend, _global_options = get_backend()
+    _backend_from_global = False
     if backend is not None:
         if backend not in ('cuda', 'cpp'):
             raise ValueError(f"backend must be 'cuda' or 'cpp', got {backend!r}")
         gpu = True
     elif _global_backend != 'default' and not force_cpu:
-        backend = _global_backend
-        gpu = True
+        # A GLOBAL backend only takes the accelerated path for problem shapes
+        # it supports; everything else silently uses the reference solver so
+        # `set_backend(...)` is always safe. An explicit per-call `backend=`
+        # kwarg bypasses this gate (deliberate user demand).
+        if _accelerated_conditions_supported(conditions, parameters, solver,
+                                             phase_records, output, kwargs):
+            backend = _global_backend
+            gpu = True
+            _backend_from_global = True
 
     if gpu:
         # Environment variables steer the accelerated pipeline; set them for the
@@ -97,6 +155,12 @@ def equilibrium(dbf, comps, phases, conditions, output=None, model=None,
         overrides = {}
         if backend is not None:
             overrides['PYCGPU_CPU'] = '1' if backend == 'cpp' else ''
+        if robust_phase_removal is None and 'PYCGPU_ROBUST' not in os.environ:
+            # Default ON for the accelerated backends: terminates the
+            # add/collapse cycles that otherwise burn the iteration budget on
+            # near-duplicate composition sets (alni_tough, AlCuFe cond 76/47).
+            # The reference solver keeps its stock behavior.
+            robust_phase_removal = True
         if robust_phase_removal is not None:
             overrides['PYCGPU_ROBUST'] = '1' if robust_phase_removal else ''
         saved = {k: os.environ.get(k) for k in overrides}
@@ -107,12 +171,22 @@ def equilibrium(dbf, comps, phases, conditions, output=None, model=None,
                 else:
                     os.environ.pop(k, None)
             from ..gpu.gpu_equilibrium import equilibrium_gpu
-            with _option_env(_global_options):
-                # GPU mode handles its own debug output
-                return equilibrium_gpu(dbf, comps, phases, conditions, output=output, model=model,
-                                     verbose=verbose, calc_opts=calc_opts, to_xarray=to_xarray,
-                                     parameters=parameters, solver=solver, phase_records=phase_records,
-                                     force_cpu=force_cpu, fallback_on_error=fallback_on_error, **kwargs)
+            try:
+                with _option_env(_global_options):
+                    # GPU mode handles its own debug output
+                    return equilibrium_gpu(dbf, comps, phases, conditions, output=output, model=model,
+                                         verbose=verbose, calc_opts=calc_opts, to_xarray=to_xarray,
+                                         parameters=parameters, solver=solver, phase_records=phase_records,
+                                         force_cpu=force_cpu, fallback_on_error=fallback_on_error, **kwargs)
+            except Exception as _accel_err:
+                if not _backend_from_global:
+                    raise
+                # Silent fallback (log only): the global backend must never
+                # change user-visible behavior for unsupported problems, and
+                # test suites commonly run with warnings-as-errors.
+                import logging
+                logging.getLogger(__name__).debug(
+                    "Accelerated backend failed, using reference solver: %r", _accel_err)
         finally:
             for k, old in saved.items():
                 if old is None:

@@ -46,10 +46,19 @@ def _build_module(backend_name, shim, verbose=False):
                 "minimizer.h", "eqsolver.h", "gpu_codegen.py"):
         with open(os.path.join(gpu_dir, hdr), "rb") as f:
             hasher.update(f.read())
+    # Fingerprint the model energy expressions: phase/component names alone
+    # collide between different assessments of the same system.
+    model_hasher = hashlib.md5()
+    for ph in sorted(shim.phases):
+        model_hasher.update(ph.encode())
+        model_hasher.update(str(shim.models[ph].GM).encode())
     key_input = "|".join([
         "calc", backend_name,
         ",".join(sorted(shim.phases)),
         ",".join(sorted(c.name for c in shim.components)),
+        # The generated functions bake in the statevar->dof-column mapping
+        "statevars:" + ",".join(str(sv) for sv in shim.phase_record_factory.state_variables),
+        "models:" + model_hasher.hexdigest(),
         str(sorted(dynamic_sizes.items())),
         hasher.hexdigest(),
     ])
@@ -95,6 +104,12 @@ def get_grid_evaluator(backend_name, components, phases, models,
     call for a system compiles the kernel (one-time, disk-cached thereafter).
     Returns None if the system cannot be built (caller falls back to CPU).
     """
+    from pycalphad.model import Model as _PlainModel
+    for _ph in phases:
+        if type(models[_ph]) is not _PlainModel:
+            raise RuntimeError(
+                f"accelerated calculate() supports plain Model instances only; "
+                f"phase {_ph} uses {type(models[_ph]).__name__}")
     shim = SimpleNamespace(
         components=list(components),
         phases=list(phases),
@@ -103,8 +118,16 @@ def get_grid_evaluator(backend_name, components, phases, models,
         conditions={},
         verbose=verbose,
     )
+    # In-process cache must also fingerprint the model expressions (same
+    # collision as the disk key: two assessments sharing phase names).
+    _mh = hashlib.md5()
+    for _ph in sorted(shim.phases):
+        _mh.update(_ph.encode())
+        _mh.update(str(models[_ph].GM).encode())
     cache_id = (backend_name, tuple(sorted(shim.phases)),
-                tuple(sorted(c.name for c in shim.components)))
+                tuple(sorted(c.name for c in shim.components)),
+                tuple(str(sv) for sv in shim.phase_record_factory.state_variables),
+                _mh.hexdigest())
     if cache_id in _evaluator_cache:
         entry = _evaluator_cache[cache_id]
     else:

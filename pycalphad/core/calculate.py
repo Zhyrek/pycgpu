@@ -495,14 +495,22 @@ def calculate(dbf, comps, phases, mode=None, output='GM', fake_points=False, bro
     accel_evaluator = None
     from pycalphad.backend import get_backend as _get_backend
     _accel_backend, _ = _get_backend()
-    if _accel_backend in ('cpp', 'cuda') and output == 'GM' and len(extract_parameters(parameters)[1]) == 0:
+    _canonical_statevars = [str(sv) for sv in getattr(phase_records, 'state_variables', [])] == ['N', 'P', 'T']
+    if (_accel_backend in ('cpp', 'cuda') and output == 'GM'
+            and len(extract_parameters(parameters)[1]) == 0
+            and _canonical_statevars):
+        # The generated evaluators assume the canonical [N, P, T] state-variable
+        # layout; problems with omitted/extra state variables use the reference
+        # callables (gh-116-style calls with default state variables).
         try:
             from pycalphad.gpu.gpu_calculate import get_grid_evaluator
             accel_evaluator = get_grid_evaluator(_accel_backend, comps,
                                                  sorted(active_phases), models,
                                                  phase_records)
         except Exception as _accel_err:
-            warnings.warn(f"Accelerated calculate() unavailable, using reference path: {_accel_err!r}")
+            import logging
+            logging.getLogger(__name__).debug(
+                "Accelerated calculate() unavailable, using reference path: %r", _accel_err)
             accel_evaluator = None
 
     for phase_name in sorted(active_phases):

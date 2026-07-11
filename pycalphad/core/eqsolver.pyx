@@ -1,6 +1,7 @@
 # distutils: language = c++
 from collections import OrderedDict
 import numpy as np
+import pycalphad.core.debug_output as _dbgmod
 cimport numpy as np
 cimport cython
 from pycalphad.core.solver import Solver
@@ -32,13 +33,13 @@ cpdef bint add_new_phases(object composition_sets, object removed_compsets, obje
     from pycalphad.core.debug_output import debug_log
     
     # SEGMENT 41: PHASE ADDITION - DRIVING FORCE CALCULATION
-    debug_log(41, "Phase addition - driving force calculation")
+    if _dbgmod._debug_enabled: debug_log(41, "Phase addition - driving force calculation")
     
     driving_forces = np.dot(current_grid_X, chemical_potentials) - grid.GM[*current_idx, ...]
     
-    debug_log(f"  chemical_potentials: {np.array(chemical_potentials)}", verbose)
-    debug_log(f"  max_driving_force: {np.max(driving_forces):.15e}", verbose)
-    debug_log(f"  min_driving_force: {np.min(driving_forces):.15e}", verbose)
+    if _dbgmod._debug_enabled: debug_log(f"  chemical_potentials: {np.array(chemical_potentials)}", verbose)
+    if _dbgmod._debug_enabled: debug_log(f"  max_driving_force: {np.max(driving_forces):.15e}", verbose)
+    if _dbgmod._debug_enabled: debug_log(f"  min_driving_force: {np.min(driving_forces):.15e}", verbose)
     
     for i in range(driving_forces.shape[0]):
         if driving_forces[i] > largest_df:
@@ -61,18 +62,18 @@ cpdef bint add_new_phases(object composition_sets, object removed_compsets, obje
             df_idx = i
     
     # SEGMENT 42: PHASE ADDITION - DECISION
-    debug_log(42, "Phase addition - decision")
-    debug_log(f"  largest_df: {largest_df:.15e}", verbose)
-    debug_log(f"  minimum_df: {minimum_df:.15e}", verbose)
-    debug_log(f"  will_add_phase: {largest_df > minimum_df}", verbose)
+    if _dbgmod._debug_enabled: debug_log(42, "Phase addition - decision")
+    if _dbgmod._debug_enabled: debug_log(f"  largest_df: {largest_df:.15e}", verbose)
+    if _dbgmod._debug_enabled: debug_log(f"  minimum_df: {minimum_df:.15e}", verbose)
+    if _dbgmod._debug_enabled: debug_log(f"  will_add_phase: {largest_df > minimum_df}", verbose)
     
     if largest_df > minimum_df:
         # To add a phase, must not be within COMP_DIFFERENCE_TOL of composition of the same phase of its type
         df_comp = current_grid_X[df_idx]
         df_phase_name = <unicode>current_grid_Phase[df_idx]
         
-        debug_log(f"  candidate_phase: {df_phase_name}", verbose)
-        debug_log(f"  candidate_composition: {np.array(df_comp)}", verbose)
+        if _dbgmod._debug_enabled: debug_log(f"  candidate_phase: {df_phase_name}", verbose)
+        if _dbgmod._debug_enabled: debug_log(f"  candidate_composition: {np.array(df_comp)}", verbose)
         
         if df_phase_name == '_FAKE_':
             return False
@@ -89,7 +90,7 @@ cpdef bint add_new_phases(object composition_sets, object removed_compsets, obje
         compset.update(current_grid_Y[df_idx, :compset.phase_record.phase_dof], 1e-6,
                        state_variables)
         composition_sets.append(compset)
-        debug_log(f"  adding_phase: {df_phase_name} with driving force {largest_df:.15e}", verbose)
+        if _dbgmod._debug_enabled: debug_log(f"  adding_phase: {df_phase_name} with driving force {largest_df:.15e}", verbose)
         return True
     
     return False
@@ -140,7 +141,7 @@ def add_nearly_stable(object composition_sets, object phase_records,
             df_idx = phase_indices.start + minimum_df_idx
             compset = CompositionSet(phase_record)
             compset.update(current_grid_Y[df_idx, :phase_record.phase_dof], 0.0, state_variables)
-            debug_log(f"  adding_metastable: {phase_name} with driving force {driving_forces_for_phase[minimum_df_idx]:.15e}", verbose)
+            if _dbgmod._debug_enabled: debug_log(f"  adding_metastable: {phase_name} with driving force {driving_forces_for_phase[minimum_df_idx]:.15e}", verbose)
             composition_sets.append(compset)
     return phases_added
 
@@ -263,8 +264,8 @@ def _solve_eq_at_conditions(properties, phase_records, grid, conds_keys, state_v
             
             # DEBUG: Log initial phase data for first few conditions
             if verbose and debug_condition_counter <= 3:
-                debug_log(f"  cpu_initial_phase_{phase_idx}_amount: {phase_amt:.15e}", verbose)
-                debug_log(f"  cpu_initial_phase_{phase_idx}_site_fractions: {np.array(sfx)}", verbose)
+                if _dbgmod._debug_enabled: debug_log(f"  cpu_initial_phase_{phase_idx}_amount: {phase_amt:.15e}", verbose)
+                if _dbgmod._debug_enabled: debug_log(f"  cpu_initial_phase_{phase_idx}_site_fractions: {np.array(sfx)}", verbose)
             phase_amt = max(phase_amt, MIN_PHASE_FRACTION)
             compset = CompositionSet(phase_record)
             compset.update(sfx, phase_amt, state_variable_values)
@@ -272,17 +273,17 @@ def _solve_eq_at_conditions(properties, phase_records, grid, conds_keys, state_v
             
             # DEBUG: Log initial phase setup - numerical only for first 3 conditions
             if verbose and debug_condition_counter <= 3:
-                debug_log(f"  cpu_phase_{phase_idx}_energy: {compset.energy:.15e}", verbose)
-                debug_log(f"  cpu_phase_{phase_idx}_amount: {phase_amt:.15e}", verbose)
-                debug_log(f"  cpu_phase_{phase_idx}_X_after_update: {compset.X}", verbose)
+                if _dbgmod._debug_enabled: debug_log(f"  cpu_phase_{phase_idx}_energy: {compset.energy:.15e}", verbose)
+                if _dbgmod._debug_enabled: debug_log(f"  cpu_phase_{phase_idx}_amount: {phase_amt:.15e}", verbose)
+                if _dbgmod._debug_enabled: debug_log(f"  cpu_phase_{phase_idx}_X_after_update: {compset.X}", verbose)
         
         chemical_potentials = prop_MU_values[it.multi_index]
         energy = prop_GM_values[it.multi_index]
         
         # DEBUG: Log initial chemical potentials and energy - first 3 conditions only
         if verbose and debug_condition_counter <= 3:
-            debug_log(f"  cpu_initial_chemical_potentials: {chemical_potentials}", verbose)
-            debug_log(f"  cpu_initial_total_energy: {energy:.15e}", verbose)
+            if _dbgmod._debug_enabled: debug_log(f"  cpu_initial_chemical_potentials: {chemical_potentials}", verbose)
+            if _dbgmod._debug_enabled: debug_log(f"  cpu_initial_total_energy: {energy:.15e}", verbose)
         
         add_nearly_stable(composition_sets, phase_records, grid, curr_idx, chemical_potentials,
                           state_variable_values, -1000, verbose)
@@ -297,9 +298,9 @@ def _solve_eq_at_conditions(properties, phase_records, grid, conds_keys, state_v
             
         # DEBUG: Log normalized phase amounts - first 3 conditions only
         if verbose and debug_condition_counter <= 3:
-            debug_log(f"  cpu_phase_amount_normalization_sum: {phase_amt_sum:.15e}", verbose)
+            if _dbgmod._debug_enabled: debug_log(f"  cpu_phase_amount_normalization_sum: {phase_amt_sum:.15e}", verbose)
             for i, compset in enumerate(composition_sets):
-                debug_log(f"  cpu_normalized_phase_{i}_amount: {compset.NP:.15e}", verbose)
+                if _dbgmod._debug_enabled: debug_log(f"  cpu_normalized_phase_{i}_amount: {compset.NP:.15e}", verbose)
         iterations = 0
         history = []
         
@@ -314,10 +315,10 @@ def _solve_eq_at_conditions(properties, phase_records, grid, conds_keys, state_v
             
             # DEBUG: Log solver iteration start - first 3 conditions only
             if verbose and debug_condition_counter <= 3:
-                debug_log(f"  cpu_solver_iteration_{iterations + 1}_start", verbose)
+                if _dbgmod._debug_enabled: debug_log(f"  cpu_solver_iteration_{iterations + 1}_start", verbose)
                 for i, compset in enumerate(composition_sets):
-                    debug_log(f"  cpu_pre_solve_phase_{i}_amount: {compset.NP:.15e}", verbose)
-                    debug_log(f"  cpu_pre_solve_phase_{i}_energy: {compset.energy:.15e}", verbose)
+                    if _dbgmod._debug_enabled: debug_log(f"  cpu_pre_solve_phase_{i}_amount: {compset.NP:.15e}", verbose)
+                    if _dbgmod._debug_enabled: debug_log(f"  cpu_pre_solve_phase_{i}_energy: {compset.energy:.15e}", verbose)
                     
                 # Enable verbose mode on solver
                 if hasattr(iter_solver, 'verbose'):
@@ -331,8 +332,8 @@ def _solve_eq_at_conditions(properties, phase_records, grid, conds_keys, state_v
             # DEBUG: Check result - first 3 conditions only
             if verbose and debug_condition_counter <= 3:
                 if result is not None:
-                    debug_log(f"  cpu_solver_converged: {result.converged}", verbose)
-                    debug_log(f"  cpu_solver_chemical_potentials: {result.chemical_potentials}", verbose)
+                    if _dbgmod._debug_enabled: debug_log(f"  cpu_solver_converged: {result.converged}", verbose)
+                    if _dbgmod._debug_enabled: debug_log(f"  cpu_solver_chemical_potentials: {result.chemical_potentials}", verbose)
             
             if result is None:
                 break
@@ -342,10 +343,10 @@ def _solve_eq_at_conditions(properties, phase_records, grid, conds_keys, state_v
             
             # DEBUG: Log solver results - first 3 conditions only
             if verbose and debug_condition_counter <= 3:
-                debug_log(f"  cpu_updated_chemical_potentials: {chemical_potentials}", verbose)
+                if _dbgmod._debug_enabled: debug_log(f"  cpu_updated_chemical_potentials: {chemical_potentials}", verbose)
                 for i, compset in enumerate(composition_sets):
-                    debug_log(f"  cpu_post_solve_phase_{i}_amount: {compset.NP:.15e}", verbose)
-                    debug_log(f"  cpu_post_solve_phase_{i}_energy: {compset.energy:.15e}", verbose)
+                    if _dbgmod._debug_enabled: debug_log(f"  cpu_post_solve_phase_{i}_amount: {compset.NP:.15e}", verbose)
+                    if _dbgmod._debug_enabled: debug_log(f"  cpu_post_solve_phase_{i}_energy: {compset.energy:.15e}", verbose)
             
 
             
@@ -356,7 +357,7 @@ def _solve_eq_at_conditions(properties, phase_records, grid, conds_keys, state_v
             
             # DEBUG: Log phase changes - first 3 conditions only
             if verbose and changed_phases and debug_condition_counter <= 3:
-                debug_log(f"  cpu_phases_changed_new_count: {len(composition_sets)}", verbose)
+                if _dbgmod._debug_enabled: debug_log(f"  cpu_phases_changed_new_count: {len(composition_sets)}", verbose)
             
             iterations += 1
             if not changed_phases:
@@ -366,7 +367,7 @@ def _solve_eq_at_conditions(properties, phase_records, grid, conds_keys, state_v
             
             # DEBUG: Final solve after phase changes - first 3 conditions only
             if verbose and debug_condition_counter <= 3:
-                debug_log("  cpu_final_solve_after_phase_changes", verbose)
+                if _dbgmod._debug_enabled: debug_log("  cpu_final_solve_after_phase_changes", verbose)
             
             result = iter_solver.solve(composition_sets, cur_conds)
             chemical_potentials[:] = result.chemical_potentials
@@ -374,8 +375,8 @@ def _solve_eq_at_conditions(properties, phase_records, grid, conds_keys, state_v
             
             # DEBUG: Log final solve results - first 3 conditions only
             if verbose and debug_condition_counter <= 3:
-                debug_log(f"  cpu_final_solve_converged: {result.converged}", verbose)
-                debug_log(f"  cpu_final_chemical_potentials: {chemical_potentials}", verbose)
+                if _dbgmod._debug_enabled: debug_log(f"  cpu_final_solve_converged: {result.converged}", verbose)
+                if _dbgmod._debug_enabled: debug_log(f"  cpu_final_chemical_potentials: {chemical_potentials}", verbose)
 
         if not iter_solver.ignore_convergence:
             converged = result.converged
@@ -387,15 +388,15 @@ def _solve_eq_at_conditions(properties, phase_records, grid, conds_keys, state_v
             
             # DEBUG: Log final equilibrium results - first 3 conditions only with numerical data
             if verbose and debug_condition_counter <= 3:
-                debug_log(f"  cpu_final_converged: {converged}", verbose)
+                if _dbgmod._debug_enabled: debug_log(f"  cpu_final_converged: {converged}", verbose)
                 total_gm = 0
                 for i, compset in enumerate(composition_sets):
-                    debug_log(f"  cpu_final_phase_{i}_amount: {compset.NP:.15e}", verbose)
-                    debug_log(f"  cpu_final_phase_{i}_energy: {compset.energy:.15e}", verbose)
-                    debug_log(f"  cpu_final_phase_{i}_X: {np.array(compset.X)}", verbose)
+                    if _dbgmod._debug_enabled: debug_log(f"  cpu_final_phase_{i}_amount: {compset.NP:.15e}", verbose)
+                    if _dbgmod._debug_enabled: debug_log(f"  cpu_final_phase_{i}_energy: {compset.energy:.15e}", verbose)
+                    if _dbgmod._debug_enabled: debug_log(f"  cpu_final_phase_{i}_X: {np.array(compset.X)}", verbose)
                     total_gm += compset.NP * compset.energy
-                debug_log(f"  cpu_final_total_gm: {total_gm:.15e}", verbose)
-                debug_log(f"  cpu_final_chemical_potentials: {chemical_potentials}", verbose)
+                if _dbgmod._debug_enabled: debug_log(f"  cpu_final_total_gm: {total_gm:.15e}", verbose)
+                if _dbgmod._debug_enabled: debug_log(f"  cpu_final_chemical_potentials: {chemical_potentials}", verbose)
             
             prop_MU_values[it.multi_index] = chemical_potentials
             prop_Phase_values[it.multi_index] = ''
@@ -422,7 +423,7 @@ def _solve_eq_at_conditions(properties, phase_records, grid, conds_keys, state_v
             # SEGMENT 40: FINAL GIBBS ENERGY CALCULATION
             # Only print for first 3 conditions to avoid clutter
             if debug_condition_counter <= 3:
-                debug_log(40, "Final Gibbs energy calculation", condition_idx=it.multi_index[0])
+                if _dbgmod._debug_enabled: debug_log(40, "Final Gibbs energy calculation", condition_idx=it.multi_index[0])
             
             var_offset = 0
             total_comp = np.zeros(prop_X_values.shape[-1])
@@ -434,23 +435,23 @@ def _solve_eq_at_conditions(properties, phase_records, grid, conds_keys, state_v
                 prop_GM_values[it.multi_index] += compset.NP * compset.energy
                 var_offset += compset.phase_record.phase_dof
                 
-                debug_log(f"  phase_{phase_idx}_{compset.phase_record.phase_name}_Y: {compset.dof[len(compset.phase_record.state_variables):]}", verbose)
-                debug_log(f"  phase_{phase_idx}_{compset.phase_record.phase_name}_X: {compset.X}", verbose)
-                debug_log(f"  phase_{phase_idx}_{compset.phase_record.phase_name}_contribution: NP={compset.NP:.15e} * energy={compset.energy:.15e} = {compset.NP * compset.energy:.15e}", verbose)
+                if _dbgmod._debug_enabled: debug_log(f"  phase_{phase_idx}_{compset.phase_record.phase_name}_Y: {compset.dof[len(compset.phase_record.state_variables):]}", verbose)
+                if _dbgmod._debug_enabled: debug_log(f"  phase_{phase_idx}_{compset.phase_record.phase_name}_X: {compset.X}", verbose)
+                if _dbgmod._debug_enabled: debug_log(f"  phase_{phase_idx}_{compset.phase_record.phase_name}_contribution: NP={compset.NP:.15e} * energy={compset.energy:.15e} = {compset.NP * compset.energy:.15e}", verbose)
                 
                 
                 # DEBUG: Log per-phase energy contribution - first 3 conditions only
                 if verbose and debug_condition_counter <= 3:
-                    debug_log(f"  cpu_phase_{phase_idx}_energy_contribution: {compset.NP * compset.energy:.15e}", verbose)
+                    if _dbgmod._debug_enabled: debug_log(f"  cpu_phase_{phase_idx}_energy_contribution: {compset.NP * compset.energy:.15e}", verbose)
             
-            debug_log(f"  final_GM: {prop_GM_values[it.multi_index]:.15e}", verbose)
+            if _dbgmod._debug_enabled: debug_log(f"  final_GM: {prop_GM_values[it.multi_index]:.15e}", verbose)
 
         else:
 
             
             # DEBUG: Log equilibrium failure - first 3 conditions only
             if verbose and debug_condition_counter <= 3:
-                debug_log(f"  cpu_equilibrium_failed_converged: {converged}", verbose)
+                if _dbgmod._debug_enabled: debug_log(f"  cpu_equilibrium_failed_converged: {converged}", verbose)
             
             prop_MU_values[it.multi_index] = np.nan
             prop_NP_values[it.multi_index] = np.nan

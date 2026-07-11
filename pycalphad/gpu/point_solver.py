@@ -259,26 +259,18 @@ def build_spec_rows(points, spec_row0, hull, dynamic_sizes, nonvacant_elements,
     n_constraints = int(cmask[0].sum())
     if not np.all(cmask.sum(axis=1) == n_constraints):
         raise ValueError("all points must prescribe the same NUMBER of X conditions")
-    for i in range(n):
-        slot = 0
-        for c in np.flatnonzero(cmask[i]):
-            rows[i, off_rhs + slot] = points.X[i, c]
-            slot += 1
+    # vectorized: constraint slot k of point i is its k-th prescribed
+    # component (column order), same enumeration as the per-point loops
+    rows_i, cols_c = np.nonzero(cmask)
+    slot = np.concatenate([np.arange(c) for c in
+                           np.bincount(rows_i, minlength=n)]) if rows_i.size else rows_i
+    rows[rows_i, off_rhs + slot] = points.X[rows_i, cols_c]
 
-    # NOTE: if points prescribe DIFFERENT component sets, the coefficient
-    # matrix must also be per-point. For same-component batches (the ZPF
-    # binary case groups by X component) row 0's coefficients are correct;
-    # mixed-component batches overwrite coefficients too:
+    # per-point coefficient matrices (points may prescribe different
+    # component sets): zero the block, set coef[slot, comp] = 1
     off_coef = 3 + MC
-    base_coef = rows[0, off_coef:off_coef + MC * MC].copy()
-    for i in range(n):
-        coef = np.zeros((MC, MC))
-        slot = 0
-        for c in np.flatnonzero(cmask[i]):
-            coef[slot, c] = 1.0
-            slot += 1
-        rows[i, off_coef:off_coef + MC * MC] = coef.reshape(-1)
-    del base_coef
+    rows[:, off_coef:off_coef + MC * MC] = 0.0
+    rows[rows_i, off_coef + slot * MC + cols_c] = 1.0
 
     # per-point fit parameters live at the tail of the CORE section
     if MAX_PARAMS > 0 and points.params is not None:
@@ -592,8 +584,15 @@ class PointBatchSolver:
             d_res = cp.asarray(results)
             d_grid = cp.asarray(np.frombuffer(grid_blocks.tobytes(), dtype=np.uint8))
             d_gbi = cp.asarray(gbi)
-            d_work = [cp.empty((nt, s), dtype=cp.float64) for s in wa_shapes]
-            d_ptrs = cp.asarray(np.array([w.data.ptr for w in d_work], dtype=np.uint64))
+            # Work arrays and the pointer table persist across calls (sized to
+            # the largest chunk seen) — reallocating ~GBs per launch dominated
+            # small-step ensemble wall time.
+            wk = getattr(self, '_dev_work', None)
+            if wk is None or wk[0] < nt:
+                d_work = [cp.empty((nt, s), dtype=cp.float64) for s in wa_shapes]
+                d_ptrs = cp.asarray(np.array([w.data.ptr for w in d_work], dtype=np.uint64))
+                self._dev_work = wk = (nt, d_work, d_ptrs)
+            _, d_work, d_ptrs = wk
             for cs in range(0, n, chunk):
                 ce = min(cs + chunk, n)
                 cn = ce - cs
@@ -649,8 +648,16 @@ def device_point_hull(points, solver, X_row, GM_rows, combo_idx, Phase_row,
     ncomp = len(nonvacant_elements)
     n = len(points)
     m = X_row.shape[0]
-    X_row = np.ascontiguousarray(X_row, dtype=np.float64)
-    GM_flat = np.ascontiguousarray(GM_rows, dtype=np.float64).reshape(-1)
+    # X_row/GM_rows may be device (cupy) arrays on the CUDA backend — used
+    # as-is, no host round trip. Host copies are made only where host code
+    # needs them (fake-GM recompute below).
+    _is_dev = type(X_row).__module__.startswith('cupy') or \
+        type(GM_rows).__module__.startswith('cupy')
+    if not _is_dev:
+        X_row = np.ascontiguousarray(X_row, dtype=np.float64)
+        GM_flat = np.ascontiguousarray(GM_rows, dtype=np.float64).reshape(-1)
+    else:
+        GM_flat = GM_rows.reshape(-1)
 
     x_base = np.zeros(n, dtype=np.int64)
     gm_base = (np.asarray(combo_idx, dtype=np.int64) * m)
@@ -692,6 +699,9 @@ def device_point_hull(points, solver, X_row, GM_rows, combo_idx, Phase_row,
              dict(X=X_row, GM=GM_flat, xb=x_base, gb=gm_base, mp=m_points,
                   fi=fixed_idx, nf=nfixed, co=coefs, rh=rhs, nl=nlc,
                   mu=mu, oe=oe, fr=fr, sx=sx).items()}
+        if _is_dev:
+            d['X'] = X_row
+            d['GM'] = GM_flat
         tpb = 64
         kern = solver.module.get_function('point_hull_kernel')
         kern(((n + tpb - 1) // tpb,), (tpb,),
@@ -702,6 +712,10 @@ def device_point_hull(points, solver, X_row, GM_rows, combo_idx, Phase_row,
         mu, oe, fr, sx = (cp.asnumpy(d['mu']), cp.asnumpy(d['oe']),
                           cp.asnumpy(d['fr']), cp.asnumpy(d['sx']))
 
+    if _is_dev:
+        import cupy as _cp
+        X_row = _cp.asnumpy(X_row)
+        GM_flat = _cp.asnumpy(GM_flat) if False else None  # only fake rows needed
     # ---- vectorized reference post-processing (matches point_hull) ----
     # Only the first ncomp vertex slots are meaningful; trailing stays
     # ''/NaN. Fake vertices dissolve with the non-fake GM recompute.
@@ -718,7 +732,11 @@ def device_point_hull(points, solver, X_row, GM_rows, combo_idx, Phase_row,
     Phase[:, :ncomp] = phase
     has_fake = fake.any(axis=1)
     if has_fake.any():
-        gm_at = GM_flat[(gm_base[:, None] + idx)]     # (n, ncomp)
+        if GM_flat is None:  # device GM: gather just the (n, ncomp) values
+            import cupy as _cp
+            gm_at = _cp.asnumpy(GM_rows.reshape(-1)[_cp.asarray(gm_base[:, None] + idx)])
+        else:
+            gm_at = GM_flat[(gm_base[:, None] + idx)]     # (n, ncomp)
         w = np.where(fake, 0.0, fr[:, :ncomp])
         molesum = w.sum(axis=1)
         new_e = (w * gm_at).sum(axis=1)

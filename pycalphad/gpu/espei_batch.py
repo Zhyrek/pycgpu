@@ -831,11 +831,7 @@ class BatchedZPFCalculator:
                 if key == 'all':
                     d_g = self._d_gm_current
                 else:
-                    dcache = getattr(self, '_dev_gmf_cache', None)
-                    if dcache is None:
-                        self._dev_gmf_cache = dcache = {}
-                    d_g = self._d_gm_current[:, cp.asarray(buf['sel'])]
-                    dcache[key] = d_g  # keep alive through the launch
+                    d_g = self._dev_gmf_cache[key]  # built just above in the iso loop
                 return self._ext_blocks(key, W, int(buf['dY'].data.ptr),
                                         int(buf['dX'].data.ptr),
                                         int(buf['dPID'].data.ptr),
@@ -849,13 +845,17 @@ class BatchedZPFCalculator:
                                     gfilt_gm_host.ctypes.data, buf['M'],
                                     self._legacy_tmpl_block(key))
 
+        cuda = self.backend == 'cuda'
         hyp_res, n_hyp = None, 0
         if self._hyp_pts_raw is not None:
             pts, combo, n_hyp = self._walker_major(self._hyp_pts_raw, params_matrix, key='hyp')
             t = self._grid_tmpl
-            hull = device_point_hull(pts, self.solver, t.X[0], grid.GM, combo,
+            buf = self._group_buffers('all')
+            hull_X = buf['dX'] if cuda else t.X[0]
+            hull_GM = self._d_gm_current if cuda else grid.GM
+            hull = device_point_hull(pts, self.solver, hull_X, hull_GM, combo,
                                      t.Phase[0], t.Y[0], self.nonvacant)
-            gm_all = np.ascontiguousarray(grid.GM)
+            gm_all = grid.GM  # host copy (contiguous) for cpp block pointers
             blocks = _blocks_for('all', gm_all)
             hyp_res = self.solver.solve(pts, hull, grid, self.spec_row0,
                                         self.state_variables, self.nonvacant,
@@ -865,16 +865,42 @@ class BatchedZPFCalculator:
         for ph, raw in self._iso_pts_raw.items():
             pts, combo, n_ph = self._walker_major(raw, params_matrix, key=ph)
             pts.phase_restrict[:] = ph
-            gfilt = self._filtered_grid(grid, ph)
             t = self._grid_tmpl
-            sel = self._grid_phase_masks[ph]
-            gm_f = np.ascontiguousarray(np.asarray(gfilt.GM))
-            hull = device_point_hull(pts, self.solver,
-                                     np.ascontiguousarray(t.X[0][sel]),
-                                     gm_f, combo,
-                                     t.Phase[0][sel],
-                                     np.ascontiguousarray(t.Y[0][sel]),
-                                     self.nonvacant)
+            sel = self._grid_phase_masks.get(ph) if self._grid_phase_masks else None
+            if sel is None:
+                self._filtered_grid(grid, ph)  # builds the mask cache
+                sel = self._grid_phase_masks[ph]
+            buf = self._group_buffers(ph)
+            if cuda:
+                cp = self.solver._cp
+                dcache = getattr(self, '_dev_gmf_cache', None)
+                if dcache is None:
+                    self._dev_gmf_cache = dcache = {}
+                dsel = dcache.get((ph, 'sel'))
+                if dsel is None:
+                    dcache[(ph, 'sel')] = dsel = cp.asarray(sel)
+                # persistent per (phase, W) buffer: the ext blocks bake in its
+                # pointer, so it must be updated IN PLACE each step
+                W_here = len(params_matrix)
+                d_gm_f = dcache.get((ph, W_here))
+                if d_gm_f is None or d_gm_f.shape[0] != self._d_gm_current.shape[0]:
+                    d_gm_f = cp.empty((self._d_gm_current.shape[0], sel.size))
+                    dcache[(ph, W_here)] = d_gm_f
+                cp.take(self._d_gm_current, dsel, axis=1, out=d_gm_f)
+                dcache[ph] = d_gm_f
+                hull = device_point_hull(pts, self.solver, buf['dX'], d_gm_f,
+                                         combo, t.Phase[0][sel],
+                                         np.ascontiguousarray(t.Y[0][sel]),
+                                         self.nonvacant)
+                gm_f = None
+                gfilt = None
+            else:
+                gfilt = self._filtered_grid(grid, ph)
+                gm_f = np.ascontiguousarray(np.asarray(gfilt.GM))
+                hull = device_point_hull(pts, self.solver, buf['X'], gm_f,
+                                         combo, t.Phase[0][sel],
+                                         np.ascontiguousarray(t.Y[0][sel]),
+                                         self.nonvacant)
             blocks = _blocks_for(ph, gm_f)
             iso_res[ph] = self.solver.solve(pts, hull, grid, self.spec_row0,
                                             self.state_variables, self.nonvacant,

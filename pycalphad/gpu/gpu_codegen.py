@@ -3505,7 +3505,9 @@ __global__ void top_level_equilibrium_kernel(
                     const PhaseRecord* phase_rec = &g_phase_records_array[phase_record_idx];
                     
                     // Set up DOF array for this phase (mirrors CPU compset.dof setup)
-                    double phase_dof[MAX_STATEVARS + MAX_DOF_PER_PHASE];
+                    // Trailing MAX_PARAMS slots hold runtime fit-parameter values,
+                    // read by the generated functions as x[3 + phase_dof + j].
+                    double phase_dof[MAX_STATEVARS + MAX_DOF_PER_PHASE + MAX_PARAMS];
                     
                     // State variables - from condition args
                     // CRITICAL FIX: GPU functions expect [N, P, T, site_fractions] format
@@ -3596,6 +3598,39 @@ __global__ void top_level_equilibrium_kernel(
                         }}
                         phase_dof[3 + sf] = site_frac_val;  // Site fractions start after [N, P, T] (position 3)
                     }}
+
+                    #if MAX_PARAMS > 0
+                    {{
+                        // Runtime fit parameters ride in trailing dof slots after this
+                        // phase's site fractions, exactly as at the compset-creation
+                        // sites in eqsolver.h. They are the LAST (MAX_PARAMS + 1)
+                        // doubles of the spec row's CORE section (fit_params then
+                        // num_params) — apply_safe_padding appends padding AFTER the
+                        // core, so they are NOT at the end of the stride. Offsets
+                        // mirror create_flat_system_specification in
+                        // gpu_systemspec_flat.py field-for-field. Without this fill
+                        // the energy evaluation below reads unwritten stack slots.
+                        const int spec_core_doubles =
+                            3                                                       // num_statevars, num_components, prescribed_system_amount
+                            + MAX_COMPONENTS                                        // initial_chemical_potentials
+                            + MAX_FIXED_MOLE_FRACTION_CONDITIONS * MAX_COMPONENTS   // prescribed_mole_fraction_coefficients
+                            + MAX_FIXED_MOLE_FRACTION_CONDITIONS                    // prescribed_mole_fraction_rhs
+                            + 2                                                     // num_prescribed_mole_fraction_{{conditions,coefficients_cols}}
+                            + (MAX_COMPONENTS + 1)                                  // free_chemical_potential_indices + count
+                            + (MAX_STATEVARS + 1)                                   // free_statevar_indices + count
+                            + (MAX_COMPONENTS + 1)                                  // fixed_chemical_potential_indices + count
+                            + (MAX_STATEVARS + 1)                                   // fixed_statevar_indices + count
+                            + (MAX_PHASES + 1)                                      // fixed_stable_compset_indices + count
+                            + 1                                                     // max_num_free_stable_phases
+                            + 1                                                     // ALLOWED_MASS_RESIDUAL
+                            + (MAX_PARAMS + 1);                                     // fit_params + num_params
+                        const double* spec_fit_params = my_spec_doubles + (spec_core_doubles - (MAX_PARAMS + 1));
+                        int spec_num_params = (int)spec_fit_params[MAX_PARAMS];
+                        for (int pj = 0; pj < spec_num_params && pj < MAX_PARAMS; ++pj) {{
+                            phase_dof[3 + phase_rec->phase_dof + pj] = spec_fit_params[pj];
+                        }}
+                    }}
+                    #endif
                     
                     if (verbose && ph_idx < 2 && condition_idx < 3) {{
                         gpu_debug_log_array("phase_site_fractions", &phase_dof[3], phase_rec->phase_dof);

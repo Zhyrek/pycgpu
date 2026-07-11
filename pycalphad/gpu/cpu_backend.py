@@ -29,8 +29,9 @@ def _compile_command(lib_path, src_path, defines):
     runtime dependency (notably simplifying macOS installs).
     """
     system = platform.system()
+    extra = os.environ.get('PYCGPU_CPU_EXTRA_CFLAGS', '').split()
     common = ['-std=c++17', '-O3', '-march=native', '-ffp-contract=off',
-              '-shared', '-fPIC', '-o', lib_path, src_path]
+              '-shared', '-fPIC'] + extra + ['-o', lib_path, src_path]
     if system == 'Darwin':
         cxx = shutil.which('clang++')
         if cxx is None:
@@ -58,6 +59,21 @@ extern "C" void pycgpu_cpu_grid_eval(int model_idx, const double* dof, double* o
     }
 }
 
+#include <cstdlib>
+#include <fenv.h>
+#include <alloca.h>
+
+// Debug aid (PYCGPU_CPU_SNAN=1): before each condition, fill a large region
+// of the stack below the driver frame with signaling-NaN doubles. Any
+// arithmetic USE of an unwritten (stale) stack double then raises FE_INVALID,
+// which we promote to SIGFPE so gdb stops at the exact faulting instruction.
+static void __attribute__((noinline)) pycgpu_paint_stack(long long nbytes)
+{
+    unsigned long long* p = (unsigned long long*)alloca(nbytes);
+    for (long long i = 0; i < nbytes / 8; ++i) p[i] = 0x7FF0000000000001ull; // sNaN
+    __asm__ __volatile__("" :: "r"(p) : "memory");
+}
+
 extern "C" void pycgpu_cpu_run_all(
     const void* global_spec_ptr_raw,
     const void* condition_args_list_ptr_raw,
@@ -80,7 +96,18 @@ extern "C" void pycgpu_cpu_run_all(
     int max_solver_iterations)
 {
     init_all_gpu_phase_records();
-    for (int t = 0; t < num_conditions_total; ++t) {
+    // PYCGPU_CPU_TSTART=<t>: start the serial loop at condition t (debug aid
+    // for isolating cross-condition state carryover; earlier conditions keep
+    // their initialization values in the results buffer).
+    const char* tstart_env = std::getenv("PYCGPU_CPU_TSTART");
+    const int t_start = tstart_env ? atoi(tstart_env) : 0;
+    const bool dbg_snan = (std::getenv("PYCGPU_CPU_SNAN") != nullptr);
+    if (dbg_snan) {
+        feclearexcept(FE_ALL_EXCEPT);
+        feenableexcept(FE_INVALID);
+    }
+    for (int t = t_start; t < num_conditions_total; ++t) {
+        if (dbg_snan) pycgpu_paint_stack(4ll * 1024 * 1024);
         // Make tid = blockDim.x * blockIdx.x + threadIdx.x == t
         threadIdx.x = (unsigned int)t;
         blockIdx.x = 0u;
@@ -92,6 +119,10 @@ extern "C" void pycgpu_cpu_run_all(
             debug_convergence_history, debug_iteration_count, debug_max_steps,
             (const WorkArrays*)work_arrays, grid_block_indices, grid_block_stride_bytes,
             max_solver_iterations);
+    }
+    if (dbg_snan) {
+        fedisableexcept(FE_ALL_EXCEPT);  // don't let numpy trap afterwards
+        feclearexcept(FE_ALL_EXCEPT);
     }
 }
 """
@@ -105,7 +136,8 @@ def build_cpu_library(full_kernel_source: str, define_flags, cache_dir: str, ver
 
     source = compat + "\n" + full_kernel_source + "\n" + _CPU_DRIVER_SRC
     defines = [d for d in define_flags if d.startswith("-D")]
-    tag = hashlib.md5((source + "|".join(sorted(defines))).encode()).hexdigest()
+    extra_cflags = os.environ.get('PYCGPU_CPU_EXTRA_CFLAGS', '')
+    tag = hashlib.md5((source + "|".join(sorted(defines)) + extra_cflags).encode()).hexdigest()
     os.makedirs(cache_dir, exist_ok=True)
     src_path = os.path.join(cache_dir, f"{tag}_cpu.cpp")
     lib_path = os.path.join(cache_dir, f"{tag}_cpu.so")
@@ -114,6 +146,8 @@ def build_cpu_library(full_kernel_source: str, define_flags, cache_dir: str, ver
         with open(src_path, "w") as f:
             f.write(source)
         cmd = _compile_command(lib_path, src_path, defines)
+        with open(os.path.join(cache_dir, f"{tag}_cmd.txt"), "w") as f:
+            f.write(" ".join(cmd) + "\n")
         if verbose:
             print(f"[CPU-C++] Compiling backend library: {' '.join(cmd)}")
         result = subprocess.run(cmd, capture_output=True, text=True)

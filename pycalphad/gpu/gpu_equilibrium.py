@@ -2326,6 +2326,29 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     # 5. Transfer struct data to GPU
     if verbose:
         print("[GPU] DEBUG: Transferring struct data to GPU...")
+
+    # ---- Condition sorting prototype (PYCGPU_SORT=1) ----
+    # Group conditions by their starting-point phase assemblage so warps run
+    # similar trajectories (same generated functions, similar iteration counts),
+    # reducing intra-warp divergence in dense launches. All per-condition
+    # buffers are permuted together; results rows are inverse-permuted before
+    # processing, so per-condition outputs are unchanged.
+    _sort_perm = None
+    if os.environ.get('PYCGPU_SORT') and not (verbose and num_total_conditions_pts <= 10):
+        _sig = np.concatenate([
+            initial_phase_data_arrays['num_phases'][:, None].astype(np.int64),
+            initial_phase_data_arrays['phase_indices'].astype(np.int64)], axis=1)
+        _, _group = np.unique(_sig, axis=0, return_inverse=True)
+        _sort_perm = np.argsort(_group, kind='stable')
+        _spec_stride_tmp = len(system_specs_array) // num_total_conditions_pts
+        system_specs_array = np.ascontiguousarray(
+            system_specs_array.reshape(num_total_conditions_pts, _spec_stride_tmp)[_sort_perm]).reshape(-1)
+        condition_args_struct = np.ascontiguousarray(condition_args_struct[_sort_perm])
+        initial_phase_data_struct = np.ascontiguousarray(initial_phase_data_struct[_sort_perm])
+        if grid_block_indices_np is not None:
+            grid_block_indices_np = np.ascontiguousarray(grid_block_indices_np[_sort_perm])
+        if verbose or os.environ.get('PYCGPU_TIME'):
+            print(f"[GPU] PYCGPU_SORT: {len(np.unique(_group))} assemblage groups over {num_total_conditions_pts} conditions")
     
     try:
         # Pack structs into byte arrays for CuPy compatibility
@@ -2847,6 +2870,14 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                     print(f"[GPU TIME] two-pass pass2 wall: {time.time() - _t_pass2:.3f} s ({_k} conditions)")
             # Scatter pass-2 results back into the full results buffer
             _res_view[_redo] = _sub_res.reshape(_k, results_per_condition)
+
+    # Undo the PYCGPU_SORT permutation: restore original condition order in the
+    # results buffer before any downstream processing.
+    if _sort_perm is not None:
+        _inv_perm = np.empty_like(_sort_perm)
+        _inv_perm[_sort_perm] = np.arange(_sort_perm.size)
+        _rv = results_gpu.view(np.float64).reshape(num_total_conditions_pts, results_per_condition)
+        _rv[:] = xp.ascontiguousarray(_rv[xp.asarray(_inv_perm)])
 
     if _guard_mode:
         # Scan the interleaved guard slices: any non-magic value means a thread

@@ -37,20 +37,20 @@ errors — `set_backend` is safe to enable globally.
   and indices) on ~1,900 mixed binary/ternary/phase-restricted cases, and
   end-to-end GM is bit-identical to the CPU-hull path at 10k, 100k, and
   1,002,000-condition batches.
-- Same-phase-set energy agreement vs the current reference solver:
-  21-phase AlCuFe over a 245-condition grid — where both solvers converge
-  (236 conditions), **236/236 stable phase sets match with max |dGM| =
-  3.5e-5 J/mol**; AuBi 55/55 at <= 9e-6. Convergence census on the
-  remaining 9 AlCuFe conditions: 2 fail on both solvers, 3 fail on the
-  reference only (the backend converges), 4 fail on the backend only
-  (reference converges) — i.e. roughly symmetric ~2% failure rates on
-  this deliberately hard system, in the known degenerate add/remove
-  cycling class (not iteration-cap limited; flagged as a follow-up). (Against the
-  older solver this branch originally targeted there was a small
-  degenerate-basin mismatch family; upstream's solver improvements since
-  then eliminated it.) Two test adjustments are flagged inline (a bitwise
-  comparison relaxed to rtol=1e-10; one degenerate-tie test made
-  backend-aware, 0.02 J/mol).
+- Energy agreement vs the current reference solver: 37-phase AlCuFe
+  censuses at 245 and 3,328 conditions give **bit-identical GM (max
+  |dGM| = 0.0) at every mutually converged condition with identical
+  NaN/convergence patterns, on both backends** — the solver kernels now
+  match the reference's iteration dynamics exactly (step-size ramp,
+  10-iteration convergence gate, NaN vertex padding), verified by
+  per-iteration trajectory traces agreeing to ~1e-12 on the sensitive
+  cases (5-component single-phase miscibility gap gh-589, ill-conditioned
+  magnetic Hessian, 9-component rose, pure-vacancy suspension gh-503,
+  charged-species alfeo). (Against the older solver this branch
+  originally targeted there was a small degenerate-basin mismatch family;
+  upstream's solver improvements since then eliminated it.) Two test
+  adjustments are flagged inline (a bitwise comparison relaxed to
+  rtol=1e-10; one degenerate-tie test made backend-aware, 0.02 J/mol).
 - The reference tree is byte-for-byte upstream: workspace.py, solver.py,
   minimizer.pyx/.pxd, eqsolver.pyx, lower_convex_hull.py and
   starting_point.py are unmodified. The only reference-file changes are the

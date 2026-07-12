@@ -68,11 +68,11 @@ def _accelerated_conditions_supported(conditions, parameters, solver,
             elif isinstance(cond, v.ChemicalPotential):
                 continue
             elif isinstance(cond, (v.MoleFraction, v.MassFraction)):
-                # Dilute/zero compositions have dedicated reference-path
-                # handling (clamping + user warnings) the accelerated
-                # solvers do not replicate.
-                if np.any(np.asarray(value, dtype=np.float64) < 1e-9):
-                    return False
+                # Dilute/zero compositions are clamped into
+                # [minimum_composition, 1 - minimum_composition] by the
+                # Workspace Conditions container (with its warning), which
+                # the accelerated path constructs identically — no special
+                # handling needed here.
                 continue
             elif str(cond).startswith('LinComb_'):
                 continue

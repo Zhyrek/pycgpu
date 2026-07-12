@@ -90,3 +90,17 @@ sit at solver accuracy (verified vs reference tie-lines to ~1e-15);
 grid resolution only controls boundary sampling density. Measured: Al-Ni
 (8 phases, 12,100-point grid) in 2.9 s on the C++ backend vs 27.1 s for
 reference ZPF mapping; Al-Zn in 1.3 s.
+
+## Dilute and boundary compositions
+
+Composition conditions at or beyond the dilute limit (including exact 0
+and 1) are clamped into `[1e-10, 1 - 1e-10]` by the Workspace conditions
+container — identical semantics and warnings on every backend, since the
+accelerated path constructs the same Workspace. Away from the clamp the
+backends match the reference at the usual bit/eps level; AT the clamp the
+per-phase matrices are ill-conditioned (~1e10), and the backends' compiled
+linear algebra lands at a slightly different point inside the same
+convergence tolerance band than LAPACK: GM agrees to ~1e-5 J/mol (~3e-10
+relative) with identical stable phase sets, while the chemical potential
+of the clamped dilute component itself — an RT/y-amplified quantity with
+little physical meaning at y ~ 1e-10 — can differ by ~1e3 J/mol.

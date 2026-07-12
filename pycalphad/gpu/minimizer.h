@@ -382,7 +382,7 @@ typedef struct SystemState {
         for (int i = 0; i < MAX_PHASES; ++i) {
             metastable_phase_iterations[i] = 0;
             times_compset_removed[i] = 0;
-            // CRITICAL FIX: Initialize phase_amt from NP, but we'll normalize below
+            // Initialize phase_amt from NP, but we'll normalize below
             phase_amt[i] = (i < num_compsets) ? compsets[i].NP : 0.0;
             _driving_forces_arr[i] = 0.0;
             _phase_energies_per_mole_atoms_arr[i] = 0.0;
@@ -414,7 +414,7 @@ typedef struct SystemState {
         phase_compositions_cols = spec->num_components;
         for (int i = 0; i < MAX_PHASES * MAX_COMPONENTS; ++i) phase_compositions[i] = 0.0;
         
-        // CRITICAL FIX: Calculate phase_compositions using formulamole_obj like CPU does
+        // Calculate phase_compositions using formulamole_obj like CPU does
         // This is essential for phase amount normalization to work correctly
         
         
@@ -425,7 +425,7 @@ typedef struct SystemState {
             
             // Calculate moles of each element per formula unit
             double formulamoles[MAX_COMPONENTS];
-            // CRITICAL: Initialize to zero since formulamole_obj only fills nonvacant elements
+            // Initialize to zero since formulamole_obj only fills nonvacant elements
             for (int i = 0; i < MAX_COMPONENTS; ++i) {
                 formulamoles[i] = 0.0;
             }
@@ -448,7 +448,7 @@ typedef struct SystemState {
                     }
                     #endif
                 } else {
-                    // CRITICAL FIX: Create Model DOF array from Workspace DOF
+                    // Create Model DOF array from Workspace DOF
                     // With updated energy functions, use full workspace DOF
                     if (compset->phase_record->formulamole_obj != nullptr) {
                         
@@ -465,7 +465,7 @@ typedef struct SystemState {
                 phase_comp_sum += formulamoles[comp_idx];
             }
             
-            // CRITICAL FIX: Convert phase amounts to formula units like CPU does
+            // Convert phase amounts to formula units like CPU does
             // CPU minimizer.pyx line 776: self.phase_amt[idx] /= phase_comp_sum
             // This normalization must happen in __init__ to match CPU behavior!
             
@@ -575,7 +575,7 @@ typedef struct SystemState {
             // REMOVED: Old code that created current_dof_for_phase incorrectly
             // Now we create model_dof_for_calcs properly from workspace DOF when needed
             
-            // CRITICAL FIX: Calculate phase_compositions using formulamole_obj (matching CPU minimizer.pyx)
+            // Calculate phase_compositions using formulamole_obj (matching CPU minimizer.pyx)
             double formulamoles[MAX_COMPONENTS];
             // Initialize to zero since formulamole_obj only fills nonvacant elements
             for (int i = 0; i < MAX_COMPONENTS; ++i) {
@@ -600,13 +600,13 @@ typedef struct SystemState {
                     }
                     #endif
                 } else {
-                    // CRITICAL FIX: Create Model DOF array from Workspace DOF
+                    // Create Model DOF array from Workspace DOF
                     // With updated energy functions, use full workspace DOF
                     if (compset->phase_record->formulamole_obj != nullptr) {
                         compset->phase_record->formulamole_obj(formulamoles, compset->dof);
                     }
                     
-                    // CRITICAL FIX: Calculate mass jacobians (missing from original GPU implementation)
+                    // Calculate mass jacobians (missing from original GPU implementation)
                     // This matches CPU line 820: compset.phase_record.formulamole_grad(csst.mass_jac[comp_idx, :], x, comp_idx)
                     // Zero out mass_jac first
                     for (int i = 0; i < csst->mass_jac_rows * csst->mass_jac_cols; ++i) {
@@ -683,7 +683,7 @@ typedef struct SystemState {
             }
 
             for (int comp_idx = 0; comp_idx < spec->num_components; ++comp_idx) {
-                // CRITICAL FIX: masses should contain mole fractions from formulamole_obj
+                // masses should contain mole fractions from formulamole_obj
                 // This matches CPU line 749: compset.phase_record.formulamole_obj(csst.masses[comp_idx, :], x, comp_idx)
                 csst->masses[comp_idx] = formulamoles[comp_idx];
                 
@@ -836,7 +836,7 @@ typedef struct SystemState {
             // REMOVED: Old code that created current_dof_for_phase incorrectly
             // Now we create model_dof_for_calcs properly from workspace DOF when needed
 
-            // CRITICAL FIX: Calculate phase_comp_sum from stored phase_compositions
+            // Calculate phase_comp_sum from stored phase_compositions
             // This matches CPU behavior (minimizer.pyx line 880-881)
             // For multi-sublattice phases, this equals the sum of site ratios (e.g., 20 for ALCU_ZETA)
             double phase_sum_moles_atoms_per_formula = 0.0;
@@ -848,7 +848,7 @@ typedef struct SystemState {
             // CPU doesn't have a fallback here - let it be what it is
 
             // Call compset update. NP is moles of formula units.
-            // CRITICAL: Match CPU algorithm - multiply phase_amt by phase_sum_moles_atoms_per_formula
+            // Match CPU algorithm - multiply phase_amt by phase_sum_moles_atoms_per_formula
             // This converts from formula units back to mole fractions, matching CPU minimizer.pyx line 885
             double update_amount = phase_amt[idx] * phase_sum_moles_atoms_per_formula;
             
@@ -864,7 +864,7 @@ typedef struct SystemState {
             
             // Additional safety check for update amount
             // CPU doesn't check update_amount bounds
-            // CRITICAL FIX: Pass the actual workspace DOF to update, not the model DOF
+            // Pass the actual workspace DOF to update, not the model DOF
             // The update function expects workspace state variables, not model state variables
             #ifdef PYCGPU_PROF
             long long prof_f0 = clock64();
@@ -877,7 +877,7 @@ typedef struct SystemState {
             // csst->energy will be G per formula unit (from pr->formulaobj)
             // Pass full workspace DOF to energy calculation, matching CPU behavior
             // The generated functions now expect workspace DOF format [N, P, T, Y1, Y2...]
-            // CRITICAL FIX: Use pr->formulaobj() for equilibrium matrix (per formula unit, not per mole atoms)
+            // Use pr->formulaobj() for equilibrium matrix (per formula unit, not per mole atoms)
             // This matches the CPU behavior where equilibrium matrix uses unnormalized energy values
             csst->energy = pr->formulaobj(compset->dof);
             
@@ -914,7 +914,7 @@ typedef struct SystemState {
             }
             #endif
             
-            // CRITICAL FIX: Properly handle mass_jac from formulamole_grad output
+            // Properly handle mass_jac from formulamole_grad output
             // formulamole_grad outputs a matrix of size (num_nonvacant_elements × num_model_dof)
             // where num_model_dof = pr->num_statevars + pr->phase_dof
             // But csst->mass_jac expects size (num_components × (spec->num_statevars + pr->phase_dof))
@@ -945,7 +945,7 @@ typedef struct SystemState {
                 #ifdef VERBOSE_DEBUG
                 if (iteration < 2) {
                     printf("GPU DEBUG: Raw formulamole_grad output (phase %d):\n", idx);
-                    // CRITICAL FIX: CSE functions output in reduced format [T, Y1, Y2, ...]
+                    // CSE functions output in reduced format [T, Y1, Y2, ...]
                     // So the gradient matrix is nonvacant_elements x (1 + phase_dof)
                     int reduced_cols = 1 + pr->phase_dof; // T + site fractions
                     for (int i = 0; i < pr->nonvacant_elements && i < 3; i++) {
@@ -964,7 +964,7 @@ typedef struct SystemState {
             }
             
             // Now copy the gradients to the correct positions in csst->mass_jac
-            // CRITICAL FIX: CSE functions output in reduced format [T, Y1, Y2, ...]
+            // CSE functions output in reduced format [T, Y1, Y2, ...]
             // We need to map this to workspace format [N, P, T, Y1, Y2, ...]
             int nonvacant_idx = 0;
             int reduced_cols = 1 + pr->phase_dof; // CSE output columns: T + site fractions
@@ -1287,7 +1287,7 @@ typedef struct SystemState {
                 csst->full_e_matrix[i] = csst->phase_matrix[i];
             }
             
-            // CRITICAL FIX: Use LU decomposition instead of SVD to match CPU behavior exactly
+            // Use LU decomposition instead of SVD to match CPU behavior exactly
             // CPU uses LAPACK's dgesv (LU decomposition with partial pivoting)
             // GPU was using SVD which produces different results for constrained matrices
             #ifdef PYCGPU_PROF
@@ -1435,7 +1435,7 @@ typedef struct SystemState {
                 }
             }
             
-            // CRITICAL FIX: Calculate c_component IMMEDIATELY after phase matrix inversion
+            // Calculate c_component IMMEDIATELY after phase matrix inversion
             // This must be done before fill_equilibrium_system uses c_component
             // DEBUG: Print mass_jac values before c_component calculation
             #ifdef VERBOSE_DEBUG
@@ -1456,7 +1456,7 @@ typedef struct SystemState {
                 for (int i = 0; i < num_phase_dof_for_csst; ++i) {
                     for (int j = 0; j < num_phase_dof_for_csst; ++j) {
                          if (cidx < pr->num_elements) { // Ensure we are using valid mass_jac entries
-                            // CRITICAL FIX: mass_jac is in Workspace format, not Model format!
+                            // mass_jac is in Workspace format, not Model format!
                             // We need to access the site fraction columns which start at spec->num_statevars
                             double mass_jac_val = csst->mass_jac[cidx * csst->mass_jac_cols + (spec->num_statevars + j)];
                             double e_matrix_val = csst->full_e_matrix[i * csst->full_e_matrix_dim + j];
@@ -1520,7 +1520,7 @@ typedef struct SystemState {
             for (int cidx = 0; cidx < spec->num_components; ++cidx) {
                  if (cidx < pr->num_elements) {
                     csst->moles_normalization += csst->masses[cidx];
-                    // CRITICAL FIX: moles_normalization_grad should be in Workspace format
+                    // moles_normalization_grad should be in Workspace format
                     // since mass_jac is in Workspace format
                     for (int i_dof = 0; i_dof < csst->mass_jac_cols; ++i_dof) {
                         csst->moles_normalization_grad[i_dof] += csst->mass_jac[cidx * csst->mass_jac_cols + i_dof];
@@ -1684,10 +1684,10 @@ __device__ void compute_phase_matrix(double* phase_matrix_out, const double* hes
 
 
 // Remaining function definitions (solve_state, advance_state, etc.)
-// These are copied from the previous response and will be checked/adjusted for consistency
+
 // with the "no phase local conditions" constraint, which mainly affects dimensions.
 
-// (Copied from previous response, check for MAX_PHASE_LOCAL_CONDITIONS removal impact)
+
 __device__ void write_row_stable_phase(double* out_row, double* out_rhs,
                                      const int* free_chemical_potential_indices, int num_free_chemical_potentials,
                                      const int* free_stable_compset_indices, int num_free_stable_compsets, // These are indices into the main compset array
@@ -1713,7 +1713,7 @@ __device__ void write_row_stable_phase(double* out_row, double* out_rhs,
     int free_variable_column_offset = 0;
     int chempot_idx, statevar_idx, i;
 
-    // CRITICAL FIX: Write masses for ALL components in free_chemical_potential_indices
+    // Write masses for ALL components in free_chemical_potential_indices
     // CPU includes ALL non-VA components as free chemical potentials, even when
     // mole fractions are prescribed. The constraints are handled separately.
     // This matches the CPU behavior of having columns for all non-VA components.
@@ -1745,7 +1745,7 @@ __device__ void write_row_stable_phase(double* out_row, double* out_rhs,
 
     for (i = 0; i < num_free_statevars; i++) {
         statevar_idx = free_statevar_indices[i]; // This is the workspace index of the free state variable
-        // CRITICAL FIX: Use workspace indices directly, just like CPU code does!
+        // Use workspace indices directly, just like CPU code does!
         // The gradient array is already populated with workspace indices from formulagrad
         out_row[free_variable_column_offset + i] = -grad_for_compset[statevar_idx];
     }
@@ -1805,7 +1805,7 @@ __device__ void write_row_fixed_mole_fraction(double* out_row, double* out_rhs,
         double term1 = 0.0;
         double term2 = 0.0;
         for (int j = 0; j < c_component_cols_cs; j++) { // j is index over phase_dof
-            // CRITICAL FIX: Both mass_jac and moles_normalization_grad are in Workspace format!
+            // Both mass_jac and moles_normalization_grad are in Workspace format!
             // In Workspace format: [N, P, T, Y1, Y2, ...] so site fractions start at num_system_statevars
             double mass_jac_val = mass_jac_cs[component_idx_of_constraint * mass_jac_cols_cs + (num_system_statevars + j)];
             double c_comp_val = c_component_cs[free_chempot_global_idx * c_component_cols_cs + j];
@@ -1936,7 +1936,7 @@ __device__ void write_row_fixed_mole_fraction(double* out_row, double* out_rhs,
     #endif
     
     for (int j = 0; j < c_G_length_cs; j++) { // j is index over phase_dof
-        // CRITICAL FIX: Use workspace indexing for mass_jac and moles_normalization_grad
+        // Use workspace indexing for mass_jac and moles_normalization_grad
         rhs_term1 += mass_jac_cs[component_idx_of_constraint * mass_jac_cols_cs + (num_system_statevars + j)] * c_G_cs[j];
         rhs_term2 += (-system_mole_fractions_sys[component_idx_of_constraint] * moles_normalization_grad_cs[num_system_statevars + j]) * c_G_cs[j];
     }
@@ -1993,15 +1993,13 @@ __device__ void write_row_fixed_mole_fraction(double* out_row, double* out_rhs,
 
 
 // --- Definitions for the rest of the __device__ functions ---
-// (Copied from previous response, to be reviewed for consistency)
+
 // fill_equilibrium_system, check_convergence, pre_solve_hook, post_solve_hook,
 // solve_state, advance_state, remove_and_consolidate_phases, change_phases, run_loop
 
-// The rest of the functions (fill_equilibrium_system, check_convergence, hooks, run_loop, solve_state, advance_state, remove_and_consolidate_phases, change_phases)
-// from the previous turn should be mostly correct in structure.
-// The main impact of "no phase local conditions" is simplifying CompsetState's phase_matrix_dim and removing related arrays,
-// which has been done above. The MAX_PHASE_MATRIX_DIM is also updated.
-// These functions rely on the corrected dimensions passed via CompsetState and PhaseRecord.
+// Phase-local conditions are always absent in this port, which simplifies
+// CompsetState's phase_matrix_dim (and MAX_PHASE_MATRIX_DIM); the functions
+// below rely on the dimensions carried by CompsetState and PhaseRecord.
 
 // Implementation of write_row_fixed_mole_amount function
 __device__ void write_row_fixed_mole_amount(double* out_row, double* out_rhs,
@@ -2095,13 +2093,12 @@ __device__ void write_row_fixed_mole_amount(double* out_row, double* out_rhs,
     }
 }
 
-// [The rest of the function definitions: fill_equilibrium_system, check_convergence, pre_solve_hook, post_solve_hook, run_loop, solve_state, advance_state, remove_and_consolidate_phases, change_phases would be here. They are substantial and largely unchanged in their logic by the removal of phase-local conditions, other than relying on the now-simpler dimensions. For brevity, I'll omit re-pasting all of them if their internal logic doesn't directly interact with phase-local-condition-specific arrays that have now been removed. The key changes were in the struct definitions and affected dimension calculations.]
-// The previous response already contained these functions. The important part is that the `CompsetState` and `SystemSpecification` definitions are now updated.
 
 // It is crucial that the C PhaseRecord struct and its associated function pointers
 // (e.g., for formulamole_obj, formulamole_grad) are implemented in a way that
 // is consistent with how they are called (e.g., if they operate per-component or fill arrays for all components).
-// The `compute_phase_matrix` function's C version from the prompt did not use chemical potentials, unlike its pyx counterpart's calculation of delta_y. This difference should be noted.
+// Note: this compute_phase_matrix does not use chemical potentials, unlike
+// the pyx counterpart's delta_y calculation.
 
 // Re-inserting and checking fill_equilibrium_system for sanity with the new context:
 __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibrium_matrix_cols,
@@ -2119,7 +2116,7 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
     int num_fixed_mole_frac_conds = spec->num_prescribed_mole_fraction_conditions;
     double prefactor;
 
-    // CRITICAL FIX: Add +1 back to match CPU matrix dimensions exactly
+    // Add +1 back to match CPU matrix dimensions exactly
     // CPU DOES include a system amount constraint row (with [1,1,1] for phase amounts)
     int total_rows = num_free_stable_phases + num_fixed_stable_cs + num_fixed_mole_frac_conds + 1;
     if (state->condition_idx < 3) {
@@ -2159,7 +2156,7 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
     for(int i=0; i < total_rows * equilibrium_matrix_cols; ++i) equilibrium_matrix[i] = 0.0;
     for(int i=0; i < total_rows; ++i) equilibrium_rhs[i] = 0.0;
     
-    // FIXED: Do NOT initialize RHS to target values - let phase contributions build the constraint equation
+    // Do NOT initialize RHS to target values; phase contributions build the constraint equation
     // The RHS should start from 0 and accumulate phase contributions, then have residual subtracted later
     // The target value (0.5) is handled in the residual calculation, not pre-loaded into RHS
 
@@ -2427,7 +2424,7 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
         }
         #endif
     }
-    // CRITICAL FIX: Add system amount constraint row to match CPU EXACTLY
+    // Add system amount constraint row to match CPU EXACTLY
     // The CPU calls write_row_fixed_mole_amount for each component to build this row
     // This adds small contributions to the chemical potential columns (not exactly zero!)
     
@@ -2540,7 +2537,7 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
 }
 
 // run_loop, solve_state, advance_state, remove_and_consolidate_phases, change_phases
-// as defined in the previous response are largely compatible with these changes,
+// are largely compatible with these changes,
 // as they primarily operate on the counts and indices managed by SystemState and SystemSpecification,
 // which are now implicitly simpler due to MAX_PHASE_LOCAL_CONDITIONS being 0.
 // Ensure MAX_EQ_SOLN_LEN and related matrix defines are correct for the number of free variables.
@@ -2581,7 +2578,6 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
 // And then use these for the A_lstsq_copy, U_lstsq, V_lstsq, singular_values_lstsq, superdiag_lstsq buffers.
 // I will update the #defines in SystemSpecification.
 
-// The `run_loop` and other functions from the previous turn would be here.
 // For brevity, I'm focusing on the direct impact of removing phase-local conditions
 // on struct definitions and initializations. The logical flow of those larger functions
 // remains the same but operates on data structures that are now simpler.
@@ -2657,7 +2653,7 @@ __device__ void advance_state(SystemSpecification* spec, SystemState* state, con
     gpu_debug_log_value("step_size", step_size_param);
     
     double current_step_size = step_size_param;
-    double MIN_PHASE_AMOUNT = 1e-16;  // CRITICAL FIX: Match CPU's 1e-16 in advance_state, not 1e-10!
+    double MIN_PHASE_AMOUNT = 1e-16;  // Match CPU's 1e-16 in advance_state, not 1e-10!
 
     // Chemical potentials are now handled in solve_state (matching CPU approach)
     // Start with phase amount updates
@@ -2739,7 +2735,7 @@ __device__ void advance_state(SystemSpecification* spec, SystemState* state, con
     printf("[GPU MASS BALANCE] advance_state() - after phase update: sum(phase_amt) = %.15e\n", phase_amt_sum_after);
     #endif
     
-    // CRITICAL FIX: DO NOT normalize phase amounts in advance_state!
+    // DO NOT normalize phase amounts in advance_state!
     // The CPU solver doesn't do this, and it prevents convergence by undoing all changes.
     // The phase amounts should be allowed to change as directed by the equilibrium solution.
     // The system amount constraint is enforced through the equilibrium matrix, not by normalization.
@@ -2824,7 +2820,7 @@ __device__ void advance_state(SystemSpecification* spec, SystemState* state, con
             }
             for (int cp_idx = 0; cp_idx < spec->num_components; ++cp_idx) {
                  if (cp_idx < 0 || cp_idx >= spec->num_components) continue;
-                // CRITICAL FIX: Use absolute chemical potentials, NOT deltas!
+                // Use absolute chemical potentials, NOT deltas!
                 // CPU code at minimizer.pyx line 1388 uses state.chemical_potentials[chempot_idx] directly
                 // This matches Eq. 43 in Sundman 2015
                 csst->delta_y[i] += csst->c_component[cp_idx * csst->c_component_cols + i] * state->chemical_potentials[cp_idx];
@@ -2927,7 +2923,7 @@ __device__ bool remove_and_consolidate_phases(SystemSpecification* spec, SystemS
             printf("[GPU] Removing phase %d (iteration %d): amount %.15e < 1e-10\n",
                    idx1, state->iteration, state->phase_amt[idx1]);
             #endif
-            // CRITICAL FIX: Check if removing this phase would leave us unable to satisfy mass balance
+            // Check if removing this phase would leave us unable to satisfy mass balance
             // Count how many phases would remain after removal
             int phases_remaining = 0;
             for (int j = 0; j < state->num_free_stable_compsets; ++j) {
@@ -3082,7 +3078,7 @@ __device__ bool remove_and_consolidate_phases(SystemSpecification* spec, SystemS
                 if (new_count < MAX_PHASES) new_free_stable_indices[new_count++] = current_idx;
             }
         }
-        // CRITICAL FIX: Match CPU behavior when all phases would be removed
+        // Match CPU behavior when all phases would be removed
         // CPU minimizer.pyx lines 1509-1517
         bool all_removed_reset = false;
         if (new_count == 0 && state->num_free_stable_compsets > 0 && num_to_remove == state->num_free_stable_compsets) {
@@ -3338,7 +3334,7 @@ __device__ bool change_phases(SystemSpecification* spec, SystemState* state,
     #endif
     
     for (int i = 0; i < final_free_count; ++i) {
-        int current_idx = final_free_stable_indices[i];  // CRITICAL FIX: Use NEW array, not old!
+        int current_idx = final_free_stable_indices[i];  // Use NEW array, not old!
         if (current_idx >=0 && current_idx < state->num_compsets) { // boundary check
             if (state->phase_amt[current_idx] < 1e-10 && !state->compsets[current_idx].fixed) {
                  state->phase_amt[current_idx] = 1e-10;
@@ -3384,12 +3380,12 @@ __device__ void solve_state(
     // IMPLEMENTATION: This mirrors the original solve_state but uses global memory arrays
     
     // Calculate matrix dimensions
-    // CRITICAL FIX: Add +1 back to match CPU matrix dimensions exactly
+    // Add +1 back to match CPU matrix dimensions exactly
     // CPU DOES include a system amount constraint row (with [1,1,1] for phase amounts)
     int equilibrium_matrix_rows = state->num_free_stable_compsets + 
                                  spec->num_fixed_stable_compsets + 
                                  spec->num_prescribed_mole_fraction_conditions + 1;
-    // CRITICAL FIX: Use num_free_chemical_potentials which now equals ALL non-VA components
+    // Use num_free_chemical_potentials which now equals ALL non-VA components
     // CPU uses all non-VA components as columns, not just mathematically independent ones
     // This fixes the matrix dimension mismatch (CPU 6x6 vs GPU 5x5 for ternary)
     int equilibrium_matrix_cols = spec->num_free_chemical_potentials +  // All non-VA components 
@@ -3408,7 +3404,7 @@ __device__ void solve_state(
         #endif
     }
     
-    // CRITICAL: Call recompute at the beginning of solve_state, just like CPU does
+    // Call recompute at the beginning of solve_state, just like CPU does
     // This ensures all CompsetState arrays (masses, jacobians, energies) are up-to-date
     
     // DEBUG: Verify spec pointer before calling recompute
@@ -3440,7 +3436,7 @@ __device__ void solve_state(
     // sum(phase_amt * masses) (moles of atoms), matching CPU. Overwriting it with
     // sum(phase_amt) (formula units) makes the N-constraint converge to the wrong scale.
     
-    // CRITICAL FIX: Manually zero the equilibrium matrix AND RHS before calling fill_equilibrium_system
+    // Manually zero the equilibrium matrix AND RHS before calling fill_equilibrium_system
     // This is needed because these arrays are in global memory and persist across iterations
     // When matrix size changes (e.g., 4x4 to 3x3 after phase consolidation), old values remain!
     for (int i = 0; i < equilibrium_matrix_rows * equilibrium_matrix_cols; ++i) {
@@ -3503,7 +3499,7 @@ __device__ void solve_state(
     }
     
     // Call lstsq with correct signature
-    // CRITICAL FIX: Use same tolerance as CPU (1e-16) instead of 1e-12
+    // Use same tolerance as CPU (1e-16) instead of 1e-12
     #ifdef PYCGPU_PROF
     prof_ss_t0 = clock64();
     #endif
@@ -3536,7 +3532,7 @@ __device__ void solve_state(
         out_equilibrium_soln[i] = equilibrium_rhs[i];
     }
     
-    // CRITICAL FIX: Update chemical potentials from the solution
+    // Update chemical potentials from the solution
     // The equilibrium solution contains NEW chemical potential values (not deltas)
     // This matches CPU behavior at minimizer.pyx line 1250
     for (int i = 0; i < spec->num_free_chemical_potentials; ++i) {
@@ -3949,7 +3945,7 @@ __device__ bool run_loop(
             #endif
         }
         
-        // CRITICAL FIX: Skip advance_state if phases changed (match CPU behavior)
+        // Skip advance_state if phases changed (match CPU behavior)
         if (!phases_changed_iter) {
             // CPU (minimizer.pyx run_loop): step size ramps up over the first
             // 20 iterations of a solve — step = min(1.0, (iteration+1)/20).

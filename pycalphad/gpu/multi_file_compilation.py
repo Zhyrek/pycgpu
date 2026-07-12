@@ -10,7 +10,7 @@ Strategy:
 3. Link all phase files together with the main kernel
 4. Allow the main kernel to call device functions from any phase file
 
-CRITICAL: All phases must be available simultaneously - no shortcuts allowed.
+All phases must be available simultaneously - no shortcuts allowed.
 """
 
 import os

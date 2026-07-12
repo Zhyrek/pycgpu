@@ -96,10 +96,9 @@ def _get_c_define(define_name, default_val=64):
 
 def compute_dynamic_kernel_sizes(wks_obj: Workspace) -> Dict[str, int]:
     """
-    Compute actual kernel size parameters based on the workspace instead of using hard-coded MAX_* values.
-    This addresses the user requirement: "For the GPU hard-coded values like MAX_DOF, the values required 
-    by the kernel should be computed based on the phase records/models in pycalphad, and then passed to 
-    the kernel using the -D flag to define it in the kernel code."
+    Compute kernel size parameters from the workspace instead of hard-coded
+    MAX_* values: sizes derive from the phase records/models and are passed
+    to the kernel as -D compiler defines.
     
     Args:
         wks_obj: Workspace containing phase records and models
@@ -157,7 +156,7 @@ def compute_dynamic_kernel_sizes(wks_obj: Workspace) -> Dict[str, int]:
         "MAX_PARAMS": len(_fit_parameter_symbols(wks_obj)),
     }
 
-    # CRITICAL: The equilibrium-matrix work-array strides MUST be passed as -D
+    # The equilibrium-matrix work-array strides MUST be passed as -D
     # defines. The kernel has #ifndef fallbacks (1000/50/50) for these; if they
     # differ from the Python-side allocation strides, threads index past the end
     # of the allocations and silently corrupt other buffers (this caused
@@ -880,7 +879,7 @@ def fix_ternary_operator_precedence(source: str) -> str:
     # Apply the fix for chained ternary operators
     fixed = re.sub(inner_pattern, fix_inner_replacement, source)
     
-    # CRITICAL FIX: Separate chained ternary operators that should be additions
+    # Separate chained ternary operators that should be additions
     # The problem: After Piecewise conversion, we might have:
     # x[3]*(cond1) ? val1 : (cond2) ? val2 : 0 + x[4]*(cond3) ? val3 : 0
     # This chains NB and TI terms with ternary operators instead of adding them
@@ -917,14 +916,14 @@ def fix_ternary_operator_precedence(source: str) -> str:
         if open_count > close_count:
             fixed = fixed + ')' * (open_count - close_count)
     
-    # CRITICAL FIX: Mechanical mixture term with ternary operators
+    # Mechanical mixture term with ternary operators
     # The problem: 1.0*(x[3]*(cond1) ? val1 : val1b + x[4]*(cond2) ? val2 : val2b)/(x[3] + x[4])
     # Due to operator precedence, the + binds tighter than ?:, causing:
     # x[3]*cond1 ? val1 : (val1b + x[4]*cond2 ? val2 : val2b)
     # This means if cond1 is true, val2 is never evaluated!
     # We need: ((x[3]*cond1 ? val1 : val1b) + (x[4]*cond2 ? val2 : val2b))/(x[3] + x[4])
     
-    # CRITICAL: Fix mechanical mixture multiplication structure
+    # Fix mechanical mixture multiplication structure
     # The problem: x[3]*(condition) ? value : 0 
     # Is interpreted as: (x[3]*condition) ? value : 0
     # Which returns full value when x[3]*condition is true (non-zero)
@@ -969,7 +968,7 @@ def fix_ternary_operator_precedence(source: str) -> str:
             
         fixed = re.sub(mech_pattern, ensure_grouping, fixed)
     
-    # CRITICAL FIX: Ideal mixing term with improper division
+    # Ideal mixing term with improper division
     # After the first fix, we have:
     # 8.3145*x[2]*(term1) + (term2)/(x[3] + x[4])
     # But this applies division only to term2!
@@ -1097,7 +1096,7 @@ def notebook_get_all_syms_for_model(model_obj: Model, wks_obj: Workspace) -> lis
     from pycalphad.variables import pressure
     
     site_variables = model_obj.site_fractions
-    # CRITICAL FIX: Use phase_record_factory's state variables to match CPU behavior
+    # Use phase_record_factory's state variables to match CPU behavior
     # The CPU builds functions with all state variables, not just the ones the model uses
     if hasattr(wks_obj, 'phase_record_factory') and wks_obj.phase_record_factory is not None:
         state_variables = wks_obj.phase_record_factory.state_variables
@@ -1123,7 +1122,7 @@ def notebook_get_all_sym_names_for_model(model_obj: Model, wks_obj: Workspace) -
         # identifiers in the generated C.
         site_variables.append(sf.phase_name+str(sf.sublattice_index)+sf.species.escaped_name)
     
-    # CRITICAL FIX: Use phase_record_factory's state variables to match CPU behavior
+    # Use phase_record_factory's state variables to match CPU behavior
     # The CPU builds functions with all state variables, not just the ones the model uses
     if hasattr(wks_obj, 'phase_record_factory') and wks_obj.phase_record_factory is not None:
         state_variables = [str(var) for var in wks_obj.phase_record_factory.state_variables]
@@ -1222,7 +1221,7 @@ def fix_piecewise_zeros(expression: str) -> str:
         prev_expr = expression
         iteration += 1
         
-        # CRITICAL: Fix ideal mixing Hessian patterns FIRST before any simplification
+        # Fix ideal mixing Hessian patterns FIRST before any simplification
         # These come from d²/dY²[Y*log(Y)] and should be 1/Y not 0
         
         # Fix 1: Simple pattern ((1e-15 < x[i]) ? (0) : (0))
@@ -1261,7 +1260,7 @@ def fix_piecewise_zeros(expression: str) -> str:
         expression = expression.replace('(0 + 0)', '0')
     
         # Pattern 9: Clean up 0 + expr -> expr (but not in 10 + expr)
-        # CRITICAL FIX: Don't apply this pattern - it breaks expressions like:
+        # Don't apply this pattern - it breaks expressions like:
         # "((1e-15 < x[3]) ? (pow(x[3], (-1))) : 0) + 1 + 11.0*" 
         # by removing "0) + " and leaving invalid syntax ") 1 + 11.0*"
         # expression = re.sub(r'(?<![\.\d])0\s*\+\s*', '', expression)
@@ -1742,7 +1741,7 @@ def notebook_source_from_expr_cse(
                 c_subexpr = apply_cse_variable_mapping(c_subexpr, model_obj, wks_obj, verbose)
                 c_code += f"    double {ccode(symbol)} = {c_subexpr};\n"
             
-            # CRITICAL: Generate gradient assignments in the EXACT order we want
+            # Generate gradient assignments in the EXACT order we want
             # The reduced_exprs from CSE might not be in the order we need
             # We need to map them back to our intended order
             
@@ -2030,7 +2029,7 @@ def notebook_source_from_expr_original(
                         # DEBUG: Print indices being processed
                         if i_sym_idx == j_sym_idx and i_sym_idx >= 1:
                             print(f"[GPU HESS DEBUG] Processing diagonal element [{i_sym_idx},{j_sym_idx}]")
-                        # CRITICAL: Fix all-zero Piecewise BEFORE conversion to ternary
+                        # Fix all-zero Piecewise BEFORE conversion to ternary
                         # Check for all-zero patterns BEFORE fix
                         import re as re_check
                         all_zero_before = len(re_check.findall(r'Piecewise\(\(0,\s*1e-15\s*<\s*[A-Za-z0-9_]+\),\s*\(0,\s*True\)\)', s))
@@ -2355,13 +2354,13 @@ def _nb_formulamole_obj_from_model(model_obj: Model, model_c_idx: int, wks_obj: 
     return notebook_source_from_expr(funcs, "formulamole_obj", model_obj, model_c_idx, wks_obj, expr_type="func", c_output_type="void", validate=validate, verbose=verbose)
 
 def _nb_formulamole_grad_from_model(model_obj: Model, model_c_idx: int, wks_obj: Workspace, validate: bool = True, verbose: bool = False) -> str:
-    # CRITICAL FIX: Generate formulamole gradient only for nonvacant elements (matching CPU)
+    # Generate formulamole gradient only for nonvacant elements (matching CPU)
     # The CPU generates a separate gradient function for each element, but we generate
     # a combined function that outputs gradients for all nonvacant elements
     import symengine
     funcs = []
     
-    # CRITICAL FIX: Handle dependent site fractions
+    # Handle dependent site fractions
     # For phases with site fractions that sum to 1, we need to express dependent
     # site fractions in terms of independent ones before taking gradients
     # Get phase from Database via workspace
@@ -2418,7 +2417,7 @@ def _nb_formulamole_grad_from_model(model_obj: Model, model_c_idx: int, wks_obj:
             moles_expr = model_obj.moles(el, per_formula_unit=True)
         else:
             moles_expr = symengine.Float(0.0)
-        # CRITICAL FIX: Do NOT apply dependent substitutions to match CPU behavior
+        # Do NOT apply dependent substitutions to match CPU behavior
         # The CPU treats all site fractions as independent variables
         # if dependent_subs:
         #     # Convert to symengine expression and substitute
@@ -2541,7 +2540,7 @@ def _generate_c_code_for_phase_models(wks_obj: Workspace, include_hess: bool = F
         fn_fmg = func_prefix + "formulamole_grad"
 
         # Get model metadata
-        # CRITICAL FIX: Use phase_record_factory's state variables for consistency with CPU
+        # Use phase_record_factory's state variables for consistency with CPU
         # The phase record needs to know about ALL state variables, not just ones the model uses
         # The generated functions expect workspace DOF format with ALL state variables
         if hasattr(wks_obj, 'phase_record_factory') and wks_obj.phase_record_factory is not None:
@@ -2715,7 +2714,7 @@ def _generate_full_gpu_source(wks_obj: Workspace,
 #include <stdio.h>          // For printf debugging
 
 // --- WorkArrays struct to reduce kernel parameters for AMD compatibility ---
-// CRITICAL FIX FOR AMD: Define WorkArrays carefully for cross-platform compatibility
+// AMD compatibility: Define WorkArrays carefully for cross-platform compatibility
 // AMD/HIP may be stricter about struct alignment and pointer dereferencing
 typedef struct WorkArrays {{
     double* arrays[23];  // Pack all work array pointers together (expanded for SystemState arrays)
@@ -3011,16 +3010,16 @@ extern "C" {{
 
 // --- Back to Basics: Simple GPU kernel that mirrors successful CPU logic ---
 __global__ void top_level_equilibrium_kernel(
-    const void* global_spec_ptr_raw, // CRITICAL FIX: Array of SystemSpecifications, one per condition
+    const void* global_spec_ptr_raw, // Array of SystemSpecifications, one per condition
     const void* condition_args_list_ptr_raw, // Array of conditions, one per condition (passed as raw memory)
     void* results_list_ptr_raw, // Array for results (passed as raw memory)
     int num_conditions_total,
-    int condition_stride, // CRITICAL FIX: Python-provided stride for condition data
-    int python_max_statevars, // CRITICAL FIX: Python's MAX_STATEVARS value for proper offset calculation
+    int condition_stride, // Python-provided stride for condition data
+    int python_max_statevars, // Python's MAX_STATEVARS value for proper offset calculation
     // DevicePhaseData contents are now implicitly g_phase_records_array and num_unique_models
     const void* initial_phase_data_ptr, // Array of InitialPhaseDataSingle structs from lower_convex_hull
-    int initial_phase_data_stride, // CRITICAL FIX: Python-provided stride for initial phase data
-    int system_spec_stride, // CRITICAL FIX: Python-provided stride for SystemSpec array
+    int initial_phase_data_stride, // Python-provided stride for initial phase data
+    int system_spec_stride, // Python-provided stride for SystemSpec array
     const void* grid_data_ptr_raw, // Pointer to grid data (can be null if not using add_new/nearly_stable in kernel)
     // Debug arrays for step-by-step solver tracking (can be null if debug disabled)
     double* debug_gm_history,           // Array: [num_conditions, max_debug_steps]
@@ -3045,7 +3044,7 @@ __global__ void top_level_equilibrium_kernel(
         #endif
     }}
 
-    // CRITICAL FIX FOR AMD: Check bounds BEFORE any pointer arithmetic
+    // AMD compatibility: Check bounds BEFORE any pointer arithmetic
     // AMD GPUs may fault on invalid pointer calculations even if never dereferenced
     if (tid >= num_conditions_total) {{
         return;  // Exit immediately for threads beyond valid conditions
@@ -3086,7 +3085,7 @@ __global__ void top_level_equilibrium_kernel(
     const int MASS_JAC_SIZE = MAX_COMPONENTS * DOF_SIZE;  // 4*8 = 32
     const int CONSTRAINT_MATRIX_SIZE = (MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS) * (MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS);
     
-    // CRITICAL FIX FOR AMD: Safely unpack WorkArrays struct
+    // AMD compatibility: Safely unpack WorkArrays struct
     // AMD GPUs may have stricter memory access checking
     // Cast and check each pointer access carefully
     double* thread_A_lstsq_copy = nullptr;
@@ -3154,7 +3153,7 @@ __global__ void top_level_equilibrium_kernel(
 
         // No need for redundant bounds check - already done at function entry
         
-        int results_per_condition = 7 + MAX_COMPONENTS + MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * MAX_COMPONENTS) + MAX_PHASES;  // CRITICAL FIX: Include phase_ids
+        int results_per_condition = 7 + MAX_COMPONENTS + MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * MAX_COMPONENTS) + MAX_PHASES;  // Include phase_ids
         int base_offset = condition_idx * results_per_condition;
         
         // Initialize all results to zero (safe default)
@@ -3176,7 +3175,7 @@ __global__ void top_level_equilibrium_kernel(
             return;
         }}
         
-        // CRITICAL FIX: Use Python-provided stride instead of hardcoded calculation
+        // Use Python-provided stride instead of hardcoded calculation
         // This ensures GPU respects Python's data layout regardless of constant values
         int condition_offset = condition_idx * condition_stride;
         
@@ -3194,12 +3193,12 @@ __global__ void top_level_equilibrium_kernel(
         double pressure = 101325.0; // Default P (1 atm)
         double temp = 298.15;     // Default T
         
-        // CRITICAL FIX: Extract state variables based on actual count, not hardcoded positions
+        // Extract state variables based on actual count, not hardcoded positions
         // Common cases:
         // - If num_statevars = 2: [N, T] (no pressure)
         // - If num_statevars = 3: [N, P, T] or [N, T, P] depending on order
         
-        // CRITICAL FIX: Access thread-specific SystemSpecification
+        // Access thread-specific SystemSpecification
         // Each thread gets its own SystemSpec from the array
         const double* system_specs_array = (const double*)global_spec_ptr_raw;
         
@@ -3224,7 +3223,7 @@ __global__ void top_level_equilibrium_kernel(
         int spec_size_doubles = spec_core_doubles_calc + spec_work_doubles_calc;
         
         // Get pointer to this thread's SystemSpec data
-        // CRITICAL FIX: Use Python-provided stride instead of calculating it
+        // Use Python-provided stride instead of calculating it
         const double* my_spec_data = &system_specs_array[condition_idx * system_spec_stride];
         
         if (tid < 2) {{
@@ -3277,7 +3276,7 @@ __global__ void top_level_equilibrium_kernel(
             }}
         }}
         
-        // CRITICAL: Extract composition values for this specific thread
+        // Extract composition values for this specific thread
         double thread_mole_fractions[MAX_COMPONENTS];
         double prescribed_sum = 0.0;
         int num_comp = (int)my_spec_data[1]; // num_components is at offset 1
@@ -3285,7 +3284,7 @@ __global__ void top_level_equilibrium_kernel(
         // First, copy all prescribed mole fractions from the condition data
         for (int i = 0; i < MAX_COMPONENTS; ++i) {{
             if (i < num_comp) {{
-                // CRITICAL FIX: Use Python's MAX_STATEVARS value directly
+                // Use Python's MAX_STATEVARS value directly
                 // Python layout: [state_vars (padded to Python's MAX_STATEVARS), compositions]
                 // Compositions start at: condition_offset + python_max_statevars
                 int comp_idx = condition_offset + python_max_statevars + i;
@@ -3295,7 +3294,7 @@ __global__ void top_level_equilibrium_kernel(
             }}
         }}
         
-        // CRITICAL FIX: For ternary+ systems, need to calculate unprescribed component
+        // For ternary+ systems, need to calculate unprescribed component
         // In Al-Cu-Fe with X(AL)=0.5, X(CU)=0.2, we need X(FE)=0.3
         // VA is always 0 for element-only calculations
         // First, sum all non-VA prescribed components (those with values > -1e-10)
@@ -3349,7 +3348,7 @@ __global__ void top_level_equilibrium_kernel(
         // FIX: Use direct byte-level array access instead of struct casting to avoid alignment issues
         const double* initial_data_byte_array = (const double*)initial_phase_data_ptr;
         
-        // CRITICAL FIX: Remove __syncthreads() here - it causes undefined behavior when not all threads reach it
+        // Remove __syncthreads() here - it causes undefined behavior when not all threads reach it
         // Only threads with valid conditions (0-31) would reach this point, but all 256 threads in the block
         // must reach __syncthreads() for correct behavior
         
@@ -3388,11 +3387,11 @@ __global__ void top_level_equilibrium_kernel(
             // Convert to all-double layout: 
             // doubles_per_struct = MAX_PHASES + MAX_PHASES + MAX_PHASES*MAX_DOF_PER_PHASE + MAX_PHASES*MAX_COMPONENTS + MAX_COMPONENTS + 1
             // where phase_indices and num_phases are stored as doubles for simplicity
-            // CRITICAL FIX: Use Python-provided stride instead of calculating it
+            // Use Python-provided stride instead of calculating it
             int struct_offset = condition_idx * initial_phase_data_stride;
             
             // Extract num_phases (stored as double at the correct offset)
-            // CRITICAL FIX: Calculate the actual offset for num_phases based on struct layout
+            // Calculate the actual offset for num_phases based on struct layout
             // offset = 2*MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * MAX_COMPONENTS) + MAX_COMPONENTS
             int num_phases_offset = 2*MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * MAX_COMPONENTS) + MAX_COMPONENTS;
             debug_num_phases = (int)initial_data_byte_array[struct_offset + num_phases_offset];
@@ -3434,11 +3433,11 @@ __global__ void top_level_equilibrium_kernel(
                 results_array[base_offset + 4 + MAX_COMPONENTS] = phase_amounts[0];          // Store first phase amount for debug
             }}
             
-            // CRITICAL FIX: Use SystemSpecification->initial_chemical_potentials instead of extracting from grid data  
+            // Use SystemSpecification->initial_chemical_potentials instead of extracting from grid data  
             // The correct initial chemical potentials are in the SystemSpecification, not in grid_data
             // NOTE: global_spec_ptr_raw is now an array of SystemSpecs, we'll access the appropriate one later
             
-            // CRITICAL FIX: Read per-condition chemical potentials from initial_data array
+            // Read per-condition chemical potentials from initial_data array
             // Chemical potentials are stored after: phase_indices + phase_amounts + site_fractions + compositions
             // Use the same MAX constants that Python used to create the data layout
             const int chem_pot_offset = MAX_PHASES + MAX_PHASES + 
@@ -3585,7 +3584,7 @@ __global__ void top_level_equilibrium_kernel(
                     double phase_dof[MAX_STATEVARS + MAX_DOF_PER_PHASE + MAX_PARAMS];
                     
                     // State variables - from condition args
-                    // CRITICAL FIX: GPU functions expect [N, P, T, site_fractions] format
+                    // GPU functions expect [N, P, T, site_fractions] format
                     // This is because gpu_codegen.py inserts P into state variables
                     if (tid == 0 && ph_idx == 0) {{
                         #ifdef VERBOSE_DEBUG
@@ -3594,12 +3593,12 @@ __global__ void top_level_equilibrium_kernel(
                     }}
                     
                     // Extract values from condition data based on actual state_variables order
-                    // CRITICAL FIX: Extract state variables based on actual count from SystemSpecification
+                    // Extract state variables based on actual count from SystemSpecification
                     double moles_val = 1.0;      // Default N
                     double pressure_val = 101325.0; // Default P
                     double temp_val = 298.15;    // Default T
                     
-                    // CRITICAL FIX: Access per-thread SystemSpec data instead of casting shared pointer
+                    // Access per-thread SystemSpec data instead of casting shared pointer
                     // global_spec_ptr_raw is an array of SystemSpecs in double format, not a single struct
                     const double* system_specs_array = (const double*)global_spec_ptr_raw;
                     const double* my_spec_doubles = &system_specs_array[condition_idx * system_spec_stride];
@@ -3618,7 +3617,7 @@ __global__ void top_level_equilibrium_kernel(
                     }}
                     
                     // Set up phase_dof based on what the energy function expects
-                    // CRITICAL FIX: GPU functions now expect ALL state variables [N, P, T] just like CPU
+                    // GPU functions now expect ALL state variables [N, P, T] just like CPU
                     // This matches the fix in notebook_get_all_syms_for_model
                     phase_dof[0] = moles_val;       // x[0] = N
                     phase_dof[1] = pressure_val;    // x[1] = P
@@ -3824,14 +3823,14 @@ __global__ void top_level_equilibrium_kernel(
                 #endif
             }}
             
-            // CRITICAL: Create thread-local copy of SystemSpecification with correct composition
-            // CRITICAL: Create thread-local SystemSpecification from global_spec_ptr_raw
+            // Create thread-local copy of SystemSpecification with correct composition
+            // Create thread-local SystemSpecification from global_spec_ptr_raw
             char thread_spec_bytes[sizeof(SystemSpecification)];
             memset(thread_spec_bytes, 0, sizeof(SystemSpecification));
             SystemSpecification* thread_spec_ptr = (SystemSpecification*)thread_spec_bytes;
             SystemSpecification& thread_spec = *thread_spec_ptr;
             
-            // CRITICAL FIX: Copy thread-specific SystemSpec instead of shared one
+            // Copy thread-specific SystemSpec instead of shared one
             // Calculate offset to this thread's SystemSpec in the array
             const double* system_specs_array = (const double*)global_spec_ptr_raw;
             
@@ -3854,7 +3853,7 @@ __global__ void top_level_equilibrium_kernel(
             int spec_size_doubles = spec_core_doubles + spec_work_doubles;
             const double* my_spec_doubles = &system_specs_array[condition_idx * system_spec_stride];
             
-            // CRITICAL FIX: Manually copy fields from double array to struct
+            // Manually copy fields from double array to struct
             // Python stores everything as doubles in a flat array, we need to 
             // reconstruct the struct with proper types
             int py_offset = 0;
@@ -3941,7 +3940,7 @@ __global__ void top_level_equilibrium_kernel(
             
             // Work arrays are not copied - they're allocated separately in global memory
             
-            // CRITICAL FIX: Safely read SystemSpecification fields
+            // Safely read SystemSpecification fields
             // sys_spec_data no longer needed - we copy the struct directly
             // Read fields by offset: num_statevars=0, num_components=1, prescribed_system_amount=2
             ConditionArgsSingle condition_args_single;
@@ -4024,7 +4023,7 @@ __global__ void top_level_equilibrium_kernel(
                 equilibrium_result.Y_phases[i] = 0.0;
             }}
             
-            // CRITICAL DEBUG: Store values before calling solver
+            // Debug: Store values before calling solver
             if (debug_gm_history != nullptr && debug_max_steps > 1 && condition_idx < num_conditions_total) {{
                 int debug_idx = condition_idx * debug_max_steps + 1;
                 debug_gm_history[debug_idx] = -999.0;  // Marker: about to call solver
@@ -4110,7 +4109,7 @@ __global__ void top_level_equilibrium_kernel(
                 debug_gm_history[condition_idx * debug_max_steps + 4] = -2000.0;  // Marker: solver demo completed
             }}
             
-            // CRITICAL DEBUG: Store values after calling solver
+            // Debug: Store values after calling solver
             if (debug_gm_history != nullptr && debug_max_steps > 2 && condition_idx < num_conditions_total) {{
                 int debug_idx = condition_idx * debug_max_steps + 2;
                 debug_gm_history[debug_idx] = equilibrium_result.final_system_gm;  // Result from solver
@@ -4147,7 +4146,7 @@ __global__ void top_level_equilibrium_kernel(
             for (int i = 0; i < MAX_COMPONENTS; ++i) {{
                 results_array[base_offset + 1 + i] = equilibrium_result.final_chemical_potentials[i]; // Final MU from solver
             }}
-            // CRITICAL FIX: Store ALL phase amounts, not just the first one
+            // Store ALL phase amounts, not just the first one
             // The old code only stored NP[0], causing GPU to report only 1 phase even when 2 were found
             // Store phase amounts starting at offset 1 + MAX_COMPONENTS
             for (int ph_idx = 0; ph_idx < MAX_PHASES; ++ph_idx) {{
@@ -4187,7 +4186,7 @@ __global__ void top_level_equilibrium_kernel(
                 }}
             }}
             
-            // CRITICAL FIX: Store phase_ids from equilibrium_result
+            // Store phase_ids from equilibrium_result
             // This was missing, causing all phases to be labeled with ID 0
             int phase_ids_offset = x_offset + (MAX_PHASES * MAX_COMPONENTS);  // Start after X_phases
             for (int phase_idx = 0; phase_idx < MAX_PHASES; ++phase_idx) {{

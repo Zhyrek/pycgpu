@@ -121,7 +121,7 @@ def _extract_values(obj):
 def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_to_unique_idx_map: dict, dynamic_sizes: dict = None, properties=None, grid=None):
     """
     Converts workspace data into GPU-compatible NumPy arrays with proper data types and layouts.
-    CRITICAL FIX: Use properties from starting_point() instead of calling full CPU equilibrium.
+    Use properties from starting_point() instead of calling full CPU equilibrium.
     
     Args:
         properties: Pre-computed properties from starting_point() (to avoid calling full equilibrium)
@@ -222,7 +222,7 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
                             print(f"[GPU]   Active phase names: {phase_values[active_mask]}")
                         print(f"[GPU]   Active phase amounts: {np_values[active_mask]}")
                     
-                    # CRITICAL: Do NOT consolidate phases! 
+                    # Do NOT consolidate phases! 
                     # CPU passes the original multi-phase starting point to the solver.
                     # GPU must do exactly the same to get identical inputs.
                     if wks_obj.verbose:
@@ -244,7 +244,7 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
                     print(f"[GPU]   DEBUG ERROR: {debug_e}")
                     print(f"[GPU]   Properties attributes: {dir(properties)}")
     
-    # CRITICAL: NO phase consolidation! GPU must use identical input data as CPU.
+    # NO phase consolidation! GPU must use identical input data as CPU.
     # CPU passes the original starting point data directly to the solver.
     # Any consolidation should happen inside the solver, not before it.
     if wks_obj.verbose:
@@ -297,7 +297,7 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
 
     # Create structured array for ConditionArgsSingle
     try:
-        # CRITICAL FIX: Use dynamic_sizes instead of _get_c_define to match kernel compilation
+        # Use dynamic_sizes instead of _get_c_define to match kernel compilation
         if dynamic_sizes is not None:
             max_statevars_scalar = int(dynamic_sizes["MAX_STATEVARS"])
             max_components_scalar = int(dynamic_sizes["MAX_COMPONENTS"])
@@ -312,7 +312,7 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
         condition_data_size = max_statevars_scalar + max_components_scalar
         condition_args_np = np.zeros((num_conditions_total, condition_data_size), dtype=np.float64)
         
-        # CRITICAL FIX: Store the stride for GPU kernel to use
+        # Store the stride for GPU kernel to use
         condition_data_stride = condition_data_size
             
     except Exception as e:
@@ -645,7 +645,7 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
                     else:
                         _prepare_gpu_data._condition_0_np_values = np_values_safe.copy()
         
-            # CRITICAL: NO per-condition consolidation! Use original data exactly like CPU.
+            # NO per-condition consolidation! Use original data exactly like CPU.
         
             for phase_idx, phase_name in enumerate(phase_values_safe):
                 if phase_name and phase_name != '' and phase_name != '_FAKE_' and phase_idx < max_phases_per_condition:
@@ -862,7 +862,7 @@ def _populate_system_specification(global_spec_np, global_spec_arrays, wks_obj, 
             print(f"[GPU] DEBUG: Populate constants: components={max_components}, statevars={max_statevars}, constraints={max_constraints}")
         
         global_spec_np[0] = min(len(wks_obj.phase_record_factory.state_variables), max_statevars)  # num_statevars
-        # CRITICAL: CPU uses ONLY nonvacant elements as components
+        # CPU uses ONLY nonvacant elements as components
         nonvacant_components = [c for c in wks_obj.components if str(c).upper() != 'VA']
         global_spec_np[1] = min(len(nonvacant_components), max_components)  # num_components (NONVACANT ONLY)
         global_spec_np[2] = 1.0  # prescribed_system_amount - System normalized to 1 mole
@@ -902,7 +902,7 @@ def _populate_system_specification(global_spec_np, global_spec_arrays, wks_obj, 
         raise
     
     # Check each component for fixed chemical potential conditions
-    # CRITICAL: CPU only works with nonvacant_elements, never includes VA
+    # CPU only works with nonvacant_elements, never includes VA
     if wks_obj.verbose:
         print("[GPU] DEBUG: Checking chemical potential conditions...")
     
@@ -953,7 +953,7 @@ def _populate_system_specification(global_spec_np, global_spec_arrays, wks_obj, 
                     print(f"[GPU] DEBUG: mu_var not in conditions, adding to free list: {component}")
                 free_chemical_potential_indices.append(comp_idx)
                 
-                # CRITICAL FIX: For free chemical potentials, use the value from workspace starting point
+                # For free chemical potentials, use the value from workspace starting point
                 # This is the first divergence - CPU must provide correct initial chemical potentials
                 if hasattr(properties, 'MU') and comp_idx < len(wks_obj.components):
                     # Check if this component has a chemical potential in the workspace starting point
@@ -970,7 +970,7 @@ def _populate_system_specification(global_spec_np, global_spec_arrays, wks_obj, 
                         mu_initial = np.asarray(properties.MU).reshape(-1, num_mu_components)[0, comp_idx]
                         global_spec_arrays['initial_chemical_potentials'][comp_idx] = float(mu_initial)
                         if wks_obj.verbose:
-                            print(f"[GPU] CRITICAL FIX: Set initial_chemical_potentials[{comp_idx}] = {mu_initial:.6f} from workspace")
+                            print(f"[GPU] Set initial_chemical_potentials[{comp_idx}] = {mu_initial:.6f} from workspace")
                     else:
                         # Component has no chemical potential in starting point (e.g., VA), set to 0
                         global_spec_arrays['initial_chemical_potentials'][comp_idx] = 0.0
@@ -992,7 +992,7 @@ def _populate_system_specification(global_spec_np, global_spec_arrays, wks_obj, 
             if wks_obj.verbose:
                 print(f"[GPU] DEBUG: Processing state var {sv_idx}: {state_var}")
             
-            # CRITICAL FIX: For equilibrium calculations, all state variables that are
+            # For equilibrium calculations, all state variables that are
             # specified in conditions should be FIXED, not free. The original logic was backwards.
             if state_var in wks_obj.conditions:
                 if wks_obj.verbose:
@@ -1061,7 +1061,7 @@ def _populate_system_specification(global_spec_np, global_spec_arrays, wks_obj, 
     global_spec_arrays['fit_params'] = _pv
 
     global_spec_np[3] = constraint_count  # num_prescribed_mole_fraction_conditions
-    # CRITICAL FIX: CPU uses nonvacant_elements.size, but GPU needs to handle full component array
+    # CPU uses nonvacant_elements.size, but GPU needs to handle full component array
     # The coefficients array has MAX_COMPONENTS columns, but only nonvacant ones are used
     # We still need to pass the full size for array indexing compatibility
     global_spec_np[4] = global_spec_np[1]  # num_prescribed_mole_fraction_coefficients_cols = num_components (including VA)
@@ -1070,7 +1070,7 @@ def _populate_system_specification(global_spec_np, global_spec_arrays, wks_obj, 
     for i, idx in enumerate(free_chemical_potential_indices[:max_components]):
         global_spec_arrays['free_chemical_potential_indices'][i] = idx
     
-    # CRITICAL FIX: Don't subtract constraint_count - CPU includes ALL non-VA components
+    # Don't subtract constraint_count - CPU includes ALL non-VA components
     # The CPU matrix has columns for ALL non-VA components' chemical potentials
     # even when mole fractions are prescribed. The constraints are handled separately.
     num_free_chempot = len(free_chemical_potential_indices)
@@ -1112,7 +1112,7 @@ def _populate_system_specification(global_spec_np, global_spec_arrays, wks_obj, 
     num_fixed_stable_compsets = global_spec_np[9]
     global_spec_np[10] = num_components + num_free_statevars - num_fixed_stable_compsets  # max_num_free_stable_phases
     
-    # CRITICAL FIX: Use dynamic ALLOWED_MASS_RESIDUAL calculation like CPU
+    # Use dynamic ALLOWED_MASS_RESIDUAL calculation like CPU
     # CPU minimizer.pyx line 484: max(1e-12, min(1e-8, np.min(np.abs(prescribed_mole_fraction_rhs))/10.0))
     prescribed_rhs = global_spec_arrays['prescribed_mole_fraction_rhs']
     constraint_count = int(global_spec_np[3])  # num_prescribed_mole_fraction_conditions
@@ -1257,7 +1257,7 @@ def _prepare_grid_data_for_gpu_from_calculate_result(grid_data, py_phase_name_to
             print(f"[GPU] Grid preparation: num_grid_points_total={num_grid_points_total}, actual_grid_points={actual_grid_points}, num_unique_phases={num_unique_phases}")
         
         # Create structured array for DeviceGrid
-        # CRITICAL: Add size information at the beginning so GPU can read it first
+        # Add size information at the beginning so GPU can read it first
         device_grid_dtype = [
             # Size information FIRST so GPU knows how to parse the rest
             ('num_grid_points_total', 'i4'),
@@ -1267,7 +1267,7 @@ def _prepare_grid_data_for_gpu_from_calculate_result(grid_data, py_phase_name_to
             ('actual_x_data_size', 'i4'),  # actual_grid_points * max_components
             ('actual_gm_data_size', 'i4'), # actual_grid_points
             ('actual_phase_id_data_size', 'i4'), # actual_grid_points
-            ('_padding', 'i4'),  # CRITICAL: Pad to 8-byte alignment (7 ints + 1 padding = 32 bytes)
+            ('_padding', 'i4'),  # Pad to 8-byte alignment (7 ints + 1 padding = 32 bytes)
             # Then the arrays - now properly aligned. Shape-tuple form is
             # REQUIRED (not '{n}f8' strings): numpy rejects the '1i4' string
             # form, which single-phase problems hit via num_unique_phases == 1.
@@ -1553,7 +1553,7 @@ def _create_initial_phase_data_struct_array(initial_phase_data_arrays, num_condi
     #         chemical_potentials[MAX_COMPONENTS] + num_phases(as double)
     doubles_per_struct = MAX_PHASES + MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * MAX_COMPONENTS) + MAX_COMPONENTS + 1
     
-    # CRITICAL FIX: Pad to avoid memory access issues with certain thread patterns
+    # Pad to avoid memory access issues with certain thread patterns
     # When size = 65 or 75 doubles, threads 10 & 17 fail (pattern: thread_id % 7 = 3)
     # Padding to 80/96 doubles (cache line multiples) ensures proper alignment
     original_size = doubles_per_struct
@@ -1649,7 +1649,7 @@ def _create_initial_phase_data_struct_array(initial_phase_data_arrays, num_condi
         if i < 5 and verbose:
             phase_indices = initial_phase_data_flat[i, 0:MAX_PHASES].astype(int)
             phase_amounts = initial_phase_data_flat[i, MAX_PHASES:2*MAX_PHASES]
-            # CRITICAL FIX: Read num_phases from the correct offset, not -1
+            # Read num_phases from the correct offset, not -1
             num_phases_offset = 2*MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * MAX_COMPONENTS) + MAX_COMPONENTS
             num_phases = int(initial_phase_data_flat[i, num_phases_offset])
             # Show all active phases, not just first 2
@@ -1896,7 +1896,7 @@ def _process_gpu_results(results_cpu_flat: np.ndarray, wks_obj: Workspace,
                 phase_id = phase_ids_trimmed[multi_idx]
                 phase_amount = np_trimmed[multi_idx]
                 
-                # CRITICAL FIX: Only set phase name if phase amount > 0
+                # Only set phase name if phase amount > 0
                 # This matches CPU behavior where zero-amount phases have empty strings
                 if phase_id >= 0 and phase_id in id_to_name and phase_amount > 1e-10:
                     phase_names_reshaped[multi_idx] = id_to_name[phase_id]
@@ -1916,7 +1916,7 @@ def _process_gpu_results(results_cpu_flat: np.ndarray, wks_obj: Workspace,
                 _vertex_perm[..., None], axis=-2)
             y_trimmed = y_reshaped_full[..., :vertex_count, :internal_dof_count]
             
-            # CRITICAL FIX: Set Y values to NaN for phases with zero amount to match CPU
+            # Set Y values to NaN for phases with zero amount to match CPU
             # This handles the case where GPU outputs values for inactive phases.
             # Also NaN-pad dof slots beyond each phase's own phase_dof (CPU fills
             # prop_Y with NaN and only writes :phase_dof).
@@ -2132,7 +2132,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
 
     
     # 2. Assemble full GPU source and compile kernel (with caching)
-    # CRITICAL: Cache key should ONLY depend on phases and components, not on specific conditions or CSE variations
+    # Cache key should ONLY depend on phases and components, not on specific conditions or CSE variations
     import hashlib
     dynamic_sizes = compute_dynamic_kernel_sizes(wks_obj)
 
@@ -2228,9 +2228,6 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             
         try:
             # DYNAMIC KERNEL SIZING: Use the sizes computed earlier for cache key
-            # This addresses user requirement: "For the GPU hard-coded values like MAX_DOF, the values required 
-            # by the kernel should be computed based on the phase records/models in pycalphad, and then passed 
-            # to the kernel using the -D flag to define it in the kernel code."
             
             # Create -D compiler flags for dynamic sizing
             define_flags = []
@@ -2302,7 +2299,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             print(f"[GPU] Cache key: {cache_key}")
         module = _gpu_module_cache[cache_key]
     
-    # CRITICAL: Call the global PhaseRecord initialization kernel every time
+    # Call the global PhaseRecord initialization kernel every time
     # This must happen on every execution, not just when compiling a new module,
     # because GPU memory may have been reset and g_phase_records_array needs initialization
     # (the CPU backend's driver calls init itself before the OpenMP loop).
@@ -2349,13 +2346,13 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         print("[GPU] DEBUG: Creating struct-compatible memory layouts...")
     
     try:
-        # CRITICAL FIX: Create one SystemSpecification per condition instead of sharing
+        # Create one SystemSpecification per condition instead of sharing
         from .gpu_systemspec_array import create_system_specifications_array
         system_specs_array = create_system_specifications_array(
             wks_obj, num_total_conditions_pts, dynamic_sizes, properties, verbose
         )
         
-        # CRITICAL FIX: Calculate stride for SystemSpec array
+        # Calculate stride for SystemSpec array
         # The array is returned flat, but we know it was created as (num_conditions, spec_size)
         # So the stride is the total length divided by num_conditions
         system_spec_stride = len(system_specs_array) // num_total_conditions_pts
@@ -2372,7 +2369,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         
         # Create InitialPhaseDataSingle struct array
         initial_phase_data_struct = _create_initial_phase_data_struct_array(initial_phase_data_arrays, num_total_conditions_pts, dynamic_sizes, verbose)
-        # CRITICAL FIX: Calculate stride for initial phase data based on actual struct size
+        # Calculate stride for initial phase data based on actual struct size
         initial_phase_data_stride = initial_phase_data_struct.shape[1]  # doubles per condition
         if verbose:
             print(f"[GPU] DEBUG: InitialPhaseDataSingle struct array created with {len(initial_phase_data_struct)} conditions")
@@ -2433,7 +2430,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         if verbose:
             print("[GPU] DEBUG: Packing structs into byte arrays...")
         
-        # CRITICAL FIX: Pass array of SystemSpecifications instead of single spec
+        # Pass array of SystemSpecifications instead of single spec
         system_spec_bytes = system_specs_array  # Already a flat double array
         condition_args_bytes = _pack_struct_to_bytes(condition_args_struct)
         # BUGFIX: initial_phase_data_struct is already a flat array, use tobytes() directly
@@ -2451,7 +2448,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         # Try a different approach: use the original dtypes but as simple arrays
         # Instead of uint8 conversion, try to transfer the structs more directly
         try:
-            # CRITICAL FIX: Transfer aligned double arrays instead of byte arrays
+            # Transfer aligned double arrays instead of byte arrays
             # system_spec_bytes is already a double array from _pack_struct_to_bytes
             system_spec_gpu = xp.asarray(system_spec_bytes, dtype=np.float64)
             # Cast back to uint8 for kernel compatibility but keep alignment
@@ -2472,7 +2469,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                 if len(condition_args_bytes) >= 2:
                     print(f"[GPU] DEBUG: First two doubles in condition_args array: {condition_args_bytes[:2]}")
                 
-            # CRITICAL FIX: condition_args_bytes is already a double array
+            # condition_args_bytes is already a double array
             # The kernel expects to cast it to ConditionArgsSingle*, which has double[8] state_variables_values
             # So we can pass it as a flat double array
             condition_args_gpu_doubles = xp.asarray(condition_args_bytes, dtype=np.float64)
@@ -2483,7 +2480,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                 # Check if there's an offset issue
                 if len(condition_args_bytes) >= 16:
                     print(f"[GPU] DEBUG: Doubles 8-15: {condition_args_bytes[8:16]}")
-            # CRITICAL FIX: Keep initial_phase_data as float64, not uint8
+            # Keep initial_phase_data as float64, not uint8
             # The GPU kernel expects double* data, not uint8*
             # IMPORTANT: Flatten the 2D array to 1D to avoid stride issues
             initial_phase_data_gpu = xp.asarray(initial_phase_data_struct.flatten(), dtype=np.float64)
@@ -2502,7 +2499,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             initial_phase_data_gpu = xp.ascontiguousarray(initial_phase_data_gpu)
             results_gpu = xp.ascontiguousarray(results_gpu)
             
-            # CRITICAL: Ensure proper alignment for struct access
+            # Ensure proper alignment for struct access
             # GPU requires 8-byte alignment for double access
             if _dev_ptr(system_spec_gpu) % 8 != 0:
                 print(f"[GPU] WARNING: system_spec_gpu not 8-byte aligned: {_dev_ptr(system_spec_gpu)}")
@@ -2605,7 +2602,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         total_threads_for_allocation *= 2
     
     # Global memory arrays [total_threads, array_size] for per-thread allocation
-    # CRITICAL: Must allocate for ALL threads that will be launched, not just num_conditions
+    # Must allocate for ALL threads that will be launched, not just num_conditions
     global_memory_arrays = {}
     # Use cp.empty for work arrays that are immediately overwritten - 5-7x faster allocation
     global_memory_arrays['A_lstsq_copy'] = xp.empty((total_threads_for_allocation, MAX_SVD_DIM * MAX_SVD_DIM), dtype=np.float64)
@@ -2628,7 +2625,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     global_memory_arrays['equilibrium_rhs'] = xp.empty((total_threads_for_allocation, MAX_EQ_MATRIX_ROWS), dtype=np.float64)
     global_memory_arrays['eq_soln'] = xp.empty((total_threads_for_allocation, MAX_EQ_SOLN_LEN), dtype=np.float64)
     
-    # CRITICAL FIX: Allocate SystemState in global memory to avoid stack overflow
+    # Allocate SystemState in global memory to avoid stack overflow
     # SystemState is too large for GPU thread stack (~100KB+ per thread)
     # Per-thread SystemState slot (doubles) — computed per system in
     # compute_dynamic_kernel_sizes and passed to the kernel as -DSYSTEM_STATE_SIZE;
@@ -2642,13 +2639,13 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     global_memory_arrays['phase_compositions'] = xp.empty((total_threads_for_allocation, dynamic_sizes['MAX_PHASES'] * dynamic_sizes['MAX_COMPONENTS']), dtype=np.float64)
     global_memory_arrays['phase_amounts_per_mole_atoms'] = xp.empty((total_threads_for_allocation, dynamic_sizes['MAX_PHASES'] * dynamic_sizes['MAX_COMPONENTS']), dtype=np.float64)
     
-    # CRITICAL: CompositionSet arrays to prevent stack overflow
+    # CompositionSet arrays to prevent stack overflow
     # Each CompositionSet needs space for DOF values and other data
     # Estimate size: phase_record pointer (8) + NP (8) + dof array (MAX_STATEVARS + MAX_DOF_PER_PHASE)*8 + X array (MAX_COMPONENTS)*8 + etc
     compset_size_doubles = 2 + dynamic_sizes['MAX_STATEVARS'] + dynamic_sizes['MAX_DOF_PER_PHASE'] + dynamic_sizes['MAX_COMPONENTS'] + 10  # Extra for other fields
 
     # Create WorkArrays struct for AMD compatibility (reduces kernel parameters from 28+ to 16)
-    # CRITICAL FIX FOR AMD: Use proper struct layout matching C definition
+    # AMD compatibility: Use proper struct layout matching C definition
     # The WorkArrays struct in C expects: struct WorkArrays { double* arrays[23]; }
     # We need to ensure proper alignment and type matching
     work_arrays_ptrs = np.zeros(23, dtype=np.uint64)  # Expanded for additional SystemState arrays
@@ -2676,12 +2673,12 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     work_arrays_ptrs[21] = _dev_ptr(global_memory_arrays['phase_compositions'])  # NEW: phase_compositions array
     work_arrays_ptrs[22] = _dev_ptr(global_memory_arrays['phase_amounts_per_mole_atoms'])  # NEW: _phase_amounts_per_mole_atoms_arr
 
-    # CRITICAL: Ensure all pointers are valid before passing to kernel
+    # Ensure all pointers are valid before passing to kernel
     for i, ptr in enumerate(work_arrays_ptrs):
         if ptr == 0:
             raise RuntimeError(f"WorkArrays pointer {i} is null! This will cause AMD GPU crash.")
 
-    # CRITICAL FIX FOR AMD: Ensure proper struct alignment
+    # AMD compatibility: Ensure proper struct alignment
     # The kernel expects struct WorkArrays { double* arrays[23]; }
     # We must ensure the array is properly typed as pointer array, not uint64 array
     # AMD/HIP may be stricter about type checking than CUDA
@@ -2695,7 +2692,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         for _ga in global_memory_arrays.values():
             _ga.fill(_GUARD_MAGIC)
     
-    # CRITICAL: SystemState struct handling
+    # SystemState struct handling
     # SystemState contains pointers (phase_record*) and cannot be stored as a flat double array!
     # This causes misalignment errors when we have duplicate phase types (miscibility gaps).
     # The kernel should allocate SystemState on the stack or use separate arrays for members.
@@ -2719,7 +2716,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     # Already calculated above: threads_per_block = 256
     blocks_per_grid = blocks_per_grid_temp  # Use the same value calculated for memory allocation
     
-    # CRITICAL FIX: Total threads already calculated above as total_threads_for_allocation
+    # Total threads already calculated above as total_threads_for_allocation
     # The kernel launches blocks_per_grid * threads_per_block threads total
     # We have already allocated memory for ALL these threads
     total_threads_launched = total_threads_for_allocation
@@ -3345,7 +3342,7 @@ def equilibrium_gpu(dbf, comps, phases, conditions, output=None, model=None,
     if verbose:
         print("[GPU] Starting GPU-accelerated equilibrium calculation...")
     
-    # CRITICAL FIX: Use the exact same workspace creation logic as CPU 
+    # Use the exact same workspace creation logic as CPU 
     # This should produce identical starting_point results as the CPU path
     if verbose:
         print("[GPU] Creating workspace with same parameters as CPU path...")

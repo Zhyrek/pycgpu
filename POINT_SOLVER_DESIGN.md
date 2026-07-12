@@ -1,85 +1,53 @@
-# Point-list batch solver — implementation notes
+# Point-list batch solver — implementation report
 
-Goal: solve an arbitrary LIST of conditions (T, P, N, X-vector) in ONE kernel
-launch, with optional per-point phase restriction and per-point fit-parameter
-vectors. This is the enabler for the batched-ZPF ESPEI residual (tier 3) and
-walker-batched MCMC ensembles (tier 4). Cartesian batching measured 10.7 s vs
-1.94 s reference on Cu-Mg ZPF (42,770 solves for 476 vertices) — dense unique
-temperatures make grids unusable for this workload.
+`pycalphad/gpu/point_solver.py` solves many independent fixed-condition
+equilibria in one launch, replacing one-Workspace-per-point loops in
+consumers like ESPEI's batched residuals. This document records what was
+built and how it is validated; the public surface is `PointList`,
+`point_hull` / `device_point_hull`, `PointBatchSolver` (via
+`get_point_solver`), and `build_spec_row0` / `build_spec_rows`.
 
-## Per-condition input formats (verified against gpu_equilibrium.py, 2026-07-11)
+Motivation (measured before building it): Cartesian condition grids cannot
+serve scattered condition lists — the Cu-Mg ZPF workload's 476 vertices
+inflate to 42,770 grid solves (10.7 s) against 1.94 s for the stock
+per-point reference, because dense unique temperatures fill the grid with
+unwanted points. A true point list is required.
 
-All arrays are row-per-condition, C-contiguous; dims from `dynamic_sizes`
-(Cu-Mg: MC=4, MP=6, MSV=4, MDOF=4, MFIX=4, MAX_PARAMS=2).
+## What it does
 
-1. `condition_args` (n, MSV + MC) float64:
-   `[statevar values in state_variables order | X value per wks.components
-   entry]` (built by `_condition_column`, gpu_equilibrium.py:370).
+- **PointList**: per-point conditions (T, P, N, any number of prescribed
+  mole fractions with a component mask, optional per-point phase
+  restriction, optional fixed chemical potentials, per-point fit-parameter
+  rows). Batches must be uniform in the *number* of prescribed mole
+  fractions; `build_spec_rows` enforces this and rewrites the per-point
+  constraint blocks (starting chemical potentials from the hull, mole
+  fraction rhs/coefficients, fit-parameter tails) onto a tiled spec
+  template built by `build_spec_row0` — one template per constraint count.
+- **point_hull / device_point_hull**: starting points from a shared
+  `calculate()` grid via the compiled lower-convex-hull
+  (`gpu/hyperplane.h`), a port of `hyperplane.pyx` verified bit-identical
+  (GM, chemical potentials, simplex fractions and indices) on ~2,200 mixed
+  binary/ternary/phase-restricted/fixed-chempot cases.
+- **PointBatchSolver.solve**: one batched kernel/driver launch over all
+  points; returns flat per-point results (GM, MU, NP, X, Y, phase ids,
+  converged flag). Work-array memory is bounded by chunked launches
+  (`PYCGPU_POINT_CHUNK`); the C++ driver and CUDA kernel share the same
+  generated source.
 
-2. spec rows (n, padded stride; 88 doubles for Cu-Mg): built by
-   `_populate_system_specification` -> `create_flat_system_specification`
-   (gpu_systemspec_flat.py, CORE layout) -> `apply_safe_padding` (appends
-   AFTER core). Per-point overwrites on a tiled row 0 (fast-path pattern,
-   gpu_systemspec_array.py:169):
-   - `off_mu = 3` — starting chemical potentials (from hull MU per point;
-     fixed-MU conditions keep spec0 values);
-   - `off_rhs = 3 + MC + MC*MC` — prescribed_mole_fraction_rhs (X per point,
-     constraint enumeration order = conditions dict order, nonvacant only);
-   - fit_params at `core_len - (MAX_PARAMS+1)` .. — per-point parameter
-     vectors + num_params at `core_len - 1` (core_len = 61 for Cu-Mg; the
-     tail of the CORE, not of the padded row).
+## Fidelity
 
-3. `initial_phase_data` struct rows (stride 80 doubles Cu-Mg) packed by
-   `_create_initial_phase_data_struct_array` from dict arrays
-   (gpu_equilibrium.py:473): phase_indices (int32 -> model idx via
-   py_phase_name_to_unique_idx_map; -1 invalid), phase_amounts (clamped to
-   MIN_PHASE_FRACTION), site_fractions (MP, MDOF), compositions (MP, MC),
-   chemical_potentials (MC), num_phases. Source = hull output per point:
-   valid = model_idx>=0 & NP>1e-10, stable-compacted (vectorized fast path
-   gpu_equilibrium.py:486-529 is the template).
+Each point reproduces the reference `equilibrium()` result for the same
+conditions: the solver kernels match the reference minimizer's iteration
+dynamics (step-size ramp, convergence gates, phase-change rules), and
+end-to-end agreement on validated systems is bit-identical or eps-class
+with identical stable-phase sets. Failed points report `converged=False`
+so consumers can reproduce reference NaN semantics or fall back
+per-point.
 
-4. Grid: `calculate()` per unique statevar combo (use `parallel_calculate`
-   with T-key); `_prepare_grid_data_for_gpu_from_calculate_result` packs
-   self-describing DeviceGrid blocks; `grid_block_indices` int32 per
-   condition selects the block. PER-POINT PHASE RESTRICTION: build an extra
-   block per (T, allowed-phase-subset) by filtering the calculate result
-   rows to that phase before packing; single-phase points index that block —
-   the add-search can then only re-add the allowed phase. No kernel change.
+## Steady-state cost per consumer call (measured, Cu-Mg ZPF workload)
 
-5. Hull per point: pycalphad's `lower_convex_hull` is a serial per-condition
-   loop calling Cython `hyperplane()` (~25 us/cond) pulling condition values
-   from coords — write a NEW point-list twin in gpu/ (do NOT touch CPU code)
-   that iterates the point arrays directly: per point, grid slice = its
-   (T-block [+ phase filter]), lincomb rows = X conditions (coef 1 at
-   component, rhs = X value) + N row (ones, rhs 1), fills MU/NP/Phase/X/Y
-   result rows with a single flat point dim. Feed those into (3).
-
-6. Launch: work arrays (23 slots, per-thread rows) + results
-   (n, results_per_condition), `results_per_condition = 7 + MC + MP + MP*MDOF
-   + MP*MC + MP`; c++ path `run_cpu_backend` / CUDA kernel with identical
-   argument list. Results offsets: GM at 0, MU at 1..MC, phase amounts at
-   1+MC.., see `_process_gpu_results`.
-
-7. Kernel acquisition: same codegen/cache as `calculate_equilibrium_gpu`
-   (`_run_model_codegen` + kernel cache keyed on model GM expressions +
-   statevar layout). Factor or replicate the acquisition block; models with
-   fit-parameter symbols produce param-slot-aware kernels (str-sorted order
-   = `extract_parameters`).
-
-## Per-likelihood loop (tier 3 steady state, after one-time prep)
-1. re-evaluate grid energies for the new parameter vector on the CACHED
-   sample dof matrix (points are parameter-independent; the c++/CUDA grid
-   evaluators already accept runtime params in trailing dof slots);
-2. re-run the point hull (vectorizable, ~25 us/point);
-3. poke fit_params into cached spec rows (per point = per walker if tier 4);
-4. one launch over all points (hyperplane vertices all-phase + isolated
-   single-phase, mixed);
-5. extract GM/MU flat; assemble driving forces (semantics already
-   implemented and validated in gpu/espei_batch.py v1).
-
-## Acceptance
-- driving forces vs ESPEI reference on Cu-Mg 7-dataset ZPF: n=476, target
-  << 1 sigma (1000 J/mol); v1 cartesian implementation achieved 469/476
-  within 1 J/mol (7 outliers <= 17 J/mol, eps-class basin differences).
-- timing target: <= 0.5 s/likelihood C++ (vs 1.94 s reference measured
-  2026-07-11 on this machine, PYTHONHASHSEED=0).
+One `calculate()` grid over the unique temperatures, one hull launch, and
+one solver launch per (phase-restriction group × constraint-count group).
+Net: ~12.6x per ESPEI ZPF likelihood on one CPU core vs the stock
+per-vertex Workspace loop, and ~10 ms/walker/step flat to 1000+ walkers on
+CUDA for whole-ensemble evaluation.

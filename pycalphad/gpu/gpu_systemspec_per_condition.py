@@ -144,7 +144,7 @@ def create_system_specifications_array(wks_obj, num_conditions: int, dynamic_siz
         
         # Index arrays (simplified - assuming all are free for now)
         # Free chemical potential indices
-        # CRITICAL FIX: Only include non-VA components as free chemical potentials
+        # Only include non-VA components as free chemical potentials
         # VA is typically excluded from chemical potential calculations
         free_chem_count = 0
         for comp_idx, comp in enumerate(wks_obj.components):
@@ -158,7 +158,7 @@ def create_system_specifications_array(wks_obj, num_conditions: int, dynamic_siz
         spec_data[offset] = float(free_chem_count)  # num_free_chemical_potentials
         offset += 1
         
-        # Free statevar indices - CRITICAL FIX: Only free if NOT in conditions
+        # Free statevar indices - Only free if NOT in conditions
         free_sv_indices_start = offset
         free_sv_count = 0
         state_variables = wks_obj.phase_record_factory.state_variables
@@ -180,7 +180,7 @@ def create_system_specifications_array(wks_obj, num_conditions: int, dynamic_siz
         spec_data[offset] = 0.0  # num_fixed_chemical_potentials
         offset += 1
         
-        # Fixed statevar indices - CRITICAL FIX: Fixed if IN conditions
+        # Fixed statevar indices - Fixed if IN conditions
         fixed_sv_indices_start = offset
         fixed_sv_count = 0
         for sv_idx, state_var in enumerate(state_variables[:max_statevars]):
@@ -199,7 +199,7 @@ def create_system_specifications_array(wks_obj, num_conditions: int, dynamic_siz
         spec_data[offset] = float(max_phases)  # max_num_free_stable_phases
         offset += 1
         
-        # CRITICAL FIX: Use dynamic ALLOWED_MASS_RESIDUAL calculation like CPU
+        # Use dynamic ALLOWED_MASS_RESIDUAL calculation like CPU
         # CPU minimizer.pyx line 484: max(1e-12, min(1e-8, np.min(np.abs(prescribed_mole_fraction_rhs))/10.0))
         if constraint_count > 0:
             # Get prescribed RHS values for this condition

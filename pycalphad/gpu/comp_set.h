@@ -24,7 +24,7 @@
 
 struct CompositionSet {
     const PhaseRecord* phase_record;
-    // CRITICAL FIX: DOF array must be large enough for workspace state variables + phase DOF
+    // DOF array must be large enough for workspace state variables + phase DOF
     // With workspace having 3 state vars (N, P, T) and phase having 2 site fractions,
     // we need at least 5 elements. But MAX_DOF_PER_PHASE might be set to 4.
     // Increase the size to handle this case.
@@ -47,7 +47,7 @@ struct CompositionSet {
     }
 
     __device__ void update(double* site_fracs, double phase_amt, double* state_variables, int workspace_num_statevars) {
-        // CRITICAL FIX: With the updated energy functions that accept all state variables,
+        // With the updated energy functions that accept all state variables,
         // we now pass the full workspace state variables array directly to the energy functions.
         // The energy functions now expect [N, P, T, Y1, Y2...] format.
         

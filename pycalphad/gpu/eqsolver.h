@@ -106,7 +106,7 @@ __device__ bool identify_candidate_phase_to_add(
     const CompositionSet* removed_compsets, // Array of recently removed CompositionSets
     int num_removed_compsets               // Number of removed compsets
 ) {
-    // CRITICAL FIX: Check for NULL grid_data before dereferencing
+    // Check for NULL grid_data before dereferencing
     if (grid_data == nullptr || grid_data->num_grid_points_total == 0) return false;
 
     // Calculate driving forces for all points in the grid
@@ -218,12 +218,12 @@ __device__ bool identify_candidate_phase_to_add(
 #endif // PYCGPU_OUTER_ADD
 
 __device__ int get_phase_record_index(const DevicePhaseData* phase_data, int grid_phase_id) {
-    // CRITICAL FIX: Check for NULL phase_data first
+    // Check for NULL phase_data first
     if (phase_data == nullptr) {
         return -1; // No phase data available
     }
 
-    // CRITICAL FIX: Check for NULL mapping array
+    // Check for NULL mapping array
     if (phase_data->grid_phase_id_to_record_index == nullptr) {
         // FALLBACK: When no mapping array exists, assume phase ID directly corresponds to record index
         // This is valid when phase IDs are 0-indexed and contiguous
@@ -256,7 +256,7 @@ __device__ int get_phase_record_index(const DevicePhaseData* phase_data, int gri
  * @return True if any nearly stable phases were identified, false otherwise.
  */
 
-// --- Main single-condition solver (moved from previous response, adapted) ---
+// --- Main single-condition solver ---
 // Note: Hook functions (pre_solve_hook, post_solve_hook) are implemented in minimizer.h
 // Output struct for a single equilibrium calculation
 typedef struct EquilibriumResultSingle { // Ensure this is defined (copied from previous prompt)
@@ -347,7 +347,7 @@ __device__ void solve_equilibrium_at_condition(
     double* equilibrium_matrix,  // Replaces stack: large equilibrium system matrix
     double* equilibrium_rhs,     // Replaces stack: equilibrium system RHS vector
     double* eq_soln,             // Replaces stack: equilibrium solution vector
-    double* global_system_states, // CRITICAL FIX: SystemState in global memory to avoid stack overflow
+    double* global_system_states, // SystemState in global memory to avoid stack overflow
     double* delta_ms,            // NEW: Global memory for delta_ms array
     double* phase_compositions,  // NEW: Global memory for phase_compositions array
     double* phase_amounts_per_mole_atoms,  // NEW: Global memory for _phase_amounts_per_mole_atoms_arr
@@ -371,12 +371,12 @@ __device__ void solve_equilibrium_at_condition(
     }
     
     // Step 2: Initialize local spec copy from the global spec passed from Python
-    // CRITICAL FIX: Use simple assignment copy instead of manual byte copy
+    // Use simple assignment copy instead of manual byte copy
     // The manual byte copy was causing struct field corruption
-    // CRITICAL FIX: Safely read SystemSpecification from GPU memory
+    // Safely read SystemSpecification from GPU memory
     // Cannot dereference struct pointer directly due to alignment/memory access issues
-    // WORKAROUND: Use global memory to store SystemSpecification to avoid stack pointer issues
-    // CRITICAL FIX: Allocate SystemSpec on stack instead of reusing work array
+    // SystemSpecification lives in global memory to avoid stack pointer issues
+    // Allocate SystemSpec on stack instead of reusing work array
     // which might be causing memory corruption for Thread 1
     char spec_buffer[sizeof(SystemSpecification)];
     SystemSpecification* current_spec_ptr = (SystemSpecification*)spec_buffer;
@@ -458,7 +458,7 @@ __device__ void solve_equilibrium_at_condition(
                 printf("  Thread %d: Value at offset %d: %e\\n", thread_id, offset, *test_ptr);
             }
             
-            // CRITICAL FIX: Manually copy the value from the known offset
+            // Manually copy the value from the known offset
             // This works around struct alignment issues between CPU and GPU
             if (*rhs_at_offset_176 != 0.0 && current_spec.prescribed_mole_fraction_rhs[0] == 0.0) {
                 printf("  Thread %d: FIXING prescribed_mole_fraction_rhs[0] from %e to %e\\n", 
@@ -471,7 +471,7 @@ __device__ void solve_equilibrium_at_condition(
     }
     
     // Step 3: Use SystemState from global memory to avoid stack overflow
-    // CRITICAL FIX: SystemState is too large (~100KB) for GPU thread stack
+    // SystemState is too large (~100KB) for GPU thread stack
     SystemState* current_sys_state_ptr = nullptr;
     if (global_system_states != nullptr) {
         // Cast the global memory to SystemState pointer
@@ -509,18 +509,18 @@ __device__ void solve_equilibrium_at_condition(
         current_sys_state.times_compset_removed[i] = 0;
     }
     
-    // CRITICAL FIX: Access flat double array directly for chemical_potentials
+    // Access flat double array directly for chemical_potentials
     // Layout: phase_indices[MAX_PHASES] + phase_amounts[MAX_PHASES] + site_fractions[MAX_PHASES*MAX_DOF_PER_PHASE] + 
     //         compositions[MAX_PHASES*MAX_COMPONENTS] + chemical_potentials[MAX_COMPONENTS] + num_phases
     // NOTE: The Python array is now flattened to 1D, so we access it for condition 0 directly
     // For multiple conditions, we would need to add: condition_idx * doubles_per_condition
     const double* initial_data_flat = initial_data;
-    // CRITICAL FIX: Use calculated offset instead of hardcoded value
+    // Use calculated offset instead of hardcoded value
     // Chemical potentials come after: phase_indices + phase_amounts + site_fractions + compositions
     int chem_pot_offset = MAX_PHASES + MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * MAX_COMPONENTS);
     
     for (int i = 0; i < MAX_COMPONENTS; ++i) {
-        // CRITICAL FIX: Use chemical potentials from SystemSpecification, NOT from initial_data
+        // Use chemical potentials from SystemSpecification, NOT from initial_data
         // The initial_data contains starting_point values which are wrong
         current_sys_state.chemical_potentials[i] = (i < current_spec.num_components) ? current_spec.initial_chemical_potentials[i] : 0.0;
         current_sys_state.mole_fractions[i] = 0.0;
@@ -529,7 +529,7 @@ __device__ void solve_equilibrium_at_condition(
     // Set up basic state from initial_data
     current_sys_state.system_amount = 1.0; // Standard amount
     
-    // CRITICAL: Initialize mole fractions from the passed condition_mole_fractions array
+    // Initialize mole fractions from the passed condition_mole_fractions array
     // This array contains the actual mole fractions from the condition, properly calculated
     // for binary, ternary, and higher-order systems
     for (int i = 0; i < MAX_COMPONENTS; ++i) {
@@ -542,7 +542,7 @@ __device__ void solve_equilibrium_at_condition(
         }
     }
     
-    // CRITICAL FIX: Access num_phases and phase_indices from flat array
+    // Access num_phases and phase_indices from flat array
     // NOTE: The initial_data pointer is already offset to this thread's data
     // Layout: phase_indices[MAX_PHASES] + phase_amounts[MAX_PHASES] + site_fractions[MAX_PHASES*MAX_DOF_PER_PHASE] + 
     //         compositions[MAX_PHASES*MAX_COMPONENTS] + chemical_potentials[MAX_COMPONENTS] + num_phases[1]
@@ -550,7 +550,7 @@ __device__ void solve_equilibrium_at_condition(
                            (MAX_PHASES * MAX_COMPONENTS) + MAX_COMPONENTS;
     int num_phases = (int)initial_data_flat[num_phases_offset];
     
-    // CRITICAL DEBUG: Test if the pointer issue is with multiple conditions or single condition
+    // Debug: Test if the pointer issue is with multiple conditions or single condition
     // The kernel might be interpreting this as a multi-condition array
     // Let's try accessing it as a 2D array and see if that fixes it
     if (thread_id == 0) {
@@ -599,7 +599,7 @@ __device__ void solve_equilibrium_at_condition(
     for (int i = 0; i < num_phases && i < MAX_PHASES; ++i) {
         int pr_idx = (int)initial_data_flat[i];  // phase_indices are at the beginning
         
-        // CRITICAL FIX: Access phase_amounts from flat array 
+        // Access phase_amounts from flat array 
         // phase_amounts start at offset MAX_PHASES
         double phase_amount = initial_data_flat[MAX_PHASES + i];
         
@@ -660,7 +660,7 @@ __device__ void solve_equilibrium_at_condition(
             printf("GPU ERROR: phase_data or phase_records_array is null!\\n");
             return;
         }
-        // CRITICAL FIX: Each composition set needs its own phase record instance
+        // Each composition set needs its own phase record instance
         // to avoid sharing memory between phases of the same type (immiscibility gap)
         cs->phase_record = &phase_data->phase_records_array[pr_idx];
         if (!cs->phase_record) continue;
@@ -683,7 +683,7 @@ __device__ void solve_equilibrium_at_condition(
                 if (k < MAX_STATEVARS - 1) printf(", ");
             }
             printf("] (current_spec.num_statevars=%d, MAX_STATEVARS=%d)\\n", current_spec.num_statevars, MAX_STATEVARS);
-            // CRITICAL FIX: Access flat double array directly for debug output
+            // Access flat double array directly for debug output
             const double* initial_data_flat_debug = (const double*)initial_data;
             int site_fractions_offset_debug = MAX_PHASES + MAX_PHASES;
             printf("  initial_data->site_fractions for phase %d: [", i);
@@ -697,7 +697,7 @@ __device__ void solve_equilibrium_at_condition(
         }
         
         // Set state variables from condition args  
-        // CRITICAL FIX: The DOF array should store WORKSPACE state variables, not Model state variables
+        // The DOF array should store WORKSPACE state variables, not Model state variables
         // CPU stores DOF as [N, P, T, Y1, Y2...] (workspace format)
         // GPU was incorrectly storing as [T, Y1, Y2...] (model format)
         
@@ -722,7 +722,7 @@ __device__ void solve_equilibrium_at_condition(
         int site_fractions_offset = MAX_PHASES + MAX_PHASES;  // phase_indices + phase_amounts
         const double* initial_data_flat = initial_data;
         
-        // CRITICAL FIX: Map site fractions to ensure correct component order
+        // Map site fractions to ensure correct component order
         // The Model expects components in alphabetical order, but initial_data might not
         // For NbTi system: Model expects [Y(NB), Y(TI)] but initial_data has [Y(TI), Y(NB)]
         for (int sf_idx = 0; sf_idx < cs->phase_record->phase_dof && sf_idx < MAX_DOF_PER_PHASE; ++sf_idx) {
@@ -797,7 +797,7 @@ __device__ void solve_equilibrium_at_condition(
             #endif
         }
         
-        // CRITICAL: Initialize CompsetState with proper arrays
+        // Initialize CompsetState with proper arrays
         // This is where masses, jacobians, etc. get set up
         css->init(&current_spec, cs);
         
@@ -884,7 +884,7 @@ __device__ void solve_equilibrium_at_condition(
         // Unlike CPU which normalizes in recompute(), GPU receives pre-normalized values
         double original_phase_amt = cs->NP;  // This is already normalized by Python
         
-        // CRITICAL FIX: Must call cs->update() to calculate energy and composition
+        // Must call cs->update() to calculate energy and composition
         // The energy field is used in the equilibrium matrix RHS calculation
         // Without this, energy=0 and the solver behaves differently than CPU
         // cs->update expects: (site_fractions, phase_amount, state_variables, workspace_num_statevars)
@@ -897,13 +897,13 @@ __device__ void solve_equilibrium_at_condition(
             #endif
         }
         
-        // WORKAROUND: Save critical values before cs->update in case of corruption
+        // Save load-bearing values before cs->update in case of corruption
         int saved_num_statevars = current_spec.num_statevars;
         int saved_num_components = current_spec.num_components;
         
         cs->update(&cs->dof[current_spec.num_statevars], cs->NP, cs->dof, current_spec.num_statevars);
         
-        // WORKAROUND: Restore values if corrupted
+        // Restore values if corrupted
         if (current_spec.num_statevars < 0 || current_spec.num_statevars > 10) {
             if (thread_id == 0) {
                 printf("GPU WARNING: Detected corruption after cs->update, restoring values\\n");
@@ -948,7 +948,7 @@ __device__ void solve_equilibrium_at_condition(
     // NOTE: Phase amount normalization already done BEFORE phase composition calculation
     // This ensures correct initial system mole fractions in recompute()
     
-    // CRITICAL: Set up free_stable_compset_indices array
+    // Set up free_stable_compset_indices array
     // This tells the solver which composition sets are free to vary
     // CPU (minimizer.pyx:792) requires NP > 0 for membership.
     current_sys_state.num_free_stable_compsets = 0;
@@ -966,7 +966,7 @@ __device__ void solve_equilibrium_at_condition(
     current_sys_state.largest_chemical_potential_difference = 0.0;
     current_sys_state.delta_ms_rows = 0;
     current_sys_state.delta_ms_cols = 0;
-    // CRITICAL FIX: Normalize phase amounts BEFORE calculating phase compositions
+    // Normalize phase amounts BEFORE calculating phase compositions
     // This matches CPU behavior exactly - phase amounts must be in formula units
     // before we calculate system mole fractions in recompute()
     double phase_amt_sum = 0.0;
@@ -977,7 +977,7 @@ __device__ void solve_equilibrium_at_condition(
     if (phase_amt_sum > 1e-12) { // Only check for non-zero to avoid division by zero
         for (int i = 0; i < current_sys_state.num_compsets; ++i) {
             current_sys_state.compsets[i].NP /= phase_amt_sum;
-            // CRITICAL: Also update phase_amt array to keep it synchronized
+            // Also update phase_amt array to keep it synchronized
             current_sys_state.phase_amt[i] = current_sys_state.compsets[i].NP;
         }
     }
@@ -996,7 +996,7 @@ __device__ void solve_equilibrium_at_condition(
     current_sys_state.phase_compositions_rows = current_sys_state.num_compsets;
     current_sys_state.phase_compositions_cols = current_spec.num_components;
     
-    // CRITICAL FIX: Initialize phase_compositions using formulamole_obj
+    // Initialize phase_compositions using formulamole_obj
     // This is essential for phase amount normalization to work correctly
     for (int i = 0; i < MAX_PHASES * MAX_COMPONENTS; ++i) {
         current_sys_state.phase_compositions[i] = 0.0;
@@ -1009,12 +1009,12 @@ __device__ void solve_equilibrium_at_condition(
         
         // Calculate moles of each element per formula unit
         double formulamoles[MAX_COMPONENTS];
-        // CRITICAL: Initialize to zero since formulamole_obj only fills nonvacant elements
+        // Initialize to zero since formulamole_obj only fills nonvacant elements
         for (int i = 0; i < MAX_COMPONENTS; ++i) {
             formulamoles[i] = 0.0;
         }
         
-        // CRITICAL FIX: Pass workspace DOF directly to formulamole_obj
+        // Pass workspace DOF directly to formulamole_obj
         // The generated functions now expect workspace DOF format [N, P, T, Y1, Y2...]
         
         if (thread_id == 0) {
@@ -1027,7 +1027,7 @@ __device__ void solve_equilibrium_at_condition(
             printf("  phase_record->phase_dof=%d\\n", cs->phase_record->phase_dof);
             #endif
         }
-        // CRITICAL FIX: Actually call the function pointer now that debugging shows they're valid
+        // Actually call the function pointer now that debugging shows they're valid
         if (cs->phase_record->formulamole_obj) {
             if (thread_id == 0) {
                 #ifdef VERBOSE_DEBUG
@@ -1088,7 +1088,7 @@ __device__ void solve_equilibrium_at_condition(
         }
     }
     
-    // CRITICAL FIX: Remove duplicate recompute call
+    // Remove duplicate recompute call
     // The SystemState::init function already calls recompute() after setting up
     // phase amounts and compositions. Calling it again here was causing incorrect
     // system mole fractions because it was using the already-normalized phase amounts
@@ -1105,7 +1105,7 @@ __device__ void solve_equilibrium_at_condition(
     }
     
     // =============================================================================
-    // CRITICAL: ADD_NEARLY_STABLE IMPLEMENTATION TO MATCH CPU
+    // ADD_NEARLY_STABLE IMPLEMENTATION TO MATCH CPU
     // =============================================================================
     // This implements the same logic as the CPU's add_nearly_stable function
     // (eqsolver.pyx lines 108-142) which adds metastable phases before solving
@@ -1136,7 +1136,7 @@ __device__ void solve_equilibrium_at_condition(
         // - phase_dof_stride_Y: int
         // - num_components_stride_X: int
         
-        // CRITICAL: Read size information from the beginning of the struct
+        // Read size information from the beginning of the struct
         // Python now puts size info FIRST in the dtype
         const int* size_info = (const int*)grid_data_bytes;
         const int num_grid_points_total = size_info[0];
@@ -1361,7 +1361,7 @@ __device__ void solve_equilibrium_at_condition(
     // =============================================================================
     
     // Step 4: Call the actual sophisticated run_loop function using global memory arrays
-    // CRITICAL: Call run_loop but provide the global memory arrays to avoid stack overflow
+    // Call run_loop but provide the global memory arrays to avoid stack overflow
     
     // The issue is that run_loop and its child functions use local arrays that cause stack overflow
     // We need to call a modified version that uses our global memory arrays
@@ -1386,7 +1386,7 @@ __device__ void solve_equilibrium_at_condition(
         #endif
     }
     
-    // CRITICAL: Call recompute after normalization to update energies and constraints  
+    // Call recompute after normalization to update energies and constraints  
     // This matches the CPU algorithm where recompute is called after phase amount changes
     // Use safe minimal version to avoid crash
     for (int i = 0; i < current_sys_state.num_compsets; ++i) {
@@ -1409,7 +1409,7 @@ __device__ void solve_equilibrium_at_condition(
             #endif
         }
         
-        // CRITICAL FIX: Pass workspace DOF directly to energy functions
+        // Pass workspace DOF directly to energy functions
         // The generated functions now expect workspace DOF format [N, P, T, Y1, Y2...]
         
         // DEBUG: Check DOF values before energy calculation
@@ -1463,7 +1463,7 @@ __device__ void solve_equilibrium_at_condition(
     if (thread_id == 0) {
         #ifdef VERBOSE_DEBUG
         printf("GPU DEBUG: About to call run_loop...\\n");
-        printf("GPU DEBUG: CRITICAL VALUES - num_compsets=%d, num_free_stable_compsets=%d\\n",
+        printf("GPU DEBUG: num_compsets=%d, num_free_stable_compsets=%d\\n",
                current_sys_state.num_compsets, current_sys_state.num_free_stable_compsets);
         printf("GPU DEBUG: Initialized energies - cs_states[0].energy=%f, cs_states[1].energy=%f\\n",
                current_sys_state.cs_states[0].energy, current_sys_state.cs_states[1].energy);
@@ -1712,7 +1712,7 @@ __device__ void solve_equilibrium_at_condition(
     // per formula unit, set by the last recompute() before convergence; no extra
     // synchronization or renormalization happens on the CPU side.
 
-    // CRITICAL FIX: NO FINAL PHASE CONSOLIDATION!
+    // NO FINAL PHASE CONSOLIDATION!
     // The CPU does NOT perform any phase consolidation after convergence.
     // The GPU was incorrectly doing extra consolidation that changed the energies.
 
@@ -1726,7 +1726,7 @@ __device__ void solve_equilibrium_at_condition(
                    i, current_sys_state.phase_amt[i], current_sys_state.cs_states[i].energy);
             #endif
         }
-        // CRITICAL FIX: Include ALL phases to match CPU behavior
+        // Include ALL phases to match CPU behavior
         // CPU does not filter phases by amount in the final result
         {
             // Convert G (per formula unit) to GM (per mole of atoms):
@@ -1755,7 +1755,7 @@ __device__ void solve_equilibrium_at_condition(
                         }
                     }
                 }
-                // CRITICAL FIX: Store normalized mole fraction as NP, not raw phase_amt
+                // Store normalized mole fraction as NP, not raw phase_amt
                 result->NP[stable_phase_count] = phase_mole_fraction;
                 
                 if (thread_id == 0) {
@@ -1765,7 +1765,7 @@ __device__ void solve_equilibrium_at_condition(
                     #endif
                 }
                 
-                // CRITICAL FIX: Store X_phases (mole fractions)
+                // Store X_phases (mole fractions)
                 double sum_moles_in_phase_formula = 0.0;
                 for (int c = 0; c < current_spec.num_components; ++c) {
                     if (c < MAX_COMPONENTS)
@@ -1785,12 +1785,12 @@ __device__ void solve_equilibrium_at_condition(
                     }
                 }
                 
-                // CRITICAL FIX: Store Y_phases (site fractions)
+                // Store Y_phases (site fractions)
                 if (current_sys_state.compsets[i].phase_record) {
                     const PhaseRecord* pr = current_sys_state.compsets[i].phase_record;
                     for (int sf = 0; sf < pr->phase_dof; ++sf) {
                         if (stable_phase_count * MAX_DOF_PER_PHASE + sf < MAX_PHASES * MAX_DOF_PER_PHASE && sf < MAX_DOF_PER_PHASE) {
-                            // CRITICAL: Use pr->num_statevars not current_spec.num_statevars
+                            // Use pr->num_statevars not current_spec.num_statevars
                             // The phase model only uses some state variables (e.g., just T)
                             // while SystemSpecification tracks all (N, P, T)
                             result->Y_phases[stable_phase_count * MAX_DOF_PER_PHASE + sf] =

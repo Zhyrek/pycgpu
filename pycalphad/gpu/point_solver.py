@@ -466,19 +466,26 @@ class PointBatchSolver:
                                       + self.MP * self.MC + self.MP)
 
     # ---------------------------------------------------------------- spec0
-    def build_spec_row0(self, point0_conds, x_component):
+    def build_spec_row0(self, point0_conds, x_component=None, x_conditions=None):
         """Padded flat spec row for a representative point.
 
         point0_conds: dict {'N':1.0,'P':...,'T':...}; x_component: element name
         of the prescribed mole fraction (value taken from the point later —
         rhs/coefs/MU/params are overwritten per point by build_spec_rows).
+        x_conditions: alternatively, {element: value} for MULTIPLE prescribed
+        mole fractions (ternary+ points); the template's constraint COUNT must
+        match the batch's per-point count, which build_spec_rows checks is
+        uniform.
         """
         import pycalphad.variables as v
         from pycalphad.gpu.gpu_equilibrium import _populate_system_specification
         from pycalphad.gpu.gpu_systemspec_flat import (create_flat_system_specification,
                                                        apply_safe_padding)
+        if x_conditions is None:
+            x_conditions = {x_component: point0_conds['X0']}
         conds = {v.N: point0_conds.get('N', 1.0), v.P: point0_conds['P'],
-                 v.T: point0_conds['T'], v.X(x_component): point0_conds['X0']}
+                 v.T: point0_conds['T'],
+                 **{v.X(el): val for el, val in x_conditions.items()}}
         shim = SimpleNamespace(components=self.shim.components,
                                phases=self.shim.phases,
                                models=self.shim.models,

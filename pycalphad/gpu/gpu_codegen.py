@@ -134,9 +134,17 @@ def compute_dynamic_kernel_sizes(wks_obj: Workspace) -> Dict[str, int]:
     padding_factor = 1.2  # 20% padding
     safety_minimum = 4    # At least 4 for any dimension
     
+    # MAX_PHASES sizes COMPOSITION SET slots, not phase names: the hull
+    # starting point can seed up to one compset per nonvacant component
+    # (all of the same phase for single-phase problems, e.g. a 5-component
+    # FCC miscibility gap starts from 5 FCC vertices), so capacity must
+    # scale with components as well as phases or the starting point is
+    # silently truncated.
+    nonvacant_comps = sum(1 for c in wks_obj.components if getattr(c, 'name', str(c)) != 'VA')
+    compset_capacity = max(actual_phases, nonvacant_comps + 1)
     computed_sizes = {
         "MAX_COMPONENTS": max(safety_minimum, int(actual_components * padding_factor)),
-        "MAX_PHASES": max(safety_minimum, int(actual_phases * padding_factor)),
+        "MAX_PHASES": max(safety_minimum, int(compset_capacity * padding_factor)),
         "MAX_STATEVARS": max(safety_minimum, int(actual_statevars * padding_factor)),
         "MAX_DOF_PER_PHASE": max(safety_minimum, int(max_dof_per_phase * padding_factor)),
         "MAX_INTERNAL_CONSTRAINTS": max(safety_minimum, int(max_internal_cons * padding_factor) + 1),

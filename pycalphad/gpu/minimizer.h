@@ -2626,9 +2626,12 @@ __device__ bool check_convergence(SystemSpecification* spec, SystemState* state)
          #endif
         );
 
-    // Check convergence similar to CPU behavior
-    // CPU doesn't require a minimum iteration count for convergence
-    if (solution_is_feasible && (state->iterations_since_last_phase_change >= 5)) {
+    // CPU (minimizer.pyx check_convergence) requires >= 10 iterations since
+    // the last phase change. With the ramped early steps this matters: the
+    // per-iteration deltas are tiny at step 0.05-0.5, so a shorter gate
+    // declares convergence before the solution is polished (measured 0.066
+    // J/mol short on the ill-conditioned alfe magnetic-Hessian test).
+    if (solution_is_feasible && (state->iterations_since_last_phase_change >= 10)) {
         gpu_debug_log_value("converged", 1.0);
         return true;
     }
@@ -3948,6 +3951,17 @@ __device__ bool run_loop(
         
         // CRITICAL FIX: Skip advance_state if phases changed (match CPU behavior)
         if (!phases_changed_iter) {
+            // CPU (minimizer.pyx run_loop): step size ramps up over the first
+            // 20 iterations of a solve — step = min(1.0, (iteration+1)/20).
+            // Without the ramp, iteration-0 full steps crush freshly seeded
+            // compsets to the clamp before they can equilibrate (measured on
+            // issue589's 3-way FCC miscibility gap: reference converges to 3
+            // compsets from the 5-vertex start, unramped backend collapses
+            // to 2 and loses 643 J/mol).
+            {
+                double step_size_initial = 1.0 * (state->iteration + 1) / 20.0;
+                step_size = fmin(1.0, step_size_initial);
+            }
             // Call advance_state (this should be safe, no large arrays)
             #ifdef PYCGPU_PROF
             prof_t0 = clock64();
@@ -3963,6 +3977,19 @@ __device__ bool run_loop(
                 #endif
             }
         }
+
+        #ifdef PYCGPU_TRACE_LOOP
+        // debug tracing twin of the reference PYCALPHAD_TRACE_LOOP print
+        if (thread_id == 0) {
+            printf("GPUTRACE iter=%d changed=%d amt=", iteration_count, (int)phases_changed_iter);
+            for (int i = 0; i < state->num_compsets; ++i)
+                printf("%s%.17g", i ? "," : "", state->phase_amt[i]);
+            printf(" mu=");
+            for (int i = 0; i < spec->num_components; ++i)
+                printf("%s%.17g", i ? "," : "", state->chemical_potentials[i]);
+            printf("\n");
+        }
+        #endif
         
         // DEBUG: Add detailed output after first iteration
         if (iteration_count == 0 && thread_id == 0) {

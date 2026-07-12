@@ -213,8 +213,9 @@ def equilibrium(dbf, comps, phases, conditions, output=None, model=None,
                     import traceback
                     _tb = traceback.extract_tb(_accel_err.__traceback__)
                     _loc = f'{_tb[-1].filename.rsplit("/", 1)[-1]}:{_tb[-1].lineno}' if _tb else '?'
+                    _test = os.environ.get('PYTEST_CURRENT_TEST', '')
                     with open(os.environ['PYCGPU_COUNT_DISPATCH'], 'a') as _f:
-                        _f.write(f'runtime_fallback [{_loc}]: {str(_accel_err)[:100]}\n')
+                        _f.write(f'runtime_fallback [{_loc}] <{_test}>: {str(_accel_err)[:100]}\n')
         finally:
             for k, old in saved.items():
                 if old is None:

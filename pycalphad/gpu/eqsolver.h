@@ -1549,6 +1549,33 @@ __device__ void solve_equilibrium_at_condition(
     }
     if (outer_grid != nullptr && phase_data != nullptr) {
         for (int outer_iter = 0; outer_iter < 10; ++outer_iter) {
+            // CPU parity (solver.py remove_metastable): DELETE NP <= 0
+            // non-fixed compsets before the candidate search so the re-solve
+            // starts from the same compacted list the CPU builds. Keeping
+            // them as zombie slots both exhausts MAX_PHASES capacity and
+            // changes the re-solve dynamics (the same candidate is re-added
+            // each outer iteration and starves; measured on issue589's
+            // 3-way FCC miscibility gap).
+            {
+                int w = 0;
+                for (int r = 0; r < current_sys_state.num_compsets; ++r) {
+                    bool keep = (current_sys_state.compsets[r].phase_record != nullptr) &&
+                                (current_sys_state.phase_amt[r] > 0.0 ||
+                                 current_sys_state.compsets[r].fixed);
+                    if (!keep) continue;
+                    if (w != r) {
+                        current_sys_state.compsets[w] = current_sys_state.compsets[r];
+                        current_sys_state.cs_states[w] = current_sys_state.cs_states[r];
+                        current_sys_state.phase_amt[w] = current_sys_state.phase_amt[r];
+                        for (int c = 0; c < MAX_COMPONENTS; ++c) {
+                            current_sys_state.phase_compositions[w * MAX_COMPONENTS + c] =
+                                current_sys_state.phase_compositions[r * MAX_COMPONENTS + c];
+                        }
+                    }
+                    ++w;
+                }
+                current_sys_state.num_compsets = w;
+            }
             double state_variables[MAX_STATEVARS];
             for (int i = 0; i < current_spec.num_statevars && i < MAX_STATEVARS; ++i) {
                 state_variables[i] = (current_sys_state.num_compsets > 0) ?
@@ -1560,6 +1587,14 @@ __device__ void solve_equilibrium_at_condition(
             bool found_phase = identify_candidate_phase_to_add(&candidate_grid_idx, &candidate_df, &current_sys_state, &current_spec,
                                                               outer_grid, phase_data, state_variables, 1e-4,
                                                               nullptr, 0);
+            #ifdef VERBOSE_DEBUG
+            if (thread_id == 0) {
+                printf("GPU DEBUG: outer_add iter=%d found=%d idx=%d df=%.6e ncs=%d ngrid=%d mu0=%.4f mu1=%.4f\n",
+                       outer_iter, (int)found_phase, candidate_grid_idx, candidate_df,
+                       current_sys_state.num_compsets, outer_grid->num_grid_points_total,
+                       current_sys_state.chemical_potentials[0], current_sys_state.chemical_potentials[1]);
+            }
+            #endif
             if (!found_phase || candidate_grid_idx < 0 || current_sys_state.num_compsets >= MAX_PHASES) break;
 
             int phase_id = outer_grid->PhaseID_ptr[candidate_grid_idx];

@@ -962,16 +962,12 @@ def _populate_system_specification(global_spec_np, global_spec_arrays, wks_obj, 
                         print(f"[GPU] DEBUG: properties.MU.shape = {mu_shape}, comp_idx = {comp_idx}")
                     num_mu_components = mu_shape[-1] if len(mu_shape) > 0 else 0
                     if comp_idx < num_mu_components:
-                        # Extract initial chemical potential from workspace starting point
-                        if properties.MU.ndim == 6:
-                            mu_initial = properties.MU[0,0,0,0,0,comp_idx]
-                        elif properties.MU.ndim >= 5:
-                            mu_initial = properties.MU[0,0,0,0,comp_idx]
-                        else:
-                            mu_initial = properties.MU.flatten()[comp_idx]
-                        # Handle case where mu_initial might be an array
-                        if hasattr(mu_initial, '__len__'):
-                            mu_initial = mu_initial.item() if mu_initial.size == 1 else mu_initial[0]
+                        # Extract the FIRST condition's chemical potential from the
+                        # workspace starting point. MU is (...condition axes...,
+                        # component); collapsing the leading axes handles any
+                        # number of condition dimensions (a 9-component system
+                        # has 11+ axes and defeats hardcoded slicing).
+                        mu_initial = np.asarray(properties.MU).reshape(-1, num_mu_components)[0, comp_idx]
                         global_spec_arrays['initial_chemical_potentials'][comp_idx] = float(mu_initial)
                         if wks_obj.verbose:
                             print(f"[GPU] CRITICAL FIX: Set initial_chemical_potentials[{comp_idx}] = {mu_initial:.6f} from workspace")
@@ -1272,21 +1268,23 @@ def _prepare_grid_data_for_gpu_from_calculate_result(grid_data, py_phase_name_to
             ('actual_gm_data_size', 'i4'), # actual_grid_points
             ('actual_phase_id_data_size', 'i4'), # actual_grid_points
             ('_padding', 'i4'),  # CRITICAL: Pad to 8-byte alignment (7 ints + 1 padding = 32 bytes)
-            # Then the arrays - now properly aligned
-            ('Y_ptr_data', f'{actual_grid_points * max_dof}f8'),
-            ('X_ptr_data', f'{actual_grid_points * max_components}f8'),
-            ('GM_ptr_data', f'{actual_grid_points}f8'),
-            ('PhaseID_ptr_data', f'{actual_grid_points}i4'),
+            # Then the arrays - now properly aligned. Shape-tuple form is
+            # REQUIRED (not '{n}f8' strings): numpy rejects the '1i4' string
+            # form, which single-phase problems hit via num_unique_phases == 1.
+            ('Y_ptr_data', 'f8', (actual_grid_points * max_dof,)),
+            ('X_ptr_data', 'f8', (actual_grid_points * max_components,)),
+            ('GM_ptr_data', 'f8', (actual_grid_points,)),
+            ('PhaseID_ptr_data', 'i4', (actual_grid_points,)),
             # Then the phase mapping arrays
-            ('phase_grid_indices_start', f'{num_unique_phases}i4'),
-            ('phase_grid_indices_stop', f'{num_unique_phases}i4'),
+            ('phase_grid_indices_start', 'i4', (num_unique_phases,)),
+            ('phase_grid_indices_stop', 'i4', (num_unique_phases,)),
             ('num_mappable_phases_in_grid', 'i4')
         ]
         # Blocks are laid out back-to-back on the GPU; each block's doubles must be
         # 8-byte aligned, so pad the record itemsize to a multiple of 8.
         _tail_pad = (-np.dtype(device_grid_dtype).itemsize) % 8
         if _tail_pad:
-            device_grid_dtype.append(('_tail_pad', f'{_tail_pad}u1'))
+            device_grid_dtype.append(('_tail_pad', 'u1', (_tail_pad,)))
 
         grid_data_blocks = np.zeros(n_blocks, dtype=device_grid_dtype)
 
@@ -1874,7 +1872,12 @@ def _process_gpu_results(results_cpu_flat: np.ndarray, wks_obj: Workspace,
             _stable_mask = np_reshaped > 1e-10
             _vertex_perm = np.argsort(~_stable_mask, axis=-1, kind='stable')
             np_reshaped = np.take_along_axis(np_reshaped, _vertex_perm, axis=-1)
-            data_vars['NP'] = (tuple(str(k) for k in coords_keys_for_shape) + ('vertex',), 
+            _stable_sorted = np.take_along_axis(_stable_mask, _vertex_perm, axis=-1)
+            # CPU pads vertex slots beyond the remaining composition sets with
+            # NaN (eqsolver.pyx: prop_NP[len(compsets):] = nan, empty-slot X =
+            # nan); the kernel leaves zeros there.
+            np_reshaped = np.where(_stable_sorted, np_reshaped, np.nan)
+            data_vars['NP'] = (tuple(str(k) for k in coords_keys_for_shape) + ('vertex',),
                               np_reshaped[..., :vertex_count])
             
             # Convert phase IDs to phase names
@@ -1903,6 +1906,8 @@ def _process_gpu_results(results_cpu_flat: np.ndarray, wks_obj: Workspace,
             x_reshaped_full = np.take_along_axis(
                 x_flat.reshape(output_shape + (max_phases_kernel, max_comps_kernel)),
                 _vertex_perm[..., None], axis=-2)
+            # empty vertex slots: NaN, matching the reference (see NP above)
+            x_reshaped_full = np.where(_stable_sorted[..., None], x_reshaped_full, np.nan)
             x_trimmed = x_reshaped_full[..., :vertex_count, :num_output_components]
             data_vars['X'] = (tuple(str(k) for k in coords_keys_for_shape) + ('vertex', 'component'), x_trimmed)
             
@@ -1922,7 +1927,9 @@ def _process_gpu_results(results_cpu_flat: np.ndarray, wks_obj: Workspace,
                 phase_idx = idx[-1]  # vertex index
                 if phase_idx < np_trimmed[idx[:-1]].shape[0]:
                     phase_amount = np_trimmed[idx[:-1] + (phase_idx,)]
-                    if phase_amount <= 1e-10:  # Phase not present
+                    # empty slots are NaN-padded now, so test the negation
+                    # (NaN <= 1e-10 is False but the slot is still not present)
+                    if not (phase_amount > 1e-10):  # Phase not present
                         y_trimmed[idx] = np.nan
                     else:
                         _pd = _dof_by_pid.get(int(phase_ids_trimmed[idx]), y_trimmed.shape[-1])

@@ -257,12 +257,14 @@ class EnsemblePointBatcher:
                  ('actual_x_data_size', 'i4'), ('actual_gm_data_size', 'i4'),
                  ('actual_phase_id_data_size', 'i4'), ('ext_mode', 'i4'),
                  ('Y_ext', 'u8'), ('X_ext', 'u8'), ('GM_ext', 'u8'), ('PID_ext', 'u8'),
-                 ('phase_grid_indices_start', f'{n_ph}i4'),
-                 ('phase_grid_indices_stop', f'{n_ph}i4'),
+                 # shape-tuple form: numpy rejects the '1i4' string form,
+                 # which single-phase problems hit via n_ph == 1
+                 ('phase_grid_indices_start', 'i4', (n_ph,)),
+                 ('phase_grid_indices_stop', 'i4', (n_ph,)),
                  ('num_mappable_phases_in_grid', 'i4')]
         pad = (-np.dtype(dtype).itemsize) % 8
         if pad:
-            dtype.append(('_tail_pad', f'{pad}u1'))
+            dtype.append(('_tail_pad', 'u1', (pad,)))
         blocks = np.zeros(W * nT, dtype=dtype)
         blocks['num_grid_points_total'] = M
         blocks['phase_dof_stride_Y'] = int(tmpl_block['phase_dof_stride_Y'])

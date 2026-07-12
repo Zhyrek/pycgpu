@@ -2709,9 +2709,11 @@ def _generate_full_gpu_source(wks_obj: Workspace,
 
     full_source = f"""
 // Removed cupy/complex.cuh as it may cause CUDA_ERROR_INVALID_VALUE
-#include <float.h>          // C-style header, works better with NVCC backend
-#include <math.h>           // C-style header, works better with NVCC backend
+#if !defined(__CUDACC_RTC__) && !defined(__HIPCC_RTC__)
+#include <float.h>
+#include <math.h>
 #include <stdio.h>          // For printf debugging
+#endif // under NVRTC/hipRTC the RTC-compat block in minimizer.h/svd.c applies
 
 // --- WorkArrays struct to reduce kernel parameters for AMD compatibility ---
 // AMD compatibility: Define WorkArrays carefully for cross-platform compatibility

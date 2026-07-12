@@ -1,7 +1,24 @@
 #pragma once
+#if defined(__CUDACC_RTC__) || defined(__HIPCC_RTC__)
+// NVRTC (runtime compilation, pip-only CUDA) has no host C headers; the
+// handful of constants/declarations the kernels use are provided directly.
+// Math functions, memcpy/memset and device printf are NVRTC builtins.
+#ifndef PYCGPU_RTC_COMPAT
+#define PYCGPU_RTC_COMPAT
+#define DBL_MAX 1.7976931348623157e+308
+#define DBL_MIN 2.2250738585072014e-308
+#define DBL_EPSILON 2.2204460492503131e-16
+#define FLT_MAX 3.402823466e+38f
+#ifndef INFINITY
+#define INFINITY (1.0/0.0)
+#endif
+extern "C" __device__ int printf(const char*, ...);
+#endif // PYCGPU_RTC_COMPAT
+#else
 #include <math.h>       // For fabs, fmax, fmin, etc.
 #include <float.h>      // For DBL_EPSILON if needed
 #include <string.h>     // For memset
+#endif // __CUDACC_RTC__
 #include "phase_rec.h" // PhaseRecord definition
 #include "comp_set.h" // CompositionSet definition
 #include "lu_solver.h" // LU decomposition solver

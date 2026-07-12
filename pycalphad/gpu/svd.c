@@ -7,8 +7,25 @@
 ////////////////////////////////////////////////////////////////////////////////
 
 // SVD Implementation - included as source, not header
+#if defined(__CUDACC_RTC__) || defined(__HIPCC_RTC__)
+// NVRTC (runtime compilation, pip-only CUDA) has no host C headers; the
+// handful of constants/declarations the kernels use are provided directly.
+// Math functions, memcpy/memset and device printf are NVRTC builtins.
+#ifndef PYCGPU_RTC_COMPAT
+#define PYCGPU_RTC_COMPAT
+#define DBL_MAX 1.7976931348623157e+308
+#define DBL_MIN 2.2250738585072014e-308
+#define DBL_EPSILON 2.2204460492503131e-16
+#define FLT_MAX 3.402823466e+38f
+#ifndef INFINITY
+#define INFINITY (1.0/0.0)
+#endif
+extern "C" __device__ int printf(const char*, ...);
+#endif // PYCGPU_RTC_COMPAT
+#else
 #include <float.h>               // required for DBL_EPSILON
 #include <math.h>                // required for fabs(), sqrt();
+#endif // __CUDACC_RTC__
 
 #define MAX_ITERATION_COUNT 30   // Maximum number of iterations
 

@@ -14,6 +14,39 @@ import json
 from typing import Dict, Optional, Tuple, Any
 from datetime import datetime
 
+
+def cuda_raw_module(code, options, verbose=False):
+    """CuPy RawModule with compiler selection for the pip-only CUDA story.
+
+    PYCGPU_CUDA_COMPILER: 'nvcc' (default when nvcc is on PATH; the
+    validated toolchain), 'nvrtc' (runtime compilation via the library the
+    CuPy wheel ships — no CUDA toolkit install needed), or 'auto'. When
+    nvcc is absent, NVRTC is used automatically instead of failing. NVRTC
+    rejects nvcc-style optimization flags, so only -std/-D options are
+    forwarded to it; the kernel sources carry an RTC-compat block for the
+    missing host C headers.
+    """
+    import shutil as _shutil
+    import cupy as _cp
+    choice = os.environ.get('PYCGPU_CUDA_COMPILER', 'auto').lower()
+    if choice not in ('nvcc', 'nvrtc', 'auto'):
+        raise ValueError(f"PYCGPU_CUDA_COMPILER must be nvcc/nvrtc/auto, got {choice!r}")
+    # On ROCm builds of CuPy, backend='nvcc' translates to hipcc and the RTC
+    # backend to hipRTC; probe for the platform's actual offline compiler.
+    _is_hip = bool(getattr(_cp.cuda.runtime, 'is_hip', False))
+    _offline = 'hipcc' if _is_hip else 'nvcc'
+    if choice == 'auto':
+        choice = 'nvcc' if _shutil.which(_offline) else 'nvrtc'
+        if choice == 'nvrtc' and verbose:
+            print(f"[GPU] {_offline} not found on PATH; compiling with "
+                  f"{'hipRTC' if _is_hip else 'NVRTC'}")
+    if choice == 'nvcc':
+        return _cp.RawModule(code=code, options=tuple(options), backend='nvcc')
+    rtc_options = tuple(o for o in options if o.startswith(('-std', '-D')))
+    return _cp.RawModule(code=code, options=rtc_options, backend='nvrtc')
+
+
+
 try:
     import cupy as cp
     GPU_AVAILABLE = True
@@ -123,11 +156,7 @@ class GPUKernelManager:
         
         # Compile the kernel
         try:
-            module = cp.RawModule(
-                code=source_code,
-                options=compile_options,
-                backend='nvcc'
-            )
+            module = cuda_raw_module(source_code, compile_options, verbose=verbose)
             
             if verbose:
                 print(f"[GPU KernelManager] Compilation successful!")
@@ -252,11 +281,7 @@ class GPUKernelManager:
                 print(f"[GPU KernelManager] Original compilation date: {meta.get('timestamp')}")
             
             # Recompile from cached source
-            module = cp.RawModule(
-                code=source_code,
-                options=compile_options,
-                backend='nvcc'
-            )
+            module = cuda_raw_module(source_code, compile_options, verbose=verbose)
             
             if verbose:
                 print(f"[GPU KernelManager] Successfully loaded and recompiled kernel!")

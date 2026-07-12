@@ -443,10 +443,10 @@ class PointBatchSolver:
         elif backend == 'cuda':
             import cupy as cp
             self._cp = cp
-            self.module = cp.RawModule(
-                code=full_source,
-                options=tuple(['-std=c++11', '-O2'] + define_flags),
-                backend='nvcc')
+            from pycalphad.gpu.kernel_manager import cuda_raw_module
+            self.module = cuda_raw_module(
+                full_source, ['-std=c++11', '-O2'] + define_flags,
+                verbose=self.verbose)
             if cp.cuda.runtime.deviceGetLimit(cp.cuda.runtime.cudaLimitStackSize) < 65536:
                 cp.cuda.runtime.deviceSetLimit(cp.cuda.runtime.cudaLimitStackSize, 65536)
             self.module.get_function('init_all_gpu_phase_records')((1,), (1,), ())

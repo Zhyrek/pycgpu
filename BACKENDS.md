@@ -39,11 +39,15 @@ Notes:
   the shared libraries per system+model fingerprint.
 - The `gpu` extra installs `cupy-cuda12x`, whose wheels bundle the CUDA
   runtime libraries (only the NVIDIA *driver* must be present). Kernel
-  compilation uses `nvcc`, which is not part of the CuPy wheel: install it
-  via conda (`conda install cuda-nvcc`), your distribution
-  (`apt install nvidia-cuda-toolkit`), or pip
-  (`nvidia-cuda-nvcc-cu12`, adding its `bin/` to PATH). If a full CUDA
-  toolkit is already installed on the machine, nothing else is needed.
+  compilation uses `nvcc` when it is on PATH (conda `cuda-nvcc`, distro
+  toolkit, or the `nvidia-cuda-nvcc-cu12` pip wheel); when no `nvcc` is
+  found, kernels compile via **NVRTC**, the runtime-compilation library
+  the CuPy wheel already ships — i.e. `pip install pycalphad[gpu]` works
+  with no CUDA toolkit install at all. Force a choice with
+  `PYCGPU_CUDA_COMPILER=nvcc|nvrtc` (the full stock test suite passes
+  under both). On ROCm builds of CuPy the same switch maps to
+  hipcc/hipRTC (the kernel sources carry guards for both RTC dialects;
+  hipRTC is untested in CI, like the ROCm path generally).
 - CUDA 11 machines: install `cupy-cuda11x` manually instead of the extra.
 - AMD: the kernel sources are HIP-compatible and CuPy publishes experimental
   `cupy-rocm-*` wheels, but the ROCm path is untested in CI; treat it as

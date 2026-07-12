@@ -112,9 +112,18 @@ def _generate_property_source(shim, output):
         f"        case {idx}: return {notebook_model_c_func_name_prefix(idx)}prop(x);"
         for idx in range(len(unique_models)))
     return f"""
+#if defined(__CUDACC_RTC__) || defined(__HIPCC_RTC__)
+#define DBL_MAX 1.7976931348623157e+308
+#define DBL_EPSILON 2.2204460492503131e-16
+#ifndef INFINITY
+#define INFINITY (1.0/0.0)
+#endif
+extern "C" __device__ int printf(const char*, ...);
+#else
 #include <float.h>
 #include <math.h>
 #include <stdio.h>
+#endif
 {_POW_SHIM}
 {''.join(funcs)}
 __device__ double pycgpu_eval_prop(int model_idx, const double* x) {{
@@ -200,9 +209,9 @@ def _build_module(backend_name, shim, verbose=False, output='GM'):
     else:
         if cp is None:
             raise RuntimeError("backend 'gpu' requires CuPy")
-        module = cp.RawModule(code=full_source,
-                              options=tuple(['-std=c++11', '-O2'] + define_flags),
-                              backend='nvcc')
+        from pycalphad.gpu.kernel_manager import cuda_raw_module
+        module = cuda_raw_module(full_source, ['-std=c++11', '-O2'] + define_flags,
+                                 verbose=verbose)
         if output == 'GM':
             init_k = module.get_function('init_all_gpu_phase_records')
             init_k((1,), (1,), ())

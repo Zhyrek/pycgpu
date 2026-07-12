@@ -1,6 +1,6 @@
 # [DRAFT — do not submit yet] Accelerated equilibrium backends (C++ / CUDA)
 
-**Target:** `pycalphad/pycalphad` `develop` ← `Zhyrek/pycgpu` `gpu-port-sync` (develop-synced; a squash-curated branch will replace this before un-drafting)
+**Target:** `pycalphad/pycalphad` `develop` ← `Zhyrek/pycgpu` `accelerated-backends-pr` (curated 3-commit branch: engine / dispatch+tests / packaging+docs+plotting; `gpu-port-sync` is the full development history)
 
 ## Summary
 
@@ -113,9 +113,9 @@ The stock test suite itself runs ~3.7x faster under the c++ backend.
 
 ## Checklist before un-drafting
 
-- [ ] Squash/curate commit history
-- [ ] Remove/relocate development docs (POINT_SOLVER_DESIGN.md,
-      ESPEI_INTEGRATION.md, PR_DRAFT.md) as maintainers prefer; CLAUDE.md
-      files and important_tests/ are dev-only and already excluded
+- [x] Squash/curate commit history (`accelerated-backends-pr`: 3 commits,
+      triple suite green — default 319 / c++ 318 / gpu 318)
+- [x] Development docs, dev TDBs, CLAUDE.md files and important_tests/
+      excluded from the curated branch
 - [ ] CI story for the backends (compiler availability on runners)
 - [ ] Maintainer decision on robust-phase-removal defaults

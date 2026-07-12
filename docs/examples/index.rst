@@ -2,25 +2,10 @@ Examples
 ========
 
 .. toctree::
-   :maxdepth: 1
+   :numbered:
+   :maxdepth: 2
 
-   BinaryExamples
-   TernaryExamples
-   Metastability
-   ReferenceStateExamples
-   EquilibriumWithOrdering
-   CementiteAnalysis
-
-Advanced Examples
-=================
-
-.. toctree::
-   :maxdepth: 1
-
-   UsingCalculationResults
-   LegacyEnergySurface
-   LegacyReferenceState
-   ChargedPhases
-   PlotActivity
-   ViscosityModel
-   Mapping
+   1_Phase_Diagrams/index
+   2_Computing_Properties/index
+   3_High_Throughput_Analysis/index
+   4_Metastability_Reference_States/index

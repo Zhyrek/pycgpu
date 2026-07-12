@@ -4,7 +4,7 @@ from pycalphad import Database, Workspace, variables as v
 from pycalphad.core.conditions import ConditionError
 from pycalphad.core.composition_set import CompositionSet
 from pycalphad.property_framework import as_property, ComputableProperty, T0, IsolatedPhase, DormantPhase
-from pycalphad.property_framework.units import Q_
+from pycalphad.property_framework.units import Q_, unit_conversion_context
 from pycalphad.tests.fixtures import load_database, select_database, ConvergenceFailureSolver
 import pytest
 from collections import Counter
@@ -326,6 +326,7 @@ def test_jansson_derivative_chempot_condition(load_database):
     np.testing.assert_almost_equal(molefrac1, 0.3)
     np.testing.assert_almost_equal(result2, (molefrac2 - molefrac1) / 1.0, decimal=2)
 
+@pytest.mark.filterwarnings("ignore:No valid points found for phase SPINEL*:UserWarning")  # Filter out an expected warning so we don't fail the test
 def test_issue_503_suspend_phase_infeasible_internal_constraints():
     "Phases that cannot satisfy internal constraints are correctly suspended (gh-503)"
     TDB = """
@@ -342,7 +343,9 @@ def test_issue_503_suspend_phase_infeasible_internal_constraints():
     """
     # SPINEL phase cannot charge balance, so even though it contains ZR, O, and VA, it must be suspended
     wks = Workspace(TDB, ['O', 'ZR', 'VA'], ['SPINEL', 'GAS'], {v.P: 1e5, v.X('O'): 0.5, v.T: 1000})
+    wks.verbose = True
     print(wks.get_dict('X(*,*)'))
+    print(wks.get_dict('NP(*)'))
     assert np.isnan(wks.get('NP(SPINEL)'))
     np.testing.assert_almost_equal(wks.get('NP(GAS)'), 1.0)
 
@@ -439,3 +442,83 @@ def test_multicomponent_jansson_derivative_dependent_component(load_database):
     # dGM / dX(Ti) = MU(Ti) - MU(Cr)
     np.testing.assert_allclose(dGM_dXTi, wks.get("MU(TI)") - wks.get("MU(CR)"))
     np.testing.assert_allclose(dGM_dXTi, -26856.725962)
+
+
+@pytest.mark.solver
+@select_database("Cr-Fe-Ni_shallow_bcc.tdb")
+def test_shallow_ternary_with_isolated_phase(load_database):
+    """
+    Test that a global min and isolated phase are computed correctly for a shallow miscibility gap.
+
+    This test was built from a out-of-band reported bug discoverd via running ESPEI.
+    The BCC energy is very shallow near the Cr-Fe edge with a very shallow miscibility
+    gap. The difference between the isolated phase energy and the global min energy is
+    only about 1.15 J/mol, so this is a tricky system that can be sensitive to starting
+    points and phase changes within the minimizer.
+    """
+    # When this test was added, the main failure mode is that composition sets were too
+    # aggressively removed, leading to finding the metastable solution inside the
+    # miscibility gap. Since the stable set of phases is about a J below, composition
+    # sets that have driving force are not picked up with low point densities and we
+    # fail to converge after only one global minimization iteration.
+    dbf = load_database()
+    comps = ['CR', 'FE', 'NI', 'VA']
+    phases = ['BCC_A2']
+    conditions = {v.T: 1170, v.P:101325, v.X('CR'): 0.638, v.X('NI'): 0.062}
+    wks = Workspace(dbf, phases=phases, components=comps, conditions=conditions, verbose=True)
+
+    # Values confirmed by turning point density up to 1e7
+    global_GM = wks.get("GM")
+    global_MU = np.asarray(wks.get("MU(*)"))
+    # Composition Sets solution:
+    # CompositionSet(BCC_A2, [0.5504, 0.36119, 0.08841], NP=0.40359, GM=-55404.75228)
+    # CompositionSet(BCC_A2, [0.69728, 0.25859, 0.04413], NP=0.59641, GM=-52834.04102)
+    assert_allclose(global_GM, -53871.55575966857)
+    assert_allclose(global_MU, np.array([-47947.48767057, -62817.25958317, -71546.46372217]))
+    # TODO: test isolated phase MU? Might need https://github.com/pycalphad/pycalphad/pull/595
+    isolated_GM = wks.get(IsolatedPhase('BCC_A2',wks=wks)("GM"))
+    # TODO: switch notation to IsolatedPhase('BCC_A2',wks=wks)("MU(*)") when possible
+    isoalted_MU = np.asarray([wks.get(IsolatedPhase('BCC_A2',wks=wks)(x)) for x in ["MU(CR)", "MU(FE)", "MU(NI)"]])
+    assert_allclose(isolated_GM, -53870.40280079158)
+    # assert_allclose(isoalted_MU, ???)
+
+
+@select_database("cfe_broshe.tdb")
+def test_unit_conversion(load_database):
+    dbf = load_database()
+    conds = {v.P: 101325, v.T: (1530, 1570, 10), v.N: 1, v.W("C"): 0.02}
+    wks = Workspace(dbf, ["FE", "C", "VA"], ["LIQUID", "FCC_A1"], conditions=conds)
+
+    # Test that it did not raise any exception (gh-609)
+    wks.get(v.T, as_property("enthalpy")["J/g"])
+
+
+@select_database("alzn_mey.tdb")
+def test_get_dict_phase_specific_unit_conversion_uses_phase_molar_mass(load_database):
+    """get_dict should use the phase-specific molar mass for unit conversion,
+    not the mixture-averaged molar mass, when converting phase-specific
+    properties like GM(FCC_A1) from J/mol to J/g."""
+    dbf = load_database()
+    # Pick conditions in the FCC_A1 + HCP_A3 two-phase region
+    components = ['AL', 'ZN', 'VA']
+    phases = ['FCC_A1', 'HCP_A3', 'LIQUID']
+    conditions = {v.N: 1, v.P: 101325, v.T: 500, v.X('ZN'): 0.4}
+    wks = Workspace(dbf, components, phases, conditions)
+
+    gm_fcc_mass = as_property('GM(FCC_A1)')['J/g']
+
+    print(wks.get_dict('GM(FCC_A1)', "X(FCC_A1,*)"))
+    # Get the result from get_dict
+    result = wks.get_dict(gm_fcc_mass)
+    get_dict_value = float(np.squeeze(list(result.values())[0]))
+
+    # Manually compute the expected answer using only FCC_A1's composition set for the molar mass context
+    composition_sets = wks.get_composition_sets()
+    assert len(composition_sets) == 2, f"Expected FCC_A1 and HCP_A3 to be stable, got {wks.get_dict('NP(*)')}"
+    fcc_compsets = [cs for cs in composition_sets if cs.phase_record.phase_name == 'FCC_A1']
+    assert len(fcc_compsets) == 1, "Expected FCC_A1 to be stable at these conditions"
+    raw_value = np.squeeze(as_property('GM(FCC_A1)').compute_property(composition_sets, wks.conditions, np.squeeze(wks.eq.MU)))
+    phase_context = unit_conversion_context(fcc_compsets, gm_fcc_mass)
+    expected = Q_(raw_value, 'J/mol').to('J/g', phase_context).magnitude.item()
+
+    assert_allclose(get_dict_value, expected)

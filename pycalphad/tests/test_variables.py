@@ -1,7 +1,8 @@
 """
 Test variables module.
 """
-
+import copy
+import pickle
 import numpy as np
 from pycalphad import variables as v
 from pycalphad.tests.fixtures import select_database, load_database
@@ -61,3 +62,89 @@ def test_component_and_species_repr_str_methods():
     sp = v.Species(None)
     assert repr(sp) == "Species(None)"
     assert str(sp) == ""
+
+def test_deepcopy():
+    '''
+    Tests that deepcopy of variables produce the same variables
+    This addresses an unreported issue where copying the chemical potential
+    would use the name attribute rather than the species (this resulted in deepcopy(v.MU('A')) -> v.MU(v.MU('A')))
+    '''
+    assert copy.deepcopy(v.NP('*')) == v.NP('*')
+    assert copy.deepcopy(v.NP('A')) == v.NP('A')
+
+    assert copy.deepcopy(v.X('B')) == v.X('B')
+    assert copy.deepcopy(v.X('A','B')) == v.X('A','B')
+
+    assert copy.deepcopy(v.W('B')) == v.W('B')
+    assert copy.deepcopy(v.W('A','B')) == v.W('A','B')
+
+    assert copy.deepcopy(v.Y('A',0,'B')) == v.Y('A',0,'B')
+    assert copy.deepcopy(v.T) == v.T
+    assert copy.deepcopy(v.P) == v.P
+    assert copy.deepcopy(v.MU('A')) == v.MU('A')
+
+
+def test_copy_with_cached_new():
+    """Test that copy.copy creates independent objects even with cached __new__.
+
+    The @lru_cache on StateVariable.__new__ could cause copy.copy() to return
+    the same cached object instead of a new one. This test verifies that the
+    __copy__ method correctly bypasses the cache.
+    """
+    # Test singleton types (TemperatureType, PressureType, SystemMolesType)
+    # These have __reduce__ returning (cls, ()) so are most susceptible to cache issues
+    t_copy = copy.copy(v.T)
+    assert t_copy is not v.T, "copy of T should be a different object"
+    assert t_copy == v.T, "copy of T should be equal to original"
+
+    p_copy = copy.copy(v.P)
+    assert p_copy is not v.P, "copy of P should be a different object"
+
+    n_copy = copy.copy(v.N)
+    assert n_copy is not v.N, "copy of N should be a different object"
+
+    # Test that modifying copy doesn't affect original
+    original_units = v.T.display_units
+    t_copy.display_units = 'degC'
+    assert v.T.display_units == original_units, "modifying copy should not affect original"
+
+    # Test other StateVariable subclasses
+    x = v.X('AL')
+    x_copy = copy.copy(x)
+    assert x_copy is not x, "copy of MoleFraction should be a different object"
+    assert x_copy == x, "copy of MoleFraction should be equal to original"
+
+    y = v.Y('FCC', 0, 'AL')
+    y_copy = copy.copy(y)
+    assert y_copy is not y, "copy of SiteFraction should be a different object"
+    assert y_copy == y, "copy of SiteFraction should be equal to original"
+
+
+def test_getitem_units_does_not_mutate_original():
+    """Test that using __getitem__ for unit conversion doesn't mutate the original.
+
+    v.T['degC'] should return a new object with different display_units,
+    leaving v.T unchanged.
+    """
+    original_units = v.T.display_units
+
+    t_celsius = v.T['degC']
+    assert t_celsius.display_units == 'degC'
+    assert v.T.display_units == original_units, "v.T should not be mutated by __getitem__"
+
+    # Verify they are different objects
+    assert t_celsius is not v.T
+
+    # But they should be equal (same underlying symbol)
+    assert t_celsius == v.T
+
+
+def test_issue557_state_variable_unit_changes_survive_roundtrip_pickle():
+    T2 = copy.deepcopy(v.T)
+    T2.display_units = 'degC'
+    T2_roundtrip = pickle.loads(pickle.dumps(T2))
+    print(f'T2: {T2.display_units}')
+    print(f'T2_roundtrip: {T2_roundtrip.display_units}')
+    assert T2.display_units == T2_roundtrip.display_units
+    T3 = pickle.loads(pickle.dumps(v.T["degC"]))
+    assert T2.display_units == T3.display_units

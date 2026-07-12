@@ -136,6 +136,11 @@ def _sample_phase_constitution(model, sampler, fixed_grid, pdens, phase_local_co
             x = - Q[neg_em_idx] / (Q[pos_em_idx] - Q[neg_em_idx])
             em_pts.append(endmembers[pos_em_idx] * x + endmembers[neg_em_idx] * (1-x))
 
+        if len(em_pts) == 0:
+            # There are no endmembers of linear combination endmembers pairs that can charge balance.
+            # This phase cannot form. Return a size zero array of the correct shape
+            return np.full((0, sum(sublattice_dof)), np.nan)
+
         # Charge neutral endmembers and mixed pseudo-endmembers
         points = np.asarray(em_pts)
 
@@ -256,48 +261,56 @@ def _compute_phase_values(components, statevar_dict, str_phase_local_conditions,
     # func may only have support for vectorization along a single axis (no broadcasting)
     # we need to force broadcasting and flatten the result before calling
     bc_statevars = np.ascontiguousarray([broadcast_to(x, points.shape[:-1]).reshape(-1) for x in statevars])
+    param_symbols, parameter_array = extract_parameters(parameters)
+    parameter_array_length = parameter_array.shape[0]
+    max_tieline_vertices = len(pure_elements)
     if points.size > 0:
         pts = points.reshape(-1, points.shape[-1])
         dof = np.ascontiguousarray(np.concatenate((bc_statevars.T, pts), axis=1))
-    else:
-        dof = np.ascontiguousarray(bc_statevars.T)
-    phase_compositions = np.zeros((dof.shape[0], len(pure_elements)), order='F')
+        phase_compositions = np.zeros((dof.shape[0], len(pure_elements)), order='F')
 
-    param_symbols, parameter_array = extract_parameters(parameters)
-    parameter_array_length = parameter_array.shape[0]
-    if parameter_array_length == 0:
-        # No parameters specified
-        phase_output = np.zeros(dof.shape[0], order='C')
-        if accel_evaluator is not None and dof.shape[0] >= getattr(accel_evaluator, 'min_points', 0):
-            # Accelerated backend (see pycalphad.set_backend): evaluate the
-            # energy over the sampled points with the generated GPU/C++
-            # functions; everything else in this routine stays unchanged.
-            # Small point sets stay on the reference callables, which win
-            # below the per-call overhead crossover (mapping makes thousands
-            # of small calculate calls).
-            accel_evaluator(phase_record.phase_name, dof, phase_output)
+        if parameter_array_length == 0:
+            # No parameters specified
+            phase_output = np.zeros(dof.shape[0], order='C')
+            if accel_evaluator is not None and dof.shape[0] >= getattr(accel_evaluator, 'min_points', 0):
+                # Accelerated backend (see pycalphad.set_backend): evaluate the
+                # energy over the sampled points with the generated GPU/C++
+                # functions; everything else in this routine stays unchanged.
+                # Small point sets stay on the reference callables, which win
+                # below the per-call overhead crossover (mapping makes thousands
+                # of small calculate calls).
+                accel_evaluator(phase_record.phase_name, dof, phase_output)
+            else:
+                phase_record.prop_2d(phase_output, dof, output.encode('utf-8'))
         else:
-            phase_record.prop_2d(phase_output, dof, output.encode('utf-8'))
-    else:
-        # Vectorized parameter arrays
-        phase_output = np.zeros((dof.shape[0], parameter_array_length), order='C')
-        phase_record.prop_parameters_2d(phase_output, dof, parameter_array, output.encode('utf-8'))
+            # Vectorized parameter arrays
+            phase_output = np.zeros((dof.shape[0], parameter_array_length), order='C')
+            phase_record.prop_parameters_2d(phase_output, dof, parameter_array, output.encode('utf-8'))
 
-    for el_idx in range(len(pure_elements)):
-        phase_record.mass_obj_2d(phase_compositions[:, el_idx], dof, el_idx)
+        for el_idx in range(len(pure_elements)):
+            phase_record.mass_obj_2d(phase_compositions[:, el_idx], dof, el_idx)
 
-    max_tieline_vertices = len(pure_elements)
-    if isinstance(phase_output, (float, int)):
-        phase_output = broadcast_to(phase_output, points.shape[:-1])
-    if isinstance(phase_compositions, (float, int)):
-        phase_compositions = broadcast_to(phase_output, points.shape[:-1] + (len(pure_elements),))
-    phase_output = np.asarray(phase_output, dtype=np.float64)
-    if parameter_array_length <= 1:
-        phase_output.shape = points.shape[:-1]
+        if isinstance(phase_output, (float, int)):
+            phase_output = broadcast_to(phase_output, points.shape[:-1])
+        if isinstance(phase_compositions, (float, int)):
+            phase_compositions = broadcast_to(phase_output, points.shape[:-1] + (len(pure_elements),))
+        if parameter_array_length <= 1:
+            phase_output = np.asarray(phase_output, dtype=np.float64).reshape(points.shape[:-1])
+        else:
+            phase_output = np.asarray(phase_output, dtype=np.float64).reshape(points.shape[:-1] + (parameter_array_length,))
+        phase_compositions = np.asarray(phase_compositions, dtype=np.float64).reshape(points.shape[:-1] + (len(pure_elements),))
     else:
-        phase_output.shape = points.shape[:-1] + (parameter_array_length,)
-    phase_compositions = np.asarray(phase_compositions, dtype=np.float64)
-    phase_compositions.shape = points.shape[:-1] + (len(pure_elements),)
+        # We still need phase_output and phase_compositions to have the correct dimensions
+        # even if there were no points in case fake_points are added (as they will be
+        # concatenated along the points dimension). These arrays will be zero size for now.
+        # The size of the points dimension will be hardcoded to zero (np.atleast_2d will have the new dimension be size 1 even if the input array is size zero).
+        points = points.reshape(points.shape[:-2] + (0, points.shape[-1],))  # np.atleast_2d always makes a (1, N) even if size is zero, here we just make it consistent
+        if parameter_array_length <= 1:
+            phase_output = np.empty(points.shape[:-1], dtype=np.float64)
+        else:
+            phase_output = np.empty(points.shape[:-1] + (parameter_array_length,), dtype=np.float64)
+        phase_compositions = np.empty(points.shape[:-1] + (len(pure_elements),), dtype=np.float64)
+
     if fake_points:
         output_shape = points.shape[:-2] + (max_tieline_vertices,)
         if parameter_array_length > 1:
@@ -479,6 +492,23 @@ def calculate(dbf, comps, phases, mode=None, output='GM', fake_points=False, bro
         if len(active_phases_without_models) > 0:
             raise ValueError(f"model must contain a Model instance for every active phase. Missing Model objects for {sorted(active_phases_without_models)}")
 
+    # Every state variable the phase records were compiled against must have a
+    # value. The compiled property functions take `phase_records.state_variables + site_fractions`
+    # as input, but `calculate()` builds the dof's state-variable columns from
+    # `statevar_dict`. If a Model requires a potential (e.g. T or P) that the
+    # caller of `calcuate()` did not provide, the dof would be have a different
+    # shape than the compiled function expects and the function would read past
+    # the end of the dof buffer. We fail loudly in that case.
+    required_statevars = {str(sv) for sv in phase_records.state_variables}
+    supplied_statevars = {str(sv) for sv in statevar_dict.keys()}
+    missing_statevars = sorted(required_statevars - supplied_statevars)
+    if missing_statevars:
+        raise ConditionError(
+            f"The following state variable(s) are required by the Model(s) for the active "
+            f"phases but were not specified: {missing_statevars}. Specify them as keyword "
+            f"arguments to calculate(), e.g. calculate(..., T=300)."
+        )
+
     maximum_internal_dof = max(len(models[phase_name].site_fractions) for phase_name in active_phases)
 
     phase_local_conditions = {key: unpack_condition(value)
@@ -549,6 +579,8 @@ def calculate(dbf, comps, phases, mode=None, output='GM', fake_points=False, bro
                                          maximum_internal_dof, broadcast=broadcast, parameters=parameters,
                                          largest_energy=float(largest_energy), fake_points=fp,
                                          accel_evaluator=accel_evaluator)
+        if phase_ds[output].size == 0:
+            warnings.warn(f"No valid points found for phase {phase_name}. This can be caused by the point samplers failing to produce feasible points with the given conditions ({conditions}) and state variables ({statevar_dict}).")
         all_phase_data.append(phase_ds)
 
     fp_offset = len(nonvacant_elements) if fake_points else 0
@@ -573,6 +605,8 @@ def calculate(dbf, comps, phases, mode=None, output='GM', fake_points=False, bro
     else:
         final_ds = all_phase_data[0]
     final_ds.attrs['phase_indices'] = islice_by_phase
+    if final_ds[output].size == 0:
+        raise ConditionError(f"No valid points found in any of the active phases ({active_phases}). This can be caused by the point samplers failing to produce feasible points with the given conditions ({conditions}) and state variables ({statevar_dict}).")
     if to_xarray:
         return final_ds.get_dataset()
     else:

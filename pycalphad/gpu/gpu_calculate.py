@@ -19,6 +19,7 @@ is unchanged.
 import ctypes
 import hashlib
 import os
+import re
 from types import SimpleNamespace
 
 import numpy as np
@@ -30,8 +31,111 @@ except Exception:
 
 _evaluator_cache = {}
 
+# Strength-reduced pow, same as the equilibrium module's CUDA path (see
+# _generate_full_gpu_source). Unlike the solver — which keeps libm pow on the
+# C++ backend for bit-parity with the reference minimizer's iteration path —
+# property evaluation is a single expression with no iteration to diverge, so
+# both backends take the fast integer-exponent chain (<=1-2 ulp from libm,
+# the same eps class as symengine's own LLVM lowering of integer powers).
+_POW_SHIM = r"""
+__device__ inline double pycgpu_pow(double b, double e) {
+    int ei = (int)e;
+    if ((double)ei == e && ei > -64 && ei < 64) {
+        unsigned int n = ei < 0 ? (unsigned int)(-ei) : (unsigned int)ei;
+        double r = 1.0, p = b;
+        while (n) { if (n & 1u) r *= p; p *= p; n >>= 1u; }
+        return ei < 0 ? 1.0 / r : r;
+    }
+    return (pow)(b, e);
+}
+#define pow(b, e) pycgpu_pow((b), (e))
+"""
 
-def _build_module(backend_name, shim, verbose=False):
+_PROP_CPU_DRIVER = r"""
+extern "C" void pycgpu_cpu_grid_eval(int model_idx, const double* dof, double* out,
+                                     long long n_points, int dof_stride)
+{
+    for (long long i = 0; i < n_points; ++i) {
+        out[i] = pycgpu_eval_prop(model_idx, &dof[i * (long long)dof_stride]);
+    }
+}
+"""
+
+
+def _property_expr(model, output, param_symbols):
+    """The model expression for `output` with reference-path semantics.
+
+    Mirrors PhaseRecordFactory.get_phase_property: undefined non-state-variable
+    symbols (other than fit parameters) are forced to zero before compilation.
+    """
+    import symengine
+    from pycalphad import variables as v
+    expr = getattr(model, output, None)
+    if expr is None:
+        raise RuntimeError(f"Model property {output} is not defined")
+    expr = symengine.sympify(expr)
+    undefs = {x for x in expr.free_symbols if not isinstance(x, v.StateVariable)} - set(param_symbols)
+    if undefs:
+        expr = expr.xreplace({x: 0. for x in undefs})
+    return expr
+
+
+def _generate_property_source(shim, output):
+    """Standalone module source evaluating `output` over dof rows.
+
+    Unlike the GM path (which reuses the full equilibrium module and its
+    PhaseRecord obj functions), non-GM outputs get a lightweight module with
+    just the generated property functions and the grid kernel — no solver,
+    so it compiles in seconds and its cache entry is independent.
+    """
+    from pycalphad.gpu.gpu_codegen import (
+        _unique_models_for_gpu, notebook_source_from_expr,
+        notebook_model_c_func_name_prefix)
+
+    unique_models, _ = _unique_models_for_gpu(shim, validate=False)
+    param_symbols = list(getattr(shim.phase_record_factory, 'param_symbols', []) or [])
+    funcs = []
+    for idx, model in enumerate(unique_models):
+        expr = _property_expr(model, output, param_symbols)
+        func_c = notebook_source_from_expr(
+            expr, "prop", model, idx, shim,
+            expr_type="func", c_output_type="double", validate=False,
+            verbose=shim.verbose)
+        # Property expressions can contain literal NaN/inf (e.g. _MIX on
+        # partitioned order/disorder models, where the reference model is
+        # undefined and the reference callables evaluate to NaN); symengine
+        # prints them as bare `nan`/`inf`, which is not valid C.
+        func_c = re.sub(r'\bnan(\.0)?\b', '(0.0/0.0)', func_c)
+        func_c = re.sub(r'\binf(\.0)?\b', '(1.0/0.0)', func_c)
+        funcs.append(func_c)
+    cases = "\n".join(
+        f"        case {idx}: return {notebook_model_c_func_name_prefix(idx)}prop(x);"
+        for idx in range(len(unique_models)))
+    return f"""
+#include <float.h>
+#include <math.h>
+#include <stdio.h>
+{_POW_SHIM}
+{''.join(funcs)}
+__device__ double pycgpu_eval_prop(int model_idx, const double* x) {{
+    switch (model_idx) {{
+{cases}
+    }}
+    return 0.0 / 0.0;
+}}
+
+extern "C" {{
+__global__ void grid_eval_kernel(int model_idx, const double* dof, double* out,
+                                 long long n_points, int dof_stride) {{
+    long long i = (long long)blockDim.x * blockIdx.x + threadIdx.x;
+    if (i >= n_points) return;
+    out[i] = pycgpu_eval_prop(model_idx, &dof[i * (long long)dof_stride]);
+}}
+}}
+"""
+
+
+def _build_module(backend_name, shim, verbose=False, output='GM'):
     from pycalphad.gpu.gpu_codegen import (
         compute_dynamic_kernel_sizes, _generate_c_code_for_phase_models,
         _generate_full_gpu_source, _unique_models_for_gpu)
@@ -43,17 +147,22 @@ def _build_module(backend_name, shim, verbose=False):
     gpu_dir = os.path.dirname(os.path.abspath(__file__))
     hasher = hashlib.md5()
     for hdr in ("svd.c", "phase_rec.h", "comp_set.h", "lu_solver.h", "hyperplane.h",
-                "minimizer.h", "eqsolver.h", "gpu_codegen.py"):
+                "minimizer.h", "eqsolver.h", "gpu_codegen.py", "gpu_calculate.py"):
         with open(os.path.join(gpu_dir, hdr), "rb") as f:
             hasher.update(f.read())
-    # Fingerprint the model energy expressions: phase/component names alone
-    # collide between different assessments of the same system.
+    # Fingerprint the model expressions being compiled: phase/component names
+    # alone collide between different assessments of the same system. For
+    # non-GM outputs the property expression itself is the fingerprint.
+    param_symbols = list(getattr(shim.phase_record_factory, 'param_symbols', []) or [])
     model_hasher = hashlib.md5()
     for ph in sorted(shim.phases):
         model_hasher.update(ph.encode())
-        model_hasher.update(str(shim.models[ph].GM).encode())
+        if output == 'GM':
+            model_hasher.update(str(shim.models[ph].GM).encode())
+        else:
+            model_hasher.update(str(_property_expr(shim.models[ph], output, param_symbols)).encode())
     key_input = "|".join([
-        "calc", backend_name,
+        "calc", backend_name, output,
         ",".join(sorted(shim.phases)),
         ",".join(sorted(c.name for c in shim.components)),
         # The generated functions bake in the statevar->dof-column mapping
@@ -68,17 +177,21 @@ def _build_module(backend_name, shim, verbose=False):
     cache_file = cache_dir / f"{cache_key}.cu"
     if cache_file.exists():
         full_source = cache_file.read_text()
-    else:
+    elif output == 'GM':
         model_funcs_c, pr_init_calls_c, unique_models, _ = \
             _generate_c_code_for_phase_models(shim, include_hess=True, validate=False)
         full_source = _generate_full_gpu_source(shim, model_funcs_c, pr_init_calls_c,
                                                 len(unique_models))
         cache_file.write_text(full_source)
+    else:
+        full_source = _generate_property_source(shim, output)
+        cache_file.write_text(full_source)
 
     if backend_name == 'cpp':
         from pycalphad.gpu.cpu_backend import build_cpu_library
         lib = build_cpu_library(full_source, define_flags, cache_dir=str(cache_dir),
-                                verbose=verbose)
+                                verbose=verbose,
+                                driver_src=None if output == 'GM' else _PROP_CPU_DRIVER)
         fn = lib.pycgpu_cpu_grid_eval
         fn.restype = None
         fn.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p,
@@ -90,19 +203,23 @@ def _build_module(backend_name, shim, verbose=False):
         module = cp.RawModule(code=full_source,
                               options=tuple(['-std=c++11', '-O2'] + define_flags),
                               backend='nvcc')
-        init_k = module.get_function('init_all_gpu_phase_records')
-        init_k((1,), (1,), ())
-        cp.cuda.runtime.deviceSynchronize()
+        if output == 'GM':
+            init_k = module.get_function('init_all_gpu_phase_records')
+            init_k((1,), (1,), ())
+            cp.cuda.runtime.deviceSynchronize()
         return ('cuda', module.get_function('grid_eval_kernel'))
 
 
 def get_grid_evaluator(backend_name, components, phases, models,
-                       phase_record_factory, verbose=False):
+                       phase_record_factory, verbose=False, output='GM'):
     """Return evaluate(phase_name, dof_2d, out_1d) for the given system.
 
-    Modules are cached per (backend, phases, components, sizes); the first
-    call for a system compiles the kernel (one-time, disk-cached thereafter).
-    Returns None if the system cannot be built (caller falls back to CPU).
+    `output` names any Model property that is a symengine expression (GM, HM,
+    SM, CPM, the _MIX/_FORM variants, ...); GM shares the full equilibrium
+    module, other outputs build a lightweight property module. Modules are
+    cached per (backend, output, phases, components, sizes); the first call
+    for a system compiles the kernel (one-time, disk-cached thereafter).
+    Raises if the system/output cannot be built (caller falls back to CPU).
     """
     from pycalphad.model import Model as _PlainModel
     for _ph in phases:
@@ -120,18 +237,22 @@ def get_grid_evaluator(backend_name, components, phases, models,
     )
     # In-process cache must also fingerprint the model expressions (same
     # collision as the disk key: two assessments sharing phase names).
+    _param_symbols = list(getattr(phase_record_factory, 'param_symbols', []) or [])
     _mh = hashlib.md5()
     for _ph in sorted(shim.phases):
         _mh.update(_ph.encode())
-        _mh.update(str(models[_ph].GM).encode())
-    cache_id = (backend_name, tuple(sorted(shim.phases)),
+        if output == 'GM':
+            _mh.update(str(models[_ph].GM).encode())
+        else:
+            _mh.update(str(_property_expr(models[_ph], output, _param_symbols)).encode())
+    cache_id = (backend_name, output, tuple(sorted(shim.phases)),
                 tuple(sorted(c.name for c in shim.components)),
                 tuple(str(sv) for sv in shim.phase_record_factory.state_variables),
                 _mh.hexdigest())
     if cache_id in _evaluator_cache:
         entry = _evaluator_cache[cache_id]
     else:
-        entry = _build_module(backend_name, shim, verbose=verbose)
+        entry = _build_module(backend_name, shim, verbose=verbose, output=output)
         _evaluator_cache[cache_id] = entry
 
     from pycalphad.gpu.gpu_codegen import _unique_models_for_gpu

@@ -170,13 +170,19 @@ extern "C" void pycgpu_cpu_run_all(
 """
 
 
-def build_cpu_library(full_kernel_source: str, define_flags, cache_dir: str, verbose: bool = False):
-    """Compile the generated kernel source + OpenMP driver into a shared library."""
+def build_cpu_library(full_kernel_source: str, define_flags, cache_dir: str, verbose: bool = False,
+                      driver_src: str = None):
+    """Compile the generated kernel source + driver into a shared library.
+
+    driver_src defaults to the full equilibrium driver; lightweight modules
+    (e.g. the property-evaluation module for calculate() outputs) pass their
+    own driver since the default one references solver symbols.
+    """
     gpu_dir = os.path.dirname(os.path.abspath(__file__))
     with open(os.path.join(gpu_dir, "cpu_compat.h")) as f:
         compat = f.read()
 
-    source = compat + "\n" + full_kernel_source + "\n" + _CPU_DRIVER_SRC
+    source = compat + "\n" + full_kernel_source + "\n" + (_CPU_DRIVER_SRC if driver_src is None else driver_src)
     defines = [d for d in define_flags if d.startswith("-D")]
     extra_cflags = os.environ.get('PYCGPU_CPU_EXTRA_CFLAGS', '')
     # platform token: Windows gained static-runtime link flags (v2) — caches
@@ -214,6 +220,10 @@ def build_cpu_library(full_kernel_source: str, define_flags, cache_dir: str, ver
             lib = ctypes.CDLL(lib_path, winmode=0)
         else:
             raise
+    if driver_src is not None:
+        # Custom-driver module (e.g. the property-evaluation module): only the
+        # driver's own exports exist; the caller sets their prototypes.
+        return lib
     hull_fn = lib.pycgpu_cpu_point_hull
     hull_fn.restype = None
     hull_fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,

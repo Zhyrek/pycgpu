@@ -518,15 +518,16 @@ def calculate(dbf, comps, phases, mode=None, output='GM', fake_points=False, bro
     plc_shape = tuple(len(x) for x in phase_local_conditions.values())
     # TODO: move state variable conditions into conditions dict
 
-    # Accelerated energy evaluation (pycalphad.set_backend('c++'|'gpu')):
-    # only the GM evaluation over sampled points moves to the backend; the
+    # Accelerated property evaluation (pycalphad.set_backend('c++'|'gpu')):
+    # only the output evaluation over sampled points moves to the backend; the
     # sampling and dataset assembly below are unchanged. Any failure to build
-    # the accelerated evaluator falls back silently to the reference path.
+    # the accelerated evaluator (including unsupported output names) falls
+    # back silently to the reference path.
     accel_evaluator = None
     from pycalphad.backend import get_backend as _get_backend
     _accel_backend, _ = _get_backend()
     _canonical_statevars = [str(sv) for sv in getattr(phase_records, 'state_variables', [])] == ['N', 'P', 'T']
-    if (_accel_backend in ('cpp', 'cuda') and output == 'GM'
+    if (_accel_backend in ('cpp', 'cuda')
             and len(extract_parameters(parameters)[1]) == 0
             and _canonical_statevars):
         # The generated evaluators assume the canonical [N, P, T] state-variable
@@ -536,7 +537,7 @@ def calculate(dbf, comps, phases, mode=None, output='GM', fake_points=False, bro
             from pycalphad.gpu.gpu_calculate import get_grid_evaluator
             accel_evaluator = get_grid_evaluator(_accel_backend, comps,
                                                  sorted(active_phases), models,
-                                                 phase_records)
+                                                 phase_records, output=output)
         except Exception as _accel_err:
             import logging
             logging.getLogger(__name__).debug(

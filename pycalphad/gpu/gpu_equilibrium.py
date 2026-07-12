@@ -1863,13 +1863,24 @@ def _process_gpu_results(results_cpu_flat: np.ndarray, wks_obj: Workspace,
             data_vars['MU'] = (tuple(str(k) for k in coords_keys_for_shape) + ('component',), 
                               mu_reshaped[..., :num_output_components])
             
-            # Extract only the relevant phases (up to vertex_count)
+            # Compact stable phases to the LEADING vertex slots (CPU keeps its
+            # remaining composition sets contiguous from slot 0; the kernel
+            # leaves removed/zero-amount compsets in place, so e.g. a starting
+            # compset that dissolved can leave slot 0 empty with the stable
+            # phase in slot 1). Stable-first, original relative order
+            # preserved; applied to the FULL MAX_PHASES arrays before the
+            # vertex trim so stable phases beyond vertex_count are not cut.
             np_reshaped = np_flat.reshape(output_shape + (max_phases_kernel,))
+            _stable_mask = np_reshaped > 1e-10
+            _vertex_perm = np.argsort(~_stable_mask, axis=-1, kind='stable')
+            np_reshaped = np.take_along_axis(np_reshaped, _vertex_perm, axis=-1)
             data_vars['NP'] = (tuple(str(k) for k in coords_keys_for_shape) + ('vertex',), 
                               np_reshaped[..., :vertex_count])
             
             # Convert phase IDs to phase names
-            phase_ids_reshaped = phase_ids_flat.reshape(output_shape + (max_phases_kernel,))
+            phase_ids_reshaped = np.take_along_axis(
+                phase_ids_flat.reshape(output_shape + (max_phases_kernel,)),
+                _vertex_perm, axis=-1)
             phase_ids_trimmed = phase_ids_reshaped[..., :vertex_count]
             phase_names_reshaped = np.full_like(phase_ids_trimmed, '', dtype=object)
             
@@ -1889,11 +1900,15 @@ def _process_gpu_results(results_cpu_flat: np.ndarray, wks_obj: Workspace,
             
             data_vars['Phase'] = (tuple(str(k) for k in coords_keys_for_shape) + ('vertex',), phase_names_reshaped)
             
-            x_reshaped_full = x_flat.reshape(output_shape + (max_phases_kernel, max_comps_kernel))
+            x_reshaped_full = np.take_along_axis(
+                x_flat.reshape(output_shape + (max_phases_kernel, max_comps_kernel)),
+                _vertex_perm[..., None], axis=-2)
             x_trimmed = x_reshaped_full[..., :vertex_count, :num_output_components]
             data_vars['X'] = (tuple(str(k) for k in coords_keys_for_shape) + ('vertex', 'component'), x_trimmed)
             
-            y_reshaped_full = y_flat.reshape(output_shape + (max_phases_kernel, max_dof_kernel))
+            y_reshaped_full = np.take_along_axis(
+                y_flat.reshape(output_shape + (max_phases_kernel, max_dof_kernel)),
+                _vertex_perm[..., None], axis=-2)
             y_trimmed = y_reshaped_full[..., :vertex_count, :internal_dof_count]
             
             # CRITICAL FIX: Set Y values to NaN for phases with zero amount to match CPU
@@ -1958,14 +1973,6 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             raise RuntimeError(
                 f"accelerated backends support plain Model instances only; "
                 f"phase {_ph} uses {type(_m).__name__}")
-        # Partitioned order/disorder phases flagged never_disorder (pycalphad
-        # #651) change the ordered-phase energy treatment in ways the code
-        # generator does not implement yet — route to the reference solver.
-        _hints = getattr(wks_obj.database.phases.get(_ph), 'model_hints', None)
-        if _hints and _hints.get('never_disorder'):
-            raise RuntimeError(
-                f"accelerated backends do not support never_disorder phases "
-                f"yet; phase {_ph}")
     
     # Check if GPU should be used - NO FALLBACK, FAIL HARD
     # The C++/OpenMP backend (PYCGPU_CPU=1) does not need CUDA or CuPy.

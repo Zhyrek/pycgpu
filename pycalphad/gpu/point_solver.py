@@ -58,9 +58,17 @@ class PointList:
     params : (n, n_params) float64 or None — per-point fit-parameter vectors.
     """
 
-    def __init__(self, T, P, N, X, x_cond_mask, phase_restrict=None, params=None):
+    def __init__(self, T, P, N, X, x_cond_mask, phase_restrict=None, params=None,
+                 fixed_mu_mask=None, fixed_mu_values=None):
         self.T = np.ascontiguousarray(T, dtype=np.float64)
         n = self.T.shape[0]
+        # fixed chemical-potential conditions (reference: lower_convex_hull's
+        # ChemicalPotential handling — an index into the fixed set plus a
+        # preset MU value, NOT a linear-combination row)
+        self.fixed_mu_mask = (np.ascontiguousarray(fixed_mu_mask, dtype=bool)
+                              if fixed_mu_mask is not None else None)
+        self.fixed_mu_values = (np.ascontiguousarray(fixed_mu_values, dtype=np.float64)
+                                if fixed_mu_values is not None else None)
         self.P = np.ascontiguousarray(np.broadcast_to(P, (n,)), dtype=np.float64)
         self.N = np.ascontiguousarray(np.broadcast_to(N, (n,)), dtype=np.float64)
         self.X = np.ascontiguousarray(X, dtype=np.float64)
@@ -172,8 +180,13 @@ def point_hull(points, grid, nonvacant_elements, grid_T=None, grid_P=None,
 
         mu = out['MU'][i]
         mu[:] = 0.0
+        if points.fixed_mu_mask is not None and points.fixed_mu_mask[i].any():
+            fixed_idx_i = np.flatnonzero(points.fixed_mu_mask[i]).astype(np.uintp)
+            mu[fixed_idx_i] = points.fixed_mu_values[i, fixed_idx_i]
+        else:
+            fixed_idx_i = np.array([], dtype=np.uintp)
         gm = hyperplane(comps_view, ener_view, mu,
-                        np.array([], dtype=np.uintp), coefs, rhs,
+                        fixed_idx_i, coefs, rhs,
                         result_fractions, result_simplex)
 
         idx = result_simplex.astype(np.int32)
@@ -666,6 +679,12 @@ def device_point_hull(points, solver, X_row, GM_rows, combo_idx, Phase_row,
     m_points = np.full(n, m, dtype=np.int32)
     fixed_idx = np.full((n, ncomp), -1, dtype=np.int32)
     nfixed = np.zeros(n, dtype=np.int32)
+    if points.fixed_mu_mask is not None and points.fixed_mu_mask.any():
+        fr, fc = np.nonzero(points.fixed_mu_mask)
+        slot_f = np.concatenate([np.arange(c) for c in
+                                 np.bincount(fr, minlength=n)]) if fr.size else fr
+        fixed_idx[fr, slot_f] = fc.astype(np.int32)
+        nfixed[:] = np.bincount(fr, minlength=n).astype(np.int32)
 
     # lincomb rows in the reference's sorted-key order: N row FIRST, then
     # one row per prescribed X (row order changes dgesv pivoting for 3+
@@ -684,6 +703,8 @@ def device_point_hull(points, solver, X_row, GM_rows, combo_idx, Phase_row,
     rhs[rows_i, 1 + slot] = points.X[rows_i, cols_c]
 
     mu = np.zeros((n, ncomp), dtype=np.float64)
+    if points.fixed_mu_mask is not None and points.fixed_mu_mask.any():
+        mu[points.fixed_mu_mask] = points.fixed_mu_values[points.fixed_mu_mask]
     oe = np.zeros(n, dtype=np.float64)
     fr = np.zeros((n, ncomp + 1), dtype=np.float64)
     sx = np.zeros((n, ncomp + 1), dtype=np.int32)
@@ -825,17 +846,25 @@ def device_starting_point(unitless_conds, state_variables, phase_record_factory,
     N = cols.get('N', np.ones(n))
     X = np.zeros((n, ncomp))
     mask = np.zeros((n, ncomp), dtype=bool)
+    mu_mask = np.zeros((n, ncomp), dtype=bool)
+    mu_vals = np.zeros((n, ncomp))
     for key, colv in cols.items():
         if key.startswith('X_'):
             ci = nonvacant.index(key[2:])
             X[:, ci] = colv
             mask[:, ci] = True
+        elif key.startswith('MU_'):
+            ci = nonvacant.index(key[3:])
+            mu_vals[:, ci] = colv
+            mu_mask[:, ci] = True
     # dependent component by mass balance (single unknown under the gate)
     free = ~mask[0]
     if free.sum() == 1:
         X[:, free] = (1.0 - X[:, mask[0]].sum(axis=1))[:, None]
 
-    pts = PointList(T=T, P=P, N=N, X=X, x_cond_mask=mask)
+    pts = PointList(T=T, P=P, N=N, X=X, x_cond_mask=mask,
+                    fixed_mu_mask=mu_mask if mu_mask.any() else None,
+                    fixed_mu_values=mu_vals if mu_mask.any() else None)
 
     # statevar-combo index per point (C-order over the statevar axes, which
     # lead the conditions ordering under the gate: N, P, T sort before X_*)

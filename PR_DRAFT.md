@@ -18,8 +18,11 @@ pycalphad.set_backend('c++')     # or 'gpu'; also `with pycalphad.backend(...)`
 No pycalphad rebuild is involved: the backends generate C/CUDA source from
 the symbolic `Model` energies at runtime, compile once per (system, model
 fingerprint) with the user's toolchain, and disk-cache the artifacts.
+Supported conditions cover the standard shapes: N=1/P/T/X grids, W
+mass-fraction and linear-combination conditions (difference and ratio
+forms), and MU chemical-potential conditions (scalars and arrays).
 Anything the backends cannot handle exactly (custom `Model` subclasses,
-non-standard or under/overdetermined conditions, dilute compositions) is
+phase-local or under/overdetermined conditions, dilute compositions) is
 routed to the reference code path automatically, including its validation
 errors — `set_backend` is safe to enable globally.
 

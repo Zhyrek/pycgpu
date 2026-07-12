@@ -34,7 +34,13 @@ def _accelerated_conditions_supported(conditions, parameters, solver,
     if solver is not None or phase_records is not None:
         return False
     if output not in (None, 'GM'):
-        return False
+        # Plain Model property names (HM, SM, CPM, _MIX/_FORM variants, ...)
+        # are evaluated at the converged states with the generated property
+        # functions; phase-qualified ('HM(FCC_A1)'), dotted-derivative
+        # ('HM.T') and other ComputableProperty forms use the reference path.
+        _outs = [output] if isinstance(output, str) else list(output)
+        if not all(isinstance(o, str) and o.isidentifier() for o in _outs):
+            return False
     if extra_kwargs:
         return False
     try:

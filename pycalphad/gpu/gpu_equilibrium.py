@@ -3250,6 +3250,79 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
 
 # ===== PUBLIC GPU EQUILIBRIUM ENTRY POINT =====
 
+def _compute_equilibrium_output_properties(result, outputs, wks_obj):
+    """Add NP-weighted equilibrium properties to `result` in place.
+
+    Mirrors the reference output loop in core/equilibrium.py for plain
+    ModelComputedProperty outputs (a symbolic Model attribute, no phase
+    qualifier): per condition, sum(NP_i * prop(converged dof_i)) over stable
+    composition sets; NaN where the solve failed. Raises for output forms
+    the generated property functions cannot serve (phase-qualified,
+    dotted-derivative, non-symbolic), so the caller can fall back.
+    """
+    from pycalphad.backend import get_backend as _get_backend
+    from pycalphad.gpu.gpu_calculate import get_grid_evaluator
+
+    for out in outputs:
+        if not isinstance(out, str) or not out.isidentifier():
+            raise ValueError(f"accelerated equilibrium supports plain Model property "
+                             f"outputs only, got {out!r}")
+
+    backend_name, _ = _get_backend()
+    backend_name = 'cpp' if backend_name not in ('cuda', 'gpu') else 'cuda'
+    models = wks_obj.models
+    prf = wks_obj.phase_record_factory
+    active_phases = sorted(models.keys())
+    statevar_names = [str(sv) for sv in prf.state_variables]
+
+    phase_arr = np.asarray(result.Phase)
+    np_arr = np.asarray(result.NP, dtype=np.float64)
+    y_arr = np.asarray(result.Y, dtype=np.float64)
+    cond_shape = phase_arr.shape[:-1]
+    n_vertex = phase_arr.shape[-1]
+    n_conds = int(np.prod(cond_shape)) if cond_shape else 1
+
+    # per-condition state variable columns from the coordinate grid
+    coords = result.coords
+    dim_names = [d for d in coords if d not in ('vertex', 'component', 'internal_dof')]
+    dim_vals = [np.atleast_1d(np.asarray(coords[d], dtype=np.float64)) for d in dim_names]
+    mesh = np.meshgrid(*dim_vals, indexing='ij') if dim_vals else []
+    sv_cols = {}
+    for name in statevar_names:
+        if name not in dim_names:
+            raise ValueError(f"state variable {name} not among result dimensions")
+        sv_cols[name] = mesh[dim_names.index(name)].reshape(-1)
+
+    phase_flat = phase_arr.reshape(n_conds, n_vertex)
+    np_flat = np_arr.reshape(n_conds, n_vertex)
+    y_flat = y_arr.reshape(n_conds, n_vertex, y_arr.shape[-1])
+    with np.errstate(invalid='ignore'):
+        stable = np.nan_to_num(np_flat) > 0.0
+    converged = ~np.isnan(np.asarray(result.GM, dtype=np.float64).reshape(-1))
+
+    for out in outputs:
+        evaluate = get_grid_evaluator(backend_name, prf.comps, active_phases,
+                                      models, prf, output=out)
+        acc = np.where(converged, 0.0, np.nan)
+        for ph in active_phases:
+            pd = len(models[ph].site_fractions)
+            ci, vi = np.nonzero(stable & (phase_flat == ph))
+            if ci.size == 0:
+                continue
+            dof = np.empty((ci.size, len(statevar_names) + pd))
+            for k, name in enumerate(statevar_names):
+                dof[:, k] = sv_cols[name][ci]
+            dof[:, len(statevar_names):] = y_flat[ci, vi, :pd]
+            vals = np.zeros(ci.size)
+            evaluate(ph, dof, vals)
+            np.add.at(acc, ci, np_flat[ci, vi] * vals)
+        arr = acc.reshape(cond_shape) if cond_shape else acc.reshape(())
+        if hasattr(result, 'data_vars'):
+            result.data_vars[out] = (tuple(dim_names), arr)
+        else:
+            result[out] = (tuple(dim_names), arr)
+
+
 def equilibrium_gpu(dbf, comps, phases, conditions, output=None, model=None,
                     verbose=False, calc_opts=None, to_xarray=True,
                     parameters=None, solver=None, phase_records=None, 
@@ -3369,21 +3442,18 @@ def equilibrium_gpu(dbf, comps, phases, conditions, output=None, model=None,
     gpu_result = calculate_equilibrium_gpu(wks, to_xarray=False, 
                                          validate_code=validate_code, force_cpu=force_cpu)
     
-    # Handle additional output properties if requested (same as CPU version)
+    # Additional output properties, evaluated at the CONVERGED states with the
+    # generated property functions (reference semantics: the system property is
+    # the NP-weighted sum over stable composition sets; non-converged
+    # conditions are NaN). Unsupported output forms raise, which the dispatch
+    # in core/equilibrium.py turns into a silent reference fallback.
     if output is not None:
-        if verbose:
-            print("[GPU] Computing additional output properties...")
-        
-        # Convert output to list if needed
-        if (not isinstance(output, (list, tuple))) or isinstance(output, str):
-            output = [output] if isinstance(output, str) else []
-        
-        # Compute additional properties using the same logic as CPU version
-        # Note: This requires iterating through results and calling property calculations
-        # For now, we'll issue a warning that additional outputs aren't fully supported yet
-        if len(output) > 0:
-            print(f"[GPU] Warning: Additional output properties {output} not yet fully supported in GPU version.")
-            print("[GPU] Returning core equilibrium results (GM, MU, NP, Phase, X, Y).")
+        outs = [output] if isinstance(output, str) else sorted(set(output))
+        outs = [o for o in outs if o not in ('GM', 'MU')]
+        if outs:
+            if verbose:
+                print(f"[GPU] Computing output properties at equilibrium: {outs}")
+            _compute_equilibrium_output_properties(gpu_result, outs, wks)
     
     # SEGMENT 40: GPU DEBUG OUTPUT AND CLEANUP
     # Extract final GM value from LightDataset or xarray

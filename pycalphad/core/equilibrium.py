@@ -10,7 +10,6 @@ from pycalphad.core.workspace import Workspace
 from pycalphad.core.light_dataset import LightDataset
 import numpy as np
 from pycalphad.property_framework import as_property
-from pycalphad.core.debug_output import init_debug_output, close_debug_output, debug_log
 
 
 def _accelerated_conditions_supported(conditions, parameters, solver,
@@ -210,45 +209,13 @@ def equilibrium(dbf, comps, phases, conditions, output=None, model=None,
         from pycalphad.core.minimizer import set_robust_removal
         set_robust_removal(bool(robust_phase_removal))
 
-    # Initialize debug output for CPU mode only
-    init_debug_output(enabled=verbose, mode="CPU")
-    
-    # Enable Cython debug output if verbose
-    if verbose:
-        try:
-            from pycalphad.core.minimizer import set_debug_mode
-            set_debug_mode(True)
-        except ImportError:
-            pass  # Function might not be available in older builds
-    
-    # SEGMENT 1: ENTRY POINT AND PARAMETER VALIDATION
-    debug_log(1, "Entry point and parameter validation", {
-        "gpu_mode": gpu,
-        "components": comps,
-        "phases": phases,
-        "conditions": conditions,
-        "output_requested": output,
-        "verbose": verbose,
-        "force_cpu": False  # Add to match GPU output
-    })
-    
     if output is None:
         output = set()
     elif (not isinstance(output, Iterable)) or isinstance(output, str):
         output = [output]
-    # DEBUG: Log equilibrium function start
     if verbose:
         print(f"\n=== CPU EQUILIBRIUM FUNCTION START ===\nComponents: {comps}\nPhases: {phases}\nConditions: {conditions}\n")
     
-    # SEGMENT 2: WORKSPACE INITIALIZATION
-    debug_log(2, "Workspace initialization", {
-        "database": str(dbf),
-        "models": str(model),
-        "parameters": parameters,
-        "calc_opts": calc_opts,
-        "solver": str(solver),
-        "phase_records": str(phase_records)
-    })
     
     wks = Workspace(database=dbf, components=comps, phases=phases, conditions=conditions, models=model, parameters=parameters,
                     verbose=verbose, calc_opts=calc_opts, solver=solver, phase_record_factory=phase_records)
@@ -256,13 +223,9 @@ def equilibrium(dbf, comps, phases, conditions, output=None, model=None,
     # Compute equilibrium values of any additional user-specified properties
     # We already computed these properties so don't recompute them
     properties = wks.eq
-    
-    # DEBUG: Check properties value
     if verbose:
         print(f"DEBUG equilibrium: properties = {properties}")
         # Don't access wks.eq again as it may trigger another recompute
-    
-    # DEBUG: Add CPU-GPU comparison logging
     if verbose and properties is not None:
         print("\n=== CPU EQUILIBRIUM FINAL RESULTS ===\n")
         
@@ -324,8 +287,6 @@ def equilibrium(dbf, comps, phases, conditions, output=None, model=None,
     
     # END DEBUG
     
-    # SEGMENT 28: Post-equilibrium property calculation
-    debug_log(28, "Post-equilibrium property calculation")
     
     if properties is None:
         if verbose:
@@ -340,14 +301,11 @@ def equilibrium(dbf, comps, phases, conditions, output=None, model=None,
         print(f"  additional_properties: {output}")
     
     for out in output:
-        # SEGMENT 29-30: Composition set enumeration and property computation
-        debug_log(29, f"Property '{out}' calculation")
         cprop = as_property(out)
         out = str(cprop)
         result_array = np.zeros(properties.GM.shape) # Will not work for non-scalar properties
         
         for index, composition_sets in wks.enumerate_composition_sets():
-            debug_log(30, f"Computing property at index {index}")
             cur_conds = OrderedDict(zip(conds_keys,
                                         [np.asarray(properties.coords[b][a], dtype=np.float64)
                                         for a, b in zip(index, conds_keys)]))
@@ -356,13 +314,9 @@ def equilibrium(dbf, comps, phases, conditions, output=None, model=None,
             if verbose:
                 print(f"  result: {result_array[index]}")
         
-        # SEGMENT 31: Property merge
-        debug_log(31, f"Merging property '{out}' into dataset")
         result = LightDataset({out: (conds_keys, result_array)}, coords=properties.coords)
         properties.merge(result, inplace=True, compat='equals')
     
-    # SEGMENT 32: Final result formatting
-    debug_log(32, "Final result formatting")
     if to_xarray:
         properties = wks.eq.get_dataset()
         if verbose:
@@ -372,29 +326,4 @@ def equilibrium(dbf, comps, phases, conditions, output=None, model=None,
         print(f"  added creation timestamp: {properties.attrs['created']}")
     if len(kwargs) > 0:
         warnings.warn('The following equilibrium keyword arguments were passed, but unused:\n{}'.format(kwargs))
-    
-    # SEGMENT 40: DEBUG OUTPUT AND CLEANUP
-    debug_log(40, "Equilibrium calculation complete", {
-        "converged": True,  # If we got here, calculation completed
-        "properties_shape": properties.GM.shape if hasattr(properties, 'GM') else "unknown",
-        "final_GM": float(properties.GM.values.flat[0]) if hasattr(properties, 'GM') and hasattr(properties.GM, 'values') else "unknown"
-    })
-    
-    # DEBUG: Check CPU buffer contents before closing
-    if verbose:
-        from pycalphad.core.debug_output import _cpu_buffer
-        print(f"[CPU] DEBUG: CPU buffer has {len(_cpu_buffer)} entries before close")
-        if len(_cpu_buffer) > 0:
-            print(f"[CPU] DEBUG: First entry: {_cpu_buffer[0]}")
-    
-    close_debug_output(mode="CPU")
-    
-    # Disable Cython debug output
-    if verbose:
-        try:
-            from pycalphad.core.minimizer import set_debug_mode
-            set_debug_mode(False)
-        except ImportError:
-            pass
-    
     return properties

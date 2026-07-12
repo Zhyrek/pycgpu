@@ -67,7 +67,7 @@ from pycalphad.core.light_dataset import LightDataset
 from pycalphad.core.constants import MIN_PHASE_FRACTION, COMP_DIFFERENCE_TOL
 import pycalphad.variables as v
 from pycalphad.model import Model
-from pycalphad.core.debug_output import init_debug_output, close_debug_output, debug_log, debug_log_array_comparison
+from pycalphad.gpu.debug_output import init_debug_output, close_debug_output, debug_log, debug_log_array_comparison
 
 # Import code generation functions from separate module
 from .gpu_codegen import (

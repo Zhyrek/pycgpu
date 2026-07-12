@@ -6,7 +6,6 @@ from pycalphad.property_framework.computed_property import LinearCombination
 from .hyperplane import hyperplane
 from pycalphad.variables import ChemicalPotential, MassFraction, MoleFraction, IndependentPotential, SiteFraction, SystemMolesType
 import numpy as np
-from pycalphad.core.debug_output import debug_log, debug_log_array_comparison
 
 
 def lower_convex_hull(global_grid, state_variables, conds_keys, phase_record_factory, result_array):
@@ -41,14 +40,6 @@ def lower_convex_hull(global_grid, state_variables, conds_keys, phase_record_fac
     --------
     None yet.
     """
-    # SEGMENT 9: LOWER CONVEX HULL - SETUP
-    debug_log(9, "Lower convex hull setup", {
-        "state_variables": state_variables,
-        "conds_keys": conds_keys,
-        "global_grid_shape": global_grid.GM.shape if hasattr(global_grid, 'GM') else "unknown",
-        "result_array_shape": result_array.GM.shape if hasattr(result_array, 'GM') else "unknown"
-    })
-    
     state_variables = sorted(state_variables, key=str)
     local_conds_keys = [c for c in conds_keys if getattr(c, 'phase_name', None) is not None]
     str_conds_keys = [str(c) for c in conds_keys]
@@ -68,25 +59,9 @@ def lower_convex_hull(global_grid, state_variables, conds_keys, phase_record_fac
     num_comps = len(result_array.coords['component'])
 
     it = np.nditer(result_array_GM_values, flags=['multi_index'])
-    
-    debug_log(9, "Lower convex hull arrays cached", {
-        "num_components": num_comps,
-        "local_conds_keys": local_conds_keys,
-        "str_conds_keys": str_conds_keys
-    })
 
-    condition_idx = 0
     while not it.finished:
         primary_index = it.multi_index
-        
-        # SEGMENT 10: LOWER CONVEX HULL - CONDITION LOOP
-        # Only print for first 3 conditions to avoid clutter
-        if condition_idx < 3:
-            debug_log(10, "Lower convex hull condition loop", {
-                "condition_idx": condition_idx,
-                "primary_index": primary_index
-            }, condition_idx=condition_idx)
-        
         grid_index = []
         # Relies on being ordered
         for lc in local_conds_keys:
@@ -183,44 +158,16 @@ def lower_convex_hull(global_grid, state_variables, conds_keys, phase_record_fac
         idx_result_array_NP_values = result_array_NP_values[it.multi_index]
         idx_result_array_points_values = result_array_points_values[it.multi_index]
 
-        # SEGMENT 11: HYPERPLANE CALCULATION
-        # Only print for first 3 conditions to avoid clutter
-        if condition_idx < 3:
-            debug_log(11, "Hyperplane calculation", {
-                "grid_index": grid_index,
-                "fixed_chempot_indices": idx_fixed_chempot_indices,
-                "lincomb_coefs_shape": idx_fixed_lincomb_molefrac_coefs.shape,
-                "lincomb_rhs_shape": idx_fixed_lincomb_molefrac_rhs.shape
-            }, condition_idx=condition_idx)
-        
         result_array_GM_values[it.multi_index] = \
             hyperplane(idx_global_grid_X_values, idx_global_grid_GM_values,
                        idx_result_array_MU_values, idx_fixed_chempot_indices, idx_fixed_lincomb_molefrac_coefs, idx_fixed_lincomb_molefrac_rhs,
                        idx_result_array_NP_values, idx_result_array_points_values)
-        
-        # Only print for first 3 conditions to avoid clutter
-        if condition_idx < 3:
-            debug_log(11, "Hyperplane result", {
-                "GM": float(result_array_GM_values[it.multi_index]),
-                "MU": idx_result_array_MU_values.tolist(),
-                "NP": idx_result_array_NP_values.tolist(),
-                "points": idx_result_array_points_values.tolist()
-            }, condition_idx=condition_idx)
-        
         # Copy phase values out
         points = result_array_points_values[it.multi_index]
-        
-        # SEGMENT 12: LOWER CONVEX HULL - COPY RESULTS
-        # Only print for first 3 conditions to avoid clutter
-        if condition_idx < 3:
-            debug_log(12, "Copy results from grid", {
-                "points": points.tolist()
-            }, condition_idx=condition_idx)
         result_array_Phase_values[it.multi_index][:num_comps] = global_grid_Phase_values[grid_index].take(points, axis=0)[:num_comps]
         result_array_X_values[it.multi_index][:num_comps] = global_grid_X_values[grid_index].take(points, axis=0)[:num_comps]
         result_array_Y_values[it.multi_index][:num_comps,:global_grid_Y_values.shape[-1]] = \
             global_grid_Y_values[grid_index].take(points, axis=0)[:num_comps]
-        
         # Special case: Sometimes fictitious points slip into the result
         if '_FAKE_' in result_array_Phase_values[it.multi_index]:
             new_energy = 0.
@@ -237,16 +184,6 @@ def lower_convex_hull(global_grid, state_variables, conds_keys, phase_record_fac
                     molesum += idx_result_array_NP_values[idx]
             if molesum != 0:
                 result_array_GM_values[it.multi_index] = new_energy / molesum
-        
-        # Only print for first 3 conditions to avoid clutter
-        if condition_idx < 3:
-            debug_log(12, "Copy results complete", {
-                "phases": result_array_Phase_values[it.multi_index].tolist(),
-                "X": result_array_X_values[it.multi_index][:num_comps].tolist(),
-                "final_GM": float(result_array_GM_values[it.multi_index])
-            }, condition_idx=condition_idx)
-        
-        condition_idx += 1
         it.iternext()
     result_array.remove('points')
     return result_array

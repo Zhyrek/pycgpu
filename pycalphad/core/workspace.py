@@ -3,7 +3,6 @@ from collections import OrderedDict, Counter, defaultdict
 from copy import copy
 from pycalphad.property_framework.computed_property import JanssonDerivative
 import pycalphad.variables as v
-from pycalphad.core.debug_output import debug_log, debug_log_array_comparison
 from pycalphad.core.utils import unpack_species, unpack_condition, unpack_phases, filter_phases, instantiate_models
 from pycalphad import calculate
 from pycalphad.core.starting_point import starting_point
@@ -29,12 +28,6 @@ from typing import TypeVar
 
 def _adjust_conditions(conds) -> OrderedDict[StateVariable, List[float]]:
     "Adjust conditions values to be in the implementation units of the quantity, and within the numerical limit of the solver."
-    # SEGMENT 4: ADJUST CONDITIONS
-    debug_log(4, "Adjust conditions start", {
-        "input_conditions": list(conds.keys()),
-        "raw_values": {str(k): v for k, v in conds.items()}
-    })
-    
     new_conds = OrderedDict()
     minimum_composition = 1e-10
     for key, value in sorted(conds.items(), key=str):
@@ -53,11 +46,6 @@ def _adjust_conditions(conds) -> OrderedDict[StateVariable, List[float]]:
             new_conds[key] = unpack_condition(value)
         if getattr(key, 'display_units', '') != '':
             new_conds[key] = Q_(new_conds[key], units=key.display_units).to(key.implementation_units)
-    
-    debug_log(4, "Adjust conditions complete", {
-        "adjusted_conditions": {str(k): v for k, v in new_conds.items()}
-    })
-    
     return new_conds
 
 class ComponentList:
@@ -264,22 +252,9 @@ class PRFField(TypedField):
     def __init__(self, depends_on=None):
         def make_prf(obj):
             try:
-                # SEGMENT 5: PHASE RECORD FACTORY CREATION
-                debug_log(5, "Phase record factory creation", {
-                    "components": obj.components,
-                    "conditions": list(obj.conditions.keys()) if hasattr(obj.conditions, 'keys') else str(obj.conditions),
-                    "models": list(obj.models.keys()) if hasattr(obj.models, 'keys') else str(obj.models),
-                    "parameters": obj.parameters
-                })
-                
                 prf = PhaseRecordFactory(obj.database, obj.components, obj.conditions,
                                          obj.models.unwrap() if hasattr(obj.models, 'unwrap') else obj.models,
                                          parameters=obj.parameters)
-                
-                debug_log(5, "Phase record factory created", {
-                    "phases": list(prf.keys()) if hasattr(prf, 'keys') else "unknown"
-                })
-                
                 return prf
             except AttributeError:
                 return None
@@ -305,13 +280,8 @@ class EquilibriumCalculationField(TypedField):
         if (not hasattr(obj, self.private_name)) or (getattr(obj, self.private_name) is None):
             try:
                 default_value = obj.recompute()
-            except AttributeError as e:
-                # Only catch specific AttributeError for missing recompute method
-                if 'recompute' in str(e):
-                    default_value = None
-                else:
-                    # Re-raise other AttributeErrors
-                    raise
+            except AttributeError:
+                default_value = None
             setattr(obj, self.private_name, default_value)
         return getattr(obj, self.private_name)
 
@@ -353,12 +323,6 @@ class Workspace:
     eq: Optional[LightDataset] = EquilibriumCalculationField(depends_on=['phase_record_factory', 'conditions', 'calc_opts', 'solver'])
 
     def __init__(self, *args, **kwargs):
-        # SEGMENT 3: WORKSPACE CONSTRUCTOR
-        debug_log(3, "Workspace constructor start", {
-            "args": args,
-            "kwargs": list(kwargs.keys())
-        })
-        
         self._suspend_dependency_updates = True
         self._eq = None # manually initialized since we don't initialize the public name 'eq' (see below)
         # Assume positional arguments are specified in class typed-attribute definition order
@@ -382,29 +346,8 @@ class Workspace:
                 raise ValueError(f'{kwarg_name} is not a Workspace attribute')
             setattr(self, kwarg_name, kwarg_val)
         self._suspend_dependency_updates = False
-        
-        debug_log(3, "Workspace constructor complete", {
-            "components": self.components,
-            "phases": self.phases,
-            "conditions": dict(self.conditions) if hasattr(self.conditions, 'items') else str(self.conditions)
-        })
 
     def recompute(self):
-        # DEBUG: Track recompute calls
-        import traceback
-        if self.verbose:
-            print("\n[WORKSPACE DEBUG] recompute() called")
-            print("Stack trace:")
-            for line in traceback.format_stack():
-                print(f"  {line.strip()}")
-        
-        # SEGMENT 6: WORKSPACE RECOMPUTE - SETUP
-        debug_log(6, "Workspace recompute setup", {
-            "conditions": dict(self.conditions),
-            "phase_record_factory": str(self.phase_record_factory),
-            "parameters": self.parameters
-        })
-        
         # Assumes implementation units from this point
         unitless_conds = OrderedDict((key, as_quantity(key, value).to(key.implementation_units).magnitude) for key, value in self.conditions.items())
         str_conds = OrderedDict((str(key), value) for key, value in unitless_conds.items())
@@ -422,136 +365,13 @@ class Workspace:
         if 'pdens' not in grid_opts:
             grid_opts['pdens'] = 60
 
-        debug_log(6, "Workspace recompute setup complete", {
-            "unitless_conds": unitless_conds,
-            "str_conds": str_conds,
-            "local_conds": local_conds,
-            "state_variables": state_variables,
-            "grid_opts": grid_opts
-        })
-
-        # DEBUG: Log calculation start (CPU workspace)
-        if self.verbose:
-            print(f"\n=== CPU WORKSPACE DEBUG START ===\nConditions: {unitless_conds}\nPhases: {self.phases}\nComponents: {self.components}")
-        
-        # SEGMENT 7: CALCULATE GRID
-        debug_log(7, "Calculate grid start", {
-            "database": str(self.database),
-            "components": self.components,
-            "phases": self.phases,
-            "local_conds": local_conds,
-            "grid_opts": grid_opts
-        })
-        
         grid = calculate(self.database, self.components, self.phases, model=self.models.unwrap(), fake_points=True,
                         phase_records=self.phase_record_factory, output='GM', parameters=self.parameters.unwrap(),
                         to_xarray=False, conditions=local_conds, **grid_opts)
-        
-        debug_log(7, "Calculate grid complete", {
-            "grid_shape": grid.GM.shape if hasattr(grid, 'GM') else "unknown",
-            "grid_coords": list(grid.coords.keys()) if hasattr(grid, 'coords') else "unknown",
-            "GM_range": [float(np.nanmin(grid.GM.values if hasattr(grid.GM, 'values') else grid.GM)), 
-                         float(np.nanmax(grid.GM.values if hasattr(grid.GM, 'values') else grid.GM))] if hasattr(grid, 'GM') else "unknown"
-        })
-        
-        # DEBUG: Log grid calculation results
-        if self.verbose:
-            print(f"Grid calculation complete - grid shape: {getattr(grid, 'GM', 'unknown').shape if hasattr(grid, 'GM') else 'unknown'}")
-            if hasattr(grid, 'GM') and grid.GM is not None:
-                gm_vals = grid.GM.values if hasattr(grid.GM, 'values') else grid.GM
-                print(f"Grid GM range: [{np.nanmin(gm_vals):.6f}, {np.nanmax(gm_vals):.6f}]")
-            
-            # DEBUG: Detailed grid analysis to match GPU debugging
-            print(f"[CPU] GRID DETAILED ANALYSIS:")
-            if hasattr(grid, 'Phase') and grid.Phase is not None:
-                phase_data = grid.Phase.values if hasattr(grid.Phase, 'values') else grid.Phase
-                unique_phases, counts = np.unique(phase_data.flatten(), return_counts=True)
-                print(f"[CPU]   Unique phases in grid: {unique_phases}")
-                print(f"[CPU]   Phase counts: {counts}")
-                
-                # Check BCC_A2 entries
-                bcc_mask = phase_data.flatten() == 'BCC_A2'
-                if np.any(bcc_mask):
-                    gm_data = grid.GM.values if hasattr(grid.GM, 'values') else grid.GM
-                    bcc_gm_values = gm_data.flatten()[bcc_mask]
-                    print(f"[CPU]   BCC_A2 GM values: {bcc_gm_values[:10]}...")  # First 10
-                    print(f"[CPU]   BCC_A2 GM range: [{np.min(bcc_gm_values):.6f}, {np.max(bcc_gm_values):.6f}]")
-        
-        # DEBUG: Add detailed parameter debugging before starting_point call
-        if self.verbose:
-            print(f"[CPU] STARTING_POINT CALL DEBUG:")
-            print(f"[CPU]   unitless_conds type: {type(unitless_conds)}")
-            print(f"[CPU]   unitless_conds: {unitless_conds}")
-            print(f"[CPU]   state_variables type: {type(state_variables)}")
-            print(f"[CPU]   state_variables: {state_variables}")
-            print(f"[CPU]   phase_record_factory type: {type(self.phase_record_factory)}")
-            print(f"[CPU]   grid type: {type(grid)}")
-            print(f"[CPU]   grid coords: {list(grid.coords.keys()) if hasattr(grid, 'coords') else 'no coords'}")
-        
-        properties = starting_point(unitless_conds, state_variables, self.phase_record_factory, grid, verbose=self.verbose)
-        
-        # DEBUG: Log starting point results
-        if self.verbose:
-            print(f"Starting point calculation complete")
-            if hasattr(properties, 'GM') and properties.GM is not None:
-                start_gm = properties.GM.values if hasattr(properties.GM, 'values') else properties.GM
-                print(f"Starting point GM: {start_gm.flatten()[0]:.6f}")
-        
-        # DEBUG: Log exact parameters passed to CPU solver
-        if self.verbose:
-            print(f"[CPU] SOLVER INPUT VALIDATION:")
-            print(f"[CPU]   properties type: {type(properties)}")
-            print(f"[CPU]   properties.GM shape: {properties.GM.shape if hasattr(properties, 'GM') else 'No GM'}")
-            print(f"[CPU]   properties.NP shape: {properties.NP.shape if hasattr(properties, 'NP') else 'No NP'}")
-            print(f"[CPU]   properties.MU shape: {properties.MU.shape if hasattr(properties, 'MU') else 'No MU'}")
-            print(f"[CPU]   properties.Phase shape: {properties.Phase.shape if hasattr(properties, 'Phase') else 'No Phase'}")
-            print(f"[CPU]   properties.X shape: {properties.X.shape if hasattr(properties, 'X') else 'No X'}")
-            print(f"[CPU]   phase_record_factory: {type(self.phase_record_factory)}")
-            print(f"[CPU]   phase_record_factory keys: {list(self.phase_record_factory.keys())}")
-            print(f"[CPU]   grid type: {type(grid)}")
-            print(f"[CPU]   conds_keys: {list(unitless_conds.keys())}")
-            print(f"[CPU]   state_variables: {state_variables}")
-            print(f"[CPU]   solver: {type(self.solver)}")
-            
-            # CRITICAL: Compare actual data values to GPU
-            print(f"[CPU] DETAILED DATA VALIDATION:")
-            if hasattr(properties, 'GM'):
-                gm_values = properties.GM.values if hasattr(properties.GM, 'values') else properties.GM
-                print(f"[CPU]   GM values: {gm_values.flatten()}")
-            if hasattr(properties, 'NP'):
-                np_values = properties.NP.values if hasattr(properties.NP, 'values') else properties.NP
-                print(f"[CPU]   NP values: {np_values.flatten()}")
-            if hasattr(properties, 'MU'):
-                mu_values = properties.MU.values if hasattr(properties.MU, 'values') else properties.MU
-                print(f"[CPU]   MU values: {mu_values.flatten()}")
-            if hasattr(properties, 'Phase'):
-                phase_values = properties.Phase.values if hasattr(properties.Phase, 'values') else properties.Phase
-                print(f"[CPU]   Phase values: {phase_values.flatten()}")
-            if hasattr(properties, 'X'):
-                x_values = properties.X.values if hasattr(properties.X, 'values') else properties.X
-                print(f"[CPU]   X values: {x_values.flatten()[:10]}...")  # First 10 to avoid clutter
-        
-        try:
-            result = _solve_eq_at_conditions(properties, self.phase_record_factory, grid,
-                                           list(unitless_conds.keys()), state_variables,
-                                           self.verbose, solver=self.solver)
-        except Exception as e:
-            if self.verbose:
-                print(f"ERROR in _solve_eq_at_conditions: {e}")
-                import traceback
-                traceback.print_exc()
-            raise
-        
-        
-        # DEBUG: Log final workspace results
-        if self.verbose:
-            print(f"Result from _solve_eq_at_conditions: {result}")
-            print(f"Result type: {type(result)}")
-            if result is not None and hasattr(result, 'GM'):
-                print(f"Result has GM: {result.GM}")
-            print(f"=== CPU WORKSPACE DEBUG END ===\n")
-        
-        return result
+        properties = starting_point(unitless_conds, state_variables, self.phase_record_factory, grid)
+        return _solve_eq_at_conditions(properties, self.phase_record_factory, grid,
+                                       list(unitless_conds.keys()), state_variables,
+                                       self.verbose, solver=self.solver)
 
     def _detect_phase_multiplicity(self):
         multiplicity = {k: 0 for k in sorted(self.phase_record_factory.keys())}

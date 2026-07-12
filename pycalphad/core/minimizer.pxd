@@ -7,7 +7,7 @@ cdef class SystemState:
     cdef int[::1] metastable_phase_iterations
     cdef int[::1] times_compset_removed
     cdef double mass_residual, largest_chemical_potential_difference
-    cdef public double[::1] phase_amt, previous_chemical_potentials, delta_statevars
+    cdef double[::1] phase_amt, previous_chemical_potentials, delta_statevars
     cdef public double[::1] chemical_potentials
     cdef double[:, ::1] phase_compositions, delta_ms
     cdef double[1] largest_statevar_change, largest_phase_amt_change, largest_y_change
@@ -22,9 +22,9 @@ cdef class SystemState:
     cdef void increment_phase_metastability_counters(self)
 
 cdef class SystemSpecification:
-    cdef public int num_statevars, num_components, max_num_free_stable_phases
-    cdef public double prescribed_system_amount
-    cdef public double ALLOWED_MASS_RESIDUAL
+    cdef int num_statevars, num_components, max_num_free_stable_phases
+    cdef double prescribed_system_amount
+    cdef double ALLOWED_MASS_RESIDUAL
     cdef double[::1] initial_chemical_potentials, prescribed_mole_fraction_rhs
     cdef double[:,::1] prescribed_mole_fraction_coefficients
     cdef int[::1] free_chemical_potential_indices, free_statevar_indices

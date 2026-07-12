@@ -12,6 +12,9 @@ import numpy as np
 from pycalphad.property_framework import as_property
 
 
+_gate_reject_reason = None
+
+
 def _accelerated_conditions_supported(conditions, parameters, solver,
                                       phase_records, output, extra_kwargs):
     """Whether the accelerated backends support this equilibrium problem shape.
@@ -22,17 +25,31 @@ def _accelerated_conditions_supported(conditions, parameters, solver,
     """
     import numpy as np
     from pycalphad import variables as v
+    global _gate_reject_reason
+    _gate_reject_reason = None
+
+    def _gate_reject(reason):
+        global _gate_reject_reason
+        _gate_reject_reason = reason
+        return False
+
     if parameters:
         # Scalar parameter overrides are supported (runtime fit-parameter
         # slots in the generated kernels); vectorized parameter sweeps are not.
         try:
             for pv in dict(parameters).values():
                 if np.asarray(pv, dtype=np.float64).size != 1:
-                    return False
+                    return _gate_reject('vectorized parameter sweep')
         except Exception:
-            return False
-    if solver is not None or phase_records is not None:
-        return False
+            return _gate_reject('parameter extraction failed')
+    if solver is not None:
+        return _gate_reject('custom solver')
+    if phase_records is not None:
+        # plain prebuilt factories work (the pipeline consumes the Workspace's
+        # factory either way); anything else uses the reference path
+        from pycalphad.codegen.phase_record_factory import PhaseRecordFactory
+        if type(phase_records) is not PhaseRecordFactory:
+            return _gate_reject('non-standard phase_records')
     if output not in (None, 'GM'):
         # Plain Model property names (HM, SM, CPM, _MIX/_FORM variants, ...)
         # are evaluated at the converged states with the generated property
@@ -40,9 +57,9 @@ def _accelerated_conditions_supported(conditions, parameters, solver,
         # ('HM.T') and other ComputableProperty forms use the reference path.
         _outs = [output] if isinstance(output, str) else list(output)
         if not all(isinstance(o, str) and o.isidentifier() for o in _outs):
-            return False
+            return _gate_reject('non-symbolic output property')
     if extra_kwargs:
-        return False
+        return _gate_reject('extra equilibrium kwargs')
     try:
         n_x_conds = sum(1 for c in conditions
                         if isinstance(c, v.MoleFraction) and getattr(c, 'phase_name', None) is None)
@@ -56,13 +73,13 @@ def _accelerated_conditions_supported(conditions, parameters, solver,
         # problems must reach the reference path's validation errors).
         if (n_x_conds + n_w_conds + n_mu_conds + n_lc_conds
                 + n_statevar_conds) != len(conditions):
-            return False
+            return _gate_reject('unsupported condition type present')
         for cond, value in conditions.items():
             if getattr(cond, 'phase_name', None) is not None:
-                return False
+                return _gate_reject('phase-local condition')
             if cond == v.N:
                 if np.any(np.atleast_1d(np.asarray(value, dtype=object)).astype(float) != 1.0):
-                    return False
+                    return _gate_reject('N != 1')
             elif cond == v.P or cond == v.T:
                 continue
             elif isinstance(cond, v.ChemicalPotential):
@@ -78,9 +95,9 @@ def _accelerated_conditions_supported(conditions, parameters, solver,
                 continue
             else:
                 # SiteFraction, phase-local, ...
-                return False
+                return _gate_reject('unsupported condition class')
     except Exception:
-        return False
+        return _gate_reject('gate exception')
     return True
 
 
@@ -173,7 +190,8 @@ def equilibrium(dbf, comps, phases, conditions, output=None, model=None,
                                              phase_records, output, kwargs)
         if os.environ.get('PYCGPU_COUNT_DISPATCH'):
             with open(os.environ['PYCGPU_COUNT_DISPATCH'], 'a') as _f:
-                _f.write('gate_pass\n' if _gate_ok else 'gate_fallback\n')
+                _f.write('gate_pass\n' if _gate_ok else
+                         f'gate_fallback: {_gate_reject_reason}\n')
         if _gate_ok:
             backend = _global_backend
             gpu = True

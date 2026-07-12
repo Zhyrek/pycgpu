@@ -2018,6 +2018,14 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         validate_code: Whether to validate generated C code (default True)
         force_cpu: Force CPU calculation even if GPU is available (for testing)
     """
+    # Reference parity: Workspace.recompute refreshes the factory's fit
+    # parameters from the Workspace parameters before solving; callers that
+    # reach this pipeline without going through recompute (the equilibrium()
+    # dispatch with a prebuilt factory) need the same refresh.
+    try:
+        wks_obj.phase_record_factory.update_parameters(wks_obj.parameters.unwrap())
+    except Exception:
+        pass
     verbose = wks_obj.verbose
 
     # The code generator supports plain Model energy expressions only.

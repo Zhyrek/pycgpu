@@ -354,18 +354,28 @@ class Workspace:
         # the reference implementation below unchanged.
         from pycalphad.backend import get_backend as _get_backend
         _backend_name, _backend_opts = _get_backend()
-        if _backend_name in ('cpp', 'cuda') and not self.calc_opts:
+        if _backend_name in ('cpp', 'cuda'):
             import os as _os
             from pycalphad.core.solver import Solver as _DefaultSolver
-            from pycalphad.core.equilibrium import _accelerated_conditions_supported
+            from pycalphad.core import equilibrium as _eqmod
             _conds = {key: as_quantity(key, value).to(key.implementation_units).magnitude
                       for key, value in self.conditions.items()}
-            _gate_ok = (type(self.solver) is _DefaultSolver
-                        and _accelerated_conditions_supported(
-                            _conds, self.parameters.unwrap(), None, None, None, {}))
+            if self.calc_opts and set(self.calc_opts) - {'pdens'}:
+                # the accelerated grid replicates recompute's grid_opts
+                # handling for pdens; other calculate options (samplers,
+                # fixed grids, ...) use the reference path
+                _gate_ok, _reason = False, 'unsupported calc_opts'
+            elif type(self.solver) is not _DefaultSolver:
+                _gate_ok, _reason = False, 'non-default solver'
+            else:
+                _gate_ok = _eqmod._accelerated_conditions_supported(
+                    _conds, self.parameters.unwrap(), None, None, None, {})
+                _reason = getattr(_eqmod, '_gate_reject_reason', None)
             if _os.environ.get('PYCGPU_COUNT_DISPATCH'):
+                _test = _os.environ.get('PYTEST_CURRENT_TEST', '')
                 with open(_os.environ['PYCGPU_COUNT_DISPATCH'], 'a') as _f:
-                    _f.write('wks_gate_pass\n' if _gate_ok else 'wks_gate_fallback\n')
+                    _f.write('wks_gate_pass\n' if _gate_ok else
+                             f'wks_gate_fallback: {_reason} <{_test}>\n')
             if _gate_ok:
                 try:
                     # same parameter refresh the reference path performs below

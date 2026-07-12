@@ -1832,12 +1832,53 @@ def apply_cse_variable_mapping(c_expr: str, model_obj: Model, wks_obj: Workspace
     
     return result
 
+def _convert_and_calls(source: str) -> str:
+    """Replace And(a, b, ...) with (a && b && ...), paren-depth aware.
+
+    A naive regex split at the first comma breaks when a condition argument
+    itself contains commas — e.g. the Brosh-EOS magnetic conditions
+    And(0 < c*pow(e, f(P))*y, c*pow(e, f(P))*y < T), where the pow(e, ...)
+    comma was captured and the '&&' landed inside pow's argument list.
+    """
+    out = source
+    pos = 0
+    while True:
+        i = out.find('And(', pos)
+        if i < 0:
+            break
+        if i > 0 and (out[i-1].isalnum() or out[i-1] == '_'):
+            pos = i + 4
+            continue
+        depth = 0
+        j = i + 3  # at '('
+        args, start = [], i + 4
+        while j < len(out):
+            ch = out[j]
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+                if depth == 0:
+                    args.append(out[start:j].strip())
+                    break
+            elif ch == ',' and depth == 1:
+                args.append(out[start:j].strip())
+                start = j + 1
+            j += 1
+        else:
+            break  # unbalanced; leave as-is
+        repl = '(' + ' && '.join(f'({a})' for a in args if a) + ')'
+        out = out[:i] + repl + out[j+1:]
+        pos = i  # rescan (handles nested And)
+    return out
+
+
 def fix_cse_symbols(source: str) -> str:
     """Fix SymEngine CSE symbols that need C replacements."""
     import re
     
-    # Replace And() function with logical AND (&&)
-    source = re.sub(r'\bAnd\(([^,]+),\s*([^)]+)\)', r'(\1 && \2)', source)
+    # Replace And() with logical AND (&&), respecting nested parentheses
+    source = _convert_and_calls(source)
     
     # Replace True with 1 and False with 0
     source = re.sub(r'\bTrue\b', '1', source)
@@ -2255,6 +2296,45 @@ def _zero_undefined_symbols(expr_or_list, wks_obj):
     return _clean(expr_or_list)
 
 
+def _realify_eps_complex(expr_or_list):
+    """Drop machine-eps imaginary residue from numeric constants.
+
+    symengine's fractional-power arithmetic can leave complex constants with
+    |imag| ~ 1e-16 in model expressions (e.g. the Brosh EOS terms in
+    cfe_broshe LIQUID: -10/9 - 1.4e-16*I). The reference LLVM path tolerates
+    these; the C printer cannot. Take the real part when the imaginary part
+    is negligible relative to the real part; raise (-> silent fallback) if a
+    genuinely complex constant ever appears.
+    """
+    import symengine as se
+
+    def _clean(expr):
+        try:
+            atoms = expr.atoms(se.Number)
+        except AttributeError:
+            return expr
+        subs = {}
+        for a in atoms:
+            try:
+                if getattr(a, 'is_real', True):
+                    continue
+                c = complex(a)
+                re_p, im_p = c.real, c.imag
+            except (TypeError, RuntimeError):
+                continue
+            scale = max(abs(re_p), 1.0)
+            if abs(im_p) <= 1e-12 * scale:
+                subs[a] = se.Float(re_p)
+            else:
+                raise ValueError(
+                    f"model expression contains a genuinely complex constant: {a}")
+        return expr.xreplace(subs) if subs else expr
+
+    if isinstance(expr_or_list, (list, tuple)):
+        return type(expr_or_list)(_clean(e) for e in expr_or_list)
+    return _clean(expr_or_list)
+
+
 def notebook_source_from_expr(
     expr_or_list_in, 
     c_function_name_base_suffix: str,
@@ -2271,6 +2351,7 @@ def notebook_source_from_expr(
     Falls back to original regex-based method if CSE fails.
     """
     expr_or_list_in = _zero_undefined_symbols(expr_or_list_in, wks_obj)
+    expr_or_list_in = _realify_eps_complex(expr_or_list_in)
     # Try the new CSE-based method first
     try:
         return notebook_source_from_expr_cse(

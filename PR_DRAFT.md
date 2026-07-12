@@ -72,9 +72,11 @@ The stock test suite itself runs ~3.7x faster under the c++ backend.
   the solver kernels (`eqsolver.h`, `minimizer.h`, `comp_set.h`,
   `phase_rec.h`, linear algebra in `svd.c`/`lu_solver.h`, device hull in
   `hyperplane.h`), the C++ single-threaded driver (`cpu_backend`), a
-  point-list batch solver (`point_solver`), and batched-likelihood support
-  consumed by ESPEI (`espei_batch`, `espei_residual`; see companion ESPEI
-  PR).
+  point-list batch solver (`point_solver`), and generic walker-ensemble
+  machinery (`ensemble.EnsemblePointBatcher`) for evaluating many
+  parameter vectors against fixed condition points — the hook the
+  companion ESPEI PR builds its batched likelihoods on. No
+  ESPEI-specific code lives in pycalphad.
 - `pycalphad/backend.py` — `set_backend` / `backend()` / per-call kwarg,
   eager validation, capability gate.
 - Minimal reference-code touches: an `accelerated=` hook in

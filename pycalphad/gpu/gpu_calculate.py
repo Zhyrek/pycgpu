@@ -280,12 +280,21 @@ def get_grid_evaluator(backend_name, components, phases, models,
     # param_values in place) take effect without rebuilding anything.
     n_params = len(getattr(phase_record_factory, 'param_symbols', []) or [])
 
-    def evaluate(phase_name, dof, out):
+    def evaluate(phase_name, dof, out, param_rows=None):
+        """Evaluate over dof rows; `param_rows` (L, n_params) evaluates every
+        (point, parameter-sample) pair — `out` must then be (n_points * L,),
+        sample-minor (matching prop_parameters_2d's (n_points, L) layout)."""
         model_idx = name_to_idx[phase_name]
         n_points = dof.shape[0]
-        if n_params:
+        if param_rows is not None and n_params:
+            pr = np.asarray(param_rows, dtype=np.float64).reshape(-1, n_params)
+            L = pr.shape[0]
+            dof = np.concatenate([np.repeat(dof, L, axis=0),
+                                  np.tile(pr, (n_points, 1))], axis=1)
+        elif n_params:
             pv = np.asarray(phase_record_factory.param_values, dtype=np.float64).reshape(-1)[:n_params]
             dof = np.concatenate([dof, np.broadcast_to(pv, (n_points, n_params))], axis=1)
+        n_points = dof.shape[0]
         dof_stride = dof.shape[1]
         dof_c = np.ascontiguousarray(dof, dtype=np.float64)
         if kind == 'cpp':

@@ -285,7 +285,13 @@ def _compute_phase_values(components, statevar_dict, str_phase_local_conditions,
         else:
             # Vectorized parameter arrays
             phase_output = np.zeros((dof.shape[0], parameter_array_length), order='C')
-            phase_record.prop_parameters_2d(phase_output, dof, parameter_array, output.encode('utf-8'))
+            if accel_evaluator is not None and dof.shape[0] >= getattr(accel_evaluator, 'min_points', 0):
+                # Accelerated backend: every (point, parameter-sample) pair in
+                # one launch; layout matches prop_parameters_2d (point-major).
+                accel_evaluator(phase_record.phase_name, dof,
+                                phase_output.reshape(-1), param_rows=parameter_array)
+            else:
+                phase_record.prop_parameters_2d(phase_output, dof, parameter_array, output.encode('utf-8'))
 
         for el_idx in range(len(pure_elements)):
             phase_record.mass_obj_2d(phase_compositions[:, el_idx], dof, el_idx)
@@ -527,8 +533,12 @@ def calculate(dbf, comps, phases, mode=None, output='GM', fake_points=False, bro
     from pycalphad.backend import get_backend as _get_backend
     _accel_backend, _ = _get_backend()
     _canonical_statevars = [str(sv) for sv in getattr(phase_records, 'state_variables', [])] == ['N', 'P', 'T']
+    _param_syms, _param_arr = extract_parameters(parameters)
+    _factory_syms = list(getattr(phase_records, 'param_symbols', []) or [])
+    _params_ok = (len(_param_arr) == 0
+                  or (list(map(str, _param_syms)) == list(map(str, _factory_syms))))
     if (_accel_backend in ('cpp', 'cuda')
-            and len(extract_parameters(parameters)[1]) == 0
+            and _params_ok
             and _canonical_statevars):
         # The generated evaluators assume the canonical [N, P, T] state-variable
         # layout; problems with omitted/extra state variables use the reference

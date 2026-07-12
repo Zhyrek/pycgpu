@@ -110,6 +110,14 @@ def get_grid_evaluator(backend_name, components, phases, models,
             raise RuntimeError(
                 f"accelerated calculate() supports plain Model instances only; "
                 f"phase {_ph} uses {type(models[_ph]).__name__}")
+        # never_disorder partitioned phases (pycalphad #651) are not
+        # implemented by the code generator — reference path handles them.
+        _hints = getattr(getattr(models[_ph], '_dbe', None), 'phases', {})
+        _ph_obj = _hints.get(_ph) if hasattr(_hints, 'get') else None
+        if _ph_obj is not None and getattr(_ph_obj, 'model_hints', {}).get('never_disorder'):
+            raise RuntimeError(
+                f"accelerated calculate() does not support never_disorder "
+                f"phases yet; phase {_ph}")
     shim = SimpleNamespace(
         components=list(components),
         phases=list(phases),

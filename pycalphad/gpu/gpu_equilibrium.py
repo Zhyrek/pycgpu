@@ -1958,6 +1958,14 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             raise RuntimeError(
                 f"accelerated backends support plain Model instances only; "
                 f"phase {_ph} uses {type(_m).__name__}")
+        # Partitioned order/disorder phases flagged never_disorder (pycalphad
+        # #651) change the ordered-phase energy treatment in ways the code
+        # generator does not implement yet — route to the reference solver.
+        _hints = getattr(wks_obj.database.phases.get(_ph), 'model_hints', None)
+        if _hints and _hints.get('never_disorder'):
+            raise RuntimeError(
+                f"accelerated backends do not support never_disorder phases "
+                f"yet; phase {_ph}")
     
     # Check if GPU should be used - NO FALLBACK, FAIL HARD
     # The C++/OpenMP backend (PYCGPU_CPU=1) does not need CUDA or CuPy.

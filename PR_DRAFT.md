@@ -20,7 +20,10 @@ the symbolic `Model` energies at runtime, compile once per (system, model
 fingerprint) with the user's toolchain, and disk-cache the artifacts.
 Supported conditions cover the standard shapes: N=1/P/T/X grids, W
 mass-fraction and linear-combination conditions (difference and ratio
-forms), and MU chemical-potential conditions (scalars and arrays).
+forms; eps-class GM with matching phase sets, and the backend converges
+on the W-grid conditions the reference fails), and MU chemical-potential
+conditions (scalars and arrays), plus dilute/boundary compositions with
+the reference's clamping semantics.
 Anything the backends cannot handle exactly (custom `Model` subclasses,
 phase-local or under/overdetermined conditions, dilute compositions) is
 routed to the reference code path automatically, including its validation
@@ -40,12 +43,17 @@ errors — `set_backend` is safe to enable globally.
   and indices) on ~1,900 mixed binary/ternary/phase-restricted cases, and
   end-to-end GM is bit-identical to the CPU-hull path at 10k, 100k, and
   1,002,000-condition batches.
-- Energy agreement vs the current reference solver: 37-phase AlCuFe
-  censuses at 245 and 3,328 conditions give **bit-identical GM (max
-  |dGM| = 0.0) at every mutually converged condition with identical
-  NaN/convergence patterns, on both backends** — the solver kernels now
-  match the reference's iteration dynamics exactly (step-size ramp,
-  10-iteration convergence gate, NaN vertex padding), verified by
+- Energy agreement vs the current reference solver: the 37-phase AlCuFe
+  census at 245 conditions gives **240/240 mutually converged conditions
+  with max |dGM| = 8.8e-6 J/mol and matching stable phase sets; the
+  backend additionally converges on all 5 conditions the reference fails**
+  (composition-sum corner cases), with zero backend-only failures. The
+  census is guarded against silent fallbacks (a dispatch audit asserts
+  the backend actually ran — an earlier undefined-database-symbol
+  compile failure had made interim census results vacuous, caught and
+  fixed via reference-matching undefined-symbol semantics in codegen).
+  Solver kernels match the reference's iteration dynamics (step-size
+  ramp, convergence gates, NaN vertex padding), verified by
   per-iteration trajectory traces agreeing to ~1e-12 on the sensitive
   cases (5-component single-phase miscibility gap gh-589, ill-conditioned
   magnetic Hessian, 9-component rose, pure-vacancy suspension gh-503,
@@ -65,6 +73,14 @@ errors — `set_backend` is safe to enable globally.
   sampling are documented separately and predate this PR).
 
 ## Performance (laptop RTX 4070 / one CPU core, vs upstream 0.11.1)
+
+Caveat: reference timings depend on the BLAS stack. These were measured
+in a conda/MKL environment; a pip/OpenBLAS install runs the *reference*
+solver ~2.2x faster on small-matrix-heavy systems (measured on AlCuFe
+245: 2.95 s vs 6.5 s), which shrinks the backend speedup accordingly
+there (backend: 1.1 s). Large batches are BLAS-insensitive (Al-Ni
+12,100 conditions: reference 14.2 s in both environments; c++ 2.9 s,
+gpu 1.6 s).
 
 | workload | 0.11.1 | c++ | gpu |
 |---|---|---|---|

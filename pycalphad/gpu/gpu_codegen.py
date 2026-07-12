@@ -2230,6 +2230,31 @@ def notebook_source_from_expr_original(
 
     return c_code
 
+def _zero_undefined_symbols(expr_or_list, wks_obj):
+    """Reference semantics for symbols the database leaves undefined.
+
+    PhaseRecordFactory.get_phase_property / build_functions force undefined
+    non-state-variable, non-fit-parameter symbols to zero before compiling
+    (e.g. COST507's GAS phase references RTLNP, which the database never
+    defines). The generated code must do the same or those names leak into
+    the C source as undeclared identifiers.
+    """
+    import pycalphad.variables as _v
+    params = set(_fit_parameter_symbols(wks_obj))
+    def _clean(expr):
+        try:
+            undefs = {x for x in expr.free_symbols
+                      if not isinstance(x, _v.StateVariable)} - params
+        except AttributeError:
+            return expr  # plain numbers
+        if undefs:
+            expr = expr.xreplace({x: 0. for x in undefs})
+        return expr
+    if isinstance(expr_or_list, (list, tuple)):
+        return type(expr_or_list)(_clean(e) for e in expr_or_list)
+    return _clean(expr_or_list)
+
+
 def notebook_source_from_expr(
     expr_or_list_in, 
     c_function_name_base_suffix: str,
@@ -2245,6 +2270,7 @@ def notebook_source_from_expr(
     Wrapper function that uses the new CSE-based code generation by default.
     Falls back to original regex-based method if CSE fails.
     """
+    expr_or_list_in = _zero_undefined_symbols(expr_or_list_in, wks_obj)
     # Try the new CSE-based method first
     try:
         return notebook_source_from_expr_cse(

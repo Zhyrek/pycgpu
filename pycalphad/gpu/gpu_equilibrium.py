@@ -825,13 +825,23 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
             grid_data_device_struct_np = None
             grid_block_shape = None
 
-    # Map each condition to its grid block (block per statevar combination, e.g. per T).
-    # Condition multi-index leading dims == grid block dims (both are the statevar coords).
+    # Map each condition to its grid block (block per statevar combination,
+    # e.g. per T). Condition dims are in sorted-condition order, where
+    # MU_*/LinComb_* dims sort BEFORE the statevars — select the statevar
+    # axes by NAME rather than assuming they lead.
     grid_block_indices_np = np.zeros(num_conditions_total, dtype=np.int32)
     if grid_data_device_struct_np is not None and grid_block_shape is not None:
         k = len(grid_block_shape)
         mi = np.unravel_index(np.arange(num_conditions_total), gm_array.shape)
-        grid_block_indices_np[:] = np.ravel_multi_index(tuple(mi[:k]), grid_block_shape).astype(np.int32)
+        _sv_names = {str(sv) for sv in state_variables}
+        _keys_sorted = sorted(wks_obj.conditions.keys(), key=str)
+        if len(_keys_sorted) == gm_array.ndim:
+            _sv_axes = [i for i, key in enumerate(_keys_sorted)
+                        if str(key) in _sv_names][:k]
+        else:  # unexpected dim layout: legacy leading-axes assumption
+            _sv_axes = list(range(k))
+        grid_block_indices_np[:] = np.ravel_multi_index(
+            tuple(mi[a] for a in _sv_axes), grid_block_shape).astype(np.int32)
 
     return (num_conditions_total, condition_args_np, global_spec_scalars, global_spec_arrays,
             initial_phase_data_arrays, grid_data_device_struct_np, grid_block_indices_np, properties)

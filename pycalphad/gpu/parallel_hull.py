@@ -37,7 +37,7 @@ def _hull_worker(args):
             sub_conds[key] = np.asarray(value)[lo:hi]
         else:
             sub_conds[key] = value
-    res = starting_point(sub_conds, state_variables, phase_records, grid, verbose=False)
+    res = starting_point(sub_conds, state_variables, phase_records, grid)
     # LightDataset contents are plain numpy => picklable back to the parent
     return res.data_vars, res.coords, res.attrs
 
@@ -81,8 +81,7 @@ def parallel_starting_point(conditions, state_variables, phase_records, grid,
 
     split = _pick_split_axis(conditions)
     if procs <= 1 or split is None:
-        return starting_point(conditions, state_variables, phase_records, grid,
-                              verbose=verbose)
+        return starting_point(conditions, state_variables, phase_records, grid)
 
     split_key, n_split = split
     procs = min(procs, n_split)
@@ -99,8 +98,7 @@ def parallel_starting_point(conditions, state_variables, phase_records, grid,
     except Exception as e:
         if verbose:
             print(f"[GPU] parallel hull failed ({e!r}); falling back to serial")
-        return starting_point(conditions, state_variables, phase_records, grid,
-                              verbose=verbose)
+        return starting_point(conditions, state_variables, phase_records, grid)
     finally:
         _WORKER_PAYLOAD = None
 

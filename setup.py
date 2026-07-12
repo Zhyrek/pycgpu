@@ -76,6 +76,23 @@ setup(
         'typing_extensions', # drop when pycalphad drops support for Python<3.13
         'xarray>=0.11.2',
     ],
+    extras_require={
+        # Accelerated C++ backend (pycalphad.set_backend('c++')): no extra
+        # Python dependencies — generated kernels compile at runtime, which
+        # requires a C++17 compiler on PATH (g++ or clang++; Xcode CLT on
+        # macOS, MinGW-w64 or WSL on Windows). pip cannot install a system
+        # compiler, so this extra exists for documentation/forward-compat.
+        'cpp': [],
+        # Accelerated CUDA backend (pycalphad.set_backend('gpu')): CuPy wheels
+        # bundle the CUDA runtime libraries (an NVIDIA driver is still
+        # required). Kernel compilation additionally uses nvcc: install the
+        # CUDA toolkit (conda `cuda-nvcc`, apt `nvidia-cuda-toolkit`, or the
+        # pip wheel `nvidia-cuda-nvcc-cu12` with its bin/ on PATH). Users on
+        # CUDA 11 should install cupy-cuda11x instead; AMD ROCm users can try
+        # the experimental cupy-rocm wheels. The GPU backend subsumes the C++
+        # backend's requirements (see 'cpp').
+        'gpu': ['cupy-cuda12x'],
+    },
     classifiers=[
         # How mature is this project? Common values are
         #   3 - Alpha

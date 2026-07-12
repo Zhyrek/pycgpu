@@ -161,8 +161,12 @@ def equilibrium(dbf, comps, phases, conditions, output=None, model=None,
         # it supports; everything else silently uses the reference solver so
         # `set_backend(...)` is always safe. An explicit per-call `backend=`
         # kwarg bypasses this gate (deliberate user demand).
-        if _accelerated_conditions_supported(conditions, parameters, solver,
-                                             phase_records, output, kwargs):
+        _gate_ok = _accelerated_conditions_supported(conditions, parameters, solver,
+                                             phase_records, output, kwargs)
+        if os.environ.get('PYCGPU_COUNT_DISPATCH'):
+            with open(os.environ['PYCGPU_COUNT_DISPATCH'], 'a') as _f:
+                _f.write('gate_pass\n' if _gate_ok else 'gate_fallback\n')
+        if _gate_ok:
             backend = _global_backend
             gpu = True
             _backend_from_global = True
@@ -205,6 +209,9 @@ def equilibrium(dbf, comps, phases, conditions, output=None, model=None,
                 import logging
                 logging.getLogger(__name__).debug(
                     "Accelerated backend failed, using reference solver: %r", _accel_err)
+                if os.environ.get('PYCGPU_COUNT_DISPATCH'):
+                    with open(os.environ['PYCGPU_COUNT_DISPATCH'], 'a') as _f:
+                        _f.write(f'runtime_fallback: {str(_accel_err)[:100]}\n')
         finally:
             for k, old in saved.items():
                 if old is None:

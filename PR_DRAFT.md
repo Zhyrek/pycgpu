@@ -38,8 +38,14 @@ errors — `set_backend` is safe to enable globally.
   end-to-end GM is bit-identical to the CPU-hull path at 10k, 100k, and
   1,002,000-condition batches.
 - Same-phase-set energy agreement vs the current reference solver:
-  21-phase AlCuFe over a 245-condition grid matches **236/236 stable phase
-  sets with max |dGM| = 3.5e-5 J/mol**; AuBi 55/55 at <= 9e-6. (Against the
+  21-phase AlCuFe over a 245-condition grid — where both solvers converge
+  (236 conditions), **236/236 stable phase sets match with max |dGM| =
+  3.5e-5 J/mol**; AuBi 55/55 at <= 9e-6. Convergence census on the
+  remaining 9 AlCuFe conditions: 2 fail on both solvers, 3 fail on the
+  reference only (the backend converges), 4 fail on the backend only
+  (reference converges) — i.e. roughly symmetric ~2% failure rates on
+  this deliberately hard system, in the known degenerate add/remove
+  cycling class (not iteration-cap limited; flagged as a follow-up). (Against the
   older solver this branch originally targeted there was a small
   degenerate-basin mismatch family; upstream's solver improvements since
   then eliminated it.) Two test adjustments are flagged inline (a bitwise

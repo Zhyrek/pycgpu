@@ -1,4 +1,5 @@
 cimport cython
+import os as _trace_os  # debug tracing only (PYCALPHAD_TRACE_LOOP)
 import numpy as np
 cimport numpy as np
 from pycalphad.core.composition_set cimport CompositionSet
@@ -423,6 +424,12 @@ cdef class SystemSpecification:
                 step_size_inital = target_step_size * (state.iteration + 1) / (20)
                 step_size = min(target_step_size, step_size_inital)
                 advance_state(self, state, eq_soln, step_size)
+            # debug tracing (PYCALPHAD_TRACE_LOOP): per-iteration state dump
+            if _trace_os.environ.get('PYCALPHAD_TRACE_LOOP'):
+                print('CPUTRACE iter=%d changed=%d amt=%s mu=%s' % (
+                    iteration, int(phases_changed),
+                    ','.join(['%.17g' % x for x in state.phase_amt]),
+                    ','.join(['%.17g' % x for x in state.chemical_potentials])))
         if state.free_stable_compset_indices.shape[0] > self.max_num_free_stable_phases:
             # Gibbs phase rule violation in solution
             converged = False

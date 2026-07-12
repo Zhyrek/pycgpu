@@ -66,3 +66,7 @@ env/
 important_tests/.pycgpu_kernels/
 generated_equilibrium_kernel*.cu
 .claude/
+
+# local dev instructions, not for distribution
+CLAUDE.md
+important_tests/CLAUDE.md

@@ -110,6 +110,7 @@ The stock test suite itself runs ~3.7x faster under the c++ backend.
 
 - [ ] Squash/curate commit history
 - [ ] Remove/relocate development docs (POINT_SOLVER_DESIGN.md,
-      ESPEI_INTEGRATION.md, PR_DRAFT.md) as maintainers prefer
+      ESPEI_INTEGRATION.md, PR_DRAFT.md) as maintainers prefer; CLAUDE.md
+      files and important_tests/ are dev-only and already excluded
 - [ ] CI story for the backends (compiler availability on runners)
 - [ ] Maintainer decision on robust-phase-removal defaults

@@ -25,21 +25,32 @@ errors — `set_backend` is safe to enable globally.
 
 ## Correctness
 
-- **The full stock test suite passes under both backends** (292 passed,
-  3 skipped, 1 xfailed — identical profile to the default backend), run
-  repeatedly throughout development after every kernel-affecting change.
+- **Synced to current `develop` and the full stock test suite passes under
+  both backends** (default 319 passed / c++ 318 / gpu 318, the difference
+  being one backend-aware skip), including the tests added upstream since
+  this work began — among them the new never-disorder model feature (#651),
+  which the backends support (generated energies match the reference to
+  1e-15 on CoV-20Wan.tdb; its test also exposed and fixed a general
+  vertex-slot compaction defect in result processing).
 - The starting-point hull is a device/compiled port of `hyperplane.pyx`
   verified **bit-identical** (GM, chemical potentials, simplex fractions
   and indices) on ~1,900 mixed binary/ternary/phase-restricted cases, and
   end-to-end GM is bit-identical to the CPU-hull path at 10k, 100k, and
   1,002,000-condition batches.
-- Same-phase-set energy agreement vs the reference solver is at the
-  eps·cond(A) scale of the underlying linear algebra; a small documented
-  family of degenerate conditions (identical phase sets, energy differences
-  up to a few J/mol on 21-phase AlCuFe) traces to LAPACK-vs-port operation
-  order, not algorithmic differences. Two test adjustments were required
-  and are flagged inline (a bitwise comparison relaxed to rtol=1e-10; one
-  degenerate-tie test made backend-aware, 0.02 J/mol).
+- Same-phase-set energy agreement vs the current reference solver:
+  21-phase AlCuFe over a 245-condition grid matches **236/236 stable phase
+  sets with max |dGM| = 3.5e-5 J/mol**; AuBi 55/55 at <= 9e-6. (Against the
+  older solver this branch originally targeted there was a small
+  degenerate-basin mismatch family; upstream's solver improvements since
+  then eliminated it.) Two test adjustments are flagged inline (a bitwise
+  comparison relaxed to rtol=1e-10; one degenerate-tie test made
+  backend-aware, 0.02 J/mol).
+- The reference tree is byte-for-byte upstream: workspace.py, solver.py,
+  minimizer.pyx/.pxd, eqsolver.pyx, lower_convex_hull.py and
+  starting_point.py are unmodified. The only reference-file changes are the
+  capability-gated dispatch in core/equilibrium.py and an evaluator hook in
+  core/calculate.py. The `robust_phase_removal` kwarg applies to the
+  accelerated kernels only (accepted and ignored on the reference path).
 - Determinism: identical inputs give bit-identical outputs run-to-run on
   both backends (`PYTHONHASHSEED` caveats of the reference `calculate()`
   sampling are documented separately and predate this PR).

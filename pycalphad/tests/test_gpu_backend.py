@@ -82,7 +82,10 @@ def test_robust_phase_removal_kwarg(load_database):
     dbf = load_database()
     comps = ['AL', 'ZN', 'VA']
     phases = list(dbf.phases.keys())
-    ref = equilibrium(dbf, comps, phases, CONDS, robust_phase_removal=True)
+    # robust_phase_removal only affects the accelerated kernels; on the
+    # reference path it is accepted and ignored (reference solver is
+    # upstream-unmodified).
+    ref = equilibrium(dbf, comps, phases, CONDS)
     res = equilibrium(dbf, comps, phases, CONDS, backend='cpp', robust_phase_removal=True)
     np.testing.assert_allclose(res.GM.values, ref.GM.values, atol=GM_ATOL)
 

@@ -205,18 +205,16 @@ def equilibrium(dbf, comps, phases, conditions, output=None, model=None,
                 else:
                     os.environ[k] = old
 
-    if robust_phase_removal is not None:
-        from pycalphad.core.minimizer import set_robust_removal
-        set_robust_removal(bool(robust_phase_removal))
+    # robust_phase_removal applies to the ACCELERATED backends only (their
+    # kernels implement the robust-removal gate; the reference Cython solver
+    # is upstream-unmodified and has no such switch). On the reference path
+    # the kwarg is accepted and ignored so backend-defaulted options do not
+    # change reference behavior.
 
     if output is None:
         output = set()
     elif (not isinstance(output, Iterable)) or isinstance(output, str):
         output = [output]
-    if verbose:
-        print(f"\n=== CPU EQUILIBRIUM FUNCTION START ===\nComponents: {comps}\nPhases: {phases}\nConditions: {conditions}\n")
-    
-    
     wks = Workspace(database=dbf, components=comps, phases=phases, conditions=conditions, models=model, parameters=parameters,
                     verbose=verbose, calc_opts=calc_opts, solver=solver, phase_record_factory=phase_records)
 

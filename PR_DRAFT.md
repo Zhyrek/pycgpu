@@ -1,6 +1,6 @@
 # [DRAFT — do not submit yet] Accelerated equilibrium backends (C++ / CUDA)
 
-**Target:** `pycalphad/pycalphad` `develop` ← `Zhyrek/pycgpu` `gpu-port`
+**Target:** `pycalphad/pycalphad` `develop` ← `Zhyrek/pycgpu` `gpu-port-sync` (develop-synced; a squash-curated branch will replace this before un-drafting)
 
 ## Summary
 

@@ -42,6 +42,14 @@ def _compile_command(lib_path, src_path, defines):
         hint = ("install MinGW-w64 g++ or use WSL" if system == 'Windows'
                 else "install g++ (e.g. `apt install g++`)")
         raise RuntimeError(f"CPU backend needs a C++17 compiler on PATH: {hint}")
+    if system == 'Windows':
+        # Python >= 3.8 removed PATH from the Windows DLL search, so a
+        # MinGW-built library whose runtime deps (libstdc++-6.dll,
+        # libgcc_s_seh-1.dll, libwinpthread-1.dll) live in the MinGW bin
+        # directory fails to load with "Could not find module ... or one of
+        # its dependencies". Link the runtimes statically so the produced
+        # library is self-contained.
+        common = common + ['-static', '-static-libgcc', '-static-libstdc++']
     return [cxx] + common + defines
 
 _CPU_DRIVER_SRC = r"""
@@ -171,7 +179,11 @@ def build_cpu_library(full_kernel_source: str, define_flags, cache_dir: str, ver
     source = compat + "\n" + full_kernel_source + "\n" + _CPU_DRIVER_SRC
     defines = [d for d in define_flags if d.startswith("-D")]
     extra_cflags = os.environ.get('PYCGPU_CPU_EXTRA_CFLAGS', '')
-    tag = hashlib.md5((source + "|".join(sorted(defines)) + extra_cflags).encode()).hexdigest()
+    # platform token: Windows gained static-runtime link flags (v2) — caches
+    # built before that produce unloadable libraries and must not be reused
+    plat_token = f"{platform.system()}-v2" if platform.system() == 'Windows' else ''
+    tag = hashlib.md5((source + "|".join(sorted(defines)) + extra_cflags
+                       + plat_token).encode()).hexdigest()
     os.makedirs(cache_dir, exist_ok=True)
     src_path = os.path.join(cache_dir, f"{tag}_cpu.cpp")
     lib_path = os.path.join(cache_dir, f"{tag}_cpu.so")
@@ -192,7 +204,16 @@ def build_cpu_library(full_kernel_source: str, define_flags, cache_dir: str, ver
     elif verbose:
         print(f"[CPU-C++] Using cached backend library {lib_path}")
 
-    lib = ctypes.CDLL(lib_path)
+    try:
+        lib = ctypes.CDLL(lib_path)
+    except OSError:
+        if platform.system() == 'Windows':
+            # fallback: legacy DLL search (PATH included) for environments
+            # where static linking was unavailable and the MinGW runtime
+            # lives next to g++ on PATH
+            lib = ctypes.CDLL(lib_path, winmode=0)
+        else:
+            raise
     hull_fn = lib.pycgpu_cpu_point_hull
     hull_fn.restype = None
     hull_fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,

@@ -2054,10 +2054,12 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     # workers over a composition axis for large grids (bit-identical to serial;
     # see parallel_hull.py; PYCGPU_HULL_PROCS=1 forces serial).
     from pycalphad.gpu.parallel_hull import parallel_starting_point
-    if os.environ.get('PYCGPU_DEVICE_HULL'):
+    if os.environ.get('PYCGPU_DEVICE_HULL', '1') not in ('0', 'off', ''):
         # Compiled per-condition hull (hyperplane.h; bit-identical to the
-        # Cython hyperplane) instead of the serial/forked CPU loop. Env-gated
-        # while it accumulates mileage; intended default for the backends.
+        # Cython hyperplane) instead of the serial/forked CPU loop. DEFAULT
+        # for the accelerated backends (gated: both suites 292 green, GM
+        # bit-identical at 10k/100k conditions); PYCGPU_DEVICE_HULL=0 opts
+        # back into the reference CPU hull path.
         from pycalphad.gpu.point_solver import get_point_solver, device_starting_point
         _hull_solver = get_point_solver(
             wks_obj.components, list(wks_obj.phases), dict(wks_obj.models.unwrap()),

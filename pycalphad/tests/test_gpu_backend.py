@@ -1,4 +1,10 @@
 """
+import shutil as _shutil
+import pytest as _pytest
+if not (_shutil.which('g++') or _shutil.which('clang++')):
+    _pytest.skip("accelerated backends need a C++17 compiler (g++/clang++) on PATH",
+                 allow_module_level=True)
+
 Tests for the accelerated equilibrium backends (backend='cpp' C++/OpenMP and
 backend='cuda' CuPy/CUDA), which run the same generated kernel source.
 

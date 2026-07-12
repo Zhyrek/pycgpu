@@ -61,18 +61,23 @@ extern "C" void pycgpu_cpu_grid_eval(int model_idx, const double* dof, double* o
 
 #include <cstdlib>
 #include <fenv.h>
-#include <alloca.h>
 
-// Debug aid (PYCGPU_CPU_SNAN=1): before each condition, fill a large region
-// of the stack below the driver frame with signaling-NaN doubles. Any
-// arithmetic USE of an unwritten (stale) stack double then raises FE_INVALID,
-// which we promote to SIGFPE so gdb stops at the exact faulting instruction.
+// Debug aid (PYCGPU_CPU_SNAN=1, LINUX/GLIBC ONLY): before each condition,
+// fill a large region of the stack below the driver frame with
+// signaling-NaN doubles. Any arithmetic USE of an unwritten (stale) stack
+// double then raises FE_INVALID, promoted to SIGFPE so gdb stops at the
+// exact faulting instruction. feenableexcept/fedisableexcept are glibc
+// extensions; on other platforms the flag is inert.
+#if defined(__GLIBC__)
+#define PYCGPU_HAVE_SNAN_DEBUG 1
+#include <alloca.h>
 static void __attribute__((noinline)) pycgpu_paint_stack(long long nbytes)
 {
     unsigned long long* p = (unsigned long long*)alloca(nbytes);
     for (long long i = 0; i < nbytes / 8; ++i) p[i] = 0x7FF0000000000001ull; // sNaN
     __asm__ __volatile__("" :: "r"(p) : "memory");
 }
+#endif
 
 extern "C" void pycgpu_cpu_point_hull(
     const double* grid_X, const double* grid_GM,
@@ -124,13 +129,17 @@ extern "C" void pycgpu_cpu_run_all(
     // their initialization values in the results buffer).
     const char* tstart_env = std::getenv("PYCGPU_CPU_TSTART");
     const int t_start = tstart_env ? atoi(tstart_env) : 0;
+#ifdef PYCGPU_HAVE_SNAN_DEBUG
     const bool dbg_snan = (std::getenv("PYCGPU_CPU_SNAN") != nullptr);
     if (dbg_snan) {
         feclearexcept(FE_ALL_EXCEPT);
         feenableexcept(FE_INVALID);
     }
+#endif
     for (int t = t_start; t < num_conditions_total; ++t) {
+#ifdef PYCGPU_HAVE_SNAN_DEBUG
         if (dbg_snan) pycgpu_paint_stack(4ll * 1024 * 1024);
+#endif
         // Make tid = blockDim.x * blockIdx.x + threadIdx.x == t
         threadIdx.x = (unsigned int)t;
         blockIdx.x = 0u;
@@ -143,10 +152,12 @@ extern "C" void pycgpu_cpu_run_all(
             (const WorkArrays*)work_arrays, grid_block_indices, grid_block_stride_bytes,
             max_solver_iterations);
     }
+#ifdef PYCGPU_HAVE_SNAN_DEBUG
     if (dbg_snan) {
         fedisableexcept(FE_ALL_EXCEPT);  // don't let numpy trap afterwards
         feclearexcept(FE_ALL_EXCEPT);
     }
+#endif
 }
 """
 

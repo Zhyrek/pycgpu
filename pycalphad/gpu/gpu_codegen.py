@@ -1108,7 +1108,12 @@ def notebook_get_all_sym_names_for_model(model_obj: Model, wks_obj: Workspace) -
     site_fracs = model_obj.site_fractions
     site_variables = []
     for sf in site_fracs:
-        site_variables.append(sf.phase_name+str(sf.sublattice_index)+sf.species.name)
+        # MUST use the species' ESCAPED name: SiteFraction symbol names are
+        # built from it (variables.py), and charged species differ from the
+        # raw name (FE+3 -> FE_POS3). The raw name never appears in printed
+        # expressions, so using it leaves those symbols unmapped -> undeclared
+        # identifiers in the generated C.
+        site_variables.append(sf.phase_name+str(sf.sublattice_index)+sf.species.escaped_name)
     
     # CRITICAL FIX: Use phase_record_factory's state variables to match CPU behavior
     # The CPU builds functions with all state variables, not just the ones the model uses

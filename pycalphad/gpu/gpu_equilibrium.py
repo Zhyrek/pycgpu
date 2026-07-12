@@ -323,27 +323,22 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
         # Use the same max_statevars_scalar we calculated above
         max_statevars = max_statevars_scalar
         
-        # Create meshgrid for ALL condition arrays (state variables + composition variables)
+        # Create meshgrid for ALL condition arrays in the CPU result-dimension
+        # order: conditions sorted by str(key) (MU_* < N < P < T < W_* < X_*).
+        # The C-order flat index over these dims is then identical to the flat
+        # condition index of the CPU starting-point arrays. For the previously
+        # supported shapes (N/P scalar + T/X arrays) this order matches the old
+        # statevars-then-species enumeration exactly.
+        import pycalphad.variables as v
         condition_grids = []
         condition_names = []
-        
-        # First add state variables
-        for sv in state_variables:
-            if sv in unitless_conds:
-                sv_values = np.asarray(unitless_conds[sv])
-                condition_grids.append(sv_values)
-                condition_names.append(sv)
-                if wks_obj.verbose:
-                    print(f"[GPU] DEBUG: State variable {sv}: {sv_values.shape} = {sv_values}")
-        
-        # Then add composition variables (like X_TI) that aren't state variables
-        import pycalphad.variables as v
-        for cond_key, cond_value in unitless_conds.items():
-            if cond_key not in state_variables and hasattr(cond_key, 'species'):
-                # This is a composition variable like X_TI
-                comp_values = np.asarray(cond_value)
-                condition_grids.append(comp_values)
+        for cond_key in sorted(unitless_conds, key=str):
+            if cond_key in state_variables or hasattr(cond_key, 'species'):
+                vals = np.asarray(unitless_conds[cond_key])
+                condition_grids.append(vals)
                 condition_names.append(cond_key)
+                if wks_obj.verbose:
+                    print(f"[GPU] DEBUG: Condition dim {cond_key}: {vals.shape}")
         
         # Create full meshgrid if we have multiple varying conditions
         if len(condition_grids) > 1:
@@ -1048,7 +1043,53 @@ def _populate_system_specification(global_spec_np, global_spec_arrays, wks_obj, 
                     print(f"[GPU] DEBUG: Constraint coefficients (nonvacant only): {global_spec_arrays['prescribed_mole_fraction_coefficients'][constraint_count, :len(nonvacant_elements)]}")
                 
                 constraint_count += 1
-                    
+
+            elif isinstance(cond, v.MassFraction) and getattr(cond, 'phase_name', None) is None \
+                    and constraint_count < max_constraints:
+                # Reference (core/solver.py): wA = k -> row of
+                # (delta_iA - k) * M_i over nonvacant components, rhs 0.
+                el = str(cond)[2:]
+                nonvacant_element_names = [str(comp).upper() for comp in nonvacant_elements]
+                if el not in nonvacant_element_names:
+                    continue
+                el_idx = nonvacant_element_names.index(el)
+                w_scalar = float(np.asarray(value).reshape(-1)[0])
+                molar_masses = np.asarray(wks_obj.phase_record_factory.molar_masses,
+                                          dtype=np.float64)
+                coefs = np.zeros(len(nonvacant_elements))
+                coefs -= w_scalar
+                coefs[el_idx] += 1.0
+                coefs *= molar_masses[:len(nonvacant_elements)]
+                for i in range(len(nonvacant_elements)):
+                    global_spec_arrays['prescribed_mole_fraction_coefficients'][constraint_count, i] = coefs[i]
+                global_spec_arrays['prescribed_mole_fraction_rhs'][constraint_count] = 0.0
+                constraint_count += 1
+
+            elif str(cond).startswith('LinComb_') and constraint_count < max_constraints:
+                # Reference (core/solver.py): linear combination of mole
+                # fractions; denominator != 1 folds the value into the
+                # denominator coefficient.
+                nonvacant_element_names = [str(comp).upper() for comp in nonvacant_elements]
+                lc_value = float(np.asarray(value).reshape(-1)[0])
+                coefs = np.zeros(len(nonvacant_elements))
+                constant = 0.0
+                for symbol, coef in zip(cond.symbols, cond.coefs):
+                    if symbol == 1:
+                        constant = coef
+                        continue
+                    el = str(symbol)[2:]
+                    coefs[nonvacant_element_names.index(el)] = coef
+                if cond.denominator == 1:
+                    rhs = lc_value - float(constant)
+                else:
+                    rhs = -float(constant)
+                    denominator_idx = cond.symbols.index(cond.denominator)
+                    coefs[denominator_idx] -= lc_value
+                for i in range(len(nonvacant_elements)):
+                    global_spec_arrays['prescribed_mole_fraction_coefficients'][constraint_count, i] = coefs[i]
+                global_spec_arrays['prescribed_mole_fraction_rhs'][constraint_count] = rhs
+                constraint_count += 1
+
     except Exception as e:
         if wks_obj.verbose:
             print(f"[GPU] ERROR in state variable/mole fraction processing: {e}")
@@ -2076,7 +2117,17 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     # workers over a composition axis for large grids (bit-identical to serial;
     # see parallel_hull.py; PYCGPU_HULL_PROCS=1 forces serial).
     from pycalphad.gpu.parallel_hull import parallel_starting_point
-    if os.environ.get('PYCGPU_DEVICE_HULL', '1') not in ('0', 'off', ''):
+    # The compiled per-condition hull covers N/P/T/X grids and scalar MU
+    # conditions; mass-fraction, linear-combination and MU-array conditions
+    # use the reference starting point (the solver kernels still run
+    # accelerated — only the starting point falls back).
+    _device_hull_ok = all(
+        (cond in (v.N, v.P, v.T))
+        or (isinstance(cond, v.MoleFraction) and getattr(cond, 'phase_name', None) is None)
+        or (isinstance(cond, v.ChemicalPotential)
+            and np.asarray(value).size == 1)
+        for cond, value in unitless_conds.items())
+    if _device_hull_ok and os.environ.get('PYCGPU_DEVICE_HULL', '1') not in ('0', 'off', ''):
         # Compiled per-condition hull (hyperplane.h; bit-identical to the
         # Cython hyperplane) instead of the serial/forked CPU loop. DEFAULT
         # for the accelerated backends (gated: both suites 292 green, GM

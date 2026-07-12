@@ -85,19 +85,25 @@ def create_system_specifications_array(wks_obj, num_conditions, dynamic_sizes, p
     if verbose:
         print(f"[GPU] Grid shape: {grid_shape} (T × {' × '.join(['X('+c+')' for c in x_components])})")
     
+    # ALL array-valued conditions in CPU result-dimension order (sorted by
+    # str: MU_* < N < P < T < W_* < X_*). The C-order flat index over these
+    # dims equals the flat condition index of the starting-point arrays.
+    cond_dims = [(key, np.asarray(value).reshape(-1))
+                 for key, value in sorted(wks_obj.conditions.items(), key=lambda kv: str(kv[0]))
+                 if np.asarray(value).size > 1]
+    cond_dim_shape = [vals.size for _, vals in cond_dims]
+
     def _build_one(condition_idx):
         """Build the padded flat spec for one condition (original per-condition path)."""
-        # Calculate multi-dimensional indices
-        indices = []
+        # per-dim indices from the flat condition index (C order over cond_dims)
+        dim_idx = {}
         remaining = condition_idx
-        for dim_size in reversed(grid_shape[1:]):  # Process dimensions in reverse order
-            indices.append(remaining % dim_size)
+        for (key, vals), dim_size in zip(reversed(cond_dims), reversed(cond_dim_shape)):
+            dim_idx[key] = remaining % dim_size
             remaining //= dim_size
-        indices.append(remaining)  # Temperature index
-        indices.reverse()  # [temp_idx, x_cu_idx, x_fe_idx, ...]
 
-        temp_idx = indices[0]
-        x_indices = {comp: indices[i + 1] for i, comp in enumerate(x_components)}
+        temp_idx = int(dim_idx.get(v.T, 0))
+        x_indices = {comp: int(dim_idx.get(v.X(comp), 0)) for comp in x_components}
         comp_idx = x_indices[x_components[0]] if x_components else 0
 
         global_spec_np = np.zeros(50, dtype=np.float64)  # Scalar fields
@@ -113,31 +119,21 @@ def create_system_specifications_array(wks_obj, num_conditions, dynamic_sizes, p
         }
 
         class TempWorkspace:
-            def __init__(self, original_wks, condition_idx, temp_idx, x_indices):
+            def __init__(self, original_wks, dim_idx):
                 self.components = original_wks.components
                 self.phase_record_factory = original_wks.phase_record_factory
                 self.verbose = original_wks.verbose
+                # every array condition (T, X, MU, W, ...) indexed by its own
+                # dimension; scalars pass through
                 self.conditions = {}
                 for key, value in original_wks.conditions.items():
-                    value_array = np.asarray(value)
+                    value_array = np.asarray(value).reshape(-1)
                     if value_array.size > 1:
-                        if key == v.T:
-                            self.conditions[key] = float(value_array.flatten()[temp_idx])
-                        elif hasattr(key, 'species') and key.species != 'VA':
-                            comp_str = str(key.species) if not isinstance(key.species, str) else key.species
-                            if comp_str in x_indices:
-                                self.conditions[key] = float(value_array.flatten()[x_indices[comp_str]])
-                            else:
-                                self.conditions[key] = float(value_array.flatten()[0])
-                        else:
-                            if condition_idx < value_array.size:
-                                self.conditions[key] = float(value_array.flatten()[condition_idx])
-                            else:
-                                self.conditions[key] = float(value_array.flatten()[-1])
+                        self.conditions[key] = float(value_array[int(dim_idx.get(key, 0))])
                     else:
-                        self.conditions[key] = float(value_array.item())
+                        self.conditions[key] = float(value_array[0])
 
-        temp_wks = TempWorkspace(wks_obj, condition_idx, temp_idx, x_indices)
+        temp_wks = TempWorkspace(wks_obj, dim_idx)
         if len(x_components) > 1:
             properties_subset = PropertiesSubset(properties, condition_idx, temp_idx, x_indices, verbose=verbose)
         else:
@@ -158,8 +154,14 @@ def create_system_specifications_array(wks_obj, num_conditions, dynamic_sizes, p
     # PYCGPU_SPEC_SLOW=1 forces the original loop (verification tooling).
     import os as _os
     mu_full = np.asarray(properties.MU) if hasattr(properties, 'MU') else None
+    # the vectorized rewrites below only cover T/X condition dims; MU/W/other
+    # array conditions use the general per-condition path
+    _plain_dims = all(key == v.T or (isinstance(key, v.MoleFraction)
+                                     and getattr(key, 'phase_name', None) is None)
+                      for key, _ in cond_dims)
     fast_ok = (
         not _os.environ.get('PYCGPU_SPEC_SLOW')
+        and _plain_dims
         and mu_full is not None
         and mu_full.ndim >= 3
         and mu_full.shape[:2] == (1, 1)

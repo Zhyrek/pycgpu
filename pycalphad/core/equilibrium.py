@@ -46,12 +46,16 @@ def _accelerated_conditions_supported(conditions, parameters, solver,
     try:
         n_x_conds = sum(1 for c in conditions
                         if isinstance(c, v.MoleFraction) and getattr(c, 'phase_name', None) is None)
+        n_w_conds = sum(1 for c in conditions
+                        if isinstance(c, v.MassFraction) and getattr(c, 'phase_name', None) is None)
         n_mu_conds = sum(1 for c in conditions if isinstance(c, v.ChemicalPotential))
+        n_lc_conds = sum(1 for c in conditions if str(c).startswith('LinComb_'))
         n_statevar_conds = sum(1 for c in conditions if c in (v.N, v.P, v.T))
         # Fully-determined standard problems only: every condition is
-        # N/P/T/X/MU and nothing else (under/overdetermined problems must
-        # reach the reference path's validation errors).
-        if n_x_conds + n_mu_conds + n_statevar_conds != len(conditions):
+        # N/P/T/X/W/MU/LinComb and nothing else (under/overdetermined
+        # problems must reach the reference path's validation errors).
+        if (n_x_conds + n_w_conds + n_mu_conds + n_lc_conds
+                + n_statevar_conds) != len(conditions):
             return False
         for cond, value in conditions.items():
             if getattr(cond, 'phase_name', None) is not None:
@@ -62,20 +66,18 @@ def _accelerated_conditions_supported(conditions, parameters, solver,
             elif cond == v.P or cond == v.T:
                 continue
             elif isinstance(cond, v.ChemicalPotential):
-                # Scalar fixed chemical potentials are supported; MU axes
-                # (arrays) are not batched yet — reference path handles them.
-                if np.asarray(value, dtype=np.float64).size != 1:
-                    return False
                 continue
-            elif isinstance(cond, v.MoleFraction):
+            elif isinstance(cond, (v.MoleFraction, v.MassFraction)):
                 # Dilute/zero compositions have dedicated reference-path
                 # handling (clamping + user warnings) the accelerated
                 # solvers do not replicate.
                 if np.any(np.asarray(value, dtype=np.float64) < 1e-9):
                     return False
                 continue
+            elif str(cond).startswith('LinComb_'):
+                continue
             else:
-                # ChemicalPotential, MassFraction, SiteFraction, LinearCombination, ...
+                # SiteFraction, phase-local, ...
                 return False
     except Exception:
         return False

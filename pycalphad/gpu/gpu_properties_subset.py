@@ -46,52 +46,23 @@ class PropertiesSubset:
     
     @property
     def MU(self):
-        """Extract MU for the specific condition."""
+        """MU vector for this condition, extracted by FLAT index.
+
+        The starting-point arrays are (condition dims..., component) with the
+        condition dims in sorted-condition order, so the C-order flat index
+        over the leading dims equals the flat condition index regardless of
+        which conditions vary (T/X grids, MU/W arrays, ...).
+        """
         if not hasattr(self.properties, 'MU'):
             # Return empty array - let caller determine size
             return np.array([])
-            
-        mu_full = self.properties.MU
-        
-        # Handle different dimensionalities of MU
-        # Common shapes:
-        # - (1, 1, n_temps, n_comps, n_components) for multi-condition
-        # - (1, 1, 1, 1, n_components) for single condition
-        
+        mu_full = np.asarray(self.properties.MU)
+        n_comp = mu_full.shape[-1]
+        mu_flat = np.ascontiguousarray(mu_full).reshape(-1, n_comp)
+        idx = self.condition_idx if self.condition_idx < mu_flat.shape[0] else 0
         if self.verbose:
-            print(f"[PropertiesSubset] MU shape: {mu_full.shape}, extracting for temp_idx={self.temp_idx}, comp_idx={self.comp_idx}")
-        
-        if mu_full.ndim == 6:
-            # Ternary system: [N, P, T, X_comp1, X_comp2, component]
-            if self.is_ternary:
-                comp_idx_list = list(self.comp_indices.values())
-                if len(comp_idx_list) == 2:
-                    x_cu_idx = comp_idx_list[0]
-                    x_fe_idx = comp_idx_list[1]
-                    result = mu_full[0, 0, self.temp_idx, x_cu_idx, x_fe_idx, :]
-                    if self.verbose:
-                        print(f"[PropertiesSubset] Extracted MU from 6D: {result}")
-                    return result
-            # Fallback for unexpected 6D case
-            return mu_full[0, 0, 0, 0, 0, :]
-        elif mu_full.ndim >= 5:
-            # Binary system or simpler multi-dimensional case
-            # Typical indexing: [N, P, T, X, component]
-            if mu_full.shape[2] > self.temp_idx and mu_full.shape[3] > self.comp_idx:
-                result = mu_full[0, 0, self.temp_idx, self.comp_idx, :]
-                if self.verbose:
-                    print(f"[PropertiesSubset] Extracted MU from 5D: {result}")
-                return result
-            else:
-                if self.verbose:
-                    print(f"[PropertiesSubset] WARNING: Index out of bounds, using first condition")
-                return mu_full[0, 0, 0, 0, :]
-        else:
-            # Fallback for unexpected shapes
-            if self.verbose:
-                print(f"[PropertiesSubset] WARNING: Unexpected MU shape {mu_full.shape}, using flat indexing")
-            # For unexpected shapes, return ALL available data - no hardcoded limits
-            return mu_full.flatten()
+            print(f"[PropertiesSubset] MU shape {mu_full.shape} -> flat row {idx}")
+        return mu_flat[idx]
     
     @property
     def GM(self):

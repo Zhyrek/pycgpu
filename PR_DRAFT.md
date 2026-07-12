@@ -85,6 +85,11 @@ The stock test suite itself runs ~3.7x faster under the c++ backend.
   ESPEI-specific code lives in pycalphad.
 - `pycalphad/backend.py` — `set_backend` / `backend()` / per-call kwarg,
   eager validation, capability gate.
+- `calculate()` accelerates any symbolic `Model` property output (GM, HM,
+  SM, CPM, `_MIX`/`_FORM` variants), including runtime fit parameters;
+  non-GM outputs compile a lightweight property module (~2x the reference
+  callables on HM/CPM) and reproduce reference NaN semantics (e.g. `_MIX`
+  on partitioned models). Unsupported outputs fall back silently.
 - Minimal reference-code touches: an `accelerated=` hook in
   `_compute_phase_values` (grid energy evaluation only) and the `gpu=`
   dispatch in `core/equilibrium.py`. The reference solver itself is

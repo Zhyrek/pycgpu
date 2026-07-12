@@ -75,3 +75,14 @@ sets.
   for very large batches).
 - `PYCGPU_ROBUST=0` — disable robust phase-removal (default on for the
   accelerated backends).
+
+## Phase diagram mapping
+
+`binplot(..., method='grid')` and `ternplot(..., method='grid')` compute
+diagrams from a dense equilibrium grid instead of ZPF-line following —
+brute force the accelerated backends make cheap. Every multi-phase grid
+point contributes its tie-line endpoint compositions, so boundary points
+sit at solver accuracy (verified vs reference tie-lines to ~1e-15);
+grid resolution only controls boundary sampling density. Measured: Al-Ni
+(8 phases, 12,100-point grid) in 2.9 s on the C++ backend vs 27.1 s for
+reference ZPF mapping; Al-Zn in 1.3 s.

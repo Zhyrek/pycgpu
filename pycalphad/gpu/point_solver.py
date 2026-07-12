@@ -404,7 +404,7 @@ class PointBatchSolver:
         define_flags = [f'-D{k}={v}' for k, v in self.dynamic_sizes.items()]
         if robust:
             define_flags.append('-DPYCGPU_ROBUST_REMOVAL')
-        if os.environ.get('PYCGPU_OUTER_ADD'):
+        if os.environ.get('PYCGPU_OUTER_ADD', '1') not in ('0', 'off', ''):
             define_flags.append('-DPYCGPU_OUTER_ADD')
 
         gpu_dir = os.path.dirname(os.path.abspath(__file__))

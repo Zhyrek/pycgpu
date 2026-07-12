@@ -348,6 +348,40 @@ class Workspace:
         self._suspend_dependency_updates = False
 
     def recompute(self):
+        # Accelerated backend dispatch (pycalphad.set_backend): supported
+        # standard problems compute the equilibrium with the compiled
+        # solvers; anything else — and any accelerated-path failure — uses
+        # the reference implementation below unchanged.
+        from pycalphad.backend import get_backend as _get_backend
+        _backend_name, _backend_opts = _get_backend()
+        if _backend_name in ('cpp', 'cuda') and not self.calc_opts:
+            import os as _os
+            from pycalphad.core.solver import Solver as _DefaultSolver
+            from pycalphad.core.equilibrium import _accelerated_conditions_supported
+            _conds = {key: as_quantity(key, value).to(key.implementation_units).magnitude
+                      for key, value in self.conditions.items()}
+            _gate_ok = (type(self.solver) is _DefaultSolver
+                        and _accelerated_conditions_supported(
+                            _conds, self.parameters.unwrap(), None, None, None, {}))
+            if _os.environ.get('PYCGPU_COUNT_DISPATCH'):
+                with open(_os.environ['PYCGPU_COUNT_DISPATCH'], 'a') as _f:
+                    _f.write('wks_gate_pass\n' if _gate_ok else 'wks_gate_fallback\n')
+            if _gate_ok:
+                try:
+                    # same parameter refresh the reference path performs below
+                    self.phase_record_factory.update_parameters(self.parameters.unwrap())
+                    from pycalphad.gpu.gpu_equilibrium import run_accelerated_workspace
+                    return run_accelerated_workspace(self, _backend_name, _backend_opts)
+                except Exception as _accel_err:
+                    import logging
+                    logging.getLogger(__name__).debug(
+                        "Accelerated backend failed, using reference solver: %r", _accel_err)
+                    if _os.environ.get('PYCGPU_COUNT_DISPATCH'):
+                        import traceback
+                        _tb = traceback.extract_tb(_accel_err.__traceback__)
+                        _loc = f'{_tb[-1].filename.rsplit("/", 1)[-1]}:{_tb[-1].lineno}' if _tb else '?'
+                        with open(_os.environ['PYCGPU_COUNT_DISPATCH'], 'a') as _f:
+                            _f.write(f'wks_runtime_fallback [{_loc}]: {str(_accel_err)[:100]}\n')
         # Assumes implementation units from this point
         unitless_conds = OrderedDict((key, as_quantity(key, value).to(key.implementation_units).magnitude) for key, value in self.conditions.items())
         str_conds = OrderedDict((str(key), value) for key, value in unitless_conds.items())

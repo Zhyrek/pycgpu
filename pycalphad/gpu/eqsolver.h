@@ -87,13 +87,12 @@ __device__ int argmax_gpu(const double* arr, int size) {
  * @return True if a candidate phase is identified (caller then adds it), false otherwise.
  */
 #ifdef PYCGPU_OUTER_ADD
-// STUDY-ONLY (task #4): correct implementation of the CPU outer
-// add_new_phases candidate search. The historical version of this
-// function dereferenced the raw grid block as a pointer-struct and
-// therefore NEVER ran (num_grid_points_total read NaN-padding bytes
-// = 0 since the original 2025-07-17 commit). Enabled only under
-// -DPYCGPU_OUTER_ADD with a correctly parsed DeviceGrid built by the
-// caller; default builds contain no outer add loop at all.
+// The CPU outer add_new_phases candidate search. (Historical note: an
+// early version dereferenced the raw grid block as a pointer-struct and
+// never ran; this implementation parses the DeviceGrid correctly.)
+// DEFAULT ON: the current reference exercises the outer add loop, e.g.
+// re-seeding the second FCC_L12 composition set in gamma/gamma-prime
+// regions. PYCGPU_OUTER_ADD=0 compiles it out.
 __device__ bool identify_candidate_phase_to_add(
     int* candidate_phase_grid_idx,         // Output: index in grid for the phase to add
     double* candidate_driving_force,       // Output: driving force of the candidate
@@ -1505,10 +1504,9 @@ __device__ void solve_equilibrium_at_condition(
     // after every solve regardless of convergence, and removed_compsets is always
     // empty on CPU (eqsolver.pyx:249).
 #ifdef PYCGPU_OUTER_ADD
-    // STUDY-ONLY (task #4): the CPU outer add loop (eqsolver.pyx:308-371)
-    // against a CORRECTLY parsed grid. Historically this loop was inert
-    // (see identify_candidate_phase_to_add note); default builds omit it,
-    // preserving every validated baseline bit-for-bit.
+    // The CPU outer add loop (eqsolver.pyx: solve, add_new_phases(df >
+    // 1e-4), re-solve while phases were added, up to 10 adds). DEFAULT ON;
+    // PYCGPU_OUTER_ADD=0 compiles it out.
     DeviceGrid _outer_grid_struct;
     const DeviceGrid* outer_grid = nullptr;
     if (grid_data != nullptr) {

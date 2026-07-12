@@ -3869,11 +3869,19 @@ __device__ bool run_loop(
         // NOTE: Phase compositions are calculated in solve_state->recompute()
         // We use those compositions for consolidation checks to match CPU behavior
         
-        // Phase change operations (these should be safe, no large arrays)
+        // Phase change operations (these should be safe, no large arrays).
+        // CPU (minimizer.pyx run_loop) only removes/consolidates after 5
+        // quiet iterations; removing earlier changes the trajectory on
+        // shallow/degenerate surfaces (a floored compset must survive until
+        // the removal step so the remaining set re-equilibrates the same
+        // way — measured on Cr-Fe-Ni_shallow_bcc's two-compset BCC gap).
         #ifdef PYCGPU_PROF
         prof_t0 = clock64();
         #endif
-        bool rc_phases_changed = remove_and_consolidate_phases(spec, state);
+        bool rc_phases_changed = false;
+        if (state->iterations_since_last_phase_change >= 5) {
+            rc_phases_changed = remove_and_consolidate_phases(spec, state);
+        }
         #ifdef PYCGPU_PROF
         prof_rc += clock64() - prof_t0;
         #endif

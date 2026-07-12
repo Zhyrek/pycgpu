@@ -79,7 +79,6 @@ from .gpu_codegen import (
 )
 
 # Import optimized multi-phase compiler for handling many phases
-from .separate_phase_compiler import compile_phases_separately
 
 # Global cache for compiled GPU modules (in-memory)
 _gpu_module_cache = {}
@@ -2308,7 +2307,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                 # Robust-removal experiment: consolidation removals count toward
                 # times_compset_removed (see minimizer.h remove_and_consolidate).
                 define_flags.append('-DPYCGPU_ROBUST_REMOVAL')
-            if os.environ.get('PYCGPU_OUTER_ADD'):
+            if os.environ.get('PYCGPU_OUTER_ADD', '1') not in ('0', 'off', ''):
                 # STUDY flag (task #4): compile in the CPU-style outer
                 # add_new_phases loop with a correctly parsed grid. Default
                 # builds omit the loop entirely (it was born dead — see
@@ -3310,6 +3309,37 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
 
 
 # ===== PUBLIC GPU EQUILIBRIUM ENTRY POINT =====
+
+def run_accelerated_workspace(wks_obj, backend_name, options=None):
+    """Compute a Workspace's equilibrium properties on an accelerated backend.
+
+    The Workspace-dispatch twin of the equilibrium() dispatch: sets the same
+    environment (backend choice, robust phase removal, backend options),
+    runs the compiled pipeline against `wks_obj` directly, and returns the
+    properties LightDataset that Workspace.recompute would have produced.
+    Raises on unsupported problems; the caller falls back to the reference
+    implementation.
+    """
+    from pycalphad.backend import _option_env
+    overrides = {'PYCGPU_CPU': '1' if backend_name == 'cpp' else ''}
+    if 'PYCGPU_ROBUST' not in os.environ:
+        overrides['PYCGPU_ROBUST'] = '1'
+    saved = {k: os.environ.get(k) for k in overrides}
+    try:
+        for k, val in overrides.items():
+            if val:
+                os.environ[k] = val
+            else:
+                os.environ.pop(k, None)
+        with _option_env(options or {}):
+            return calculate_equilibrium_gpu(wks_obj, to_xarray=False)
+    finally:
+        for k, old in saved.items():
+            if old is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = old
+
 
 def _compute_equilibrium_output_properties(result, outputs, wks_obj):
     """Add NP-weighted equilibrium properties to `result` in place.

@@ -121,6 +121,7 @@ The stock test suite itself runs ~3.7x faster under the c++ backend.
 
 ## Known limitations / discussion points
 
+
 - GPU backend requires `nvcc` at runtime (CuPy `RawModule(backend='nvcc')`);
   a pure-pip story via NVRTC or the `nvidia-cuda-nvcc-cu12` wheel is a
   possible follow-up.

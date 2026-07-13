@@ -1916,7 +1916,11 @@ __device__ void write_row_fixed_mole_fraction(double* out_row, double* out_rhs,
         int free_statevar_global_idx = free_statevar_indices[i];
         double term1 = 0.0;
         double term2 = 0.0;
-        for (int j = 0; j < c_statevars_cols_cs; j++) { // j is index over phase_dof
+        // j runs over PHASE_DOF rows of c_statevars (reference:
+        // c_statevars.shape[0]); c_G_length_cs carries phase_dof here.  The
+        // old bound c_statevars_cols_cs (= num_statevars) silently dropped
+        // site-fraction rows past index 2 for phases with phase_dof > 3.
+        for (int j = 0; j < c_G_length_cs; j++) {
             // Use workspace indexing for mass_jac and moles_normalization_grad
             term1 += mass_jac_cs[component_idx_of_constraint * mass_jac_cols_cs + (num_system_statevars + j)] *
                      c_statevars_cs[j * c_statevars_cols_cs + free_statevar_global_idx];
@@ -2081,7 +2085,10 @@ __device__ void write_row_fixed_mole_amount(double* out_row, double* out_rhs,
     // 2a. This component row: free state variables
     for (int i = 0; i < num_free_statevars; ++i) {
         int statevar_idx = free_statevar_indices[i];
-        for (int j = 0; j < c_statevars_cols_cs; ++j) {  // j is phase_dof index
+        // j runs over PHASE_DOF rows (reference: c_statevars.shape[0]);
+        // the old bound c_statevars_cols_cs (= num_statevars) dropped
+        // site-fraction rows past index 2 for phases with phase_dof > 3.
+        for (int j = 0; j < c_G_length_cs; ++j) {
             // out_row[offset + i] += phase_amt * mass_jac[comp_idx, num_sv+j] * c_statevars[j, statevar_idx] / moles_norm
             out_row[free_variable_column_offset + i] += 
                 (phase_amt_sys[compset_original_idx_sys] / normalization_factor) * 

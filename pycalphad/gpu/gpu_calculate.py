@@ -59,6 +59,14 @@ extern "C" void pycgpu_cpu_grid_eval(int model_idx, const double* dof, double* o
         out[i] = pycgpu_eval_prop(model_idx, &dof[i * (long long)dof_stride]);
     }
 }
+extern "C" void pycgpu_cpu_grid_eval_grad(int model_idx, const double* dof, double* out,
+                                          long long n_points, int dof_stride, int grad_len)
+{
+    for (long long i = 0; i < n_points; ++i) {
+        pycgpu_eval_prop_grad(model_idx, &dof[i * (long long)dof_stride],
+                              &out[i * (long long)grad_len]);
+    }
+}
 """
 
 
@@ -108,8 +116,20 @@ def _generate_property_source(shim, output):
         func_c = re.sub(r'\bnan(\.0)?\b', '(0.0/0.0)', func_c)
         func_c = re.sub(r'\binf(\.0)?\b', '(1.0/0.0)', func_c)
         funcs.append(func_c)
+        # Gradient over the full dof vector (statevars + site fractions
+        # [+ params]) — the numerator side of Jansson derivatives.
+        grad_c = notebook_source_from_expr(
+            expr, "propgrad", model, idx, shim,
+            expr_type="grad", c_output_type="void", validate=False,
+            verbose=shim.verbose)
+        grad_c = re.sub(r'\bnan(\.0)?\b', '(0.0/0.0)', grad_c)
+        grad_c = re.sub(r'\binf(\.0)?\b', '(1.0/0.0)', grad_c)
+        funcs.append(grad_c)
     cases = "\n".join(
         f"        case {idx}: return {notebook_model_c_func_name_prefix(idx)}prop(x);"
+        for idx in range(len(unique_models)))
+    grad_cases = "\n".join(
+        f"        case {idx}: {notebook_model_c_func_name_prefix(idx)}propgrad(out, x); return;"
         for idx in range(len(unique_models)))
     return f"""
 #if defined(__CUDACC_RTC__) || defined(__HIPCC_RTC__)
@@ -133,6 +153,12 @@ __device__ double pycgpu_eval_prop(int model_idx, const double* x) {{
     return 0.0 / 0.0;
 }}
 
+__device__ void pycgpu_eval_prop_grad(int model_idx, const double* x, double* out) {{
+    switch (model_idx) {{
+{grad_cases}
+    }}
+}}
+
 extern "C" {{
 __global__ void grid_eval_kernel(int model_idx, const double* dof, double* out,
                                  long long n_points, int dof_stride) {{
@@ -140,11 +166,19 @@ __global__ void grid_eval_kernel(int model_idx, const double* dof, double* out,
     if (i >= n_points) return;
     out[i] = pycgpu_eval_prop(model_idx, &dof[i * (long long)dof_stride]);
 }}
+__global__ void grid_eval_grad_kernel(int model_idx, const double* dof, double* out,
+                                      long long n_points, int dof_stride, int grad_len) {{
+    long long i = (long long)blockDim.x * blockIdx.x + threadIdx.x;
+    if (i >= n_points) return;
+    pycgpu_eval_prop_grad(model_idx, &dof[i * (long long)dof_stride],
+                          &out[i * (long long)grad_len]);
+}}
 }}
 """
 
 
-def _build_module(backend_name, shim, verbose=False, output='GM'):
+def _build_module(backend_name, shim, verbose=False, output='GM',
+                  force_property_module=False):
     from pycalphad.gpu.gpu_codegen import (
         compute_dynamic_kernel_sizes, _generate_c_code_for_phase_models,
         _generate_full_gpu_source, _unique_models_for_gpu)
@@ -166,12 +200,13 @@ def _build_module(backend_name, shim, verbose=False, output='GM'):
     model_hasher = hashlib.md5()
     for ph in sorted(shim.phases):
         model_hasher.update(ph.encode())
-        if output == 'GM':
+        if output == 'GM' and not force_property_module:
             model_hasher.update(str(shim.models[ph].GM).encode())
         else:
             model_hasher.update(str(_property_expr(shim.models[ph], output, param_symbols)).encode())
     key_input = "|".join([
         "calc", backend_name, output,
+        "propmod" if force_property_module else "solver-or-prop",
         ",".join(sorted(shim.phases)),
         ",".join(sorted(c.name for c in shim.components)),
         # The generated functions bake in the statevar->dof-column mapping
@@ -186,7 +221,7 @@ def _build_module(backend_name, shim, verbose=False, output='GM'):
     cache_file = cache_dir / f"{cache_key}.cu"
     if cache_file.exists():
         full_source = cache_file.read_text()
-    elif output == 'GM':
+    elif output == 'GM' and not force_property_module:
         model_funcs_c, pr_init_calls_c, unique_models, _ = \
             _generate_c_code_for_phase_models(shim, include_hess=True, validate=False)
         full_source = _generate_full_gpu_source(shim, model_funcs_c, pr_init_calls_c,
@@ -200,27 +235,35 @@ def _build_module(backend_name, shim, verbose=False, output='GM'):
         from pycalphad.gpu.cpu_backend import build_cpu_library
         lib = build_cpu_library(full_source, define_flags, cache_dir=str(cache_dir),
                                 verbose=verbose,
-                                driver_src=None if output == 'GM' else _PROP_CPU_DRIVER)
+                                driver_src=None if (output == 'GM' and not force_property_module) else _PROP_CPU_DRIVER)
         fn = lib.pycgpu_cpu_grid_eval
         fn.restype = None
         fn.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p,
                        ctypes.c_longlong, ctypes.c_int]
-        return ('cpp', fn)
+        gfn = None
+        if output != 'GM' or force_property_module:
+            gfn = lib.pycgpu_cpu_grid_eval_grad
+            gfn.restype = None
+            gfn.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p,
+                            ctypes.c_longlong, ctypes.c_int, ctypes.c_int]
+        return ('cpp', fn, gfn)
     else:
         if cp is None:
             raise RuntimeError("backend 'gpu' requires CuPy")
         from pycalphad.gpu.kernel_manager import cuda_raw_module
         module = cuda_raw_module(full_source, ['-std=c++11', '-O2'] + define_flags,
                                  verbose=verbose)
-        if output == 'GM':
+        if output == 'GM' and not force_property_module:
             init_k = module.get_function('init_all_gpu_phase_records')
             init_k((1,), (1,), ())
             cp.cuda.runtime.deviceSynchronize()
-        return ('cuda', module.get_function('grid_eval_kernel'))
+        gk = None if (output == 'GM' and not force_property_module) else module.get_function('grid_eval_grad_kernel')
+        return ('cuda', module.get_function('grid_eval_kernel'), gk)
 
 
 def get_grid_evaluator(backend_name, components, phases, models,
-                       phase_record_factory, verbose=False, output='GM'):
+                       phase_record_factory, verbose=False, output='GM',
+                       force_property_module=False):
     """Return evaluate(phase_name, dof_2d, out_1d) for the given system.
 
     `output` names any Model property that is a symengine expression (GM, HM,
@@ -250,23 +293,25 @@ def get_grid_evaluator(backend_name, components, phases, models,
     _mh = hashlib.md5()
     for _ph in sorted(shim.phases):
         _mh.update(_ph.encode())
-        if output == 'GM':
+        if output == 'GM' and not force_property_module:
             _mh.update(str(models[_ph].GM).encode())
         else:
             _mh.update(str(_property_expr(models[_ph], output, _param_symbols)).encode())
-    cache_id = (backend_name, output, tuple(sorted(shim.phases)),
+    cache_id = (backend_name, output, bool(force_property_module),
+                tuple(sorted(shim.phases)),
                 tuple(sorted(c.name for c in shim.components)),
                 tuple(str(sv) for sv in shim.phase_record_factory.state_variables),
                 _mh.hexdigest())
     if cache_id in _evaluator_cache:
         entry = _evaluator_cache[cache_id]
     else:
-        entry = _build_module(backend_name, shim, verbose=verbose, output=output)
+        entry = _build_module(backend_name, shim, verbose=verbose, output=output,
+                              force_property_module=force_property_module)
         _evaluator_cache[cache_id] = entry
 
     from pycalphad.gpu.gpu_codegen import _unique_models_for_gpu
     _, name_to_idx = _unique_models_for_gpu(shim, validate=False)
-    kind, fn = entry
+    kind, fn, grad_fn = entry if len(entry) == 3 else (entry[0], entry[1], None)
 
     # The single-threaded C++ path has near-zero per-call overhead and matches
     # or beats the reference LLVM callables at every measured size, so it is
@@ -311,5 +356,33 @@ def get_grid_evaluator(backend_name, components, phases, models,
             cp.cuda.runtime.deviceSynchronize()
             out[:] = cp.asnumpy(d_out)
 
+    def evaluate_grad(phase_name, dof, out):
+        """Property gradient over dof rows: out is (n_points, dof_stride)
+        where dof_stride includes trailing fit-parameter slots (appended
+        automatically from factory.param_values, as in evaluate())."""
+        if grad_fn is None:
+            raise RuntimeError('gradients unavailable for this output module')
+        model_idx = name_to_idx[phase_name]
+        if n_params:
+            pv = np.asarray(phase_record_factory.param_values, dtype=np.float64).reshape(-1)[:n_params]
+            dof = np.concatenate([dof, np.broadcast_to(pv, (dof.shape[0], n_params))], axis=1)
+        n_points, dof_stride = dof.shape
+        dof_c = np.ascontiguousarray(dof, dtype=np.float64)
+        assert out.shape == (n_points, dof_stride), (out.shape, dof.shape)
+        if kind == 'cpp':
+            grad_fn(int(model_idx), dof_c.ctypes.data, out.ctypes.data,
+                    n_points, dof_stride, dof_stride)
+        else:
+            d_dof = cp.asarray(dof_c)
+            d_out = cp.empty((n_points, dof_stride), dtype=cp.float64)
+            tpb = 128
+            blocks = (n_points + tpb - 1) // tpb
+            grad_fn((blocks,), (tpb,),
+                    (np.int32(model_idx), d_dof, d_out,
+                     np.int64(n_points), np.int32(dof_stride), np.int32(dof_stride)))
+            cp.cuda.runtime.deviceSynchronize()
+            out[:] = cp.asnumpy(d_out)
+
     evaluate.min_points = min_points
+    evaluate.grad = evaluate_grad
     return evaluate

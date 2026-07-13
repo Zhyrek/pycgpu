@@ -19,7 +19,7 @@ import numpy as np
 
 from pycalphad import Workspace
 
-__all__ = ['jansson_deltas']
+__all__ = ['jansson_deltas', 'jansson_derivative']
 
 
 def jansson_deltas(dbf, comps, phases, conditions, denominator, backend=None,
@@ -110,3 +110,117 @@ def jansson_deltas(dbf, comps, phases, conditions, denominator, backend=None,
         'grid_coords': {d: np.asarray(eq.coords[d]) for d in dims},
         'eq': eq,
     }
+
+
+def jansson_derivative(dbf, comps, phases, conditions, numerator, denominator,
+                       backend=None, **wks_kwargs):
+    """Finished Jansson derivatives d(numerator)/d(denominator) per condition.
+
+    ``numerator`` is a Model property name ('GM', 'HM', 'SM', ...);
+    ``denominator`` is a fixed state-variable condition (v.T, v.P).  Returns
+    a dict with ``values`` shaped like the flattened condition grid, plus the
+    grid layout and the underlying deltas.
+
+    The chain rule follows the reference implementation literally
+    (property_framework.computed_property.jansson_derivative, Sundman 2015
+    Eq. 73): compsets with zero amount are skipped, system properties weight
+    the gradient terms by the compset's NP (moles of atoms) and add the
+    delta-phase-amount term.
+    """
+    import numpy as np
+    from pycalphad.gpu.gpu_calculate import get_grid_evaluator
+    from pycalphad import Model
+
+    res = jansson_deltas(dbf, comps, phases, conditions, denominator,
+                         backend=backend, **wks_kwargs)
+    eq = res['eq']
+    if backend is None:
+        from pycalphad.backend import get_backend
+        backend, _ = get_backend()
+        if backend in (None, 'default'):
+            backend = 'c++'
+    backend_name = {'c++': 'cpp', 'gpu': 'gpu'}.get(backend, backend)
+
+    wks = Workspace(dbf, comps, phases, conditions, **wks_kwargs)
+    models = wks.models
+    prf = wks.phase_record_factory
+    state_variables = sorted(prf.state_variables, key=str)
+    nsv = len(state_variables)
+    evaluator = get_grid_evaluator(backend_name, wks.components, list(wks.phases),
+                                   models, prf, output=numerator,
+                                   force_property_module=True)
+
+    # Flatten the converged grid: (conditions, vertex) phase names, NP
+    # (moles of atoms), Y site fractions, and per-condition statevar values.
+    n_vert = eq.Phase.shape[-1]
+    names = np.asarray(eq.Phase.values).reshape(-1, n_vert)
+    np_amt = np.asarray(eq.NP.values, dtype=np.float64).reshape(-1, n_vert)
+    y = np.asarray(eq.Y.values, dtype=np.float64).reshape(-1, n_vert, eq.Y.shape[-1])
+    n_conds = names.shape[0]
+
+    # Per-condition state variable values in sorted(statevar) order.
+    dims = res['grid_dims']
+    coords = res['grid_coords']
+    mesh = np.meshgrid(*[coords[d] for d in dims], indexing='ij')
+    sv_cols = {}
+    for i, svar in enumerate(state_variables):
+        name = str(svar)
+        if name in coords:
+            sv_cols[i] = np.asarray(mesh[dims.index(name)], dtype=np.float64).reshape(-1)
+        else:
+            sv_cols[i] = np.full(n_conds, float(np.asarray(wks.conditions[svar]).reshape(-1)[0]))
+
+    d_mu = res['delta_MU']; d_sv_all = res['delta_statevars']
+    d_amt = res['delta_phase_amounts']; d_y_all = res['delta_sitefracs']
+    ok = res['ok']
+
+    values = np.full(n_conds, np.nan)
+    # Group evaluations by phase for batching.
+    for phase_name in sorted(set(names.reshape(-1)) - {''}):
+        pr = prf[str(phase_name)]
+        pdof = pr.phase_dof
+        rows = []
+        locs = []   # (condition index, vertex index)
+        for ci in range(n_conds):
+            if not ok[ci]:
+                continue
+            for vi in range(n_vert):
+                if names[ci, vi] != phase_name:
+                    continue
+                amt = np_amt[ci, vi]
+                if not np.isfinite(amt) or amt == 0.0:
+                    continue
+                dof_row = np.empty(nsv + pdof)
+                for i in range(nsv):
+                    dof_row[i] = sv_cols[i][ci]
+                dof_row[nsv:] = y[ci, vi, :pdof]
+                rows.append(dof_row)
+                locs.append((ci, vi))
+        if not rows:
+            continue
+        dof2d = np.asarray(rows)
+        func_vals = np.zeros(len(rows))
+        evaluator(str(phase_name), dof2d, func_vals)
+        # The generated property gradient is ordered [T, site fractions...]
+        # (get_ordered_symbols_for_diff), NOT the [N, P, T, y...] dof layout:
+        # no N/P columns are emitted.  d(anything)/dN and /dP contributions
+        # are zero for T/P denominators anyway (dN=0 always; dP=0 for a T
+        # denominator; a P denominator will need a codegen ordering
+        # extension before dX/dP works — currently T only).
+        t_pos = state_variables.index([sv for sv in state_variables
+                                       if str(sv) == 'T'][0])
+        grads = np.zeros((len(rows), dof2d.shape[1] + (
+            len(getattr(prf, 'param_symbols', []) or []))))
+        evaluator.grad(str(phase_name), dof2d, grads)
+        for r, (ci, vi) in enumerate(locs):
+            if np.isnan(func_vals[r]):
+                continue
+            if np.isnan(values[ci]):
+                values[ci] = 0.0
+            contrib = d_amt[ci, vi] * func_vals[r]
+            contrib += np_amt[ci, vi] * d_sv_all[ci][t_pos] * grads[r, 0]
+            contrib += np_amt[ci, vi] * float(
+                np.dot(d_y_all[ci, vi, :pdof], grads[r, 1:1 + pdof]))
+            values[ci] += contrib
+    return {'values': values, 'grid_dims': dims, 'grid_coords': coords,
+            'deltas': res}

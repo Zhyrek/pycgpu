@@ -4375,6 +4375,76 @@ __device__ static int pyjan_state_variable_differential(
     return ok;
 }
 
+/* Reference fixed_component_differential (minimizer.pyx:736): the plain
+ * Newton system (no reserved row, no spec mutation) with a unit RHS on the
+ * target component's mole-fraction row.  The target is identified the way
+ * the reference does: the identity constraint row whose only nonzero
+ * coefficient (=1) sits in the target component's column. */
+__device__ static int pyjan_fixed_component_differential(
+    SystemSpecification* spec, SystemState* state, int target_component_index,
+    double* equilibrium_matrix, double* equilibrium_rhs,
+    double* U, double* V, double* singular_values, double* superdiag,
+    double* delta_chemical_potentials, double* delta_statevars,
+    double* delta_phase_amounts)
+{
+    int i, r, c;
+    for (i = 0; i < spec->num_components; ++i) delta_chemical_potentials[i] = 0.0;
+    for (i = 0; i < spec->num_statevars; ++i)  delta_statevars[i] = 0.0;
+    for (i = 0; i < state->num_compsets; ++i)  delta_phase_amounts[i] = 0.0;
+
+    int num_stable = state->num_free_stable_compsets;
+    int num_fixed_ph = spec->num_fixed_stable_compsets;
+    int num_mf = spec->num_prescribed_mole_fraction_conditions;
+    int rows = num_stable + num_fixed_ph + num_mf + 1;
+    int cols = spec->num_free_chemical_potentials + num_stable
+               + spec->num_free_statevars;
+    if (rows != cols || rows > MAX_SVD_M || cols > MAX_SVD_N) return 0;
+
+    /* Reference: raises unless the target component is actually fixed
+     * (has an identity constraint row). */
+    int target_found = 0;
+    int ncols_mf = spec->num_prescribed_mole_fraction_coefficients_cols;
+    if (ncols_mf > MAX_COMPONENTS) ncols_mf = MAX_COMPONENTS;
+    for (r = 0; r < num_mf; ++r) {
+        int identity = 1, ones = 0, one_at = -1;
+        for (c = 0; c < ncols_mf; ++c) {
+            double coef = spec->prescribed_mole_fraction_coefficients[r][c];
+            if (fabs(coef - 1.0) < 1e-12) { ones++; one_at = c; }
+            else if (fabs(coef) > 1e-12) { identity = 0; break; }
+        }
+        if (identity && ones == 1 && one_at == target_component_index) target_found = 1;
+    }
+    if (!target_found) return 0;
+
+    for (i = 0; i < rows * cols; ++i) equilibrium_matrix[i] = 0.0;
+    for (i = 0; i < rows; ++i) equilibrium_rhs[i] = 0.0;
+    fill_equilibrium_system(equilibrium_matrix, cols, equilibrium_rhs, spec, state);
+    for (i = 0; i < rows; ++i) equilibrium_rhs[i] = 0.0;
+    for (r = 0; r < num_mf; ++r) {
+        int identity = 1, ones = 0, one_at = -1;
+        for (c = 0; c < ncols_mf; ++c) {
+            double coef = spec->prescribed_mole_fraction_coefficients[r][c];
+            if (fabs(coef - 1.0) < 1e-12) { ones++; one_at = c; }
+            else if (fabs(coef) > 1e-12) { identity = 0; break; }
+        }
+        equilibrium_rhs[num_stable + num_fixed_ph + r] =
+            (identity && ones == 1 && one_at == target_component_index) ? 1.0 : 0.0;
+    }
+
+    lstsq(equilibrium_matrix, rows, cols, equilibrium_rhs, 1e-16,
+          U, V, singular_values, superdiag);
+
+    for (i = 0; i < spec->num_free_chemical_potentials; ++i)
+        delta_chemical_potentials[spec->free_chemical_potential_indices[i]] = equilibrium_rhs[i];
+    for (i = 0; i < num_stable; ++i)
+        delta_phase_amounts[state->free_stable_compset_indices[i]] =
+            equilibrium_rhs[spec->num_free_chemical_potentials + i];
+    for (i = 0; i < spec->num_free_statevars; ++i)
+        delta_statevars[spec->free_statevar_indices[i]] =
+            equilibrium_rhs[spec->num_free_chemical_potentials + num_stable + i];
+    return 1;
+}
+
 /* Epilogue driver: called once per condition after convergence.  Writes the
  * per-condition delta block to jansson_out (already offset per thread). */
 __device__ static void pyjan_compute_deltas(
@@ -4391,9 +4461,15 @@ __device__ static void pyjan_compute_deltas(
 
     for (int i = 0; i < PYJAN_OUT_STRIDE; ++i) jansson_out[i] = 0.0;
 
+#if defined(PYCGPU_JANSSON_KIND) && (PYCGPU_JANSSON_KIND == 1)
+    int ok = pyjan_fixed_component_differential(
+        spec, state, target_statevar_index, equilibrium_matrix, equilibrium_rhs,
+        U, V, singular_values, superdiag, d_mu, d_sv, d_amt);
+#else
     int ok = pyjan_state_variable_differential(
         spec, state, target_statevar_index, equilibrium_matrix, equilibrium_rhs,
         U, V, singular_values, superdiag, d_mu, d_sv, d_amt);
+#endif
     if (!ok) { *status = 0.0; return; }
 
 #ifndef PYCGPU_JANSSON_MATDUMP

@@ -8,10 +8,11 @@ the reference computes per condition in
 ``pycalphad.core.minimizer.state_variable_differential`` /
 ``site_fraction_differential``, but for all conditions in one launch.
 
-Phase 1 scope: state-variable denominators (v.T, v.P).  Composition and
-fit-parameter denominators are phase 2; the property-side chain rule
-(``JanssonDerivative`` numerators) composes these deltas with generated
-property gradients on the host.
+Denominators: state variables (v.T, v.P) via ``state_variable_differential``
+and fixed mole fractions (v.X('ZN')) via ``fixed_component_differential``.
+Fit-parameter denominators are the remaining phase; the property-side chain
+rule (``jansson_derivative``) composes these deltas with generated property
+gradients on the host.
 """
 import os
 
@@ -28,8 +29,9 @@ def jansson_deltas(dbf, comps, phases, conditions, denominator, backend=None,
 
     Parameters
     ----------
-    denominator : pycalphad StateVariable condition to differentiate against
-        (must be one of the fixed state variables, e.g. ``v.T``).
+    denominator : condition to differentiate against — a fixed state
+        variable (e.g. ``v.T``) or a fixed mole fraction (e.g.
+        ``v.X('ZN')``).
 
     Returns
     -------
@@ -52,20 +54,32 @@ def jansson_deltas(dbf, comps, phases, conditions, denominator, backend=None,
             backend = 'c++'
     backend = {'cpp': 'c++', 'cuda': 'gpu'}.get(backend, backend)
 
+    from pycalphad import variables as v
+
     wks = Workspace(dbf, comps, phases, conditions, **wks_kwargs)
     state_variables = sorted(wks.phase_record_factory.state_variables, key=str)
-    try:
-        sv_idx = state_variables.index(denominator)
-    except ValueError:
-        raise ValueError(
-            f'{denominator} is not a state variable of this system '
-            f'({state_variables}); phase-1 jansson_deltas supports state-'
-            f'variable denominators only')
+    kind = 0
+    if isinstance(denominator, v.MoleFraction):
+        # Fixed-component denominator: index into the constraint coefficient
+        # columns.  Same source as the reference (variables.py:633):
+        # phase_record.nonvacant_elements.
+        prf = wks.phase_record_factory
+        nonvacant = list(prf[sorted(wks.phases)[0]].nonvacant_elements)
+        sv_idx = nonvacant.index(str(denominator.species.name))
+        kind = 1
+    else:
+        try:
+            sv_idx = state_variables.index(denominator)
+        except ValueError:
+            raise ValueError(
+                f'{denominator} must be a fixed state variable '
+                f'({state_variables}) or a fixed mole-fraction condition')
 
     # The c++ driver is selected via the PYCGPU_CPU env (the same switch
     # run_accelerated_workspace uses); force_cpu means "no accelerated path".
     _env_saves = {}
     for key, val in (('PYCGPU_JANSSON_TARGET', str(sv_idx)),
+                     ('PYCGPU_JANSSON_KIND', str(kind)),
                      ('PYCGPU_CPU', '1' if backend == 'c++' else None)):
         _env_saves[key] = os.environ.get(key)
         if val is None:
@@ -117,9 +131,10 @@ def jansson_derivative(dbf, comps, phases, conditions, numerator, denominator,
     """Finished Jansson derivatives d(numerator)/d(denominator) per condition.
 
     ``numerator`` is a Model property name ('GM', 'HM', 'SM', ...);
-    ``denominator`` is a fixed state-variable condition (v.T, v.P).  Returns
-    a dict with ``values`` shaped like the flattened condition grid, plus the
-    grid layout and the underlying deltas.
+    ``denominator`` is a fixed state-variable condition (v.T, v.P) or a
+    fixed mole-fraction condition (v.X('ZN')).  Returns a dict with
+    ``values`` shaped like the flattened condition grid, plus the grid
+    layout and the underlying deltas.
 
     The chain rule follows the reference implementation literally
     (property_framework.computed_property.jansson_derivative, Sundman 2015

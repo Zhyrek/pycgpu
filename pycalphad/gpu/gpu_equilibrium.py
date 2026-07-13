@@ -2311,9 +2311,12 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                 print(f"[GPU] Using dynamic kernel sizing: {dynamic_sizes}")
                 print(f"[GPU] Compiler defines: {define_flags}")
             if os.environ.get('PYCGPU_JANSSON_TARGET') is not None:
-                # Jansson-derivative epilogue: target statevar index baked as
-                # a compile define (kernels are disk-cached per define set).
+                # Jansson-derivative epilogue: target index baked as a compile
+                # define (kernels are disk-cached per define set).  KIND: 0 =
+                # state variable (index into sorted statevars), 1 = fixed
+                # component (index into the constraint coefficient columns).
                 define_flags.append(f"-DPYCGPU_JANSSON_TARGET={int(os.environ['PYCGPU_JANSSON_TARGET'])}")
+                define_flags.append(f"-DPYCGPU_JANSSON_KIND={int(os.environ.get('PYCGPU_JANSSON_KIND', 0))}")
             if os.environ.get('PYCGPU_GUARD'):
                 # Memory-safety validation mode: interleave guard slices between
                 # per-thread work-array slices and scan them after the run.

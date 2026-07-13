@@ -2310,6 +2310,10 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                 define_flags.append('-DVERBOSE_DEBUG')
                 print(f"[GPU] Using dynamic kernel sizing: {dynamic_sizes}")
                 print(f"[GPU] Compiler defines: {define_flags}")
+            if os.environ.get('PYCGPU_JANSSON_TARGET') is not None:
+                # Jansson-derivative epilogue: target statevar index baked as
+                # a compile define (kernels are disk-cached per define set).
+                define_flags.append(f"-DPYCGPU_JANSSON_TARGET={int(os.environ['PYCGPU_JANSSON_TARGET'])}")
             if os.environ.get('PYCGPU_GUARD'):
                 # Memory-safety validation mode: interleave guard slices between
                 # per-thread work-array slices and scan them after the run.
@@ -2455,7 +2459,15 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         MAX_DOF_PER_PHASE = dynamic_sizes['MAX_DOF_PER_PHASE']
         # Updated to include ALL phase amounts AND X_phases AND phase_ids
         results_per_condition = 7 + dynamic_sizes['MAX_COMPONENTS'] + MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * dynamic_sizes['MAX_COMPONENTS']) + MAX_PHASES
-        results_flat = np.zeros(num_total_conditions_pts * results_per_condition, dtype=np.float64)
+        # Jansson-derivative deltas ride in a trailing region of the results
+        # buffer (one PYJAN_OUT_STRIDE block per condition) when requested.
+        _jansson_target = os.environ.get('PYCGPU_JANSSON_TARGET')
+        _pyjan_stride = 0
+        if _jansson_target is not None:
+            _pyjan_stride = (dynamic_sizes['MAX_COMPONENTS'] + dynamic_sizes['MAX_STATEVARS']
+                             + MAX_PHASES + MAX_PHASES * MAX_DOF_PER_PHASE + 1)
+        results_flat = np.zeros(num_total_conditions_pts * results_per_condition
+                                + num_total_conditions_pts * _pyjan_stride, dtype=np.float64)
         
         # Also create structured array for final result conversion (after GPU)
         results_struct = _create_equilibrium_results_struct_array(num_total_conditions_pts, dynamic_sizes)
@@ -2878,12 +2890,20 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     if _cpu_backend_mode:
         from pycalphad.gpu.cpu_backend import run_cpu_backend
     _t_kernel0 = time.time()
+    _jansson_rows = []
     for _cs in range(0, num_total_conditions_pts, _chunk_size):
         _ce = min(_cs + _chunk_size, num_total_conditions_pts)
         _cn = _ce - _cs
         _c_spec = _spec_f8[_cs * system_spec_stride:_ce * system_spec_stride]
         _c_cond = condition_args_gpu_doubles[_cs * condition_data_stride:_ce * condition_data_stride]
         _c_res = _res_f8[_cs * results_per_condition:_ce * results_per_condition]
+        if _pyjan_stride:
+            # The kernel writes Jansson deltas past the chunk's result records
+            # (trailing region). A raw slice view would overrun into the next
+            # chunk, so give the chunk a private buffer (on the same device as
+            # the results buffer) with its own tail and copy back afterwards.
+            _c_res = xp.zeros(_cn * results_per_condition + _cn * _pyjan_stride,
+                              dtype=np.float64)
         _c_ipd = initial_phase_data_gpu[_cs * initial_phase_data_stride:_ce * initial_phase_data_stride]
         _c_gbi = grid_block_indices_gpu[_cs:_ce] if grid_block_indices_gpu is not None else None
         if _cpu_backend_mode:
@@ -2906,6 +2926,13 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                 work_arrays_ptr_table=work_arrays_gpu,
                 max_solver_iterations=int(max_solver_iterations),
                 verbose=verbose)
+            if _pyjan_stride:
+                # Copy the chunk's records back into the shared results
+                # buffer and collect its Jansson tail.
+                _res_f8[_cs * results_per_condition:_ce * results_per_condition] = \
+                    _c_res[:_cn * results_per_condition]
+                _jansson_rows.append(
+                    _c_res[_cn * results_per_condition:].reshape(_cn, _pyjan_stride).copy())
         else:
             if debug_enabled:
                 _dbg_args = (_dev_ptr(debug_arrays['gm_history']),
@@ -2927,6 +2954,20 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                 max_solver_iterations)
             _c_blocks = (_cn + threads_per_block - 1) // threads_per_block
             top_level_kernel((_c_blocks,), (threads_per_block,), _chunk_args)
+            if _pyjan_stride:
+                _res_f8[_cs * results_per_condition:_ce * results_per_condition] = \
+                    _c_res[:_cn * results_per_condition]
+                _jansson_rows.append(_to_numpy(
+                    _c_res[_cn * results_per_condition:]).reshape(_cn, _pyjan_stride).copy())
+
+    if _pyjan_stride and _jansson_rows:
+        wks_obj._jansson_deltas = {
+            'raw': np.concatenate(_jansson_rows, axis=0),
+            'layout': {'MAX_COMPONENTS': int(dynamic_sizes['MAX_COMPONENTS']),
+                       'MAX_STATEVARS': int(dynamic_sizes['MAX_STATEVARS']),
+                       'MAX_PHASES': int(MAX_PHASES),
+                       'MAX_DOF_PER_PHASE': int(MAX_DOF_PER_PHASE)},
+        }
 
     if not _cpu_backend_mode:
         cp.cuda.runtime.deviceSynchronize()

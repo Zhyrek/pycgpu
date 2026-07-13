@@ -350,7 +350,8 @@ __device__ void solve_equilibrium_at_condition(
     double* delta_ms,            // NEW: Global memory for delta_ms array
     double* phase_compositions,  // NEW: Global memory for phase_compositions array
     double* phase_amounts_per_mole_atoms,  // NEW: Global memory for _phase_amounts_per_mole_atoms_arr
-    int max_solver_iterations    // Newton-loop budget (CPU parity: 1000)
+    int max_solver_iterations,   // Newton-loop budget (CPU parity: 1000)
+    double* jansson_out          // optional Jansson delta block (PYCGPU_JANSSON_TARGET)
 ) {
     // STACK OVERFLOW FIX: All large arrays are now passed as parameters from global memory
     
@@ -1615,6 +1616,19 @@ __device__ void solve_equilibrium_at_condition(
                     ++w;
                 }
                 current_sys_state.num_compsets = w;
+                // Rebuild the stable-index list NOW: the block above moved
+                // compsets to new slots, and on the no-candidate break below
+                // nothing else refreshes these indices — leaving them stale
+                // poisons any post-solve reader of the state (the Jansson
+                // epilogue's fill read zeroed global rows through a
+                // out-of-range slot; found via matrix dump).
+                current_sys_state.num_free_stable_compsets = 0;
+                for (int r = 0; r < current_sys_state.num_compsets; ++r) {
+                    if (!current_sys_state.compsets[r].fixed) {
+                        current_sys_state.free_stable_compset_indices[
+                            current_sys_state.num_free_stable_compsets++] = r;
+                    }
+                }
             }
             double state_variables[MAX_STATEVARS];
             for (int i = 0; i < current_spec.num_statevars && i < MAX_STATEVARS; ++i) {
@@ -1741,6 +1755,26 @@ __device__ void solve_equilibrium_at_condition(
         #endif
     }
 #endif // PYCGPU_OUTER_ADD
+
+#ifdef PYCGPU_JANSSON_TARGET
+    // Jansson-derivative epilogue: at the converged state, solve the
+    // perturbed equilibrium system for d(MU, NP, statevars)/d(target) and
+    // back-substitute the per-compset site-fraction deltas (Sundman 2015
+    // Eq. 74/78; reference minimizer.pyx state_variable_differential /
+    // site_fraction_differential).  Runs on the converged, recompute'd
+    // state with the same per-thread buffers as the Newton solve.
+    if (jansson_out != (double*)0) {
+        if (converged) {
+            pyjan_compute_deltas(&current_spec, &current_sys_state,
+                                 PYCGPU_JANSSON_TARGET,
+                                 equilibrium_matrix, equilibrium_rhs,
+                                 U_lstsq, V_lstsq, singular_values_lstsq,
+                                 superdiag_lstsq, jansson_out);
+        } else {
+            for (int _ji = 0; _ji < PYJAN_OUT_STRIDE; ++_ji) jansson_out[_ji] = 0.0;
+        }
+    }
+#endif
 
     // DEBUG: Store whether solver was called and returned
     if (thread_id == 0) {

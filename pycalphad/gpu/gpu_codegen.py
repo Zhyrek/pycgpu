@@ -2807,12 +2807,19 @@ def _generate_full_gpu_source(wks_obj: Workspace,
     max_grid_points = _get_c_define("MAX_GRID_POINTS")
 
     svd_c_source = _read_gpu_header("svd.c")
+    # LAPACK transliteration chain (bitwise-identical to reference LAPACK;
+    # order matters: leaf -> dbdsqr -> mid -> top)
+    lapack_source = (_read_gpu_header("lapack_leaf.h")
+                     + "\n" + _read_gpu_header("lapack_dbdsqr.h")
+                     + "\n" + _read_gpu_header("lapack_mid.h")
+                     + "\n" + _read_gpu_header("lapack_top.h"))
     phase_rec_h_source = _read_gpu_header("phase_rec.h")
     comp_set_h_source = _read_gpu_header("comp_set.h")
     lu_solver_h_source = _read_gpu_header("lu_solver.h")
     hyperplane_h_source = _read_gpu_header("hyperplane.h")
     minimizer_h_source = _read_gpu_header("minimizer.h")
     eqsolver_h_source = _read_gpu_header("eqsolver.h")
+    jansson_h_source = ""  # jansson code folded into minimizer.h
 
     full_source = f"""
 // Removed cupy/complex.cuh as it may cause CUDA_ERROR_INVALID_VALUE
@@ -2863,6 +2870,8 @@ __device__ void gpu_debug_log_array(const char* message, const double* arr, int 
 
 // --- Static C Code Includes ---
 // Content of svd.c
+{lapack_source}
+
 {svd_c_source}
 
 // Content of phase_rec.h
@@ -2879,6 +2888,8 @@ __device__ void gpu_debug_log_array(const char* message, const double* arr, int 
 
 // Content of minimizer.h (defines SystemSpecification, SystemState, run_loop, etc.)
 {minimizer_h_source}
+
+{jansson_h_source}
 
 // Content of eqsolver.h (defines solve_equilibrium_at_condition, helpers)
 {eqsolver_h_source}
@@ -4195,7 +4206,15 @@ __global__ void top_level_equilibrium_kernel(
                 thread_delta_ms,  // Pass delta_ms global memory pointer
                 thread_phase_compositions,  // Pass phase_compositions global memory pointer
                 thread_phase_amounts_per_mole_atoms,  // Pass phase_amounts_per_mole_atoms global memory pointer
-                max_solver_iterations
+                max_solver_iterations,
+#ifdef PYCGPU_JANSSON_TARGET
+                // Jansson delta block: trailing region of the results buffer,
+                // laid out after all per-condition result records.
+                results_array + (long long)num_conditions_total * results_per_condition
+                             + (long long)condition_idx * PYJAN_OUT_STRIDE
+#else
+                (double*)0
+#endif
             );
             
             // COMMENTED OUT: Temporary placeholder values (real solver is now being called above)

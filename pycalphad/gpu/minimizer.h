@@ -1310,7 +1310,20 @@ typedef struct SystemState {
             #ifdef PYCGPU_PROF
             long long prof_i0 = clock64();
             #endif
+#ifndef PYCGPU_LEGACY_LINALG
+            {
+                // LAPACK-transliterated inverse with the reference wrapper's
+                // exact semantics (minimizer.pyx invert_matrix: NaN scrub ->
+                // zeros, dgetrf+dgetri with lwork=n, failure -> -1e19).  The
+                // reference feeds its C-ordered buffer straight to Fortran, so
+                // passing our row-major buffer unchanged sees identical bytes.
+                int _ipiv[MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS];
+                pyclap_invert_pycalphad(csst->full_e_matrix,
+                                        csst->full_e_matrix_dim, _ipiv, work_inv);
+            }
+#else
             invert_matrix_lu(csst->full_e_matrix, csst->full_e_matrix_dim, work_inv);
+#endif
             #ifdef PYCGPU_PROF
             if (thread_id < PYCGPU_PROF_MAXT) g_prof_inv[thread_id] += clock64() - prof_i0;
             #endif
@@ -4197,6 +4210,28 @@ __device__ void lstsq(double* A, int nrows, int ncols, double* b, double toleran
     // Note: A is already a copy (A_lstsq_copy), so we don't need another copy
     // b_orig was only used for residual check which has been removed
 
+#ifndef PYCGPU_LEGACY_LINALG
+    // LAPACK-transliterated path (default): bitwise-identical to reference
+    // LAPACK's dgelsd chain with the reference wrapper's semantics (NaN
+    // scrub -> zeros, failure -> -1e19, rcond = 1e-16 RELATIVE cutoff).
+    // Buffers repurposed from the caller's per-thread slices: V holds the
+    // column-major copy, singular_values the SVs, U the LAPACK workspace,
+    // superdiag a snapshot of b for the fallback.  The base-case port
+    // covers every real system (n <= 25); larger or non-square systems
+    // return a loud code and fall through to the legacy SVD below,
+    // preserving old behavior instead of failing.
+    {
+        int i;
+        for (i = 0; i < nrows; ++i) superdiag[i] = b[i];
+        int rc = pyclap_lstsq_pycalphad(A, nrows, ncols, b, 1e-16,
+                                        V, singular_values, U, (int*)0);
+        if (rc != PYCLAP_ERR_DC_UNPORTED && rc != PYCLAP_ERR_NOT_SQUARE) {
+            return;  /* solved (or reference-semantics sentinel written) */
+        }
+        for (i = 0; i < nrows; ++i) b[i] = superdiag[i];
+    }
+#endif
+
     // Perform SVD: A = U * S * V^T
     int svd_result = Singular_Value_Decomposition(A, nrows, ncols, U, singular_values, V, superdiag);
     
@@ -4248,4 +4283,215 @@ __device__ void lstsq(double* A, int nrows, int ncols, double* b, double toleran
     for (int i = 0; i < ncols; ++i) {
         b[i] = temp_solution[i];
     }
+}
+/* ==== jansson derivative epilogue (folded from jansson.h; the separate
+ * file hit stale-read behavior on /mnt/c for newly created files) ==== */
+/* jansson.h — Jansson derivative deltas at a converged equilibrium state.
+ *
+ * Faithful port of the reference chain (Sundman et al. 2015):
+ *   state_variable_differential  (minimizer.pyx:699, Eq. 74)
+ *   site_fraction_differential   (minimizer.pyx:825, Eq. 78)
+ *
+ * Runs as an epilogue after run_loop converges, inside the same thread and
+ * on the same recompute'd SystemState, so every matrix it needs (per-compset
+ * c_statevars / c_component from the e-matrix, the equilibrium-system
+ * machinery) is already live.  The property-side chain rule (Eq. 73) is done
+ * batched on the host: these deltas are per-condition solver outputs.
+ *
+ * Output layout per condition (PYJAN_OUT_STRIDE doubles):
+ *   [0 .. MAX_COMPONENTS)                       delta chemical potentials
+ *   [MAX_COMPONENTS .. +MAX_STATEVARS)          delta state variables
+ *   [.. +MAX_PHASES)                            delta phase amounts (moles
+ *                                               of formula units, matching
+ *                                               state->phase_amt convention)
+ *   [.. +MAX_PHASES*MAX_DOF_PER_PHASE)          delta site fractions per
+ *                                               compset (compset-major)
+ *   [last slot]                                 status: 1.0 ok, 0.0 failed
+ */
+
+#define PYJAN_OUT_STRIDE (MAX_COMPONENTS + MAX_STATEVARS + MAX_PHASES + \
+                          MAX_PHASES * MAX_DOF_PER_PHASE + 1)
+
+/* Reference site_fraction_differential (Eq. 78): delta_y for one compset
+ * from the converged c_statevars / c_component blocks. */
+__device__ static void pyjan_site_fraction_differential(
+    const SystemSpecification* spec, const CompsetState* csst, int num_phase_dof,
+    const double* delta_chempots, const double* delta_statevars, double* delta_y)
+{
+    for (int i = 0; i < num_phase_dof; ++i) {
+        double acc = 0.0;
+        for (int sv = 0; sv < spec->num_statevars; ++sv) {
+            acc += csst->c_statevars[i * csst->c_statevars_cols + sv]
+                   * delta_statevars[sv];
+        }
+        for (int cp = 0; cp < spec->num_components; ++cp) {
+            acc += csst->c_component[cp * csst->c_component_cols + i]
+                   * delta_chempots[cp];
+        }
+        delta_y[i] = acc;
+    }
+}
+
+/* Reference state_variable_differential (Eq. 74): free the target state
+ * variable, rebuild the equilibrium system with one reserved row pinning
+ * delta(target) = 1, solve, and read off the deltas.
+ *
+ * Mutates a THREAD-LOCAL copy of the spec's statevar index arrays and
+ * restores them before returning (mirroring the reference's try/finally).
+ * Returns 1 on success, 0 on failure (dimension overflow / solve failure).
+ */
+__device__ static int pyjan_state_variable_differential(
+    SystemSpecification* spec, SystemState* state, int target_statevar_index,
+    double* equilibrium_matrix, double* equilibrium_rhs,
+    double* U, double* V, double* singular_values, double* superdiag,
+    double* delta_chemical_potentials, double* delta_statevars,
+    double* delta_phase_amounts)
+{
+    int i, j;
+    for (i = 0; i < spec->num_components; ++i) delta_chemical_potentials[i] = 0.0;
+    for (i = 0; i < spec->num_statevars; ++i)  delta_statevars[i] = 0.0;
+    for (i = 0; i < state->num_compsets; ++i)  delta_phase_amounts[i] = 0.0;
+
+    /* Save original fixed/free statevar index sets. */
+    int orig_fixed[MAX_STATEVARS], orig_free[MAX_STATEVARS];
+    int orig_num_fixed = spec->num_fixed_statevars;
+    int orig_num_free  = spec->num_free_statevars;
+    for (i = 0; i < orig_num_fixed; ++i) orig_fixed[i] = spec->fixed_statevar_indices[i];
+    for (i = 0; i < orig_num_free;  ++i) orig_free[i]  = spec->free_statevar_indices[i];
+
+    /* fixed := setdiff(fixed, {target}); free := append(free, target).
+     * (The reference appends, so the target is the LAST free statevar and
+     * therefore the LAST column of the system — relied on below.) */
+    {
+        int w = 0;
+        for (i = 0; i < orig_num_fixed; ++i) {
+            if (spec->fixed_statevar_indices[i] != target_statevar_index) {
+                spec->fixed_statevar_indices[w++] = spec->fixed_statevar_indices[i];
+            }
+        }
+        spec->num_fixed_statevars = w;
+        spec->free_statevar_indices[spec->num_free_statevars++] = target_statevar_index;
+    }
+
+    int ok = 0;
+    {
+        /* Reference construct_equilibrium_system(spec, state, 1):
+         * rows = num_stable + num_fixed_phases + num_molefrac_conds
+         *        + num_reserved(1) + 1
+         * cols = free_chempots + num_stable + free_statevars(now +1)
+         * and requires rows == cols (Gibbs phase rule). */
+        int num_stable = state->num_free_stable_compsets;
+        int num_fixed_ph = spec->num_fixed_stable_compsets;
+        int num_mf = spec->num_prescribed_mole_fraction_conditions;
+        int rows = num_stable + num_fixed_ph + num_mf + 1 + 1;
+        int cols = spec->num_free_chemical_potentials + num_stable
+                   + spec->num_free_statevars;
+        if (rows == cols && rows <= MAX_SVD_M && cols <= MAX_SVD_N) {
+            for (i = 0; i < rows * cols; ++i) equilibrium_matrix[i] = 0.0;
+            for (i = 0; i < rows; ++i) equilibrium_rhs[i] = 0.0;
+            fill_equilibrium_system(equilibrium_matrix, cols, equilibrium_rhs, spec, state);
+            /* Zero the RHS again (fill writes the Newton RHS; the
+             * differential wants a unit perturbation only), then pin the
+             * reserved last row: matrix[-1, -1] = 1, rhs[-1] = 1. */
+            for (i = 0; i < rows; ++i) equilibrium_rhs[i] = 0.0;
+            for (j = 0; j < cols; ++j) equilibrium_matrix[(rows - 1) * cols + j] = 0.0;
+            equilibrium_matrix[(rows - 1) * cols + (cols - 1)] = 1.0;
+            equilibrium_rhs[rows - 1] = 1.0;
+
+#ifdef PYCGPU_TRACE_LOOP
+            printf("JANSPEC cond=%d rows=%d cols=%d stable=%d fixedph=%d mf=%d fcp=%d fsv=%d\n",
+                   state->condition_idx, rows, cols, num_stable, num_fixed_ph, num_mf,
+                   spec->num_free_chemical_potentials, spec->num_free_statevars);
+            if (state->condition_idx == 1) {
+                printf("JANMAT rows=%d cols=%d\n", rows, cols);
+                for (i = 0; i < rows; ++i) {
+                    printf("JANROW %d:", i);
+                    for (j = 0; j < cols; ++j)
+                        printf(" %.17g", equilibrium_matrix[i * cols + j]);
+                    printf(" | %.17g\n", equilibrium_rhs[i]);
+                }
+            }
+#endif
+#ifdef PYCGPU_JANSSON_MATDUMP
+            /* debug: expose the assembled system through the output buffer
+             * (delta_y region, unused during diagnosis) */
+            {
+                double* dump = delta_phase_amounts + MAX_PHASES;  /* d_y area */
+                int cap = MAX_PHASES * MAX_DOF_PER_PHASE;
+                int k = 0;
+                dump[k++] = (double)rows; dump[k++] = (double)cols;
+                dump[k++] = (double)state->num_free_stable_compsets;
+                dump[k++] = (double)state->free_stable_compset_indices[0];
+                dump[k++] = (double)state->num_compsets;
+                {
+                    int cs0 = state->free_stable_compset_indices[0];
+                    CompsetState* c0 = &state->cs_states[cs0];
+                    dump[k++] = c0->masses[0];
+                    dump[k++] = c0->masses[1];
+                    dump[k++] = c0->grad[2];
+                }
+                for (i = 0; i < rows * cols && k < cap; ++i)
+                    dump[k++] = equilibrium_matrix[i];
+            }
+#endif
+            lstsq(equilibrium_matrix, rows, cols, equilibrium_rhs, 1e-16,
+                  U, V, singular_values, superdiag);
+
+            for (i = 0; i < spec->num_free_chemical_potentials; ++i) {
+                int cp_idx = spec->free_chemical_potential_indices[i];
+                delta_chemical_potentials[cp_idx] = equilibrium_rhs[i];
+            }
+            for (i = 0; i < num_stable; ++i) {
+                int cs_idx = state->free_stable_compset_indices[i];
+                delta_phase_amounts[cs_idx] =
+                    equilibrium_rhs[spec->num_free_chemical_potentials + i];
+            }
+            for (i = 0; i < spec->num_free_statevars; ++i) {
+                int sv_idx = spec->free_statevar_indices[i];
+                delta_statevars[sv_idx] =
+                    equilibrium_rhs[spec->num_free_chemical_potentials + num_stable + i];
+            }
+            ok = 1;
+        }
+    }
+
+    /* Restore the spec (reference: finally block). */
+    spec->num_fixed_statevars = orig_num_fixed;
+    spec->num_free_statevars  = orig_num_free;
+    for (i = 0; i < orig_num_fixed; ++i) spec->fixed_statevar_indices[i] = orig_fixed[i];
+    for (i = 0; i < orig_num_free;  ++i) spec->free_statevar_indices[i]  = orig_free[i];
+    return ok;
+}
+
+/* Epilogue driver: called once per condition after convergence.  Writes the
+ * per-condition delta block to jansson_out (already offset per thread). */
+__device__ static void pyjan_compute_deltas(
+    SystemSpecification* spec, SystemState* state, int target_statevar_index,
+    double* equilibrium_matrix, double* equilibrium_rhs,
+    double* U, double* V, double* singular_values, double* superdiag,
+    double* jansson_out)
+{
+    double* d_mu  = jansson_out;
+    double* d_sv  = jansson_out + MAX_COMPONENTS;
+    double* d_amt = jansson_out + MAX_COMPONENTS + MAX_STATEVARS;
+    double* d_y   = jansson_out + MAX_COMPONENTS + MAX_STATEVARS + MAX_PHASES;
+    double* status = jansson_out + (PYJAN_OUT_STRIDE - 1);
+
+    for (int i = 0; i < PYJAN_OUT_STRIDE; ++i) jansson_out[i] = 0.0;
+
+    int ok = pyjan_state_variable_differential(
+        spec, state, target_statevar_index, equilibrium_matrix, equilibrium_rhs,
+        U, V, singular_values, superdiag, d_mu, d_sv, d_amt);
+    if (!ok) { *status = 0.0; return; }
+
+#ifndef PYCGPU_JANSSON_MATDUMP
+    for (int cs = 0; cs < state->num_compsets && cs < MAX_PHASES; ++cs) {
+        const CompositionSet* compset = &state->compsets[cs];
+        if (compset->phase_record == (const PhaseRecord*)0) continue;
+        pyjan_site_fraction_differential(
+            spec, &state->cs_states[cs], compset->phase_record->phase_dof,
+            d_mu, d_sv, &d_y[cs * MAX_DOF_PER_PHASE]);
+    }
+#endif
+    *status = 1.0;
 }

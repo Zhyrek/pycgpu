@@ -2639,6 +2639,15 @@ __device__ bool check_convergence(SystemSpecification* spec, SystemState* state)
          #endif
         );
 
+    #ifdef PYCGPU_TRACE_LOOP
+    if (state->condition_idx == 0) {
+        printf("TRACECONV iter=%d damt=%.3e dy=%.3e dsv=%.3e mres=%.3e quiet=%d feas=%d\n",
+               state->iteration, state->largest_phase_amt_change, state->largest_y_change,
+               state->largest_statevar_change, state->mass_residual,
+               state->iterations_since_last_phase_change, (int)solution_is_feasible);
+    }
+    #endif
+
     // CPU (minimizer.pyx check_convergence) requires >= 10 iterations since
     // the last phase change. With the ramped early steps this matters: the
     // per-iteration deltas are tiny at step 0.05-0.5, so a shorter gate
@@ -2891,22 +2900,35 @@ __device__ void advance_state(SystemSpecification* spec, SystemState* state, con
             }
         } while (exceeded_bounds_for_phase && site_frac_step_limiter >= min_allowed_sf_step);
 
+        double max_dy_this_cs = 0.0;
         for (int i = 0; i < num_site_fracs; ++i) {
             double old_val = compset->dof[spec->num_statevars + i];
             // Apply the final calculated new_y_for_phase value for this iteration of step_limiter
             compset->dof[spec->num_statevars + i] = new_y_for_phase[i]; // Value after potential bounding
             double change_this_y = fabs(compset->dof[spec->num_statevars + i] - old_val);
-            if (change_this_y > state->largest_y_change) {
-                state->largest_y_change = change_this_y;
-            }
-
-        // REMOVED: Special handling for single-sublattice phases was causing issues
-        // Phase compositions will be recalculated in the next recompute() call
-        // This matches CPU behavior which doesn't have special handling here
-        
+            if (change_this_y > max_dy_this_cs) max_dy_this_cs = change_this_y;
         }
+        // CPU parity (minimizer.pyx:956): largest_y_change is reset INSIDE the
+        // per-compset loop, so check_convergence sees only the LAST compset's
+        // largest site-fraction step — a max over all compsets is NOT the
+        // reference semantics. This matters: a removed compset whose internal
+        // Newton oscillates (AlCuFe BCC_B2 ordering gap) otherwise blocks
+        // convergence for ~50 iterations, after which change_phases samples its
+        // bouncing dof at a spurious positive driving force, re-adds it, and
+        // the full-step re-solve destroys the converged solution (+249 J/mol
+        // with a matching phase set, or a lost second phase).
+        state->largest_y_change = max_dy_this_cs;
+        #ifdef PYCGPU_TRACE_LOOP
+        if (state->condition_idx == 0 && max_dy_this_cs > 1e-6) {
+            printf("TRACEDY iter=%d cs=%d amt=%.3e maxdy=%.3e limiter=%.3e y=", state->iteration,
+                   idx, state->phase_amt[idx], max_dy_this_cs, site_frac_step_limiter);
+            for (int i = 0; i < num_site_fracs; ++i)
+                printf("%s%.6g", i ? "," : "", compset->dof[spec->num_statevars + i]);
+            printf("\n");
+        }
+        #endif
     }
-    
+
     gpu_debug_log_value("largest_y_change", state->largest_y_change);
 }
 
@@ -3184,6 +3206,21 @@ __device__ bool change_phases(SystemSpecification* spec, SystemState* state,
     bool phases_changed = false;
     double current_driving_forces[MAX_PHASES]; // Sized to MAX_PHASES
     state->driving_forces(spec, current_driving_forces, MAX_PHASES); // Get DFs for all possible phases
+
+    #ifdef PYCGPU_TRACE_LOOP
+    if (thread_id == 0) {
+        printf("TRACEADD iter=%d df=", state->iteration);
+        for (int i = 0; i < state->num_compsets; ++i)
+            printf("%s%.10g", i ? "," : "", current_driving_forces[i]);
+        printf(" meta_iters=");
+        for (int i = 0; i < state->num_compsets; ++i)
+            printf("%s%d", i ? "," : "", state->metastable_phase_iterations[i]);
+        printf(" removed=");
+        for (int i = 0; i < state->num_compsets; ++i)
+            printf("%s%d", i ? "," : "", state->times_compset_removed[i]);
+        printf("\n");
+    }
+    #endif
 
     // Match CPU minimizer.pyx lines 1391-1403 exactly
     double MIN_PHASE_AMOUNT_FOR_ADD_CHECK = 1e-9;  // CPU uses 1e-9, not MIN_PHASE_FRACTION
@@ -3939,13 +3976,20 @@ __device__ bool run_loop(
             }
         }
         
-        // Update phase change tracking. CPU (minimizer.pyx:659-663) resets to 0 on a
-        // phase change and then unconditionally increments, so the counter is 1 (not 0)
-        // at the end of a phase-change iteration.
+        // Update phase change tracking. CPU (minimizer.pyx run_loop) is an
+        // if/ELSE: the counter stays 0 through a phase-change iteration and
+        // increments only on quiet iterations. Reset-then-always-increment
+        // leaves the counter one ahead, so the >=5 removal and >=10
+        // convergence gates fire one iteration early — early removal is
+        // fatal for a freshly seeded compset whose decisive mass swing
+        // happens on iteration 5 after the add (AlCuFe BCC_B2+LIQUID: the
+        // seed was culled at 1e-16 right before the swing, four times, until
+        // the removal budget ran out and the second phase was lost, +57 J/mol).
         if (phases_changed_iter) {
             state->iterations_since_last_phase_change = 0;
+        } else {
+            state->iterations_since_last_phase_change++;
         }
-        state->iterations_since_last_phase_change++;
         // CPU minimizer.pyx:663 increments metastability counters every iteration;
         // without this, metastable_phase_iterations stays 0 and change_phases can
         // never re-add a removed phase.

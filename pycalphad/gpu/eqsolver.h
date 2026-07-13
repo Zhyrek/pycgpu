@@ -540,6 +540,44 @@ __device__ void solve_equilibrium_at_condition(
             current_sys_state.mole_fractions[i] = 0.0;
         }
     }
+
+    // CPU parity (eqsolver.pyx:200-212): a condition whose prescribed mole
+    // fractions sum above one is infeasible and is skipped silently (NaN
+    // result; the CPU allows these to make 2-D composition mapping easy).
+    // Without the guard these conditions burn the full iteration budget —
+    // 1000 inner iterations plus 10 outer phase-add re-solves — before
+    // failing; on composition-grid workloads that was most of the runtime.
+    //
+    // The sum is taken over the spec's prescribed mole-fraction constraint
+    // rows (identity rows only — those are the plain X() conditions the CPU
+    // counts; W()/linear-combination rows are excluded, as on the CPU).
+    // Do NOT compute this from condition_mole_fractions: that array carries
+    // backend-transformed values whose meaning varies by path (dilute
+    // rewrites push its sum slightly above one; on charged systems it does
+    // not hold mole fractions at all).
+    {
+        double indep_sum = 0.0;
+        int ncols = current_spec.num_prescribed_mole_fraction_coefficients_cols;
+        if (ncols > MAX_COMPONENTS) ncols = MAX_COMPONENTS;
+        for (int r = 0; r < current_spec.num_prescribed_mole_fraction_conditions; ++r) {
+            int ones = 0;
+            bool identity = true;
+            for (int c = 0; c < ncols; ++c) {
+                double coef = current_spec.prescribed_mole_fraction_coefficients[r][c];
+                if (fabs(coef - 1.0) < 1e-12) ones++;
+                else if (fabs(coef) > 1e-12) { identity = false; break; }
+            }
+            if (identity && ones == 1) {
+                indep_sum += current_spec.prescribed_mole_fraction_rhs[r];
+            }
+        }
+        if (indep_sum > 1.0) {
+            result->converged = false;
+            result->hit_iteration_cap = false;
+            result->num_stable_phases = 0;
+            return;
+        }
+    }
     
     // Access num_phases and phase_indices from flat array
     // NOTE: The initial_data pointer is already offset to this thread's data
@@ -1546,6 +1584,10 @@ __device__ void solve_equilibrium_at_condition(
         outer_grid = &_outer_grid_struct;
     }
     if (outer_grid != nullptr && phase_data != nullptr) {
+        #ifdef PYCGPU_OUTER_STATS
+        int outer_adds_count = 0;
+        long long outer_iters_spent = 0;
+        #endif
         for (int outer_iter = 0; outer_iter < 10; ++outer_iter) {
             // CPU parity (solver.py remove_metastable): DELETE NP <= 0
             // non-fixed compsets before the candidate search so the re-solve
@@ -1688,7 +1730,15 @@ __device__ void solve_equilibrium_at_condition(
                 current_sys_state.iteration >= max_solver_iterations - 1) {
                 hit_iteration_cap = true;
             }
+            #ifdef PYCGPU_OUTER_STATS
+            outer_adds_count++;
+            outer_iters_spent += current_sys_state.iteration + 1;
+            #endif
         }
+        #ifdef PYCGPU_OUTER_STATS
+        printf("OUTERSTAT tid=%d adds=%d resolve_iters=%lld conv=%d\n",
+               thread_id, outer_adds_count, outer_iters_spent, (int)converged);
+        #endif
     }
 #endif // PYCGPU_OUTER_ADD
 

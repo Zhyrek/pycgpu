@@ -3189,17 +3189,11 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                 print(f"[GPU] Threads that converged: {converged_count}/{num_total_conditions_pts}")
                 print(f"[GPU] Temperature range: {np.min(temp_values):.1f} - {np.max(temp_values):.1f} K")
             
-            # Success criteria: Check if the batched approach worked
-            if real_energy_threads >= expected_real_energy * 0.8 and simple_calc_threads >= expected_simple_calc * 0.8:
-                print(f"[GPU] SUCCESS: Batched energy calculation approach worked!")
-                print(f"[GPU] - {real_energy_threads} threads successfully used real energy functions")
-                print(f"[GPU] - {simple_calc_threads} threads used simple calculations")
-                print(f"[GPU] - This demonstrates controlled parallel execution of thermodynamic functions")
-                
-                if real_energy_threads == expected_real_energy:
-                    print(f"[GPU] PERFECT: All expected threads used real energy functions!")
-            elif converged_count >= num_total_conditions_pts * 0.8:
-                print(f"[GPU] SUCCESS: Basic kernel execution - {converged_count}/{num_total_conditions_pts} threads converged!")
+            if verbose:
+                if real_energy_threads >= expected_real_energy * 0.8 and simple_calc_threads >= expected_simple_calc * 0.8:
+                    print(f"[GPU] Batched energy calculation: {real_energy_threads} real-energy threads, {simple_calc_threads} simple-calculation threads")
+                elif converged_count >= num_total_conditions_pts * 0.8:
+                    print(f"[GPU] Kernel execution: {converged_count}/{num_total_conditions_pts} threads converged")
             
             # Convert the flat array results to structured array format for compatibility
             # Create a properly formatted results_cpu from the flat array data

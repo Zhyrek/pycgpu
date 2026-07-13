@@ -1765,6 +1765,12 @@ __device__ void solve_equilibrium_at_condition(
     // state with the same per-thread buffers as the Newton solve.
     if (jansson_out != (double*)0) {
         if (converged) {
+            // Refresh the per-compset state at the FINAL dof before solving
+            // the differentials: run_loop's last iteration leaves grad/hess/
+            // c-blocks one advance_state stale, which pollutes the delta
+            // solve (~1e-3 relative on d_amt).  The reference does the same
+            // via state.recompute(spec) in JanssonDerivative.compute_property.
+            current_sys_state.recompute(&current_spec, work_inv);
             pyjan_compute_deltas(&current_spec, &current_sys_state,
                                  PYCGPU_JANSSON_TARGET,
                                  equilibrium_matrix, equilibrium_rhs,

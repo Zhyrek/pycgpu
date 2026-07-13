@@ -38,7 +38,9 @@ def jansson_deltas(dbf, comps, phases, conditions, denominator, backend=None,
     dict with arrays over the flattened condition grid:
       ``delta_MU``            (n_conds, n_components)
       ``delta_statevars``     (n_conds, n_statevars)  [d(target)/d(target)=1]
-      ``delta_phase_amounts`` (n_conds, max_phases)   formula-unit convention
+      ``delta_phase_amounts`` (n_conds, max_phases)   MOLES OF ATOMS (the
+          CompositionSet.NP unit; converted from the solver's formula-unit
+          convention inside the kernel)
       ``delta_sitefracs``     (n_conds, max_phases, max_dof)
       ``ok``                  (n_conds,) bool — converged and solved
       plus ``grid_dims``/``grid_coords`` describing the condition grid and

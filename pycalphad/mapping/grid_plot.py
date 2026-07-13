@@ -74,7 +74,10 @@ def binplot_grid(database, components, phases, conditions, x=None, y=None,
     points); three-phase points mark invariant reactions.
     """
     eq_kwargs = eq_kwargs or {}
-    plot_kwargs = plot_kwargs or {}
+    # ZPF-binplot compatibility: the axes may arrive via plot_kwargs['ax'];
+    # the remaining plot_kwargs are forwarded to the scatter calls.
+    plot_kwargs = dict(plot_kwargs or {})
+    ax = plot_kwargs.pop('ax', ax)
     comp_conds = [c for c in conditions
                   if isinstance(c, v.MoleFraction) and getattr(c, 'phase_name', None) is None]
     if len(comp_conds) != 1:
@@ -127,7 +130,9 @@ def ternplot_grid(database, components, phases, conditions, x=None, y=None,
     three-phase points contribute tie-triangles.
     """
     eq_kwargs = eq_kwargs or {}
-    plot_kwargs = plot_kwargs or {}
+    # ZPF-ternplot compatibility: the axes may arrive via plot_kwargs['ax'].
+    plot_kwargs = dict(plot_kwargs or {})
+    ax = plot_kwargs.pop('ax', ax)
     comp_conds = sorted((c for c in conditions
                          if isinstance(c, v.MoleFraction) and getattr(c, 'phase_name', None) is None),
                         key=str)

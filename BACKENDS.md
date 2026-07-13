@@ -25,6 +25,10 @@ Model subclasses, dilute compositions, under/overdetermined inputs) are
 routed to the reference solver automatically, including its validation
 errors.
 
+Runnable side-by-side comparisons (reference vs accelerated, with agreement
+checks and timings) live in `examples/5_Accelerated_Backends/` — start with
+`1_BackendBasics.ipynb`.
+
 ## Installation
 
 | backend | install | system requirements |

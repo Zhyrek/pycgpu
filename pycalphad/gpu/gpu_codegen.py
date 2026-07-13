@@ -2399,6 +2399,20 @@ def _nb_formulahess_from_model(model_obj: Model, model_c_idx: int, wks_obj: Work
     
     return result
 
+def _nb_formulaparamgrad_from_model(model_obj: Model, model_c_idx: int, wks_obj: Workspace, validate: bool = True, verbose: bool = False) -> str:
+    """dG/dp for each fit parameter (formula-unit G, matching formulagrad)."""
+    params = _fit_parameter_symbols(wks_obj)
+    exprs = [model_obj.G.diff(p) for p in params]
+    return notebook_source_from_expr(exprs, "formulaparamgrad", model_obj, model_c_idx, wks_obj, expr_type="func", c_output_type="void", validate=validate, verbose=verbose)
+
+def _nb_formulaparammixed_from_model(model_obj: Model, model_c_idx: int, wks_obj: Workspace, validate: bool = True, verbose: bool = False) -> str:
+    """d2G/(dy_j dp): j-major flat layout out[j*n_params + p], site-fraction
+    order matching formulagrad's (get_ordered_symbols_for_diff minus T)."""
+    params = _fit_parameter_symbols(wks_obj)
+    ysyms = get_ordered_symbols_for_diff(model_obj, wks_obj)[1:]
+    exprs = [model_obj.G.diff(y).diff(p) for y in ysyms for p in params]
+    return notebook_source_from_expr(exprs, "formulaparammixed", model_obj, model_c_idx, wks_obj, expr_type="func", c_output_type="void", validate=validate, verbose=verbose)
+
 def _nb_internal_cons_func_from_model(model_obj: Model, model_c_idx: int, wks_obj: Workspace, validate: bool = True, verbose: bool = False) -> str:
     # Generate internal constraints function
     constraints = model_obj.get_internal_constraints()
@@ -2599,6 +2613,11 @@ def _generate_c_code_for_phase_models(wks_obj: Workspace, include_hess: bool = F
 
     validation_warnings = []
     unique_py_models, py_phase_name_to_unique_idx_map = _unique_models_for_gpu(wks_obj, validate)
+    # Parameter-denominator Jansson builds (PYCGPU_JANSSON_KIND=2) need dG/dp
+    # and d2G/dydp device functions; generated only for those builds (the
+    # module source differs, so they land in distinct cache entries).
+    _jansson_params = (os.environ.get('PYCGPU_JANSSON_KIND') == '2'
+                       and len(_fit_parameter_symbols(wks_obj)) > 0)
 
     # Generate C functions for all unique models
     all_model_device_functions_c_code = ""
@@ -2624,6 +2643,9 @@ def _generate_c_code_for_phase_models(wks_obj: Workspace, include_hess: bool = F
             all_model_device_functions_c_code += _nb_mass_obj_from_model(model_obj, model_c_idx, wks_obj, validate, wks_obj.verbose)
             all_model_device_functions_c_code += _nb_formulamole_obj_from_model(model_obj, model_c_idx, wks_obj, validate, wks_obj.verbose)
             all_model_device_functions_c_code += _nb_formulamole_grad_from_model(model_obj, model_c_idx, wks_obj, validate, wks_obj.verbose)
+            if _jansson_params:
+                all_model_device_functions_c_code += _nb_formulaparamgrad_from_model(model_obj, model_c_idx, wks_obj, validate, wks_obj.verbose)
+                all_model_device_functions_c_code += _nb_formulaparammixed_from_model(model_obj, model_c_idx, wks_obj, validate, wks_obj.verbose)
             
         except CodeValidationError as e:
             if validate:
@@ -2662,6 +2684,9 @@ def _generate_c_code_for_phase_models(wks_obj: Workspace, include_hess: bool = F
         # Count non-vacancy components
         nonvacant_count = sum(1 for comp in wks_obj.components if comp.name != 'VA')
         init_call = f"    g_phase_records_array[{model_c_idx}].init(&{fn_obj}, &{fn_formulaobj}, &{fn_formulagrad}, {fn_formulahess if fn_formulahess == 'nullptr' else '&' + fn_formulahess}, &{fn_icf}, &{fn_icj}, &{fn_mass}, &{fn_fmo}, &{fn_fmg}, {num_statevars}, {phase_dof}, {num_elements}, {num_internal_cons}, {nonvacant_count});\n"
+        if _jansson_params:
+            init_call += f"    g_phase_records_array[{model_c_idx}].formulaparamgrad = &{func_prefix}formulaparamgrad;\n"
+            init_call += f"    g_phase_records_array[{model_c_idx}].formulaparammixed = &{func_prefix}formulaparammixed;\n"
         g_phase_record_array_init_calls_c_code.append(init_call)
 
     return (all_model_device_functions_c_code, g_phase_record_array_init_calls_c_code, 
@@ -4211,7 +4236,7 @@ __global__ void top_level_equilibrium_kernel(
                 // Jansson delta block: trailing region of the results buffer,
                 // laid out after all per-condition result records.
                 results_array + (long long)num_conditions_total * results_per_condition
-                             + (long long)condition_idx * PYJAN_OUT_STRIDE
+                             + (long long)condition_idx * PYJAN_COND_STRIDE
 #else
                 (double*)0
 #endif

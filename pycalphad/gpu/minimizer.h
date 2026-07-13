@@ -2090,9 +2090,9 @@ __device__ void write_row_fixed_mole_amount(double* out_row, double* out_rhs,
         // site-fraction rows past index 2 for phases with phase_dof > 3.
         for (int j = 0; j < c_G_length_cs; ++j) {
             // out_row[offset + i] += phase_amt * mass_jac[comp_idx, num_sv+j] * c_statevars[j, statevar_idx] / moles_norm
-            out_row[free_variable_column_offset + i] += 
-                (phase_amt_sys[compset_original_idx_sys] / normalization_factor) * 
-                mass_jac_cs[component_idx * mass_jac_cols_cs + num_system_statevars + j] * 
+            out_row[free_variable_column_offset + i] +=
+                (phase_amt_sys[compset_original_idx_sys] / normalization_factor) *
+                mass_jac_cs[component_idx * mass_jac_cols_cs + num_system_statevars + j] *
                 c_statevars_cs[j * c_statevars_cols_cs + statevar_idx];
         }
     }
@@ -4233,6 +4233,14 @@ __device__ void lstsq(double* A, int nrows, int ncols, double* b, double toleran
 #define PYJAN_OUT_STRIDE (MAX_COMPONENTS + MAX_STATEVARS + MAX_PHASES + \
                           MAX_PHASES * MAX_DOF_PER_PHASE + 1)
 
+/* Parameter denominators (KIND==2) emit one delta block per fit parameter;
+ * every other kind emits a single block per condition. */
+#if defined(PYCGPU_JANSSON_KIND) && (PYCGPU_JANSSON_KIND == 2) && (MAX_PARAMS > 0)
+#define PYJAN_COND_STRIDE (MAX_PARAMS * PYJAN_OUT_STRIDE)
+#else
+#define PYJAN_COND_STRIDE PYJAN_OUT_STRIDE
+#endif
+
 /* Reference site_fraction_differential (Eq. 78): delta_y for one compset
  * from the converged c_statevars / c_component blocks. */
 __device__ static void pyjan_site_fraction_differential(
@@ -4414,6 +4422,161 @@ __device__ static int pyjan_state_variable_differential(
     return ok;
 }
 
+#if defined(PYCGPU_JANSSON_KIND) && (PYCGPU_JANSSON_KIND == 2) && (MAX_PARAMS > 0)
+/* Parameter differential d(equilibrium)/d(fit parameter p).  A fit parameter
+ * is not a system unknown, so its unit perturbation lands entirely on the
+ * RHS of the converged Newton system (the p-column of the would-be extended
+ * system moved to the RHS):
+ *   stable/fixed-phase rows:  +dG_M/dp          (site-fraction terms cancel
+ *                                                by internal-equilibrium
+ *                                                stationarity)
+ *   mass rows:                the c_G RHS blocks of the Newton fill with
+ *                             c_p in place of c_G, where
+ *                             c_p = -E * d2G/(dy dp)  -- the parameter
+ *                             analogue of the c_statevars columns.
+ *   site fractions:           delta_y = c_p + c_component*delta_mu
+ *                                       + c_statevars*delta_sv.  */
+__device__ static void pyjan_param_cp(
+    const CompsetState* csst, int phase_dof, const double* mixed, int param_idx,
+    double* c_p)
+{
+    for (int i = 0; i < phase_dof; ++i) {
+        double acc = 0.0;
+        for (int j = 0; j < phase_dof; ++j) {
+            acc -= csst->full_e_matrix[i * csst->full_e_matrix_dim + j]
+                   * mixed[j * MAX_PARAMS + param_idx];
+        }
+        c_p[i] = acc;
+    }
+}
+
+__device__ static int pyjan_parameter_differential(
+    SystemSpecification* spec, SystemState* state, int param_idx,
+    double* equilibrium_matrix, double* equilibrium_rhs,
+    double* U, double* V, double* singular_values, double* superdiag,
+    double* delta_chemical_potentials, double* delta_statevars,
+    double* delta_phase_amounts, double* delta_y_out)
+{
+    int i, r, c;
+    for (i = 0; i < spec->num_components; ++i) delta_chemical_potentials[i] = 0.0;
+    for (i = 0; i < spec->num_statevars; ++i)  delta_statevars[i] = 0.0;
+    for (i = 0; i < state->num_compsets; ++i)  delta_phase_amounts[i] = 0.0;
+
+    int num_stable = state->num_free_stable_compsets;
+    int num_fixed_ph = spec->num_fixed_stable_compsets;
+    int num_mf = spec->num_prescribed_mole_fraction_conditions;
+    int rows = num_stable + num_fixed_ph + num_mf + 1;
+    int cols = spec->num_free_chemical_potentials + num_stable
+               + spec->num_free_statevars;
+    if (rows != cols || rows > MAX_SVD_M || cols > MAX_SVD_N) return 0;
+
+    for (i = 0; i < rows * cols; ++i) equilibrium_matrix[i] = 0.0;
+    for (i = 0; i < rows; ++i) equilibrium_rhs[i] = 0.0;
+    fill_equilibrium_system(equilibrium_matrix, cols, equilibrium_rhs, spec, state);
+    for (i = 0; i < rows; ++i) equilibrium_rhs[i] = 0.0;
+
+    double pgrad[MAX_PARAMS];
+    double mixed[MAX_DOF_PER_PHASE * MAX_PARAMS];
+    double c_p_all[MAX_PHASES * MAX_DOF_PER_PHASE];
+    int have_cp[MAX_PHASES];
+    for (i = 0; i < MAX_PHASES; ++i) have_cp[i] = 0;
+
+    double sysamt = state->system_amount;
+
+    for (int pass = 0; pass < 2; ++pass) {
+        int count = (pass == 0) ? num_stable : num_fixed_ph;
+        for (int k = 0; k < count; ++k) {
+            int cs_idx = (pass == 0) ? state->free_stable_compset_indices[k]
+                                     : spec->fixed_stable_compset_indices[k];
+            const CompositionSet* compset = &state->compsets[cs_idx];
+            if (compset->phase_record == (const PhaseRecord*)0) continue;
+            const CompsetState* csst = &state->cs_states[cs_idx];
+            int pdof = compset->phase_record->phase_dof;
+            if (compset->phase_record->formulaparamgrad == (pycgpu_array_func_t)0 ||
+                compset->phase_record->formulaparammixed == (pycgpu_array_func_t)0) return 0;
+
+            /* Phase row RHS: +dG/dp (same formula-unit convention as the
+             * Newton row's `energy`). Row index mirrors fill order. */
+            compset->phase_record->formulaparamgrad(pgrad, compset->dof);
+            int row = (pass == 0) ? k : (num_stable + k);
+            equilibrium_rhs[row] = pgrad[param_idx];
+
+            if (cs_idx >= MAX_PHASES) return 0;
+            compset->phase_record->formulaparammixed(mixed, compset->dof);
+            pyjan_param_cp(csst, pdof, mixed, param_idx,
+                           &c_p_all[cs_idx * MAX_DOF_PER_PHASE]);
+            have_cp[cs_idx] = 1;
+            const double* c_p = &c_p_all[cs_idx * MAX_DOF_PER_PHASE];
+            double amt = state->phase_amt[cs_idx];
+            if (fabs(sysamt) < 1e-12) continue;
+
+            /* Mole-fraction condition rows. */
+            int ncols_mf = spec->num_prescribed_mole_fraction_coefficients_cols;
+            if (ncols_mf > MAX_COMPONENTS) ncols_mf = MAX_COMPONENTS;
+            for (r = 0; r < num_mf; ++r) {
+                double row_acc = 0.0;
+                for (c = 0; c < ncols_mf; ++c) {
+                    double prefactor = spec->prescribed_mole_fraction_coefficients[r][c];
+                    if (fabs(prefactor) < 1e-12) continue;
+                    double t1 = 0.0, t2 = 0.0;
+                    for (int j = 0; j < pdof; ++j) {
+                        t1 += csst->mass_jac[c * csst->mass_jac_cols + (spec->num_statevars + j)] * c_p[j];
+                        t2 += (-state->mole_fractions[c] * csst->moles_normalization_grad[spec->num_statevars + j]) * c_p[j];
+                    }
+                    row_acc += -prefactor * (amt / sysamt) * (t1 + t2);
+                }
+                equilibrium_rhs[num_stable + num_fixed_ph + r] += row_acc;
+            }
+            /* N (system amount) row. */
+            {
+                double acc = 0.0;
+                for (c = 0; c < spec->num_components; ++c) {
+                    double t1 = 0.0;
+                    for (int j = 0; j < pdof; ++j) {
+                        t1 += csst->mass_jac[c * csst->mass_jac_cols + (spec->num_statevars + j)] * c_p[j];
+                    }
+                    acc += -amt * t1;
+                }
+                equilibrium_rhs[num_stable + num_fixed_ph + num_mf] += acc;
+            }
+        }
+    }
+
+    lstsq(equilibrium_matrix, rows, cols, equilibrium_rhs, 1e-16,
+          U, V, singular_values, superdiag);
+
+    for (i = 0; i < spec->num_free_chemical_potentials; ++i)
+        delta_chemical_potentials[spec->free_chemical_potential_indices[i]] = equilibrium_rhs[i];
+    for (i = 0; i < num_stable; ++i)
+        delta_phase_amounts[state->free_stable_compset_indices[i]] =
+            equilibrium_rhs[spec->num_free_chemical_potentials + i];
+    for (i = 0; i < spec->num_free_statevars; ++i)
+        delta_statevars[spec->free_statevar_indices[i]] =
+            equilibrium_rhs[spec->num_free_chemical_potentials + num_stable + i];
+
+    /* delta_y with the direct parameter channel. */
+    for (int cs = 0; cs < state->num_compsets && cs < MAX_PHASES; ++cs) {
+        const CompositionSet* compset = &state->compsets[cs];
+        if (compset->phase_record == (const PhaseRecord*)0) continue;
+        const CompsetState* csst = &state->cs_states[cs];
+        int pdof = compset->phase_record->phase_dof;
+        double* dy = &delta_y_out[cs * MAX_DOF_PER_PHASE];
+        pyjan_site_fraction_differential(spec, csst, pdof,
+            delta_chemical_potentials, delta_statevars, dy);
+        if (have_cp[cs]) {
+            for (int j = 0; j < pdof; ++j) dy[j] += c_p_all[cs * MAX_DOF_PER_PHASE + j];
+        } else if (compset->phase_record->formulaparammixed != (pycgpu_array_func_t)0) {
+            double cp_tmp[MAX_DOF_PER_PHASE];
+            compset->phase_record->formulaparammixed(mixed, compset->dof);
+            pyjan_param_cp(csst, pdof, mixed, param_idx, cp_tmp);
+            for (int j = 0; j < pdof; ++j) dy[j] += cp_tmp[j];
+        }
+    }
+    pyjan_amounts_to_moles(spec, state, delta_phase_amounts, delta_y_out);
+    return 1;
+}
+#endif /* PYCGPU_JANSSON_KIND == 2 && MAX_PARAMS > 0 */
+
 /* Reference fixed_component_differential (minimizer.pyx:736): the plain
  * Newton system (no reserved row, no spec mutation) with a unit RHS on the
  * target component's mole-fraction row.  The target is identified the way
@@ -4498,8 +4661,26 @@ __device__ static void pyjan_compute_deltas(
     double* d_y   = jansson_out + MAX_COMPONENTS + MAX_STATEVARS + MAX_PHASES;
     double* status = jansson_out + (PYJAN_OUT_STRIDE - 1);
 
-    for (int i = 0; i < PYJAN_OUT_STRIDE; ++i) jansson_out[i] = 0.0;
+    for (int i = 0; i < PYJAN_COND_STRIDE; ++i) jansson_out[i] = 0.0;
 
+#if defined(PYCGPU_JANSSON_KIND) && (PYCGPU_JANSSON_KIND == 2)
+    /* Parameter denominators: one delta block per fit parameter, all
+     * parameters solved against the same converged state (the Newton matrix
+     * is refilled per parameter because lstsq destroys it). */
+    (void)target_statevar_index; (void)d_mu; (void)d_sv; (void)d_amt; (void)d_y; (void)status;
+#if MAX_PARAMS > 0
+    for (int p = 0; p < MAX_PARAMS; ++p) {
+        double* out_p = jansson_out + p * PYJAN_OUT_STRIDE;
+        int okp = pyjan_parameter_differential(
+            spec, state, p, equilibrium_matrix, equilibrium_rhs,
+            U, V, singular_values, superdiag,
+            out_p, out_p + MAX_COMPONENTS,
+            out_p + MAX_COMPONENTS + MAX_STATEVARS,
+            out_p + MAX_COMPONENTS + MAX_STATEVARS + MAX_PHASES);
+        out_p[PYJAN_OUT_STRIDE - 1] = okp ? 1.0 : 0.0;
+    }
+#endif
+#else /* PYCGPU_JANSSON_KIND 0/1 */
 #if defined(PYCGPU_JANSSON_KIND) && (PYCGPU_JANSSON_KIND == 1)
     int ok = pyjan_fixed_component_differential(
         spec, state, target_statevar_index, equilibrium_matrix, equilibrium_rhs,
@@ -4522,4 +4703,5 @@ __device__ static void pyjan_compute_deltas(
     pyjan_amounts_to_moles(spec, state, d_amt, d_y);
 #endif
     *status = 1.0;
+#endif /* PYCGPU_JANSSON_KIND == 2 */
 }

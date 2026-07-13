@@ -1777,7 +1777,7 @@ __device__ void solve_equilibrium_at_condition(
                                  U_lstsq, V_lstsq, singular_values_lstsq,
                                  superdiag_lstsq, jansson_out);
         } else {
-            for (int _ji = 0; _ji < PYJAN_OUT_STRIDE; ++_ji) jansson_out[_ji] = 0.0;
+            for (int _ji = 0; _ji < PYJAN_COND_STRIDE; ++_ji) jansson_out[_ji] = 0.0;
         }
     }
 #endif

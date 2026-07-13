@@ -61,7 +61,11 @@ def jansson_deltas(dbf, comps, phases, conditions, denominator, backend=None,
     wks = Workspace(dbf, comps, phases, conditions, **wks_kwargs)
     state_variables = sorted(wks.phase_record_factory.state_variables, key=str)
     kind = 0
-    if isinstance(denominator, v.MoleFraction):
+    if isinstance(denominator, str) and denominator == 'parameters':
+        # All fit parameters at once (one delta block per parameter).
+        sv_idx = 0
+        kind = 2
+    elif isinstance(denominator, v.MoleFraction):
         # Fixed-component denominator: index into the constraint coefficient
         # columns.  Same source as the reference (variables.py:633):
         # phase_record.nonvacant_elements.
@@ -106,18 +110,28 @@ def jansson_deltas(dbf, comps, phases, conditions, denominator, backend=None,
     L = stash['layout']
     nc, nsv = L['MAX_COMPONENTS'], L['MAX_STATEVARS']
     nph, ndof = L['MAX_PHASES'], L['MAX_DOF_PER_PHASE']
+    if kind == 2:
+        # (n_conds, n_params * stride) -> param axis after the condition axis.
+        n_params = max(int(L.get('MAX_PARAMS', 0)), 1)
+        raw = raw.reshape(raw.shape[0] * n_params, -1)
     o = 0
     delta_mu = raw[:, o:o + nc]; o += nc
     delta_sv = raw[:, o:o + nsv]; o += nsv
     delta_amt = raw[:, o:o + nph]; o += nph
     delta_y = raw[:, o:o + nph * ndof].reshape(-1, nph, ndof); o += nph * ndof
     ok = raw[:, o] > 0.5
+    if kind == 2:
+        delta_mu = delta_mu.reshape(-1, n_params, nc)
+        delta_sv = delta_sv.reshape(-1, n_params, nsv)
+        delta_amt = delta_amt.reshape(-1, n_params, nph)
+        delta_y = delta_y.reshape(-1, n_params, nph, ndof)
+        ok = ok.reshape(-1, n_params)
 
     n_active = len(wks.components) - (1 if any(str(c) == 'VA' for c in wks.components) else 0)
     dims = list(eq.GM.dims)
     return {
-        'delta_MU': delta_mu[:, :n_active],
-        'delta_statevars': delta_sv[:, :len(state_variables)],
+        'delta_MU': delta_mu[..., :n_active],
+        'delta_statevars': delta_sv[..., :len(state_variables)],
         'delta_phase_amounts': delta_amt,
         'delta_sitefracs': delta_y,
         'ok': ok,
@@ -191,7 +205,12 @@ def jansson_derivative(dbf, comps, phases, conditions, numerator, denominator,
     d_amt = res['delta_phase_amounts']; d_y_all = res['delta_sitefracs']
     ok = res['ok']
 
-    values = np.full(n_conds, np.nan)
+    param_mode = isinstance(denominator, str) and denominator == 'parameters'
+    n_params = d_amt.shape[1] if param_mode else 0
+    if param_mode:
+        ok = np.all(ok, axis=1)
+
+    values = np.full((n_conds, n_params) if param_mode else n_conds, np.nan)
     # Group evaluations by phase for batching.
     for phase_name in sorted(set(names.reshape(-1)) - {''}):
         pr = prf[str(phase_name)]
@@ -229,6 +248,25 @@ def jansson_derivative(dbf, comps, phases, conditions, numerator, denominator,
         grads = np.zeros((len(rows), dof2d.shape[1] + (
             len(getattr(prf, 'param_symbols', []) or []))))
         evaluator.grad(str(phase_name), dof2d, grads)
+        if param_mode:
+            pgrads = np.zeros((len(rows), n_params))
+            evaluator.param_grad(str(phase_name), dof2d, pgrads)
+            for r, (ci, vi) in enumerate(locs):
+                if np.isnan(func_vals[r]):
+                    continue
+                if np.isnan(values[ci, 0]):
+                    values[ci, :] = 0.0
+                for p in range(n_params):
+                    contrib = d_amt[ci, p, vi] * func_vals[r]
+                    # Direct dprop/dp term plus the equilibrium response
+                    # (delta_statevars is zero when T and P are conditions).
+                    contrib += np_amt[ci, vi] * (
+                        pgrads[r, p]
+                        + d_sv_all[ci, p, t_pos] * grads[r, 0]
+                        + float(np.dot(d_y_all[ci, p, vi, :pdof],
+                                       grads[r, 1:1 + pdof])))
+                    values[ci, p] += contrib
+            continue
         for r, (ci, vi) in enumerate(locs):
             if np.isnan(func_vals[r]):
                 continue
@@ -239,5 +277,9 @@ def jansson_derivative(dbf, comps, phases, conditions, numerator, denominator,
             contrib += np_amt[ci, vi] * float(
                 np.dot(d_y_all[ci, vi, :pdof], grads[r, 1:1 + pdof]))
             values[ci] += contrib
-    return {'values': values, 'grid_dims': dims, 'grid_coords': coords,
-            'deltas': res}
+    out = {'values': values, 'grid_dims': dims, 'grid_coords': coords,
+           'deltas': res}
+    if param_mode:
+        out['param_symbols'] = [str(s) for s in
+                                (getattr(prf, 'param_symbols', []) or [])]
+    return out

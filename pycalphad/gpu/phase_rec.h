@@ -25,6 +25,10 @@ typedef struct PhaseRecord {
     pycgpu_array_func_t mass_obj;
     pycgpu_array_func_t formulamole_obj;
     pycgpu_array_func_t formulamole_grad;
+    /* Jansson parameter derivatives (set by emitted assignments after init()
+     * when fit parameters are present and requested; nullptr otherwise). */
+    pycgpu_array_func_t formulaparamgrad;   /* out[p] = dG/dp            */
+    pycgpu_array_func_t formulaparammixed;  /* out[j*MAX_PARAMS+p] = d2G/dy_j dp */
     int num_statevars; //number of STATE variables
     int phase_dof; //number of SITE variables
     int num_vars;
@@ -41,6 +45,8 @@ typedef struct PhaseRecord {
         mass_obj = mon;
         formulamole_obj = fmon;
         formulamole_grad = fmgn;
+        formulaparamgrad = nullptr;
+        formulaparammixed = nullptr;
         num_statevars = ns;
         phase_dof = pd;
         num_vars = ns+pd;
@@ -60,6 +66,8 @@ typedef struct PhaseRecord {
         mass_obj = nullptr;
         formulamole_obj = nullptr;
         formulamole_grad = nullptr;
+        formulaparamgrad = nullptr;
+        formulaparammixed = nullptr;
         num_statevars = 0;
         phase_dof = 0;
         num_vars = 0;

@@ -67,6 +67,14 @@ extern "C" void pycgpu_cpu_grid_eval_grad(int model_idx, const double* dof, doub
                               &out[i * (long long)grad_len]);
     }
 }
+extern "C" void pycgpu_cpu_grid_eval_pgrad(int model_idx, const double* dof, double* out,
+                                           long long n_points, int dof_stride, int n_params)
+{
+    for (long long i = 0; i < n_points; ++i) {
+        pycgpu_eval_prop_pgrad(model_idx, &dof[i * (long long)dof_stride],
+                               &out[i * (long long)n_params]);
+    }
+}
 """
 
 
@@ -125,12 +133,26 @@ def _generate_property_source(shim, output):
         grad_c = re.sub(r'\bnan(\.0)?\b', '(0.0/0.0)', grad_c)
         grad_c = re.sub(r'\binf(\.0)?\b', '(1.0/0.0)', grad_c)
         funcs.append(grad_c)
+        # Parameter gradient (dprop/dp per fit parameter) -- the direct term
+        # of parameter-denominator Jansson derivatives. Only emitted when the
+        # system carries fit parameters.
+        if param_symbols:
+            pgrad_c = notebook_source_from_expr(
+                [expr.diff(p) for p in param_symbols], "proppgrad", model, idx, shim,
+                expr_type="func", c_output_type="void", validate=False,
+                verbose=shim.verbose)
+            pgrad_c = re.sub(r'\bnan(\.0)?\b', '(0.0/0.0)', pgrad_c)
+            pgrad_c = re.sub(r'\binf(\.0)?\b', '(1.0/0.0)', pgrad_c)
+            funcs.append(pgrad_c)
     cases = "\n".join(
         f"        case {idx}: return {notebook_model_c_func_name_prefix(idx)}prop(x);"
         for idx in range(len(unique_models)))
     grad_cases = "\n".join(
         f"        case {idx}: {notebook_model_c_func_name_prefix(idx)}propgrad(out, x); return;"
         for idx in range(len(unique_models)))
+    pgrad_cases = "\n".join(
+        f"        case {idx}: {notebook_model_c_func_name_prefix(idx)}proppgrad(out, x); return;"
+        for idx in range(len(unique_models))) if param_symbols else ""            
     return f"""
 #if defined(__CUDACC_RTC__) || defined(__HIPCC_RTC__)
 #define DBL_MAX 1.7976931348623157e+308
@@ -159,6 +181,12 @@ __device__ void pycgpu_eval_prop_grad(int model_idx, const double* x, double* ou
     }}
 }}
 
+__device__ void pycgpu_eval_prop_pgrad(int model_idx, const double* x, double* out) {{
+    switch (model_idx) {{
+{pgrad_cases}
+    }}
+}}
+
 extern "C" {{
 __global__ void grid_eval_kernel(int model_idx, const double* dof, double* out,
                                  long long n_points, int dof_stride) {{
@@ -172,6 +200,13 @@ __global__ void grid_eval_grad_kernel(int model_idx, const double* dof, double* 
     if (i >= n_points) return;
     pycgpu_eval_prop_grad(model_idx, &dof[i * (long long)dof_stride],
                           &out[i * (long long)grad_len]);
+}}
+__global__ void grid_eval_pgrad_kernel(int model_idx, const double* dof, double* out,
+                                       long long n_points, int dof_stride, int n_params) {{
+    long long i = (long long)blockDim.x * blockIdx.x + threadIdx.x;
+    if (i >= n_points) return;
+    pycgpu_eval_prop_pgrad(model_idx, &dof[i * (long long)dof_stride],
+                           &out[i * (long long)n_params]);
 }}
 }}
 """
@@ -241,12 +276,18 @@ def _build_module(backend_name, shim, verbose=False, output='GM',
         fn.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p,
                        ctypes.c_longlong, ctypes.c_int]
         gfn = None
+        pgfn = None
         if output != 'GM' or force_property_module:
             gfn = lib.pycgpu_cpu_grid_eval_grad
             gfn.restype = None
             gfn.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p,
                             ctypes.c_longlong, ctypes.c_int, ctypes.c_int]
-        return ('cpp', fn, gfn)
+            if param_symbols:
+                pgfn = lib.pycgpu_cpu_grid_eval_pgrad
+                pgfn.restype = None
+                pgfn.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p,
+                                 ctypes.c_longlong, ctypes.c_int, ctypes.c_int]
+        return ('cpp', fn, gfn, pgfn)
     else:
         if cp is None:
             raise RuntimeError("backend 'gpu' requires CuPy")
@@ -258,7 +299,10 @@ def _build_module(backend_name, shim, verbose=False, output='GM',
             init_k((1,), (1,), ())
             cp.cuda.runtime.deviceSynchronize()
         gk = None if (output == 'GM' and not force_property_module) else module.get_function('grid_eval_grad_kernel')
-        return ('cuda', module.get_function('grid_eval_kernel'), gk)
+        pgk = None
+        if gk is not None and param_symbols:
+            pgk = module.get_function('grid_eval_pgrad_kernel')
+        return ('cuda', module.get_function('grid_eval_kernel'), gk, pgk)
 
 
 def get_grid_evaluator(backend_name, components, phases, models,
@@ -311,7 +355,14 @@ def get_grid_evaluator(backend_name, components, phases, models,
 
     from pycalphad.gpu.gpu_codegen import _unique_models_for_gpu
     _, name_to_idx = _unique_models_for_gpu(shim, validate=False)
-    kind, fn, grad_fn = entry if len(entry) == 3 else (entry[0], entry[1], None)
+    if len(entry) == 4:
+        kind, fn, grad_fn, pgrad_fn = entry
+    elif len(entry) == 3:
+        kind, fn, grad_fn = entry
+        pgrad_fn = None
+    else:
+        kind, fn = entry
+        grad_fn = pgrad_fn = None
 
     # The single-threaded C++ path has near-zero per-call overhead and matches
     # or beats the reference LLVM callables at every measured size, so it is
@@ -383,6 +434,32 @@ def get_grid_evaluator(backend_name, components, phases, models,
             cp.cuda.runtime.deviceSynchronize()
             out[:] = cp.asnumpy(d_out)
 
+    def evaluate_param_grad(phase_name, dof, out):
+        """dprop/dp over dof rows: out is (n_points, n_params); fit-parameter
+        values are appended from factory.param_values as in evaluate()."""
+        if pgrad_fn is None or not n_params:
+            raise RuntimeError('parameter gradients unavailable for this module')
+        model_idx = name_to_idx[phase_name]
+        pv = np.asarray(phase_record_factory.param_values, dtype=np.float64).reshape(-1)[:n_params]
+        dof = np.concatenate([dof, np.broadcast_to(pv, (dof.shape[0], n_params))], axis=1)
+        n_points, dof_stride = dof.shape
+        dof_c = np.ascontiguousarray(dof, dtype=np.float64)
+        assert out.shape == (n_points, n_params), (out.shape, dof.shape)
+        if kind == 'cpp':
+            pgrad_fn(int(model_idx), dof_c.ctypes.data, out.ctypes.data,
+                     n_points, dof_stride, n_params)
+        else:
+            d_dof = cp.asarray(dof_c)
+            d_out = cp.empty((n_points, n_params), dtype=cp.float64)
+            tpb = 128
+            blocks = (n_points + tpb - 1) // tpb
+            pgrad_fn((blocks,), (tpb,),
+                     (np.int32(model_idx), d_dof, d_out,
+                      np.int64(n_points), np.int32(dof_stride), np.int32(n_params)))
+            cp.cuda.runtime.deviceSynchronize()
+            out[:] = cp.asnumpy(d_out)
+
     evaluate.min_points = min_points
     evaluate.grad = evaluate_grad
+    evaluate.param_grad = evaluate_param_grad
     return evaluate

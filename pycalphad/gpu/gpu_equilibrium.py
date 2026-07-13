@@ -2244,7 +2244,9 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         "fmad:" + str(bool(os.environ.get('PYCGPU_NOFMAD'))),
         "robust:" + str(bool(os.environ.get('PYCGPU_ROBUST'))),
         "prof:" + str(bool(os.environ.get('PYCGPU_PROF'))),
-        "fp32emu:" + str(bool(os.environ.get('PYCGPU_FP32EMU')))
+        "fp32emu:" + str(bool(os.environ.get('PYCGPU_FP32EMU'))),
+        "jansson:" + str(os.environ.get('PYCGPU_JANSSON_TARGET'))
+        + "/" + str(os.environ.get('PYCGPU_JANSSON_KIND')),
     ]
     cache_key_input = "|".join(cache_key_parts)
     cache_key = hashlib.md5(cache_key_input.encode()).hexdigest()
@@ -2469,6 +2471,9 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         if _jansson_target is not None:
             _pyjan_stride = (dynamic_sizes['MAX_COMPONENTS'] + dynamic_sizes['MAX_STATEVARS']
                              + MAX_PHASES + MAX_PHASES * MAX_DOF_PER_PHASE + 1)
+            if os.environ.get('PYCGPU_JANSSON_KIND') == '2':
+                # Parameter denominators: one delta block per fit parameter.
+                _pyjan_stride *= max(int(dynamic_sizes.get('MAX_PARAMS', 0)), 1)
         results_flat = np.zeros(num_total_conditions_pts * results_per_condition
                                 + num_total_conditions_pts * _pyjan_stride, dtype=np.float64)
         
@@ -2969,7 +2974,8 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             'layout': {'MAX_COMPONENTS': int(dynamic_sizes['MAX_COMPONENTS']),
                        'MAX_STATEVARS': int(dynamic_sizes['MAX_STATEVARS']),
                        'MAX_PHASES': int(MAX_PHASES),
-                       'MAX_DOF_PER_PHASE': int(MAX_DOF_PER_PHASE)},
+                       'MAX_DOF_PER_PHASE': int(MAX_DOF_PER_PHASE),
+                       'MAX_PARAMS': int(dynamic_sizes.get('MAX_PARAMS', 0))},
         }
 
     if not _cpu_backend_mode:

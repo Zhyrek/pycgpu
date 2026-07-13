@@ -75,6 +75,21 @@ typical systems; a small documented set of degenerate conditions differ at
 the eps·cond level of the underlying linear algebra with identical phase
 sets.
 
+## Running the test suite per backend
+
+```shell
+pytest pycalphad/tests                   # reference solver (nothing broken)
+pytest pycalphad/tests --backend=c++     # every test through the c++ backend
+pytest pycalphad/tests --backend=gpu     # every test through the gpu backend
+```
+
+The flag sets the global backend for the session so all tests exercise the
+selected dispatch path (`PYCALPHAD_BACKEND` env is honored when the flag is
+absent). Tests asserting bitwise equality against the reference report
+**xfail** — never skip — when the documented eps-class engine difference
+trips them, so divergences stay enumerable in every run and flip to plain
+passes if the backend linear algebra reaches bit-parity.
+
 ## Tuning (optional environment variables)
 
 - `PYCGPU_DEVICE_HULL=0` — opt out of the compiled starting-point hull

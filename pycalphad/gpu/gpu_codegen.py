@@ -2806,7 +2806,7 @@ def _generate_full_gpu_source(wks_obj: Workspace,
     max_dof_per_phase = _get_c_define("MAX_DOF_PER_PHASE")
     max_grid_points = _get_c_define("MAX_GRID_POINTS")
 
-    svd_c_source = _read_gpu_header("svd.c")
+    svd_c_source = ""  # legacy svd.c removed (LAPACK transliteration replaces it)
     # LAPACK transliteration chain (bitwise-identical to reference LAPACK;
     # order matters: leaf -> dbdsqr -> mid -> top)
     lapack_source = (_read_gpu_header("lapack_leaf.h")
@@ -2815,7 +2815,7 @@ def _generate_full_gpu_source(wks_obj: Workspace,
                      + "\n" + _read_gpu_header("lapack_top.h"))
     phase_rec_h_source = _read_gpu_header("phase_rec.h")
     comp_set_h_source = _read_gpu_header("comp_set.h")
-    lu_solver_h_source = _read_gpu_header("lu_solver.h")
+    lu_solver_h_source = ""  # legacy lu_solver.h removed
     hyperplane_h_source = _read_gpu_header("hyperplane.h")
     minimizer_h_source = _read_gpu_header("minimizer.h")
     eqsolver_h_source = _read_gpu_header("eqsolver.h")

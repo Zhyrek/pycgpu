@@ -1243,8 +1243,11 @@ __device__ static void pyclap_dormqr(char side, char trans, int m, int n,
         }
     }
 
-    if (nb < nbmin || nb >= k) {
-        /* Use unblocked code */
+    if (1) {  /* ALWAYS unblocked: LAPACK's blocked path (dlarft/dlarfb)
+                 * is a performance variant; the unblocked algorithm is the
+                 * same math at any size.  Below the blocking threshold
+                 * (k <= nb = 32, i.e. every real equilibrium system) this
+                 * is also the path LAPACK itself takes -> bitwise. */
         pyclap_dorm2r(side, trans, m, n, k, a, lda, tau, c, ldc, work,
                       &iinfo);
     } else {
@@ -1321,8 +1324,11 @@ __device__ static void pyclap_dormlq(char side, char trans, int m, int n,
         }
     }
 
-    if (nb < nbmin || nb >= k) {
-        /* Use unblocked code */
+    if (1) {  /* ALWAYS unblocked: LAPACK's blocked path (dlarft/dlarfb)
+                 * is a performance variant; the unblocked algorithm is the
+                 * same math at any size.  Below the blocking threshold
+                 * (k <= nb = 32, i.e. every real equilibrium system) this
+                 * is also the path LAPACK itself takes -> bitwise. */
         pyclap_dorml2(side, trans, m, n, k, a, lda, tau, c, ldc, work,
                       &iinfo);
     } else {

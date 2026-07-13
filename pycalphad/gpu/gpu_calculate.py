@@ -155,7 +155,7 @@ def _build_module(backend_name, shim, verbose=False, output='GM'):
 
     gpu_dir = os.path.dirname(os.path.abspath(__file__))
     hasher = hashlib.md5()
-    for hdr in ("svd.c", "phase_rec.h", "comp_set.h", "lu_solver.h", "hyperplane.h",
+    for hdr in ("phase_rec.h", "comp_set.h", "hyperplane.h",
                 "minimizer.h", "eqsolver.h", "gpu_codegen.py", "gpu_calculate.py"):
         with open(os.path.join(gpu_dir, hdr), "rb") as f:
             hasher.update(f.read())

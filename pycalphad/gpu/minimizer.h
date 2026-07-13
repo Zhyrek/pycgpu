@@ -21,28 +21,19 @@ extern "C" __device__ int printf(const char*, ...);
 #endif // __CUDACC_RTC__
 #include "phase_rec.h" // PhaseRecord definition
 #include "comp_set.h" // CompositionSet definition
-#include "lu_solver.h" // LU decomposition solver
 #include "debug_gpu.h" // GPU debug system
 
 // Forward declarations for types defined in eqsolver.h
 struct DeviceGrid;
 struct DevicePhaseData;
 
-// Forward declare SVD functions (actual definitions in svd.c will be included at compile time)
-__device__ int Singular_Value_Decomposition(double* A, int nrows, int ncols, double* U, 
-                      double* singular_values, double* V, double* dummy_array);
-__device__ void Singular_Value_Decomposition_Solve(double* U, double* D, double* V,  
-                double tolerance, int nrows, int ncols, double *B, double* x);
-__device__ void Singular_Value_Decomposition_Inverse(double* U, double* D, double* V,  
-                        double tolerance, int nrows, int ncols, double *Astar);
+// (legacy SVD forward declarations removed with svd.c)
 
 // Forward declarations for functions defined later in this file
 __device__ void compute_phase_matrix(double* phase_matrix_out, const double* hess_in,
                                     const double* cons_jac_tmp_in,
                                     const CompositionSet& compset_ref, int num_statevars_val,
                                     const double* phase_dof_site_fracs);
-__device__ void invert_matrix(double* matrix, int dim, double* U, double* V, 
-                              double* singular_values, double* superdiag, double* work);
 __device__ void lstsq(double* A, int nrows, int ncols, double* b, double tolerance,
                       double* U, double* V, double* singular_values, double* superdiag);
 
@@ -1310,7 +1301,6 @@ typedef struct SystemState {
             #ifdef PYCGPU_PROF
             long long prof_i0 = clock64();
             #endif
-#ifndef PYCGPU_LEGACY_LINALG
             {
                 // LAPACK-transliterated inverse with the reference wrapper's
                 // exact semantics (minimizer.pyx invert_matrix: NaN scrub ->
@@ -1321,9 +1311,6 @@ typedef struct SystemState {
                 pyclap_invert_pycalphad(csst->full_e_matrix,
                                         csst->full_e_matrix_dim, _ipiv, work_inv);
             }
-#else
-            invert_matrix_lu(csst->full_e_matrix, csst->full_e_matrix_dim, work_inv);
-#endif
             #ifdef PYCGPU_PROF
             if (thread_id < PYCGPU_PROF_MAXT) g_prof_inv[thread_id] += clock64() - prof_i0;
             #endif
@@ -4171,27 +4158,7 @@ __device__ bool run_loop(
  * @param superdiag Workspace for super-diagonal (N).
  * @param work Additional workspace (N x N).
  */
-__device__ void invert_matrix(double* matrix, int dim, double* U, double* V, 
-                              double* singular_values, double* superdiag, double* work) {
-    // Copy input matrix to work array (SVD modifies input)
-    for (int i = 0; i < dim * dim; ++i) {
-        work[i] = matrix[i];
-    }
-    
-    // Perform SVD: work = U * S * V^T
-    int svd_result = Singular_Value_Decomposition(work, dim, dim, U, singular_values, V, superdiag);
-    
-    if (svd_result != 0) {
-        // SVD failed - CPU doesn't have a fallback
-        return;
-    }
-    
-    // Compute pseudo-inverse using SVD result
-    // tolerance based on machine precision and matrix size
-    double tolerance = 1e-14 * dim;
-    
-    Singular_Value_Decomposition_Inverse(U, singular_values, V, tolerance, dim, dim, matrix);
-}
+/* legacy SVD-based invert_matrix removed; superseded by pyclap_invert_pycalphad */
 
 /**
  * @brief Solves least squares problem Ax = b using SVD decomposition.
@@ -4207,81 +4174,26 @@ __device__ void invert_matrix(double* matrix, int dim, double* U, double* V,
  */
 __device__ void lstsq(double* A, int nrows, int ncols, double* b, double tolerance,
                       double* U, double* V, double* singular_values, double* superdiag) {
-    // Note: A is already a copy (A_lstsq_copy), so we don't need another copy
-    // b_orig was only used for residual check which has been removed
-
-#ifndef PYCGPU_LEGACY_LINALG
-    // LAPACK-transliterated path (default): bitwise-identical to reference
-    // LAPACK's dgelsd chain with the reference wrapper's semantics (NaN
-    // scrub -> zeros, failure -> -1e19, rcond = 1e-16 RELATIVE cutoff).
-    // Buffers repurposed from the caller's per-thread slices: V holds the
-    // column-major copy, singular_values the SVs, U the LAPACK workspace,
-    // superdiag a snapshot of b for the fallback.  The base-case port
-    // covers every real system (n <= 25); larger or non-square systems
-    // return a loud code and fall through to the legacy SVD below,
-    // preserving old behavior instead of failing.
-    {
-        int i;
-        for (i = 0; i < nrows; ++i) superdiag[i] = b[i];
-        int rc = pyclap_lstsq_pycalphad(A, nrows, ncols, b, 1e-16,
-                                        V, singular_values, U, (int*)0);
-        if (rc != PYCLAP_ERR_DC_UNPORTED && rc != PYCLAP_ERR_NOT_SQUARE) {
-            return;  /* solved (or reference-semantics sentinel written) */
-        }
-        for (i = 0; i < nrows; ++i) b[i] = superdiag[i];
-    }
-#endif
-
-    // Perform SVD: A = U * S * V^T
-    int svd_result = Singular_Value_Decomposition(A, nrows, ncols, U, singular_values, V, superdiag);
-    
-    if (svd_result != 0) {
-        // SVD failed - CPU doesn't have a fallback
+    // Reference-LAPACK dgelsd chain (bitwise vs compiled netlib), with the
+    // reference wrapper's semantics (NaN scrub -> zeros, failure -> -1e19,
+    // relative rcond).  Buffers repurposed from the caller's per-thread
+    // slices: V = column-major copy, singular_values = SVs, U = workspace.
+    // Shapes outside the ported base case (n > 25 or non-square) cannot
+    // reach the kernel — the dispatch gate bounds the system size — but if
+    // they ever did, the reference failure sentinels make it loud.
+    (void)tolerance;  // the chain applies dgelsd's relative rcond internally
+    (void)superdiag;
+    if (ncols > 120) {
+        // Per-thread LAPACK workspace (the U slice) fits n <= ~120; a
+        // 120-dimensional equilibrium system implies a ~60-component
+        // database, far beyond anything physical.  Loud, not silent.
+        for (int i = 0; i < ncols; ++i) b[i] = -1e19;
         return;
     }
-    
-    // DEBUG: Print singular values for small systems
-    bool is_infeasible = false;
-    #ifdef VERBOSE_DEBUG
-    if (nrows <= 4 && ncols <= 3) {  // Small systems that might be infeasible
-        printf("[GPU LSTSQ DEBUG] SVD results for %dx%d system:\n", nrows, ncols);
-        for (int i = 0; i < ncols; ++i) {
-            printf("  singular_values[%d] = %.15e\n", i, singular_values[i]);
-        }
-        // Check if system is rank-deficient (smallest singular value very small)
-        double min_sv = singular_values[0];
-        for (int i = 1; i < ncols; ++i) {
-            if (singular_values[i] < min_sv) min_sv = singular_values[i];
-        }
-        if (min_sv < 1e-10 * singular_values[0]) {  // Use tighter tolerance for rank detection
-            is_infeasible = true;
-            printf("  System appears INFEASIBLE (rank-deficient), min_sv/max_sv = %.15e\n", min_sv/singular_values[0]);
-        }
-    }
-    #endif
-    
-    // Solve using SVD result
-    // Note: b is input as RHS (size nrows), output as solution (size ncols)
-    // We need a temporary array for the solution since b changes size
-    double temp_solution[MAX_SVD_N];
-    
-    Singular_Value_Decomposition_Solve(U, singular_values, V, tolerance, nrows, ncols, b, temp_solution);
-    
-    // Residual calculation disabled to save stack space
-    // (A_copy array was removed - saves ~130*130*8 = 135KB of stack)
-
-    #ifdef VERBOSE_DEBUG
-    if (nrows <= 4 && ncols <= 3) {
-        printf("  Solution vector:\n");
-        for (int i = 0; i < ncols; ++i) {
-            printf("    x[%d] = %.15e\n", i, temp_solution[i]);
-        }
-    }
-    #endif
-    
-    // Copy solution back to b
-    for (int i = 0; i < ncols; ++i) {
-        b[i] = temp_solution[i];
+    int rc = pyclap_lstsq_pycalphad(A, nrows, ncols, b, 1e-16,
+                                    V, singular_values, U, (int*)0);
+    if (rc == PYCLAP_ERR_DC_UNPORTED || rc == PYCLAP_ERR_NOT_SQUARE) {
+        for (int i = 0; i < ncols; ++i) b[i] = -1e19;
     }
 }
 /* ==== jansson derivative epilogue (folded from jansson.h; the separate

@@ -8,11 +8,11 @@
  * All dependencies (pyclap_*) are `static` in those headers.
  *
  * Restrictions of this port (loud, not silent):
- *  - dlalsd: divide-and-conquer section (n > smlsiz) returns
- *    PYCLAP_ERR_DC_UNPORTED; callers fall back to the legacy SVD path.
- *    Equilibrium systems are n ~ 4-15 (worst ~30 vs smlsiz=25), so the
- *    base case covers everything real; the fallback keeps n>25 correct
- *    (legacy eps-class) rather than wrong.
+ *  - dlalsd: the divide-and-conquer section is not ported and is
+ *    unreachable (dgelsd routes every n through the QR-iteration base
+ *    case; above LAPACK's SMLSIZ=25 performance threshold this stays the
+ *    correct LAPACK algorithm, merely not bitwise with a D&C build).
+ *    PYCLAP_ERR_DC_UNPORTED remains as a defensive signal only.
  *  - dgelsd: square (m == n) only — the only shape the solver produces
  *    (construct_equilibrium_system raises on non-square). m < mnthr is
  *    implied by squareness (mnthr = int(1.6*n) > n), so the initial-QR
@@ -232,7 +232,13 @@ __device__ static int pyclap_dgelsd_sq(int m, int n, double* a, int lda,
 {
     int info = 0;
     if (m != n) return PYCLAP_ERR_NOT_SQUARE;
-    const int smlsiz = 25;          /* ILAENV(9,'DGELSD') — ilaenv.f */
+    /* ILAENV(9,'DGELSD') = 25 is LAPACK's PERFORMANCE threshold between the
+     * QR-iteration base case and divide-and-conquer — not a validity limit.
+     * For n <= 25 we take the identical path to LAPACK (bitwise); above it
+     * we keep the (ported, bitwise-validated) base-case algorithm where the
+     * library would switch to D&C for speed: correct LAPACK results, not
+     * bitwise with a D&C build.  Real equilibrium systems are n ~ 4-15. */
+    const int smlsiz = (n > 25) ? n : 25;
     int minmn = (m < n) ? m : n;
     if (minmn < 1) { *rank = 0; return 0; }
     const int nrhs = 1;             /* reference wrapper always NRHS=1 */

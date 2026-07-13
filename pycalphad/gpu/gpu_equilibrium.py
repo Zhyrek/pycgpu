@@ -3,27 +3,30 @@
 # Main GPU equilibrium calculation module for pycalphad GPU acceleration
 # Handles compilation, kernel launching, and result processing
 
+import logging
 import numpy as np
 import os
 import time
 
-# CUDA environment is now compatible with GCC 13.3
+_import_log = logging.getLogger(__name__)
 
-# GPU availability detection with optional CPU fallback
+# GPU availability detection. Deliberately quiet: the c++ backend imports
+# this module too and needs no CuPy; selecting the gpu backend without a
+# working CuPy raises a clear error at set_backend time (pycalphad.backend).
 try:
     import cupy as cp
     GPU_AVAILABLE = True
     if os.getenv('FORCE_CPU', '0') == '1':
-        print("[GPU] FORCE_CPU=1 detected, disabling GPU acceleration")
+        _import_log.info("FORCE_CPU=1 detected, disabling GPU acceleration")
         GPU_AVAILABLE = False
 except ImportError:
     cp = None
     GPU_AVAILABLE = False
-    print("[GPU] CuPy not available, using CPU fallback")
+    _import_log.debug("CuPy not available; only the c++ backend can run")
 except Exception as e:
     cp = None
     GPU_AVAILABLE = False
-    print(f"[GPU] GPU initialization failed: {e}, using CPU fallback")
+    _import_log.debug("CuPy import failed (%r); only the c++ backend can run", e)
 
 
 def _detect_gpu_backend():

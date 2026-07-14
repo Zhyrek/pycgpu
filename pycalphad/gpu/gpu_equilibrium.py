@@ -842,8 +842,15 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
                         if str(key) in _sv_names][:k]
         else:  # unexpected dim layout: legacy leading-axes assumption
             _sv_axes = list(range(k))
+        _idx = tuple(mi[a] for a in _sv_axes)
+        if len(_idx) < k:
+            # calculate() PREPENDS one size-1 axis per scalar phase-local
+            # condition (grid dims: local conditions first, then statevars);
+            # their block-index contribution is zero.
+            _zeros = np.zeros(num_conditions_total, dtype=np.intp)
+            _idx = tuple(_zeros for _ in range(k - len(_idx))) + _idx
         grid_block_indices_np[:] = np.ravel_multi_index(
-            tuple(mi[a] for a in _sv_axes), grid_block_shape).astype(np.int32)
+            _idx, grid_block_shape).astype(np.int32)
 
     return (num_conditions_total, condition_args_np, global_spec_scalars, global_spec_arrays,
             initial_phase_data_arrays, grid_data_device_struct_np, grid_block_indices_np, properties)
@@ -1435,7 +1442,8 @@ def _create_system_specification_struct(global_spec_scalars, global_spec_arrays,
     MAX_SVD_DIM = MAX_PHASES + MAX_FIXED_MOLE_FRACTION_CONDITIONS + MAX_COMPONENTS + MAX_STATEVARS + 2
     MAX_SVD_M = MAX_SVD_DIM
     MAX_SVD_N = MAX_SVD_DIM
-    MAX_PHASE_MATRIX_DIM = MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS
+    MAX_PHASE_MATRIX_DIM = (MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS
+                            + int((dynamic_sizes or {}).get('MAX_PHASE_LOCAL_CONDITIONS', 0)))
     
     # Create the exact dtype that matches the C struct layout
     # This must match the SystemSpecification struct in minimizer.h exactly
@@ -2658,7 +2666,8 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     
     # Calculate array sizes based on MAX constants
     MAX_SVD_DIM = dynamic_sizes['MAX_COMPONENTS'] + dynamic_sizes['MAX_PHASES'] + dynamic_sizes['MAX_STATEVARS'] + dynamic_sizes['MAX_FIXED_MOLE_FRACTION_CONDITIONS'] + 2  # 4+4+4+4+2=18
-    MAX_PHASE_MATRIX_DIM = dynamic_sizes['MAX_DOF_PER_PHASE'] + dynamic_sizes['MAX_INTERNAL_CONSTRAINTS']  # 4+4=8
+    MAX_PHASE_MATRIX_DIM = (dynamic_sizes['MAX_DOF_PER_PHASE'] + dynamic_sizes['MAX_INTERNAL_CONSTRAINTS']
+                            + int(dynamic_sizes.get('MAX_PHASE_LOCAL_CONDITIONS', 0)))
     MAX_DOF_SIZE = dynamic_sizes['MAX_STATEVARS'] + dynamic_sizes['MAX_DOF_PER_PHASE']  # 4+4=8
     # Equilibrium-matrix work-array strides: MUST come from dynamic_sizes so the
     # Python allocations match the kernel's -D-defined slicing strides exactly

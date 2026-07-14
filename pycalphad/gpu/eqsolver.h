@@ -795,6 +795,7 @@ __device__ void solve_equilibrium_at_condition(
             for (int pj = 0; pj < current_spec.num_params && pj < MAX_PARAMS; ++pj) {
                 cs->dof[current_spec.num_statevars + cs->phase_record->phase_dof + pj] = current_spec.fit_params[pj];
             }
+            pycgpu_attach_local_conditions(cs, &current_spec, pr_idx);
         if (thread_id == 0 && current_sys_state.num_compsets < 2) {
             #ifdef VERBOSE_DEBUG
             printf("  Final cs->dof after setup (Workspace format): [");
@@ -1352,6 +1353,7 @@ __device__ void solve_equilibrium_at_condition(
                     for (int pj = 0; pj < current_spec.num_params && pj < MAX_PARAMS; ++pj) {
                         cs->dof[current_spec.num_statevars + cs->phase_record->phase_dof + pj] = current_spec.fit_params[pj];
                     }
+                    pycgpu_attach_local_conditions(cs, &current_spec, ph_idx);
                     
                     // Set initial phase amount to 0 (metastable)
                     cs->NP = 0.0;
@@ -1673,6 +1675,7 @@ __device__ void solve_equilibrium_at_condition(
             for (int pj = 0; pj < current_spec.num_params && pj < MAX_PARAMS; ++pj) {
                 new_cs->dof[current_spec.num_statevars + new_cs->phase_record->phase_dof + pj] = current_spec.fit_params[pj];
             }
+            pycgpu_attach_local_conditions(new_cs, &current_spec, phase_record_idx);
 
             // CPU (eqsolver.pyx:89) adds the new phase with NP = 1e-6 moles of atoms
             new_cs->NP = 1e-6;

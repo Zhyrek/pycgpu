@@ -154,6 +154,9 @@ def compute_dynamic_kernel_sizes(wks_obj: Workspace) -> Dict[str, int]:
         # _fit_parameter_symbols). Sized exactly: parameter count changes the
         # generated code, and the cache key includes dynamic sizes.
         "MAX_PARAMS": len(_fit_parameter_symbols(wks_obj)),
+        # Phase-local conditions (conditions with a phase name): total count
+        # system-wide. 0 when absent -> all dependent sizes unchanged.
+        "MAX_PHASE_LOCAL_CONDITIONS": _max_phase_local_conditions(wks_obj),
     }
 
     # The equilibrium-matrix work-array strides MUST be passed as -D
@@ -1077,6 +1080,15 @@ def notebook_replace_exp(source: str) -> str:
         source = source[:base_start]+new_pow+source[exp_end:]
         index = source.find("**")
     return source[:-1] #remove final space now that it's no longer needed
+
+
+def _max_phase_local_conditions(wks_obj):
+    """Total number of phase-local conditions (conditions with a phase name,
+    e.g. X(FCC_A1,ZN) or Y(LIQUID,0,ZN)). Sizes both the spec's system-wide
+    list and the per-compset attachment arrays (a compset attaches at most
+    all of them)."""
+    return sum(1 for key in (getattr(wks_obj, 'conditions', {}) or {})
+               if getattr(key, 'phase_name', None) is not None)
 
 
 def _fit_parameter_symbols(wks_obj):
@@ -3842,6 +3854,7 @@ __global__ void top_level_equilibrium_kernel(
                             + (MAX_PHASES + 1)                                      // fixed_stable_compset_indices + count
                             + 1                                                     // max_num_free_stable_phases
                             + 1                                                     // ALLOWED_MASS_RESIDUAL
+                            + (1 + 4 * MAX_PHASE_LOCAL_CONDITIONS)                  // phase-local conditions block
                             + (MAX_PARAMS + 1);                                     // fit_params + num_params
                         const double* spec_fit_params = my_spec_doubles + (spec_core_doubles - (MAX_PARAMS + 1));
                         int spec_num_params = (int)spec_fit_params[MAX_PARAMS];
@@ -4078,6 +4091,13 @@ __global__ void top_level_equilibrium_kernel(
             
             thread_spec.max_num_free_stable_phases = (int)my_spec_doubles[py_offset++];
             thread_spec.ALLOWED_MASS_RESIDUAL = my_spec_doubles[py_offset++];
+            thread_spec.num_phase_local_conditions_total = (int)my_spec_doubles[py_offset++];
+            for (int pi = 0; pi < MAX_PHASE_LOCAL_CONDITIONS; ++pi) {{
+                thread_spec.plc_model[pi] = (int)my_spec_doubles[py_offset++];
+                thread_spec.plc_type[pi] = (int)my_spec_doubles[py_offset++];
+                thread_spec.plc_target[pi] = (int)my_spec_doubles[py_offset++];
+                thread_spec.plc_value[pi] = my_spec_doubles[py_offset++];
+            }}
             for (int pi = 0; pi < MAX_PARAMS; ++pi) {{
                 thread_spec.fit_params[pi] = my_spec_doubles[py_offset++];
             }}

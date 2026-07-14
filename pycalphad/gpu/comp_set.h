@@ -18,6 +18,18 @@
 #define MAX_STATEVARS 8
 #endif
 
+// Phase-local conditions (conditions with a phase name, e.g. X(FCC_A1,ZN)
+// or Y(LIQUID,0,ZN)): each one borders the owning compset's phase matrix
+// with a constraint-jacobian row, exactly like an internal constraint
+// (reference compute_phase_matrix, minimizer.pyx:98). Sized per system by
+// compute_dynamic_kernel_sizes; 0 when no phase-local conditions exist.
+#ifndef MAX_PHASE_LOCAL_CONDITIONS
+#define MAX_PHASE_LOCAL_CONDITIONS 0
+#endif
+// Zero-length arrays are invalid C++; keep a 1-slot floor for the field
+// declarations (num_phase_local_conditions still reads 0).
+#define PYCGPU_PLC_CAP (MAX_PHASE_LOCAL_CONDITIONS > 0 ? MAX_PHASE_LOCAL_CONDITIONS : 1)
+
 // Legacy aliases for compatibility
 #define NDOF_MAX MAX_DOF_PER_PHASE
 #define NELEM_MAX MAX_COMPONENTS
@@ -36,8 +48,18 @@ struct CompositionSet {
     double energy;
     double NP;
     bool fixed;
+    // Phase-local conditions attached to this compset (reference:
+    // CompositionSet.set_local_conditions). type 0 = mole fraction
+    // (target = nonvacant component index; jacobian built from mass_jac and
+    // the moles-normalization gradient), type 1 = site fraction (target =
+    // site-fraction dof index; unit jacobian row).
+    int num_phase_local_conditions;
+    int plc_type[PYCGPU_PLC_CAP];
+    int plc_target[PYCGPU_PLC_CAP];
+    double plc_value[PYCGPU_PLC_CAP];
 
-    __device__ CompositionSet() : phase_record(nullptr), energy(0.0), NP(0.0), fixed(false) {
+    __device__ CompositionSet() : phase_record(nullptr), energy(0.0), NP(0.0), fixed(false),
+                                  num_phase_local_conditions(0) {
         for(int i = 0; i < MAX_STATEVARS + MAX_DOF_PER_PHASE; i++) dof[i] = 0.0;
         for(int i = 0; i < MAX_COMPONENTS; i++) X[i] = 0.0;
     }

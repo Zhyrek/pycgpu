@@ -61,6 +61,40 @@ def create_system_specifications_array(wks_obj, num_conditions, dynamic_sizes, p
             if verbose:
                 print(f"[GPU] Found X({comp}) condition with {len(x_conditions[comp_str])} values: {x_conditions[comp_str]}")
     
+    # Phase-local conditions (scalar values; the dispatch gate rejects
+    # array-valued ones): one system-wide entry list shared by every
+    # per-condition spec. Entries are (model_idx, type, target, value):
+    #   type 0 = X(phase, el), target = nonvacant component index;
+    #   type 1 = Y(phase, subl, sp), target = site-fraction dof index in the
+    #            generated-code ordering (get_ordered_symbols_for_diff).
+    plc_entries = []
+    _plc_conds = [(key, value) for key, value in wks_obj.conditions.items()
+                  if getattr(key, 'phase_name', None) is not None]
+    if _plc_conds:
+        from .gpu_codegen import _unique_models_for_gpu, get_ordered_symbols_for_diff
+        _u_models, _name_to_idx = _unique_models_for_gpu(wks_obj, validate=False)
+        _nonvacant = [str(c) for c in sorted(wks_obj.components, key=str)
+                      if str(c) != 'VA']
+        for key, value in _plc_conds:
+            _midx = _name_to_idx[key.phase_name]
+            _val = float(np.asarray(value).reshape(-1)[0])
+            if isinstance(key, v.MoleFraction):
+                _target = _nonvacant.index(str(key.species.name))
+                plc_entries.append((_midx, 0, _target, _val))
+            elif isinstance(key, v.SiteFraction):
+                _ysyms = get_ordered_symbols_for_diff(_u_models[_midx], wks_obj)[1:]
+                _target = None
+                for _yi, _sf in enumerate(_ysyms):
+                    if (getattr(_sf, 'sublattice_index', None) == key.sublattice_index
+                            and str(getattr(_sf, 'species', '')) == str(key.species)):
+                        _target = _yi
+                        break
+                if _target is None:
+                    raise ValueError(f'site fraction {key} not found in model dof')
+                plc_entries.append((_midx, 1, _target, _val))
+            else:
+                raise ValueError(f'unsupported phase-local condition {key}')
+
     # For backward compatibility, keep x_ti_values as the first composition condition found
     x_ti_values = x_conditions[x_components[0]] if x_components else None
     
@@ -139,6 +173,7 @@ def create_system_specifications_array(wks_obj, num_conditions, dynamic_sizes, p
         else:
             properties_subset = PropertiesSubset(properties, condition_idx, temp_idx, comp_idx, verbose=verbose)
 
+        global_spec_arrays['phase_local_conditions'] = plc_entries
         _populate_system_specification(global_spec_np, global_spec_arrays, temp_wks,
                                        dynamic_sizes, properties_subset)
         spec_doubles = create_flat_system_specification(global_spec_np, global_spec_arrays,

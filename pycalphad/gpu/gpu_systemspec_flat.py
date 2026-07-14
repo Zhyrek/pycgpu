@@ -26,6 +26,7 @@ def create_flat_system_specification(global_spec_scalars, global_spec_arrays, dy
     
     # Calculate total size in doubles
     MAX_PARAMS = int(dynamic_sizes.get("MAX_PARAMS", 0))
+    MAX_PHASE_LOCAL_CONDITIONS = int(dynamic_sizes.get("MAX_PHASE_LOCAL_CONDITIONS", 0))
     spec_core_doubles = (
         3 +  # num_statevars, num_components, prescribed_system_amount
         MAX_COMPONENTS +  # initial_chemical_potentials
@@ -39,6 +40,7 @@ def create_flat_system_specification(global_spec_scalars, global_spec_arrays, dy
         (MAX_PHASES + 1) +  # fixed_stable_compset_indices + num_fixed_stable_compsets
         1 +  # max_num_free_stable_phases
         1 +  # ALLOWED_MASS_RESIDUAL
+        (1 + 4 * MAX_PHASE_LOCAL_CONDITIONS) +  # phase-local conditions block
         (MAX_PARAMS + 1)  # fit_params[MAX_PARAMS] + num_params
     )
     
@@ -166,6 +168,21 @@ def create_flat_system_specification(global_spec_scalars, global_spec_arrays, dy
     # ALLOWED_MASS_RESIDUAL
     spec_doubles[idx] = global_spec_scalars[11]
     idx += 1
+
+    # Phase-local conditions: count then (model_idx, type, target, value)
+    # per slot. Attached at compset creation to compsets of the matching
+    # model; type 0 = mole fraction, 1 = site fraction.
+    plc = global_spec_arrays.get('phase_local_conditions', []) or []
+    spec_doubles[idx] = float(min(len(plc), MAX_PHASE_LOCAL_CONDITIONS))
+    idx += 1
+    for i in range(MAX_PHASE_LOCAL_CONDITIONS):
+        if i < len(plc):
+            model_idx, plc_type, target, value = plc[i]
+            spec_doubles[idx] = float(model_idx)
+            spec_doubles[idx + 1] = float(plc_type)
+            spec_doubles[idx + 2] = float(target)
+            spec_doubles[idx + 3] = float(value)
+        idx += 4
 
     # Runtime fit parameters (trailing dof slots in the generated functions)
     fit_params = np.asarray(global_spec_arrays.get('fit_params', []), dtype=np.float64).reshape(-1)

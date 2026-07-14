@@ -33,7 +33,9 @@ struct DevicePhaseData;
 __device__ void compute_phase_matrix(double* phase_matrix_out, const double* hess_in,
                                     const double* cons_jac_tmp_in,
                                     const CompositionSet& compset_ref, int num_statevars_val,
-                                    const double* phase_dof_site_fracs);
+                                    const double* phase_dof_site_fracs,
+                                    const double* mass_jac, int mass_jac_cols,
+                                    int num_components);
 __device__ void lstsq(double* A, int nrows, int ncols, double* b, double tolerance,
                       double* U, double* V, double* singular_values, double* superdiag);
 
@@ -95,7 +97,10 @@ struct SystemState;
 #define MAX_SVD_DIM (MAX_PHASES + MAX_FIXED_MOLE_FRACTION_CONDITIONS + MAX_COMPONENTS + MAX_STATEVARS + 2)
 #define MAX_SVD_M MAX_SVD_DIM
 #define MAX_SVD_N MAX_SVD_DIM
-#define MAX_PHASE_MATRIX_DIM (MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS)
+#ifndef MAX_PHASE_LOCAL_CONDITIONS
+#define MAX_PHASE_LOCAL_CONDITIONS 0
+#endif
+#define MAX_PHASE_MATRIX_DIM (MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS + MAX_PHASE_LOCAL_CONDITIONS)
 
 // Maximum number of threads that can run simultaneously
 // This should be at least as large as the maximum number of conditions
@@ -139,6 +144,13 @@ typedef struct SystemSpecification {
     // parameter vectors for batched MCMC ensembles).
     double fit_params[MAX_PARAMS + 1];
     int num_params;
+    // Phase-local conditions (system-wide list; attached at compset creation
+    // to every compset whose model index matches plc_model).
+    int num_phase_local_conditions_total;
+    int plc_model[PYCGPU_PLC_CAP];
+    int plc_type[PYCGPU_PLC_CAP];
+    int plc_target[PYCGPU_PLC_CAP];
+    double plc_value[PYCGPU_PLC_CAP];
 
     // Work arrays removed - now passed as parameters from Python to functions that need them
     // This allows for dynamic allocation based on actual number of conditions
@@ -203,6 +215,29 @@ typedef struct SystemSpecification {
     SystemSpecification(){}
 } SystemSpecification;
 
+/* Attach the spec's phase-local conditions to a freshly created compset
+ * (reference: solver.py attaches to every compset of the matching phase via
+ * CompositionSet.set_local_conditions). model_idx is the compset's index
+ * into the phase-records array. */
+__device__ static void pycgpu_attach_local_conditions(
+    CompositionSet* cs, const SystemSpecification* spec, int model_idx)
+{
+    cs->num_phase_local_conditions = 0;
+#if MAX_PHASE_LOCAL_CONDITIONS > 0
+    for (int i = 0; i < spec->num_phase_local_conditions_total
+                    && cs->num_phase_local_conditions < MAX_PHASE_LOCAL_CONDITIONS; ++i) {
+        if (spec->plc_model[i] == model_idx) {
+            int k = cs->num_phase_local_conditions++;
+            cs->plc_type[k] = spec->plc_type[i];
+            cs->plc_target[k] = spec->plc_target[i];
+            cs->plc_value[k] = spec->plc_value[i];
+        }
+    }
+#else
+    (void)spec; (void)model_idx;
+#endif
+}
+
 #ifdef __cplusplus
 }
 #endif
@@ -222,9 +257,9 @@ typedef struct CompsetState {
     int mass_jac_rows;
     int mass_jac_cols;
     // phase_matrix_dim = phase_dof + num_internal_cons (since num_phase_local_conditions is 0)
-    double phase_matrix[(MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS) * (MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS)];
+    double phase_matrix[MAX_PHASE_MATRIX_DIM * MAX_PHASE_MATRIX_DIM];
     int phase_matrix_dim;
-    double full_e_matrix[(MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS) * (MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS)];
+    double full_e_matrix[MAX_PHASE_MATRIX_DIM * MAX_PHASE_MATRIX_DIM];
     int full_e_matrix_dim;
 
     double c_G[MAX_DOF_PER_PHASE];
@@ -275,13 +310,14 @@ typedef struct CompsetState {
         for(int i=0; i<mass_jac_rows * mass_jac_cols; ++i) mass_jac[i] = 0.0;
         for(int i=mass_jac_rows*mass_jac_cols; i < MAX_COMPONENTS * (MAX_STATEVARS + MAX_DOF_PER_PHASE); ++i) mass_jac[i] = 0.0;
 
-        phase_matrix_dim = pr->phase_dof + pr->num_internal_cons; // num_phase_local_conditions is 0
+        phase_matrix_dim = pr->phase_dof + pr->num_internal_cons
+                         + compset->num_phase_local_conditions;
         for(int i=0; i<phase_matrix_dim * phase_matrix_dim; ++i) phase_matrix[i] = 0.0;
-        for(int i=phase_matrix_dim*phase_matrix_dim; i < (MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS) * (MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS); ++i) phase_matrix[i] = 0.0;
+        for(int i=phase_matrix_dim*phase_matrix_dim; i < MAX_PHASE_MATRIX_DIM * MAX_PHASE_MATRIX_DIM; ++i) phase_matrix[i] = 0.0;
 
         full_e_matrix_dim = phase_matrix_dim;
         for(int i=0; i<full_e_matrix_dim * full_e_matrix_dim; ++i) full_e_matrix[i] = 0.0;
-        for(int i=full_e_matrix_dim*full_e_matrix_dim; i < (MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS) * (MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS); ++i) full_e_matrix[i] = 0.0;
+        for(int i=full_e_matrix_dim*full_e_matrix_dim; i < MAX_PHASE_MATRIX_DIM * MAX_PHASE_MATRIX_DIM; ++i) full_e_matrix[i] = 0.0;
 
         c_G_length = pr->phase_dof;
         for(int i=0; i<c_G_length; ++i) c_G[i] = 0.0;
@@ -1275,7 +1311,9 @@ typedef struct SystemState {
             // Site fractions start at spec->num_statevars in workspace DOF
             compute_phase_matrix(csst->phase_matrix, csst->hess, csst->cons_jac_tmp,
                                  *compset, spec->num_statevars,
-                                 &compset->dof[spec->num_statevars]);
+                                 &compset->dof[spec->num_statevars],
+                                 csst->mass_jac, csst->mass_jac_cols,
+                                 spec->num_components);
 
             // DEBUG: Check phase_matrix before inversion
             #ifdef VERBOSE_DEBUG
@@ -1307,7 +1345,7 @@ typedef struct SystemState {
                 // zeros, dgetrf+dgetri with lwork=n, failure -> -1e19).  The
                 // reference feeds its C-ordered buffer straight to Fortran, so
                 // passing our row-major buffer unchanged sees identical bytes.
-                int _ipiv[MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS];
+                int _ipiv[MAX_PHASE_MATRIX_DIM];
                 pyclap_invert_pycalphad(csst->full_e_matrix,
                                         csst->full_e_matrix_dim, _ipiv, work_inv);
             }
@@ -1648,55 +1686,76 @@ __device__ bool identify_candidate_phase_to_add(
 __device__ void compute_phase_matrix(double* phase_matrix_out, const double* hess_in,
                                     const double* cons_jac_tmp_in,
                                     const CompositionSet& compset_ref, int num_statevars_val,
-                                    // chemical_potentials not used in C version from prompt
-                                    const double* phase_dof_site_fracs) {
-    // Based on the C version in the original minimizer.h prompt
-    // Assumes phase_matrix_out is pre-sized to (phase_dof + num_internal_cons) x (phase_dof + num_internal_cons)
-    // num_phase_local_conditions is zero, so it's omitted from dimensions.
+                                    const double* phase_dof_site_fracs,
+                                    const double* mass_jac, int mass_jac_cols,
+                                    int num_components) {
+    // LHS of Eq. 41, Sundman 2015 (reference compute_phase_matrix,
+    // minimizer.pyx:78): Hessian block bordered by the internal-constraint
+    // jacobian rows and, when present, the phase-local condition rows.
 
     if (compset_ref.phase_record == nullptr) return; // Safety check
     const PhaseRecord* pr = compset_ref.phase_record;
 
     int phase_dof_val = pr->phase_dof;
     int num_internal_cons_val = pr->num_internal_cons;
-    int current_phase_matrix_dim = phase_dof_val + num_internal_cons_val;
+    int n_plc = compset_ref.num_phase_local_conditions;
+    int current_phase_matrix_dim = phase_dof_val + num_internal_cons_val + n_plc;
     int hess_total_dim = num_statevars_val + phase_dof_val; // num_cols of hess
     int cons_jac_total_dim = num_statevars_val + phase_dof_val; // num_cols of cons_jac_tmp
+
+    // Zero everything first (reference zeroes csst.phase_matrix each
+    // iteration); the fills below only write the nonzero structure.
+    for (int i = 0; i < current_phase_matrix_dim * current_phase_matrix_dim; ++i) {
+        phase_matrix_out[i] = 0.0;
+    }
 
     // Fill phase matrix from Hessian (diagonal blocks)
     for (int i = 0; i < phase_dof_val; i++) {
         for (int j = 0; j < phase_dof_val; j++) {
-            // phase_matrix[i][j] = hess[num_statevars+i][num_statevars+j]
             phase_matrix_out[i * current_phase_matrix_dim + j] =
                 hess_in[(num_statevars_val + i) * hess_total_dim + (num_statevars_val + j)];
         }
     }
 
-    // Fill phase matrix from constraint Jacobian (off-diagonal blocks)
+    // Border with the internal-constraint Jacobian (symmetric blocks)
     for (int i = 0; i < num_internal_cons_val; i++) {
         for (int j = 0; j < phase_dof_val; j++) {
-            // Upper right block: phase_matrix[phase_dof+i][j] (row-major index)
             phase_matrix_out[(phase_dof_val + i) * current_phase_matrix_dim + j] =
                 cons_jac_tmp_in[i * cons_jac_total_dim + (num_statevars_val + j)];
-
-            // Lower left block: phase_matrix[j][phase_dof+i] (row-major index)
             phase_matrix_out[j * current_phase_matrix_dim + (phase_dof_val + i)] =
                 cons_jac_tmp_in[i * cons_jac_total_dim + (num_statevars_val + j)];
         }
     }
-     // Zero out the bottom-right block corresponding to (constraint, constraint) interactions if it's not filled by above
-    for (int i = 0; i < num_internal_cons_val; ++i) {
-        for (int j = 0; j < num_internal_cons_val; ++j) {
-            // This block should be zero in the standard formulation if not explicitly calculated.
-            // phase_matrix[phase_dof+i][phase_dof+j]
-            if (i!=j) { // Off-diagonal typically zero unless hessian of constraints considered.
-                 // phase_matrix_out[(phase_dof_val + i) * current_phase_matrix_dim + (phase_dof_val + j)] = 0.0;
+
+#if MAX_PHASE_LOCAL_CONDITIONS > 0
+    // Phase-local condition rows border the matrix after the internal
+    // constraints (reference minimizer.pyx:98). The jacobians are built
+    // from quantities the solver already computes:
+    //   X(phase, el) = v:  cons = moles(el, per fu) - v * sum_c moles(c, per fu)
+    //     d/dy_j = mass_jac[el][nsv+j] - v * (column sum over components of
+    //     mass_jac)[nsv+j]  (= moles_normalization_grad)
+    //   Y(phase, subl, sp) = v:  cons = y_k - v  ->  d/dy_j = (j == k)
+    for (int i = 0; i < n_plc; ++i) {
+        int border = phase_dof_val + num_internal_cons_val + i;
+        for (int j = 0; j < phase_dof_val; ++j) {
+            double jac_ij;
+            if (compset_ref.plc_type[i] == 0) {
+                double norm_grad_j = 0.0;
+                for (int c = 0; c < num_components; ++c) {
+                    norm_grad_j += mass_jac[c * mass_jac_cols + (num_statevars_val + j)];
+                }
+                jac_ij = mass_jac[compset_ref.plc_target[i] * mass_jac_cols + (num_statevars_val + j)]
+                         - compset_ref.plc_value[i] * norm_grad_j;
+            } else {
+                jac_ij = (j == compset_ref.plc_target[i]) ? 1.0 : 0.0;
             }
-            // Diagonal (lambda_i, lambda_i) terms are also typically zero.
-            // If they are filled from Hessian, this part is not needed. Sundman 2015 Eq 41 has this block as 0.
-             phase_matrix_out[(phase_dof_val + i) * current_phase_matrix_dim + (phase_dof_val + j)] = 0.0; // Explicitly zero for Sundman formulation
+            phase_matrix_out[border * current_phase_matrix_dim + j] = jac_ij;
+            phase_matrix_out[j * current_phase_matrix_dim + border] = jac_ij;
         }
     }
+#else
+    (void)mass_jac; (void)mass_jac_cols; (void)num_components;
+#endif
 }
 
 
@@ -2018,9 +2077,9 @@ __device__ void write_row_fixed_mole_fraction(double* out_row, double* out_rhs,
 // fill_equilibrium_system, check_convergence, pre_solve_hook, post_solve_hook,
 // solve_state, advance_state, remove_and_consolidate_phases, change_phases, run_loop
 
-// Phase-local conditions are always absent in this port, which simplifies
-// CompsetState's phase_matrix_dim (and MAX_PHASE_MATRIX_DIM); the functions
-// below rely on the dimensions carried by CompsetState and PhaseRecord.
+// Phase-local conditions (conditions with a phase name) border each
+// owning compset's phase matrix; the functions below rely on the dimensions
+// carried by CompsetState and PhaseRecord.
 
 // Implementation of write_row_fixed_mole_amount function
 __device__ void write_row_fixed_mole_amount(double* out_row, double* out_rhs,

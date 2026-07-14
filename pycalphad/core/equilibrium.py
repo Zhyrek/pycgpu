@@ -68,15 +68,26 @@ def _accelerated_conditions_supported(conditions, parameters, solver,
         n_mu_conds = sum(1 for c in conditions if isinstance(c, v.ChemicalPotential))
         n_lc_conds = sum(1 for c in conditions if str(c).startswith('LinComb_'))
         n_statevar_conds = sum(1 for c in conditions if c in (v.N, v.P, v.T))
+        # Phase-local conditions (X(phase,el) / Y(phase,subl,sp)) border the
+        # owning compset's phase matrix; scalar values only (the per-condition
+        # spec bakes one value system-wide).
+        n_plc_conds = sum(1 for c in conditions
+                          if isinstance(c, (v.MoleFraction, v.SiteFraction))
+                          and getattr(c, 'phase_name', None) is not None)
         # Fully-determined standard problems only: every condition is
-        # N/P/T/X/W/MU/LinComb and nothing else (under/overdetermined
-        # problems must reach the reference path's validation errors).
+        # N/P/T/X/W/MU/LinComb/phase-local and nothing else (under/over-
+        # determined problems must reach the reference path's validation
+        # errors).
         if (n_x_conds + n_w_conds + n_mu_conds + n_lc_conds
-                + n_statevar_conds) != len(conditions):
+                + n_statevar_conds + n_plc_conds) != len(conditions):
             return _gate_reject('unsupported condition type present')
         for cond, value in conditions.items():
             if getattr(cond, 'phase_name', None) is not None:
-                return _gate_reject('phase-local condition')
+                if not isinstance(cond, (v.MoleFraction, v.SiteFraction)):
+                    return _gate_reject('unsupported phase-local condition class')
+                if np.asarray(value, dtype=object).size != 1:
+                    return _gate_reject('array-valued phase-local condition')
+                continue
             if cond == v.N:
                 if np.any(np.atleast_1d(np.asarray(value, dtype=object)).astype(float) != 1.0):
                     return _gate_reject('N != 1')

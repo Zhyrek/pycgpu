@@ -35,15 +35,18 @@
 #endif
 
 /* <float.h> fallbacks for RTC compilers without hosted headers.
+ * Decimal spellings (bit-exact round-trips of the intended powers of two):
+ * hex float literals are C++17 and NVRTC in -std=c++11 mode rejects them
+ * ("user-defined literal operator not found").
    Values are the IEEE-754 binary64 constants, hex-exact. */
 #ifndef DBL_EPSILON
-#define DBL_EPSILON 0x1p-52
+#define DBL_EPSILON 2.220446049250313e-16
 #endif
 #ifndef DBL_MIN
-#define DBL_MIN 0x1p-1022
+#define DBL_MIN 2.2250738585072014e-308
 #endif
 #ifndef DBL_MAX
-#define DBL_MAX 0x1.fffffffffffffp+1023
+#define DBL_MAX 1.7976931348623157e+308
 #endif
 #ifndef DBL_MANT_DIG
 #define DBL_MANT_DIG 53
@@ -371,10 +374,10 @@ __device__ static double pyclap_dnrm2(int n, const double* x, int incx)
     const double zero = 0.0;
     const double one  = 1.0;
     const double maxN = DBL_MAX;            /* huge(0.0_wp) */
-    const double tsml = 0x1p-511;
-    const double tbig = 0x1p+486;
-    const double ssml = 0x1p+537;
-    const double sbig = 0x1p-538;
+    const double tsml = 1.4916681462400413e-154;
+    const double tbig = 1.997919072202235e+146;
+    const double ssml = 4.4989137945431964e+161;
+    const double sbig = 1.1113793747425387e-162;
     int i, ix;
     int notbig;
     double abig, amed, asml, ax, scl, sumsq, ymax, ymin;
@@ -863,10 +866,10 @@ __device__ static void pyclap_dlassq(int n, const double* x, int incx,
 {
     const double zero = 0.0;
     const double one  = 1.0;
-    const double tsml = 0x1p-511;
-    const double tbig = 0x1p+486;
-    const double ssml = 0x1p+537;
-    const double sbig = 0x1p-538;
+    const double tsml = 1.4916681462400413e-154;
+    const double tbig = 1.997919072202235e+146;
+    const double ssml = 4.4989137945431964e+161;
+    const double sbig = 1.1113793747425387e-162;
     int i, ix;
     int notbig;
     double abig, amed, asml, ax, ymax, ymin;
@@ -1253,8 +1256,8 @@ __device__ static void pyclap_dlartg(double f, double g,
 {
     const double zero = 0.0;
     const double one  = 1.0;
-    const double safmin = 0x1p-1022;
-    const double safmax = 0x1p+1022;
+    const double safmin = 2.2250738585072014e-308;
+    const double safmax = 4.49423283715579e+307;
     double d, f1, fs, g1, gs, u, rtmin, rtmax;
 
     rtmin = sqrt(safmin);

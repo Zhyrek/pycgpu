@@ -2020,6 +2020,29 @@ def _process_gpu_results(results_cpu_flat: np.ndarray, wks_obj: Workspace,
         print("[GPU] Results processed into LightDataset.")
     return final_dataset
 
+class _UnitNormalizedWks:
+    """Workspace proxy whose .conditions holds implementation-unit magnitudes.
+
+    The Conditions container converts units on __getitem__ but yields RAW
+    display-unit magnitudes from items()/values(). The spec/grid assembly
+    below iterates items(), so a condition keyed as v.T['degC'] fed it
+    Celsius magnitudes where kelvin was expected — corrupting the
+    per-condition dimension indexing (every point of
+    test_workspace_conditions_specify_units diverged, up to 16 kJ, while
+    the test still passed because it only asserts condition values).
+    All attribute reads and writes pass through to the real Workspace.
+    """
+    def __init__(self, wks, conditions):
+        object.__setattr__(self, '_wks', wks)
+        object.__setattr__(self, 'conditions', conditions)
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, '_wks'), name)
+
+    def __setattr__(self, name, value):
+        setattr(object.__getattribute__(self, '_wks'), name, value)
+
+
 def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=False, force_cpu=False):
     """
     Main GPU equilibrium calculation function - NO FALLBACK.
@@ -2112,6 +2135,9 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     local_conds = {key: as_quantity(key, value).to(key.implementation_units).magnitude
                    for key, value in wks_obj.conditions.items()
                    if getattr(key, 'phase_name', None) is not None}
+    # Hand the assembly stages implementation-unit condition values keyed by
+    # the original condition keys (see _UnitNormalizedWks).
+    _norm_wks = _UnitNormalizedWks(wks_obj, OrderedDict(unitless_conds))
     state_variables = wks_obj.phase_record_factory.state_variables
     
     if verbose:
@@ -2422,7 +2448,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     # 3. Prepare data for GPU (pass dynamic sizes for proper array dimensioning)
     # Use properties from wks.eq to avoid duplicate calculations
     (num_total_conditions_pts, condition_args_np, global_spec_scalars, global_spec_arrays,
-     initial_phase_data_arrays, grid_data_device_struct_np, grid_block_indices_np, properties) = _prepare_gpu_data(wks_obj, unique_py_models, py_phase_name_to_unique_idx_map, dynamic_sizes, properties=cpu_style_properties, grid=grid)
+     initial_phase_data_arrays, grid_data_device_struct_np, grid_block_indices_np, properties) = _prepare_gpu_data(_norm_wks, unique_py_models, py_phase_name_to_unique_idx_map, dynamic_sizes, properties=cpu_style_properties, grid=grid)
     
     debug_log(f"  gpu_num_conditions: {num_total_conditions_pts}", verbose)
     if condition_args_np is not None:
@@ -2443,7 +2469,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         # Create one SystemSpecification per condition instead of sharing
         from .gpu_systemspec_array import create_system_specifications_array
         system_specs_array = create_system_specifications_array(
-            wks_obj, num_total_conditions_pts, dynamic_sizes, properties, verbose
+            _norm_wks, num_total_conditions_pts, dynamic_sizes, properties, verbose
         )
         
         # Calculate stride for SystemSpec array

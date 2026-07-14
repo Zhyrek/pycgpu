@@ -2246,7 +2246,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         "models:" + _model_hash.hexdigest(),
         "sizes:" + str(sorted(dynamic_sizes.items())),
         "headers:" + _header_hash.hexdigest(),
-        "verbose:" + str(verbose),
+        "devdebug:" + str(bool(os.environ.get('PYCGPU_DEVICE_DEBUG'))),
         "guard:" + str(bool(os.environ.get('PYCGPU_GUARD'))),
         "backend:" + ("cpu" if os.environ.get('PYCGPU_CPU') else "gpu"),
         "fmad:" + str(bool(os.environ.get('PYCGPU_NOFMAD'))),
@@ -2315,9 +2315,15 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             for define_name, value in dynamic_sizes.items():
                 define_flags.append(f'-D{define_name}={value}')
 
-            # Add VERBOSE_DEBUG flag if verbose mode is enabled
-            if verbose:
+            # Device-side printf debugging is OPT-IN via PYCGPU_DEVICE_DEBUG.
+            # It used to ride on verbose=True, which made every
+            # equilibrium(verbose=True) call compile a printf-laden kernel:
+            # per-iteration matrix dumps through the GPU's serialized printf
+            # buffer ran ~1000x slower (a single verbose suite test produced
+            # 330 MB of device output). verbose keeps all host-side prints.
+            if os.environ.get('PYCGPU_DEVICE_DEBUG'):
                 define_flags.append('-DVERBOSE_DEBUG')
+            if verbose:
                 print(f"[GPU] Using dynamic kernel sizing: {dynamic_sizes}")
                 print(f"[GPU] Compiler defines: {define_flags}")
             if os.environ.get('PYCGPU_JANSSON_TARGET') is not None:

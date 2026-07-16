@@ -53,6 +53,9 @@ def _compile_command(lib_path, src_path, defines):
     return [cxx] + common + defines
 
 _CPU_DRIVER_SRC = r"""
+#include <thread>
+#include <atomic>
+#include <vector>
 // ===== CPU backend driver (appended by pycalphad.gpu.cpu_backend) =====
 // Single-threaded by design: parallelism is the caller's job (multiple
 // pycalphad calls in threads/processes; thread_local shims in cpu_compat.h
@@ -97,6 +100,38 @@ extern "C" void pycgpu_cpu_point_hull(
     double* chemical_potentials, double* out_energy,
     double* result_fractions, int* result_simplex, int n_conditions)
 {
+    // Same opt-in threading as pycgpu_cpu_run_all: conditions are
+    // independent, outputs are per-condition slots, and the CUDA-index
+    // shims are thread_local, so results are bit-identical at any thread
+    // count. The hull dominates the accelerated wall for many-phase
+    // systems (8.6 of 10.5 s for the 9.4k-condition AlCuFe example).
+    const char* nthr_env = std::getenv("PYCGPU_CPU_THREADS");
+    int n_threads = nthr_env ? atoi(nthr_env) : 1;
+    if (n_threads <= 0) n_threads = (int)std::thread::hardware_concurrency();
+    if (n_threads > n_conditions) n_threads = n_conditions;
+    if (n_threads > 1) {
+        std::atomic<int> next_t(0);
+        auto worker = [&]() {
+            for (;;) {
+                const int t = next_t.fetch_add(1, std::memory_order_relaxed);
+                if (t >= n_conditions) break;
+                threadIdx.x = (unsigned int)t;
+                blockIdx.x = 0u;
+                blockDim.x = 0u;
+                point_hull_kernel(grid_X, grid_GM, x_base_row, gm_base_row,
+                                  m_points, num_components,
+                                  fixed_chempot_indices, num_fixed_chempots,
+                                  lincomb_coefs, lincomb_rhs, num_lincomb, max_lincomb,
+                                  chemical_potentials, out_energy,
+                                  result_fractions, result_simplex, n_conditions);
+            }
+        };
+        std::vector<std::thread> pool;
+        pool.reserve((size_t)n_threads);
+        for (int i = 0; i < n_threads; ++i) pool.emplace_back(worker);
+        for (auto& th : pool) th.join();
+        return;
+    }
     for (int t = 0; t < n_conditions; ++t) {
         threadIdx.x = (unsigned int)t;
         blockIdx.x = 0u;
@@ -137,6 +172,18 @@ extern "C" void pycgpu_cpu_run_all(
     // their initialization values in the results buffer).
     const char* tstart_env = std::getenv("PYCGPU_CPU_TSTART");
     const int t_start = tstart_env ? atoi(tstart_env) : 0;
+    // PYCGPU_CPU_THREADS=<n>: opt-in in-process parallelism over conditions
+    // (0 = all hardware threads). Safe by construction: each condition is
+    // independent, indexes its OWN work-array slot, and the CUDA-index shims
+    // (threadIdx/blockIdx) are thread_local, so per-condition results are
+    // BIT-IDENTICAL for any thread count. Default 1 keeps the documented
+    // single-threaded behavior (process-based parallelism, e.g. ESPEI
+    // walkers, composes without oversubscription).
+    const char* nthr_env = std::getenv("PYCGPU_CPU_THREADS");
+    int n_threads = nthr_env ? atoi(nthr_env) : 1;
+    if (n_threads <= 0) n_threads = (int)std::thread::hardware_concurrency();
+    if (n_threads > num_conditions_total - t_start) n_threads = num_conditions_total - t_start;
+    if (n_threads < 1) n_threads = 1;
 #ifdef PYCGPU_HAVE_SNAN_DEBUG
     const bool dbg_snan = (std::getenv("PYCGPU_CPU_SNAN") != nullptr);
     if (dbg_snan) {
@@ -144,6 +191,33 @@ extern "C" void pycgpu_cpu_run_all(
         feenableexcept(FE_INVALID);
     }
 #endif
+    bool run_parallel = (n_threads > 1);
+#ifdef PYCGPU_HAVE_SNAN_DEBUG
+    if (dbg_snan) run_parallel = false;  // FP-exception trapping is per-thread; keep the debug aid serial
+#endif
+    if (run_parallel) {
+        std::atomic<int> next_t(t_start);
+        auto worker = [&]() {
+            for (;;) {
+                const int t = next_t.fetch_add(1, std::memory_order_relaxed);
+                if (t >= num_conditions_total) break;
+                threadIdx.x = (unsigned int)t;
+                blockIdx.x = 0u;
+                blockDim.x = 0u;
+                top_level_equilibrium_kernel(global_spec_ptr_raw, condition_args_list_ptr_raw,
+                    results_list_ptr_raw, num_conditions_total, condition_stride,
+                    python_max_statevars, initial_phase_data_ptr, initial_phase_data_stride,
+                    system_spec_stride, grid_data_ptr_raw, debug_gm_history, debug_mu_history,
+                    debug_convergence_history, debug_iteration_count, debug_max_steps,
+                    (const WorkArrays*)work_arrays, grid_block_indices, grid_block_stride_bytes,
+                    max_solver_iterations);
+            }
+        };
+        std::vector<std::thread> pool;
+        pool.reserve((size_t)n_threads);
+        for (int i = 0; i < n_threads; ++i) pool.emplace_back(worker);
+        for (auto& th : pool) th.join();
+    } else
     for (int t = t_start; t < num_conditions_total; ++t) {
 #ifdef PYCGPU_HAVE_SNAN_DEBUG
         if (dbg_snan) pycgpu_paint_stack(4ll * 1024 * 1024);

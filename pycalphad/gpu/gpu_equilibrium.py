@@ -2712,6 +2712,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     MAX_EQ_MATRIX_COLS = dynamic_sizes['MAX_EQ_SOLN_LEN']
     MAX_EQ_MATRIX_SIZE = dynamic_sizes['MAX_EQ_MATRIX_SIZE']
     MAX_EQ_SOLN_LEN = dynamic_sizes['MAX_EQ_SOLN_LEN']
+    SYSTEM_STATE_SIZE = dynamic_sizes['SYSTEM_STATE_SIZE']
     # Calculate threads early for memory allocation
     # One condition per thread; block size is tunable (PYCGPU_BLOCK) since the
     # per-thread state is huge and occupancy/locality trade off with block size.
@@ -2726,7 +2727,50 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     # loops the kernel over contiguous condition slices. Per-condition input/
     # result buffers stay full-size (they are comparatively small).
     _chunk_env = int(os.environ.get('PYCGPU_CHUNK', 0) or 0)
-    _chunk_size = min(num_total_conditions_pts, _chunk_env) if _chunk_env > 0 else num_total_conditions_pts
+    # Per-thread work-array footprint in doubles. MUST mirror the
+    # global_memory_arrays allocations below (same size expressions).
+    _per_thread_doubles = (
+        3 * MAX_SVD_DIM * MAX_SVD_DIM + 2 * MAX_SVD_DIM
+        + 4 * MAX_PHASE_MATRIX_DIM * MAX_PHASE_MATRIX_DIM + 2 * MAX_PHASE_MATRIX_DIM
+        + 2 * MAX_DOF_SIZE + MAX_DOF_SIZE * MAX_DOF_SIZE
+        + dynamic_sizes['MAX_COMPONENTS'] * (1 + MAX_DOF_SIZE)
+        + MAX_EQ_MATRIX_SIZE + MAX_EQ_MATRIX_ROWS + MAX_EQ_SOLN_LEN
+        + SYSTEM_STATE_SIZE
+        + 3 * dynamic_sizes['MAX_PHASES'] * dynamic_sizes['MAX_COMPONENTS'])
+    _per_thread_bytes = 8 * _per_thread_doubles
+    if os.environ.get('PYCGPU_GUARD'):
+        _per_thread_bytes *= 2  # guard mode doubles every work allocation
+    if _chunk_env > 0:
+        _chunk_size = min(num_total_conditions_pts, _chunk_env)
+    else:
+        # AUTO-CHUNK: the work arrays scale with the launch size and
+        # previously had NO automatic bound — a 600k-equilibria run
+        # allocates tens of GB of work arrays in one launch and dies with
+        # a GPU memory access fault when it crosses VRAM (observed on
+        # ROCm between 500k and 600k AuBi equilibria on a large card; any
+        # CUDA card faults at its own capacity the same way). Cap the
+        # launch so the work arrays fit in a fraction of the memory that
+        # is free RIGHT NOW (per-condition input/result buffers are
+        # already allocated at this point and comparatively small).
+        if _cpu_backend_mode:
+            try:
+                _mem_budget = int(os.sysconf('SC_AVPHYS_PAGES')
+                                  * os.sysconf('SC_PAGE_SIZE') * 0.5)
+            except (ValueError, OSError, AttributeError):
+                _mem_budget = 4 << 30
+        else:
+            try:
+                _free_b, _total_b = cp.cuda.Device().mem_info
+                _mem_budget = int(_free_b * 0.70)
+            except Exception:
+                _mem_budget = 4 << 30
+        _fit = max(int(_mem_budget // _per_thread_bytes), 1)
+        _fit = max((_fit // threads_per_block) * threads_per_block,
+                   threads_per_block)
+        _chunk_size = min(num_total_conditions_pts, _fit)
+        if (verbose or os.environ.get('PYCGPU_TIME')) and _chunk_size < num_total_conditions_pts:
+            print(f"[GPU] auto-chunk: {_per_thread_bytes/1024:.0f} KB/thread work arrays, "
+                  f"budget {_mem_budget/2**30:.1f} GiB -> {_chunk_size} conditions/launch")
     blocks_per_grid_temp = (_chunk_size + threads_per_block - 1) // threads_per_block
     total_threads_for_allocation = blocks_per_grid_temp * threads_per_block
     # Memory-safety validation mode (PYCGPU_GUARD=1): double every work-array
@@ -2766,7 +2810,6 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     # Per-thread SystemState slot (doubles) — computed per system in
     # compute_dynamic_kernel_sizes and passed to the kernel as -DSYSTEM_STATE_SIZE;
     # a static_assert in eqsolver.h guarantees sizeof(SystemState) fits.
-    SYSTEM_STATE_SIZE = dynamic_sizes['SYSTEM_STATE_SIZE']
     global_memory_arrays['system_states'] = xp.empty((total_threads_for_allocation, SYSTEM_STATE_SIZE), dtype=np.float64)
 
     # Additional SystemState arrays moved from stack to global memory

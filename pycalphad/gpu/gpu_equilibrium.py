@@ -2077,7 +2077,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                 f"phase {_ph} uses {type(_m).__name__}")
     
     # Check if GPU should be used - NO FALLBACK, FAIL HARD
-    # The C++/OpenMP backend (PYCGPU_CPU=1) does not need CUDA or CuPy.
+    # The C++ backend (PYCGPU_CPU=1) does not need CUDA or CuPy.
     _cpu_backend_mode = bool(os.environ.get('PYCGPU_CPU'))
     use_gpu = (GPU_AVAILABLE or _cpu_backend_mode) and not force_cpu and os.getenv('FORCE_CPU', '0') != '1'
 
@@ -2092,7 +2092,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         print(f"[GPU DEBUG] Phases: {wks_obj.phases}")
 
     # Check for CuPy availability at runtime - NO FALLBACK
-    # Backend selection: CUDA (default, requires CuPy) or the C++/OpenMP CPU
+    # Backend selection: CUDA (default, requires CuPy) or the C++ CPU
     # backend (PYCGPU_CPU=1), which must work WITHOUT CuPy installed. All buffer
     # code below goes through `xp` and the small helpers so both backends share
     # one pipeline; in CPU mode every buffer is a host numpy array and the
@@ -2104,7 +2104,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             from pycalphad.backend import AcceleratedCapabilityError
             raise AcceleratedCapabilityError(
                 "[GPU] CuPy is not available. Install cupy for the CUDA backend, "
-                "or set PYCGPU_CPU=1 to use the C++/OpenMP CPU backend.")
+                "or set PYCGPU_CPU=1 to use the C++ CPU backend.")
         # Test GPU accessibility - NO FALLBACK
         _ = cp.cuda.Device()
         xp = cp
@@ -2387,7 +2387,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                 define_flags.append('-DPYCGPU_FP32EMU')
 
             if os.environ.get('PYCGPU_CPU'):
-                # CPU-C++ backend: compile the same generated source with g++/OpenMP.
+                # CPU-C++ backend: compile the same generated source with g++.
                 from pycalphad.gpu.cpu_backend import build_cpu_library
                 module = build_cpu_library(full_kernel_source, define_flags,
                                            cache_dir=str(_kernel_cache_dir()),
@@ -2426,7 +2426,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     # Call the global PhaseRecord initialization kernel every time
     # This must happen on every execution, not just when compiling a new module,
     # because GPU memory may have been reset and g_phase_records_array needs initialization
-    # (the CPU backend's driver calls init itself before the OpenMP loop).
+    # (the CPU backend's driver calls init itself before its condition loop).
     if not _cpu_backend_mode:
         try:
             init_records_kernel = module.get_function("init_all_gpu_phase_records")

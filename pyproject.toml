@@ -52,7 +52,14 @@ dependencies = [
     "xarray>=0.11.2",
 ]
 
-dynamic = ["version"]
+# Static version (fork policy): dynamic setuptools_scm versioning reports
+# 0.0.0 whenever the plugin cannot run — tag-less snapshots, and notably
+# --no-build-isolation builds where setuptools_scm is not installed, in
+# which case plain setuptools supplies the 0.0.0 default and pip may then
+# evict this package for failing downstream version floors (ESPEI requires
+# pycalphad>=0.11.0). The branch contains the upstream 0.11.2 release; bump
+# the post number when pushing user-facing changes.
+version = "0.11.2.post2"
 
 [project.urls]
 Homepage = "https://pycalphad.org/"
@@ -152,14 +159,3 @@ omit = [
 
 [tool.coverage.report]
 ignore_errors = true # workaround for https://github.com/cython/cython/issues/5581
-
-# '[tool.setuptools.scm]' needs to be the last line because
-# we do an append operation in the deploy.yaml GitHub Actions workflow
-[tool.setuptools_scm]
-# Fork-install resilience: when git metadata is unavailable (tarball
-# installs, shallow/tag-less clones), setuptools_scm would report 0.0.0,
-# which pip then treats as failing ESPEI's pycalphad>=0.11.0 requirement
-# and replaces this install with upstream pycalphad. The fork descends
-# from the 0.11.2 release (0.11.1 and 0.11.2 are ancestors of this
-# branch), so a post-release of 0.11.2 is the honest version.
-fallback_version = "0.11.2.post2"

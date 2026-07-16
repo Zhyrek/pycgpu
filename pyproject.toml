@@ -161,4 +161,4 @@ ignore_errors = true # workaround for https://github.com/cython/cython/issues/55
 # which pip then treats as failing ESPEI's pycalphad>=0.11.0 requirement
 # and replaces this install with upstream pycalphad. The fork descends
 # from the 0.11.0 release, so a post-release of it is the honest floor.
-fallback_version = "0.11.0.post1"
+fallback_version = "0.11.0.post2"

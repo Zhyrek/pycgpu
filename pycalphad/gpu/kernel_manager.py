@@ -47,39 +47,53 @@ def cuda_raw_module(code, options, verbose=False):
 
 
 def ensure_device_stack_limit(nbytes=65536, verbose=False):
-    """Raise the per-thread device stack limit (CUDA) if below nbytes.
+    """Raise the per-thread device stack limit if below nbytes.
 
     The solver kernels call the generated energy functions through function
-    pointers, so the compiler cannot statically size the per-thread stack
-    and the CUDA default (1 KB) applies; overflowing it silently corrupts
-    other threads' local memory (this showed up as nondeterministic results
-    at batch sizes over ~200 conditions).
+    pointers, so the compiler cannot statically size the per-thread stack:
+    frames reached through an indirect call come out of the DYNAMIC stack
+    budget, which defaults to 1 KB on both CUDA and ROCm. Overflowing it
+    silently corrupts other threads' local memory (this showed up as
+    nondeterministic results at batch sizes over ~200 conditions on CUDA;
+    the same budget applies to AMD's scratch-backed dynamic stack).
 
-    On ROCm builds of CuPy the call is SKIPPED: HIP maps
-    cudaDeviceSetLimit(cudaLimitStackSize) to hipDeviceSetLimit, which most
-    ROCm stacks reject with hipErrorUnknown — and AMD kernels do not use a
-    runtime-sized stack in the first place (scratch space is sized by the
-    compiler at code-object load, including for indirect calls), so there
-    is nothing to raise. Any other failure is downgraded to a warning so
-    one exotic driver cannot take down the whole accelerated path.
+    The raise is ATTEMPTED on both platforms — newer ROCm supports
+    hipDeviceSetLimit(hipLimitStackSize); older stacks reject it (the
+    observed failure is hipErrorUnknown), in which case a loud warning
+    explains the residual risk instead of the whole accelerated path dying.
 
-    Returns True if the limit is known to satisfy nbytes.
+    PYCGPU_DEVICE_STACK_BYTES overrides the requested size (some ROCm
+    versions accept certain values only); set it to 0 to skip the call
+    entirely.
+
+    Returns True if the limit is known to satisfy the request.
     """
     import warnings
     import cupy as _cp
-    if bool(getattr(_cp.cuda.runtime, 'is_hip', False)):
-        return True
+    override = os.environ.get('PYCGPU_DEVICE_STACK_BYTES')
+    if override is not None:
+        nbytes = int(override)
+        if nbytes == 0:
+            return False
+    _is_hip = bool(getattr(_cp.cuda.runtime, 'is_hip', False))
     try:
         limit = _cp.cuda.runtime.cudaLimitStackSize
         if _cp.cuda.runtime.deviceGetLimit(limit) < nbytes:
             _cp.cuda.runtime.deviceSetLimit(limit, nbytes)
         return True
     except Exception as e:
+        platform = 'ROCm/HIP' if _is_hip else 'CUDA'
         warnings.warn(
-            f"could not raise the device stack limit to {nbytes} bytes ({e}); "
-            "continuing with the driver default. If large systems produce "
-            "corrupted/nondeterministic GPU results, use the c++ backend or "
-            "PYCGPU_CPU=1.")
+            f"could not raise the device stack limit to {nbytes} bytes on "
+            f"{platform} ({e}); continuing with the driver default "
+            f"(typically 1024 bytes). The kernels call generated functions "
+            f"through function pointers, whose frames use this dynamic-stack "
+            f"budget — 1 KB is known to be insufficient for larger systems "
+            f"and overflow corrupts results SILENTLY. Validate against the "
+            f"reference on this platform before trusting gpu-backend "
+            f"results, or use the c++ backend (identical numerics). "
+            f"PYCGPU_DEVICE_STACK_BYTES=<n> requests a different size; "
+            f"a newer ROCm may support the call.")
         return False
 
 

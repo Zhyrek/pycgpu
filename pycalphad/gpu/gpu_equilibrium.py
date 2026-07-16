@@ -2842,8 +2842,8 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     # Overflowing it silently corrupts other threads' local memory, which showed up
     # as nondeterministic results at batch sizes ≳200 conditions.
     if not _cpu_backend_mode:
-        if cp.cuda.runtime.deviceGetLimit(cp.cuda.runtime.cudaLimitStackSize) < 65536:
-            cp.cuda.runtime.deviceSetLimit(cp.cuda.runtime.cudaLimitStackSize, 65536)
+        from pycalphad.gpu.kernel_manager import ensure_device_stack_limit
+        ensure_device_stack_limit(65536, verbose=verbose)
 
     # Already calculated above: threads_per_block = 256
     blocks_per_grid = blocks_per_grid_temp  # Use the same value calculated for memory allocation

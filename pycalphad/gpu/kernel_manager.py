@@ -46,6 +46,43 @@ def cuda_raw_module(code, options, verbose=False):
     return _cp.RawModule(code=code, options=rtc_options, backend='nvrtc')
 
 
+def ensure_device_stack_limit(nbytes=65536, verbose=False):
+    """Raise the per-thread device stack limit (CUDA) if below nbytes.
+
+    The solver kernels call the generated energy functions through function
+    pointers, so the compiler cannot statically size the per-thread stack
+    and the CUDA default (1 KB) applies; overflowing it silently corrupts
+    other threads' local memory (this showed up as nondeterministic results
+    at batch sizes over ~200 conditions).
+
+    On ROCm builds of CuPy the call is SKIPPED: HIP maps
+    cudaDeviceSetLimit(cudaLimitStackSize) to hipDeviceSetLimit, which most
+    ROCm stacks reject with hipErrorUnknown — and AMD kernels do not use a
+    runtime-sized stack in the first place (scratch space is sized by the
+    compiler at code-object load, including for indirect calls), so there
+    is nothing to raise. Any other failure is downgraded to a warning so
+    one exotic driver cannot take down the whole accelerated path.
+
+    Returns True if the limit is known to satisfy nbytes.
+    """
+    import warnings
+    import cupy as _cp
+    if bool(getattr(_cp.cuda.runtime, 'is_hip', False)):
+        return True
+    try:
+        limit = _cp.cuda.runtime.cudaLimitStackSize
+        if _cp.cuda.runtime.deviceGetLimit(limit) < nbytes:
+            _cp.cuda.runtime.deviceSetLimit(limit, nbytes)
+        return True
+    except Exception as e:
+        warnings.warn(
+            f"could not raise the device stack limit to {nbytes} bytes ({e}); "
+            "continuing with the driver default. If large systems produce "
+            "corrupted/nondeterministic GPU results, use the c++ backend or "
+            "PYCGPU_CPU=1.")
+        return False
+
+
 
 try:
     import cupy as cp

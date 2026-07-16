@@ -447,8 +447,8 @@ class PointBatchSolver:
             self.module = cuda_raw_module(
                 full_source, ['-std=c++11', '-O2'] + define_flags,
                 verbose=self.verbose)
-            if cp.cuda.runtime.deviceGetLimit(cp.cuda.runtime.cudaLimitStackSize) < 65536:
-                cp.cuda.runtime.deviceSetLimit(cp.cuda.runtime.cudaLimitStackSize, 65536)
+            from pycalphad.gpu.kernel_manager import ensure_device_stack_limit
+            ensure_device_stack_limit(65536, verbose=self.verbose)
             self.module.get_function('init_all_gpu_phase_records')((1,), (1,), ())
             cp.cuda.runtime.deviceSynchronize()
             self._top_kernel = self.module.get_function('top_level_equilibrium_kernel')

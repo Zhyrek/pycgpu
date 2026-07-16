@@ -2063,13 +2063,16 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     verbose = wks_obj.verbose
 
     # The code generator supports plain Model energy expressions only.
-    # Subclassed models (MQMQA/quasichemical, custom contributions) must raise
-    # here so global-backend dispatch falls back to the reference solver.
+    # Subclassed models (MQMQA/quasichemical, custom contributions) are a
+    # DECLARED capability limit: raising the typed error here lets the
+    # global-backend dispatch fall back to the reference solver, while
+    # genuine runtime failures propagate (see core/equilibrium.py).
     from pycalphad.model import Model as _PlainModel
+    from pycalphad.backend import AcceleratedCapabilityError
     for _ph in wks_obj.phases:
         _m = wks_obj.models[_ph]
         if type(_m) is not _PlainModel:
-            raise RuntimeError(
+            raise AcceleratedCapabilityError(
                 f"accelerated backends support plain Model instances only; "
                 f"phase {_ph} uses {type(_m).__name__}")
     
@@ -2098,7 +2101,8 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         xp = np
     else:
         if cp is None:
-            raise RuntimeError(
+            from pycalphad.backend import AcceleratedCapabilityError
+            raise AcceleratedCapabilityError(
                 "[GPU] CuPy is not available. Install cupy for the CUDA backend, "
                 "or set PYCGPU_CPU=1 to use the C++/OpenMP CPU backend.")
         # Test GPU accessibility - NO FALLBACK

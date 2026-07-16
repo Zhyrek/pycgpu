@@ -88,7 +88,8 @@ def _property_expr(model, output, param_symbols):
     from pycalphad import variables as v
     expr = getattr(model, output, None)
     if expr is None:
-        raise RuntimeError(f"Model property {output} is not defined")
+        from pycalphad.backend import AcceleratedCapabilityError
+        raise AcceleratedCapabilityError(f"Model property {output} is not defined")
     expr = symengine.sympify(expr)
     undefs = {x for x in expr.free_symbols if not isinstance(x, v.StateVariable)} - set(param_symbols)
     if undefs:
@@ -144,6 +145,16 @@ def _generate_property_source(shim, output):
             pgrad_c = re.sub(r'\bnan(\.0)?\b', '(0.0/0.0)', pgrad_c)
             pgrad_c = re.sub(r'\binf(\.0)?\b', '(1.0/0.0)', pgrad_c)
             funcs.append(pgrad_c)
+    joined = ''.join(funcs)
+    if 'Derivative(' in joined:
+        # Unevaluated symbolic Derivative nodes (e.g. degree_of_ordering's
+        # gradient) cannot be lowered to C — a DECLARED capability limit,
+        # detected before the compiler is ever invoked so that genuine
+        # compilation failures remain hard errors.
+        from pycalphad.backend import AcceleratedCapabilityError
+        raise AcceleratedCapabilityError(
+            f'generated code for {output} contains unevaluated symbolic '
+            f'Derivative nodes; this property uses the reference path')
     cases = "\n".join(
         f"        case {idx}: return {notebook_model_c_func_name_prefix(idx)}prop(x);"
         for idx in range(len(unique_models)))
@@ -290,7 +301,8 @@ def _build_module(backend_name, shim, verbose=False, output='GM',
         return ('cpp', fn, gfn, pgfn)
     else:
         if cp is None:
-            raise RuntimeError("backend 'gpu' requires CuPy")
+            from pycalphad.backend import AcceleratedCapabilityError
+            raise AcceleratedCapabilityError("backend 'gpu' requires CuPy")
         from pycalphad.gpu.kernel_manager import cuda_raw_module
         module = cuda_raw_module(full_source, ['-std=c++11', '-O2'] + define_flags,
                                  verbose=verbose)
@@ -320,7 +332,8 @@ def get_grid_evaluator(backend_name, components, phases, models,
     from pycalphad.model import Model as _PlainModel
     for _ph in phases:
         if type(models[_ph]) is not _PlainModel:
-            raise RuntimeError(
+            from pycalphad.backend import AcceleratedCapabilityError
+            raise AcceleratedCapabilityError(
                 f"accelerated calculate() supports plain Model instances only; "
                 f"phase {_ph} uses {type(models[_ph]).__name__}")
     shim = SimpleNamespace(

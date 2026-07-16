@@ -45,7 +45,21 @@ import os
 import shutil
 from contextlib import contextmanager
 
-__all__ = ['set_backend', 'get_backend', 'backend']
+__all__ = ['set_backend', 'get_backend', 'backend', 'AcceleratedCapabilityError']
+
+
+class AcceleratedCapabilityError(RuntimeError):
+    """The problem or environment is outside the accelerated backends'
+    declared capabilities (e.g. CuPy missing for the gpu backend, custom
+    Model subclasses). The dispatch treats this like a capability-gate
+    rejection and runs the reference solver instead.
+
+    Every OTHER exception raised on the accelerated path — compilation
+    failures, kernel errors, pipeline bugs — PROPAGATES to the caller by
+    default rather than silently degrading to the reference solver
+    (set PYCGPU_FALLBACK=1 to restore fall-back-on-any-error behavior for
+    unattended production runs)."""
+
 
 # Canonical internal names are 'default', 'cpp', 'cuda'.
 _ALIASES = {

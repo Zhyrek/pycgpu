@@ -369,7 +369,9 @@ class Workspace:
                 _gate_ok, _reason = False, 'non-default solver'
             else:
                 _gate_ok = _eqmod._accelerated_conditions_supported(
-                    _conds, self.parameters.unwrap(), None, None, None, {})
+                    _conds, self.parameters.unwrap(), None, None, None, {},
+                    dbf=self.database, comps=[str(c) for c in self.components],
+                    phases=list(self.phases))
                 _reason = getattr(_eqmod, '_gate_reject_reason', None)
             if _os.environ.get('PYCGPU_COUNT_DISPATCH'):
                 _test = _os.environ.get('PYTEST_CURRENT_TEST', '')
@@ -383,15 +385,28 @@ class Workspace:
                     from pycalphad.gpu.gpu_equilibrium import run_accelerated_workspace
                     return run_accelerated_workspace(self, _backend_name, _backend_opts)
                 except Exception as _accel_err:
-                    import logging
-                    logging.getLogger(__name__).debug(
-                        "Accelerated backend failed, using reference solver: %r", _accel_err)
+                    from pycalphad.backend import AcceleratedCapabilityError
+                    _fall_back = (isinstance(_accel_err, AcceleratedCapabilityError)
+                                  or bool(_os.environ.get('PYCGPU_FALLBACK')))
                     if _os.environ.get('PYCGPU_COUNT_DISPATCH'):
                         import traceback
                         _tb = traceback.extract_tb(_accel_err.__traceback__)
                         _loc = f'{_tb[-1].filename.rsplit("/", 1)[-1]}:{_tb[-1].lineno}' if _tb else '?'
+                        _kind = 'wks_runtime_fallback' if _fall_back else 'wks_runtime_error'
                         with open(_os.environ['PYCGPU_COUNT_DISPATCH'], 'a') as _f:
-                            _f.write(f'wks_runtime_fallback [{_loc}]: {str(_accel_err)[:100]}\n')
+                            _f.write(f'{_kind} [{_loc}]: {str(_accel_err)[:100]}\n')
+                    if not _fall_back:
+                        # Runtime failures RAISE (see core/equilibrium.py):
+                        # only declared capability limits fall back silently.
+                        raise RuntimeError(
+                            "the accelerated backend failed at runtime "
+                            "(chained below). Not falling back silently: set "
+                            "PYCGPU_FALLBACK=1 to run the reference solver on "
+                            "accelerated-path errors, or use the 'default' "
+                            "backend.") from _accel_err
+                    import logging
+                    logging.getLogger(__name__).debug(
+                        "Accelerated backend capability fallback: %r", _accel_err)
         # Assumes implementation units from this point
         unitless_conds = OrderedDict((key, as_quantity(key, value).to(key.implementation_units).magnitude) for key, value in self.conditions.items())
         str_conds = OrderedDict((str(key), value) for key, value in unitless_conds.items())

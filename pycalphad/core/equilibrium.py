@@ -16,7 +16,8 @@ _gate_reject_reason = None
 
 
 def _accelerated_conditions_supported(conditions, parameters, solver,
-                                      phase_records, output, extra_kwargs):
+                                      phase_records, output, extra_kwargs,
+                                      dbf=None, comps=None, phases=None):
     """Whether the accelerated backends support this equilibrium problem shape.
 
     Supported: standard N=1 / P / T / X(component) condition grids with no
@@ -68,6 +69,25 @@ def _accelerated_conditions_supported(conditions, parameters, solver,
         n_mu_conds = sum(1 for c in conditions if isinstance(c, v.ChemicalPotential))
         n_lc_conds = sum(1 for c in conditions if str(c).startswith('LinComb_'))
         n_statevar_conds = sum(1 for c in conditions if c in (v.N, v.P, v.T))
+        # Invalid-input pre-flight: problems the REFERENCE path must reject
+        # with its canonical exceptions never enter the accelerated path
+        # (missing components, no active phases, under/overdetermined
+        # composition conditions). Runtime errors no longer fall back, so
+        # these must be declared here rather than discovered by crashing.
+        if dbf is not None and comps is not None:
+            _comp_names = {str(c).upper() for c in comps}
+            _db_elements = {str(e).upper() for e in dbf.elements}
+            if not (_comp_names - {'VA', '/-'}) <= _db_elements:
+                return _gate_reject('component not in database')
+            _n_nonvacant = len(_comp_names - {'VA', '/-'})
+            if (n_x_conds + n_w_conds + n_mu_conds + n_lc_conds) != _n_nonvacant - 1:
+                return _gate_reject('not a fully determined composition set')
+            if phases is not None:
+                from pycalphad.core.utils import filter_phases, unpack_species
+                _cand = [p for p in (phases if not isinstance(phases, dict) else list(phases))
+                         if p in dbf.phases]
+                if not filter_phases(dbf, unpack_species(dbf, list(comps)), _cand):
+                    return _gate_reject('no active phases')
         # Phase-local conditions (X(phase,el) / Y(phase,subl,sp)) border the
         # owning compset's phase matrix; scalar values only (the per-condition
         # spec bakes one value system-wide).
@@ -198,7 +218,8 @@ def equilibrium(dbf, comps, phases, conditions, output=None, model=None,
         # `set_backend(...)` is always safe. An explicit per-call `backend=`
         # kwarg bypasses this gate (deliberate user demand).
         _gate_ok = _accelerated_conditions_supported(conditions, parameters, solver,
-                                             phase_records, output, kwargs)
+                                             phase_records, output, kwargs,
+                                             dbf=dbf, comps=comps, phases=phases)
         if os.environ.get('PYCGPU_COUNT_DISPATCH'):
             with open(os.environ['PYCGPU_COUNT_DISPATCH'], 'a') as _f:
                 _f.write('gate_pass\n' if _gate_ok else
@@ -240,19 +261,31 @@ def equilibrium(dbf, comps, phases, conditions, output=None, model=None,
             except Exception as _accel_err:
                 if not _backend_from_global:
                     raise
-                # Silent fallback (log only): the global backend must never
-                # change user-visible behavior for unsupported problems, and
-                # test suites commonly run with warnings-as-errors.
-                import logging
-                logging.getLogger(__name__).debug(
-                    "Accelerated backend failed, using reference solver: %r", _accel_err)
+                from pycalphad.backend import AcceleratedCapabilityError
+                _fall_back = (isinstance(_accel_err, AcceleratedCapabilityError)
+                              or bool(os.environ.get('PYCGPU_FALLBACK')))
                 if os.environ.get('PYCGPU_COUNT_DISPATCH'):
                     import traceback
                     _tb = traceback.extract_tb(_accel_err.__traceback__)
                     _loc = f'{_tb[-1].filename.rsplit("/", 1)[-1]}:{_tb[-1].lineno}' if _tb else '?'
                     _test = os.environ.get('PYTEST_CURRENT_TEST', '')
+                    _kind = 'runtime_fallback' if _fall_back else 'runtime_error'
                     with open(os.environ['PYCGPU_COUNT_DISPATCH'], 'a') as _f:
-                        _f.write(f'runtime_fallback [{_loc}] <{_test}>: {str(_accel_err)[:100]}\n')
+                        _f.write(f'{_kind} [{_loc}] <{_test}>: {str(_accel_err)[:100]}\n')
+                if not _fall_back:
+                    # Runtime failures RAISE: silently degrading to the
+                    # reference solver hides broken backends behind
+                    # perfect-looking (self-compared) results. Only declared
+                    # capability limits fall back.
+                    raise RuntimeError(
+                        "the accelerated backend failed at runtime (chained "
+                        "below). Not falling back silently: set "
+                        "PYCGPU_FALLBACK=1 to run the reference solver on "
+                        "accelerated-path errors, or use the 'default' "
+                        "backend.") from _accel_err
+                import logging
+                logging.getLogger(__name__).debug(
+                    "Accelerated backend capability fallback: %r", _accel_err)
         finally:
             for k, old in saved.items():
                 if old is None:

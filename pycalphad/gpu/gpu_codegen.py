@@ -2589,10 +2589,22 @@ def _unique_models_for_gpu(wks_obj: Workspace, validate: bool = True):
 
     # Build list of unique models (by phase name)
     # IMPORTANT: Sort phases to ensure deterministic ordering for kernel caching
+    from pycalphad.model import Model as _PlainModel
+    from pycalphad.backend import AcceleratedCapabilityError
     for ph_name in sorted(wks_obj.phases):
         if ph_name not in py_phase_name_to_unique_idx_map:
+            _mod = wks_obj.models[ph_name]
+            if type(_mod) is not _PlainModel:
+                # Custom Model subclasses (ModelMQMQA, user models) are a
+                # DECLARED capability limit: the codegen only supports the
+                # plain Model's symbolic structure. Declaring it here (before
+                # any code generation or compilation) keeps genuine compile
+                # failures as hard errors.
+                raise AcceleratedCapabilityError(
+                    f'accelerated backends support plain Model instances '
+                    f'only; phase {ph_name} uses {type(_mod).__name__}')
             py_phase_name_to_unique_idx_map[ph_name] = len(unique_py_models)
-            unique_py_models.append(wks_obj.models[ph_name])
+            unique_py_models.append(_mod)
 
     if wks_obj.verbose:
         print(f"[GPU] Phase name to unique index mapping: {py_phase_name_to_unique_idx_map}")

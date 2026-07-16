@@ -549,9 +549,21 @@ def calculate(dbf, comps, phases, mode=None, output='GM', fake_points=False, bro
                                                  sorted(active_phases), models,
                                                  phase_records, output=output)
         except Exception as _accel_err:
+            import os as _os
+            from pycalphad.backend import AcceleratedCapabilityError
+            if not (isinstance(_accel_err, AcceleratedCapabilityError)
+                    or _os.environ.get('PYCGPU_FALLBACK')):
+                # Runtime failures RAISE (see core/equilibrium.py): only
+                # declared capability limits fall back silently.
+                raise RuntimeError(
+                    "the accelerated calculate() evaluator failed to build "
+                    "(chained below). Not falling back silently: set "
+                    "PYCGPU_FALLBACK=1 to use the reference path on "
+                    "accelerated-path errors, or use the 'default' "
+                    "backend.") from _accel_err
             import logging
             logging.getLogger(__name__).debug(
-                "Accelerated calculate() unavailable, using reference path: %r", _accel_err)
+                "Accelerated calculate() capability fallback: %r", _accel_err)
             accel_evaluator = None
 
     for phase_name in sorted(active_phases):

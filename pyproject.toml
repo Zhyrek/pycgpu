@@ -162,4 +162,4 @@ ignore_errors = true # workaround for https://github.com/cython/cython/issues/55
 # and replaces this install with upstream pycalphad. The fork descends
 # from the 0.11.2 release (0.11.1 and 0.11.2 are ancestors of this
 # branch), so a post-release of 0.11.2 is the honest version.
-fallback_version = "0.11.2.post1"
+fallback_version = "0.11.2.post2"

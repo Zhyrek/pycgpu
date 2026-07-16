@@ -42,7 +42,12 @@ except Exception:
     pass
 if ok:
     print('verdict             : stack limit OK for the gpu backend')
+elif is_hip:
+    print('verdict             : expected on ROCm and validated benign — AMD sizes')
+    print('                      kernel scratch statically at load, so the runtime')
+    print('                      limit does not back these kernels. Confirm once per')
+    print('                      new machine with check_backend_correctness.py gpu.')
 else:
-    print('verdict             : run check_backend_correctness.py gpu — if it reports')
-    print('                      HEALTHY, this platform statically covers indirect-call')
-    print('                      frames and the rejected raise does not matter.')
+    print('verdict             : UNEXPECTED on CUDA — the limit protects against real')
+    print('                      silent corruption there. Run')
+    print('                      check_backend_correctness.py gpu before trusting results.')

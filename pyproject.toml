@@ -156,3 +156,9 @@ ignore_errors = true # workaround for https://github.com/cython/cython/issues/55
 # '[tool.setuptools.scm]' needs to be the last line because
 # we do an append operation in the deploy.yaml GitHub Actions workflow
 [tool.setuptools_scm]
+# Fork-install resilience: when git metadata is unavailable (tarball
+# installs, shallow/tag-less clones), setuptools_scm would report 0.0.0,
+# which pip then treats as failing ESPEI's pycalphad>=0.11.0 requirement
+# and replaces this install with upstream pycalphad. The fork descends
+# from the 0.11.0 release, so a post-release of it is the honest floor.
+fallback_version = "0.11.0.post1"

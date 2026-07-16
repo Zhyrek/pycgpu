@@ -2765,6 +2765,12 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             except Exception:
                 _mem_budget = 4 << 30
         _fit = max(int(_mem_budget // _per_thread_bytes), 1)
+        # Defensive 32-bit guard: keep every per-launch index product
+        # (thread_idx * stride) below 2^31 even where a cast is missed.
+        # SYSTEM_STATE_SIZE is by far the largest per-thread stride; the
+        # generated slicing now uses (long long) arithmetic, so this cap is
+        # belt-and-braces rather than the primary fix.
+        _fit = min(_fit, (2**31 - 1) // max(int(SYSTEM_STATE_SIZE), 1))
         _fit = max((_fit // threads_per_block) * threads_per_block,
                    threads_per_block)
         _chunk_size = min(num_total_conditions_pts, _fit)

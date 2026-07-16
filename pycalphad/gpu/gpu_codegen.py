@@ -3285,29 +3285,29 @@ __global__ void top_level_equilibrium_kernel(
         // This avoids struct member access which may fail on AMD
         double** work_ptrs = (double**)work_arrays;
 
-        if (work_ptrs[0]) thread_A_lstsq_copy = &work_ptrs[0][thread_idx * SVD_MN_SIZE];
-        if (work_ptrs[1]) thread_U_lstsq = &work_ptrs[1][thread_idx * SVD_MN_SIZE];
-        if (work_ptrs[2]) thread_V_lstsq = &work_ptrs[2][thread_idx * SVD_NN_SIZE];
-        if (work_ptrs[3]) thread_singular_values_lstsq = &work_ptrs[3][thread_idx * SVD_N_SIZE];
-        if (work_ptrs[4]) thread_superdiag_lstsq = &work_ptrs[4][thread_idx * SVD_N_SIZE];
-        if (work_ptrs[5]) thread_U_inv = &work_ptrs[5][thread_idx * PHASE_MATRIX_SIZE];
-        if (work_ptrs[6]) thread_V_inv = &work_ptrs[6][thread_idx * PHASE_MATRIX_SIZE];
-        if (work_ptrs[7]) thread_singular_values_inv = &work_ptrs[7][thread_idx * MAX_PHASE_MATRIX_DIM];
-        if (work_ptrs[8]) thread_superdiag_inv = &work_ptrs[8][thread_idx * MAX_PHASE_MATRIX_DIM];
-        if (work_ptrs[9]) thread_work_inv = &work_ptrs[9][thread_idx * PHASE_MATRIX_SIZE];
-        if (work_ptrs[10]) thread_x_dof = &work_ptrs[10][thread_idx * DOF_SIZE];
-        if (work_ptrs[11]) thread_grad = &work_ptrs[11][thread_idx * DOF_SIZE];
-        if (work_ptrs[12]) thread_hess = &work_ptrs[12][thread_idx * HESS_SIZE];
-        if (work_ptrs[13]) thread_masses = &work_ptrs[13][thread_idx * MAX_COMPONENTS];
-        if (work_ptrs[14]) thread_mass_jac = &work_ptrs[14][thread_idx * MASS_JAC_SIZE];
-        if (work_ptrs[15]) thread_phase_matrix = &work_ptrs[15][thread_idx * CONSTRAINT_MATRIX_SIZE];
-        if (work_ptrs[16]) thread_equilibrium_matrix = &work_ptrs[16][thread_idx * MAX_EQ_MATRIX_SIZE];
-        if (work_ptrs[17]) thread_equilibrium_rhs = &work_ptrs[17][thread_idx * MAX_EQ_MATRIX_ROWS];
-        if (work_ptrs[18]) thread_eq_soln = &work_ptrs[18][thread_idx * MAX_EQ_SOLN_LEN];
+        if (work_ptrs[0]) thread_A_lstsq_copy = &work_ptrs[0][(long long)thread_idx * SVD_MN_SIZE];
+        if (work_ptrs[1]) thread_U_lstsq = &work_ptrs[1][(long long)thread_idx * SVD_MN_SIZE];
+        if (work_ptrs[2]) thread_V_lstsq = &work_ptrs[2][(long long)thread_idx * SVD_NN_SIZE];
+        if (work_ptrs[3]) thread_singular_values_lstsq = &work_ptrs[3][(long long)thread_idx * SVD_N_SIZE];
+        if (work_ptrs[4]) thread_superdiag_lstsq = &work_ptrs[4][(long long)thread_idx * SVD_N_SIZE];
+        if (work_ptrs[5]) thread_U_inv = &work_ptrs[5][(long long)thread_idx * PHASE_MATRIX_SIZE];
+        if (work_ptrs[6]) thread_V_inv = &work_ptrs[6][(long long)thread_idx * PHASE_MATRIX_SIZE];
+        if (work_ptrs[7]) thread_singular_values_inv = &work_ptrs[7][(long long)thread_idx * MAX_PHASE_MATRIX_DIM];
+        if (work_ptrs[8]) thread_superdiag_inv = &work_ptrs[8][(long long)thread_idx * MAX_PHASE_MATRIX_DIM];
+        if (work_ptrs[9]) thread_work_inv = &work_ptrs[9][(long long)thread_idx * PHASE_MATRIX_SIZE];
+        if (work_ptrs[10]) thread_x_dof = &work_ptrs[10][(long long)thread_idx * DOF_SIZE];
+        if (work_ptrs[11]) thread_grad = &work_ptrs[11][(long long)thread_idx * DOF_SIZE];
+        if (work_ptrs[12]) thread_hess = &work_ptrs[12][(long long)thread_idx * HESS_SIZE];
+        if (work_ptrs[13]) thread_masses = &work_ptrs[13][(long long)thread_idx * MAX_COMPONENTS];
+        if (work_ptrs[14]) thread_mass_jac = &work_ptrs[14][(long long)thread_idx * MASS_JAC_SIZE];
+        if (work_ptrs[15]) thread_phase_matrix = &work_ptrs[15][(long long)thread_idx * CONSTRAINT_MATRIX_SIZE];
+        if (work_ptrs[16]) thread_equilibrium_matrix = &work_ptrs[16][(long long)thread_idx * MAX_EQ_MATRIX_SIZE];
+        if (work_ptrs[17]) thread_equilibrium_rhs = &work_ptrs[17][(long long)thread_idx * MAX_EQ_MATRIX_ROWS];
+        if (work_ptrs[18]) thread_eq_soln = &work_ptrs[18][(long long)thread_idx * MAX_EQ_SOLN_LEN];
         // Skip 19 - handled separately for system_states
-        if (work_ptrs[20]) thread_delta_ms = &work_ptrs[20][thread_idx * (MAX_PHASES * MAX_COMPONENTS)];
-        if (work_ptrs[21]) thread_phase_compositions = &work_ptrs[21][thread_idx * (MAX_PHASES * MAX_COMPONENTS)];
-        if (work_ptrs[22]) thread_phase_amounts_per_mole_atoms = &work_ptrs[22][thread_idx * (MAX_PHASES * MAX_COMPONENTS)];
+        if (work_ptrs[20]) thread_delta_ms = &work_ptrs[20][(long long)thread_idx * (MAX_PHASES * MAX_COMPONENTS)];
+        if (work_ptrs[21]) thread_phase_compositions = &work_ptrs[21][(long long)thread_idx * (MAX_PHASES * MAX_COMPONENTS)];
+        if (work_ptrs[22]) thread_phase_amounts_per_mole_atoms = &work_ptrs[22][(long long)thread_idx * (MAX_PHASES * MAX_COMPONENTS)];
     }}
 
     // MIRROR CPU LOGIC: Start with what definitely works on CPU
@@ -4259,7 +4259,7 @@ __global__ void top_level_equilibrium_kernel(
                 thread_x_dof, thread_grad, thread_hess,
                 thread_masses, thread_mass_jac, thread_phase_matrix,
                 thread_equilibrium_matrix, thread_equilibrium_rhs, thread_eq_soln,
-                work_arrays ? &((double**)work_arrays)[19][thread_idx * SYSTEM_STATE_SIZE] : nullptr,
+                work_arrays ? &((double**)work_arrays)[19][(long long)thread_idx * SYSTEM_STATE_SIZE] : nullptr,
                 thread_delta_ms,  // Pass delta_ms global memory pointer
                 thread_phase_compositions,  // Pass phase_compositions global memory pointer
                 thread_phase_amounts_per_mole_atoms,  // Pass phase_amounts_per_mole_atoms global memory pointer

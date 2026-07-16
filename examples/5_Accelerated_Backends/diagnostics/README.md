@@ -11,6 +11,7 @@ Recommended order on a fresh machine:
 | `check_device_stack.py` | Does this GPU accept the per-thread stack raise the kernels want? (ROCm troubleshooting) | seconds |
 | `check_backend_correctness.py [c++\|gpu]` | Do the accelerated answers match the reference — and did the run actually use the backend (fallback guard)? | ~1 min + one-time compile |
 | `benchmark_speed.py [backend] [nx nt]` | What speedup does this machine get, with compile time excluded? | ~1-2 min |
+| `check_reference_threading.py [nx nt]` | Is the reference solver helped, hurt, or untouched by BLAS thread pools on this machine? | ~1-2 min |
 
 Things these scripts teach you to watch for anywhere else:
 

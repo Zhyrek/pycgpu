@@ -4110,8 +4110,11 @@ __device__ bool run_loop(
         }
 
         #ifdef PYCGPU_TRACE_LOOP
+#ifndef PYCGPU_TRACE_COND
+#define PYCGPU_TRACE_COND 0
+#endif
         // debug tracing twin of the reference PYCALPHAD_TRACE_LOOP print
-        if (thread_id == 0) {
+        if (thread_id == PYCGPU_TRACE_COND) {
             printf("GPUTRACE iter=%d changed=%d amt=", iteration_count, (int)phases_changed_iter);
             for (int i = 0; i < state->num_compsets; ++i)
                 printf("%s%.17g", i ? "," : "", state->phase_amt[i]);

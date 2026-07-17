@@ -169,3 +169,34 @@ def test_binplot_grid_method_invalid(load_database):
     with pytest.raises(ValueError, match="method"):
         binplot(dbf, ['AL', 'ZN', 'VA'], list(dbf.phases.keys()), conds, method='bogus')
 
+
+def _compare_backends_quaternary(dbf, backend):
+    # Regression test for the condition-row stride bug: the per-condition
+    # data rows are [statevars..., X...] with stride (MAX_STATEVARS +
+    # MAX_COMPONENTS). The packer used to truncate rows to the STATIC header
+    # width (8 doubles), which coincidentally equals the dynamic stride for
+    # every system with <= 4 padded components — all binaries and ternaries —
+    # so only 5+ component systems (here quaternary + VA) exposed it: every
+    # condition after the first read shifted garbage (T=800 landing in the
+    # N slot, an X value in the T slot) and diverged or converged to garbage.
+    # The X values must DIFFER across conditions: equal-X grids mask the bug.
+    comps = ['AL', 'CO', 'CR', 'NI', 'VA']
+    phases = list(dbf.phases.keys())
+    conds = {v.N: 1, v.P: 101325, v.T: (800, 1601, 400),
+             v.X('AL'): 0.05, v.X('CO'): 0.05, v.X('CR'): (0.05, 0.35, 0.1)}
+    ref = equilibrium(dbf, comps, phases, conds)
+    res = equilibrium(dbf, comps, phases, conds, backend=backend)
+    assert np.isfinite(res.GM.values).sum() == np.isfinite(ref.GM.values).sum()
+    np.testing.assert_allclose(res.GM.values, ref.GM.values, atol=GM_ATOL)
+
+
+@needs_cpp
+@select_database("alcocrni.tdb")
+def test_cpp_backend_quaternary_batch(load_database):
+    _compare_backends_quaternary(load_database(), 'cpp')
+
+
+@needs_cuda
+@select_database("alcocrni.tdb")
+def test_cuda_backend_quaternary_batch(load_database):
+    _compare_backends_quaternary(load_database(), 'cuda')

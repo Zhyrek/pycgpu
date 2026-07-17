@@ -298,13 +298,21 @@ def build_spec_rows(points, spec_row0, hull, dynamic_sizes, nonvacant_elements,
 
 def _spec_core_len(dynamic_sizes):
     """Length in doubles of the spec CORE section (gpu_systemspec_flat.py)."""
+    # MUST mirror the kernel's sequential spec unpack EXACTLY. The
+    # phase-local-condition fields (one count scalar + 4 doubles per
+    # MAX_PHASE_LOCAL_CONDITIONS slot) sit BETWEEN ALLOWED_MASS_RESIDUAL and
+    # the fit-parameter tail; omitting them shifted the per-point fit_params
+    # write one slot early whenever parameters were present — the kernel then
+    # read parameter k from slot k+1, silently freezing the LAST fit
+    # parameter and mis-assigning the rest (ESPEI batched-residual path).
     MC = int(dynamic_sizes['MAX_COMPONENTS'])
     MSV = int(dynamic_sizes['MAX_STATEVARS'])
     MP = int(dynamic_sizes['MAX_PHASES'])
     MFIX = int(dynamic_sizes['MAX_FIXED_MOLE_FRACTION_CONDITIONS'])
     MPAR = int(dynamic_sizes.get('MAX_PARAMS', 0))
+    MPLC = int(dynamic_sizes.get('MAX_PHASE_LOCAL_CONDITIONS', 0))
     return (3 + MC + MFIX * MC + MFIX + 2 + (MC + 1) + (MSV + 1) + (MC + 1)
-            + (MSV + 1) + (MP + 1) + 1 + 1 + (MPAR + 1))
+            + (MSV + 1) + (MP + 1) + 1 + 1 + (1 + 4 * MPLC) + (MPAR + 1))
 
 
 def build_initial_phase_data(points, hull, py_phase_name_to_unique_idx_map,

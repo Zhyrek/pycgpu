@@ -1628,96 +1628,36 @@ def _create_initial_phase_data_struct_array(initial_phase_data_arrays, num_condi
         print(f"[GPU] NEW All-double layout: {doubles_per_struct} doubles per condition = {doubles_per_struct * 8} bytes")
         print(f"[GPU] Total initial phase data: {initial_phase_data_flat.nbytes} bytes for {num_conditions} conditions")
     
-    # Copy data from our structured arrays to the flat double arrays
-    for i in range(num_conditions):
-        offset = 0
-        
-        # phase_indices (stored as doubles)
-        initial_phase_data_flat[i, offset:offset+MAX_PHASES] = initial_phase_data_arrays['phase_indices'][i, :].astype(np.float64)
-        offset += MAX_PHASES
-        
-        # phase_amounts (already doubles)
-        initial_phase_data_flat[i, offset:offset+MAX_PHASES] = initial_phase_data_arrays['phase_amounts'][i, :]
-        offset += MAX_PHASES
-        
-        # site_fractions (flatten 2D array)
-        sf_flat = initial_phase_data_arrays['site_fractions'][i, :, :].flatten()
-        sf_padded = np.zeros(MAX_PHASES * MAX_DOF_PER_PHASE)
-        sf_padded[:len(sf_flat)] = sf_flat
-        initial_phase_data_flat[i, offset:offset+(MAX_PHASES * MAX_DOF_PER_PHASE)] = sf_padded
-        offset += (MAX_PHASES * MAX_DOF_PER_PHASE)
-        
-        # DEBUG: Print detailed site fractions data for first condition
-        if i == 0 and verbose:
-            print(f"[GPU] DEBUG: SITE_FRACTIONS DETAILED for condition {i}:")
-            print(f"  Original shape: {initial_phase_data_arrays['site_fractions'][i].shape}")
-            print(f"  Original data: {initial_phase_data_arrays['site_fractions'][i]}")
-            print(f"  Flattened sf_flat: {sf_flat}")
-            print(f"  Padded sf_padded: {sf_padded}")
-            print(f"  Stored in flat array at offset {offset-(MAX_PHASES * MAX_DOF_PER_PHASE)}: {initial_phase_data_flat[i, offset-(MAX_PHASES * MAX_DOF_PER_PHASE):offset]}")
-            
-            # Also print phase indices to correlate with site fractions
-            phase_indices = initial_phase_data_flat[i, 0:MAX_PHASES].astype(int) 
-            phase_amounts = initial_phase_data_flat[i, MAX_PHASES:2*MAX_PHASES]
-            print(f"  Phase indices: {phase_indices}")
-            print(f"  Phase amounts: {phase_amounts}")
-            
-            # Print compositions for comparison
-            comp_offset = 2*MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE)
-            compositions = initial_phase_data_flat[i, comp_offset:comp_offset+(MAX_PHASES * MAX_COMPONENTS)]
-            print(f"  Compositions: {compositions}")
-        
-        # compositions (flatten 2D array)
-        comp_flat = initial_phase_data_arrays['compositions'][i, :, :].flatten()
-        comp_padded = np.zeros(MAX_PHASES * MAX_COMPONENTS)
-        comp_padded[:len(comp_flat)] = comp_flat
-        initial_phase_data_flat[i, offset:offset+(MAX_PHASES * MAX_COMPONENTS)] = comp_padded
-        offset += (MAX_PHASES * MAX_COMPONENTS)
-        
-        # chemical_potentials (already doubles)
-        initial_phase_data_flat[i, offset:offset+MAX_COMPONENTS] = initial_phase_data_arrays['chemical_potentials'][i, :]
-        if verbose and i < 2:
-            print(f"[GPU] Condition {i} - Storing chemical potentials at offset {offset}:")
-            print(f"  Values: {initial_phase_data_arrays['chemical_potentials'][i, :]}")
-            print(f"  Stored in flat array: {initial_phase_data_flat[i, offset:offset+MAX_COMPONENTS]}")
-        offset += MAX_COMPONENTS
-        
-        # num_phases (stored as double)
-        initial_phase_data_flat[i, offset] = float(initial_phase_data_arrays['num_phases'][i])
-        
-        # DOUBLE CHECK: Print the actual flat array being created
-        if i < 2 and verbose:
-            print(f"[GPU] PYTHON SIDE FLAT ARRAY DUMP for condition {i}:")
-            # Print key offsets - use actual offset, not hardcoded 60
-            chem_pot_offset = offset - MAX_COMPONENTS - 1  # offset is after chem pots and num_phases
-            if chem_pot_offset >= 0 and chem_pot_offset + MAX_COMPONENTS <= doubles_per_struct:
-                print(f"  Chemical potentials (offset {chem_pot_offset}-{chem_pot_offset+MAX_COMPONENTS-1}): {initial_phase_data_flat[i, chem_pot_offset:chem_pot_offset+MAX_COMPONENTS]}")
-            print(f"  Num phases (offset {offset}): {initial_phase_data_flat[i, offset]}")
-            if i == 0:
-                print(f"  First {min(45, doubles_per_struct)} values:")
-                for idx in range(min(45, doubles_per_struct)):
-                    print(f"    [{idx}]: {initial_phase_data_flat[i, idx]}")
-        
-        # DEBUG: Log the struct data for first few conditions to verify transfer
-        if i < 5 and verbose:
-            phase_indices = initial_phase_data_flat[i, 0:MAX_PHASES].astype(int)
-            phase_amounts = initial_phase_data_flat[i, MAX_PHASES:2*MAX_PHASES]
-            # Read num_phases from the correct offset, not -1
-            num_phases_offset = 2*MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * MAX_COMPONENTS) + MAX_COMPONENTS
-            num_phases = int(initial_phase_data_flat[i, num_phases_offset])
-            # Show all active phases, not just first 2
-            active_phases = phase_indices[:num_phases]
-            active_amounts = phase_amounts[:num_phases]
-            print(f"[GPU] InitialPhaseData[{i}]: num_phases={num_phases}, phases={active_phases}, amounts={active_amounts}")
-            # Also check if we're getting the same data for all conditions
-            if i > 0:
-                same_phases = np.array_equal(phase_indices[:2], initial_phase_data_flat[0, 0:2].astype(int))
-                same_amounts = np.allclose(phase_amounts[:2], initial_phase_data_flat[0, MAX_PHASES:MAX_PHASES+2], atol=1e-6)
-                if same_phases and same_amounts:
-                    print(f"[GPU] WARNING: Condition {i} has identical phase data to condition 0! This explains why only thread 0 works.")
-                else:
-                    print(f"[GPU] GOOD: Condition {i} phase amounts differ from condition 0: {phase_amounts[:2]} vs {initial_phase_data_flat[0, MAX_PHASES:MAX_PHASES+2]}")
-    
+    # Vectorized packing (was a per-condition python loop — 6.5 us/condition
+    # at 100k conditions). The source arrays are allocated at the MAX_* dims
+    # by _prepare_gpu_data, so a row-major reshape is exactly the contiguous
+    # copy-and-pad the loop performed; the assertion pins that invariant.
+    sf = np.asarray(initial_phase_data_arrays['site_fractions'], dtype=np.float64)
+    comp = np.asarray(initial_phase_data_arrays['compositions'], dtype=np.float64)
+    assert sf.shape[1:] == (MAX_PHASES, MAX_DOF_PER_PHASE), sf.shape
+    assert comp.shape[1:] == (MAX_PHASES, MAX_COMPONENTS), comp.shape
+    off = 0
+    initial_phase_data_flat[:, off:off+MAX_PHASES] = \
+        initial_phase_data_arrays['phase_indices'].astype(np.float64)
+    off += MAX_PHASES
+    initial_phase_data_flat[:, off:off+MAX_PHASES] = \
+        initial_phase_data_arrays['phase_amounts']
+    off += MAX_PHASES
+    initial_phase_data_flat[:, off:off+(MAX_PHASES * MAX_DOF_PER_PHASE)] = \
+        sf.reshape(num_conditions, MAX_PHASES * MAX_DOF_PER_PHASE)
+    off += MAX_PHASES * MAX_DOF_PER_PHASE
+    initial_phase_data_flat[:, off:off+(MAX_PHASES * MAX_COMPONENTS)] = \
+        comp.reshape(num_conditions, MAX_PHASES * MAX_COMPONENTS)
+    off += MAX_PHASES * MAX_COMPONENTS
+    initial_phase_data_flat[:, off:off+MAX_COMPONENTS] = \
+        initial_phase_data_arrays['chemical_potentials']
+    off += MAX_COMPONENTS
+    initial_phase_data_flat[:, off] = \
+        np.asarray(initial_phase_data_arrays['num_phases'], dtype=np.float64)
+    if verbose and num_conditions > 0:
+        print(f"[GPU] DEBUG: packed {num_conditions} InitialPhaseData rows "
+              f"(vectorized), num_phases[0]={initial_phase_data_flat[0, off]}")
+
     return initial_phase_data_flat
 
 
@@ -1943,16 +1883,18 @@ def _process_gpu_results(results_cpu_flat: np.ndarray, wks_obj: Workspace,
             # Get NP values to check which phases are actually present
             np_trimmed = np_reshaped[..., :vertex_count]
             
+            # Vectorized id -> name mapping (was a python loop over every
+            # (condition, vertex) element — 13 us/condition at 100k
+            # conditions). Zero-amount slots keep the CPU's empty string.
             id_to_name = {idx: name for name, idx in py_phase_name_to_unique_idx_map.items()}
-            for flat_idx in range(phase_names_reshaped.size):
-                multi_idx = np.unravel_index(flat_idx, phase_names_reshaped.shape)
-                phase_id = phase_ids_trimmed[multi_idx]
-                phase_amount = np_trimmed[multi_idx]
-                
-                # Only set phase name if phase amount > 0
-                # This matches CPU behavior where zero-amount phases have empty strings
-                if phase_id >= 0 and phase_id in id_to_name and phase_amount > 1e-10:
-                    phase_names_reshaped[multi_idx] = id_to_name[phase_id]
+            _max_pid = max(id_to_name) if id_to_name else -1
+            _name_lut = np.full(_max_pid + 2, '', dtype=object)
+            for _pid, _nm in id_to_name.items():
+                _name_lut[_pid] = _nm
+            _ids_i = phase_ids_trimmed.astype(np.int64)
+            _valid = (_ids_i >= 0) & (_ids_i <= _max_pid) & (np_trimmed > 1e-10)
+            phase_names_reshaped = np.where(
+                _valid, _name_lut[np.clip(_ids_i, 0, _max_pid + 1)], '')
             
             data_vars['Phase'] = (tuple(str(k) for k in coords_keys_for_shape) + ('vertex',), phase_names_reshaped)
             
@@ -1976,17 +1918,21 @@ def _process_gpu_results(results_cpu_flat: np.ndarray, wks_obj: Workspace,
             _dof_by_pid = {pid: len(wks_obj.models[name].site_fractions)
                            for name, pid in py_phase_name_to_unique_idx_map.items()
                            if name in wks_obj.models}
-            for idx in np.ndindex(y_trimmed.shape[:-1]):  # Iterate over all but last dimension
-                phase_idx = idx[-1]  # vertex index
-                if phase_idx < np_trimmed[idx[:-1]].shape[0]:
-                    phase_amount = np_trimmed[idx[:-1] + (phase_idx,)]
-                    # empty slots are NaN-padded now, so test the negation
-                    # (NaN <= 1e-10 is False but the slot is still not present)
-                    if not (phase_amount > 1e-10):  # Phase not present
-                        y_trimmed[idx] = np.nan
-                    else:
-                        _pd = _dof_by_pid.get(int(phase_ids_trimmed[idx]), y_trimmed.shape[-1])
-                        y_trimmed[idx + (slice(_pd, None),)] = np.nan
+            # Vectorized (was np.ndindex over every (condition, vertex) row):
+            # absent slots -> all-NaN row; present slots -> NaN beyond the
+            # phase's own phase_dof, exactly as the loop wrote them.
+            _present = np_trimmed > 1e-10
+            _full_dof = y_trimmed.shape[-1]
+            _pd_lut = np.full(_max_pid + 2, _full_dof, dtype=np.int64)
+            for _pid, _pd in _dof_by_pid.items():
+                _pd_lut[_pid] = _pd
+            _pd_arr = np.where((_ids_i >= 0) & (_ids_i <= _max_pid),
+                               _pd_lut[np.clip(_ids_i, 0, _max_pid + 1)], _full_dof)
+            _dof_pos = np.arange(_full_dof)
+            y_trimmed = np.where(_present[..., None], y_trimmed, np.nan)
+            y_trimmed = np.where(_present[..., None]
+                                 & (_dof_pos >= _pd_arr[..., None]),
+                                 np.nan, y_trimmed)
             
             data_vars['Y'] = (tuple(str(k) for k in coords_keys_for_shape) + ('vertex', 'internal_dof'), y_trimmed)
             

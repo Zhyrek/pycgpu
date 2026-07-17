@@ -7,7 +7,7 @@ from .gpu_systemspec_flat import create_flat_system_specification, apply_safe_pa
 from .gpu_properties_subset import PropertiesSubset
 
 
-def create_system_specifications_array(wks_obj, num_conditions, dynamic_sizes, properties, verbose=False):
+def create_system_specifications_array(wks_obj, num_conditions, dynamic_sizes, properties, verbose=False, device_xp=None):
     """
     Create an array of SystemSpecification structs, one per condition.
     
@@ -205,7 +205,11 @@ def create_system_specifications_array(wks_obj, num_conditions, dynamic_sizes, p
 
     if fast_ok:
         spec0 = _build_one(0)
-        specs_array = np.tile(spec0, (num_conditions, 1))
+        # device_xp (cupy): tile + per-condition column writes happen ON
+        # DEVICE — only the template row and the n-length columns cross the
+        # bus instead of the full (n, stride) array (~1 GB at 1M conditions).
+        _xp = device_xp if device_xp is not None else np
+        specs_array = _xp.tile(_xp.asarray(spec0), (num_conditions, 1))
 
         # Multi-dim index arrays for every condition (same little-endian
         # decomposition as _build_one, which matches C-order flattening of
@@ -241,7 +245,7 @@ def create_system_specifications_array(wks_obj, num_conditions, dynamic_sizes, p
                     vals = varr[x_idx_arrs[el]]
                 else:
                     vals = np.full(num_conditions, float(varr.flat[0]))
-                specs_array[:, off_rhs + constraint_count] = vals
+                specs_array[:, off_rhs + constraint_count] = _xp.asarray(vals)
                 constraint_count += 1
 
         # initial_chemical_potentials: FREE chempots take per-condition starting
@@ -253,7 +257,8 @@ def create_system_specifications_array(wks_obj, num_conditions, dynamic_sizes, p
             if v.ChemicalPotential(comp) in wks_obj.conditions:
                 continue
             if comp_idx < n_mu_comp:
-                specs_array[:, off_mu + comp_idx] = mu_flat[:, comp_idx]
+                specs_array[:, off_mu + comp_idx] = _xp.asarray(
+                    np.ascontiguousarray(mu_flat[:, comp_idx]))
 
         if verbose:
             print(f"[GPU] SystemSpecification array built via fast path "

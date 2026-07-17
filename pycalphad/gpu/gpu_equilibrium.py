@@ -2513,8 +2513,12 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     try:
         # Create one SystemSpecification per condition instead of sharing
         from .gpu_systemspec_array import create_system_specifications_array
+        _spec_dev_xp = (cp if (not _cpu_backend_mode
+                               and os.environ.get('PYCGPU_DEVICE_PIPE', '1') != '0')
+                        else None)
         system_specs_array = create_system_specifications_array(
-            _norm_wks, num_total_conditions_pts, dynamic_sizes, properties, verbose
+            _norm_wks, num_total_conditions_pts, dynamic_sizes, properties, verbose,
+            device_xp=_spec_dev_xp
         )
         
         # Calculate stride for SystemSpec array
@@ -2571,13 +2575,18 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             if os.environ.get('PYCGPU_JANSSON_KIND') == '2':
                 # Parameter denominators: one delta block per fit parameter.
                 _pyjan_stride *= max(int(dynamic_sizes.get('MAX_PARAMS', 0)), 1)
-        results_flat = np.zeros(num_total_conditions_pts * results_per_condition
-                                + num_total_conditions_pts * _pyjan_stride, dtype=np.float64)
+        _results_len = (num_total_conditions_pts * results_per_condition
+                        + num_total_conditions_pts * _pyjan_stride)
+        # cuda: allocate the (zero) results buffer ON DEVICE — the old path
+        # materialized ~n*rpc*8 bytes of host zeros, copied them via
+        # .tobytes(), and uploaded them (three full passes over hundreds of
+        # MB at large batches, all to move zeros).
+        results_flat = None if not _cpu_backend_mode else np.zeros(_results_len, dtype=np.float64)
         
         # Also create structured array for final result conversion (after GPU)
         results_struct = _create_equilibrium_results_struct_array(num_total_conditions_pts, dynamic_sizes)
         if verbose:
-            print(f"[GPU] DEBUG: Results flat array created with {len(results_flat)} doubles ({num_total_conditions_pts} conditions * {results_per_condition} per condition)")
+            print(f"[GPU] DEBUG: Results buffer sized {_results_len} doubles ({num_total_conditions_pts} conditions * {results_per_condition} per condition)")
             print(f"[GPU] DEBUG: results_per_condition = {results_per_condition}")
             print(f"[GPU] DEBUG: EquilibriumResultSingle struct array created for post-processing")
     
@@ -2630,7 +2639,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             
         
         initial_phase_data_bytes = initial_phase_data_struct.tobytes()
-        results_bytes = results_flat.tobytes()  # Use flat array directly
+        results_bytes = results_flat.tobytes() if results_flat is not None else None
         
         
         # Try a different approach: use the original dtypes but as simple arrays
@@ -2679,7 +2688,8 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                 # Chemical potentials are at offset 40-43 for first condition
                 if len(initial_phase_data_gpu) > 43:
                     print(f"[GPU] DEBUG: Condition 0 chemical potentials (40-43): {[float(initial_phase_data_gpu[i]) for i in range(40, min(44, len(initial_phase_data_gpu)))]}")
-            results_gpu = _from_bytes(results_bytes)
+            results_gpu = (_from_bytes(results_bytes) if results_bytes is not None
+                           else cp.zeros(_results_len, dtype=cp.float64).view(cp.uint8))
             
             # Ensure arrays are contiguous for proper pointer access
             system_spec_gpu = xp.ascontiguousarray(system_spec_gpu)

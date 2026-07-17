@@ -652,7 +652,7 @@ class PointBatchSolver:
 
 
 def device_point_hull(points, solver, X_row, GM_rows, combo_idx, Phase_row,
-                      Y_row, nonvacant_elements):
+                      Y_row, nonvacant_elements, light=False):
     """Compiled point hull (hyperplane.h) — same result dict as point_hull.
 
     Parameters
@@ -752,6 +752,36 @@ def device_point_hull(points, solver, X_row, GM_rows, combo_idx, Phase_row,
     # Only the first ncomp vertex slots are meaningful; trailing stays
     # ''/NaN. Fake vertices dissolve with the non-fake GM recompute.
     idx = sx[:, :ncomp]
+    if light:
+        # Device-pipeline mode: the per-vertex NP/X/Y/Phase host arrays are
+        # unused downstream (the starting rows are built on device from the
+        # raw outputs), so skip the large gathers. GM keeps the fake-vertex
+        # recompute (numeric fake mask instead of the object-array gather);
+        # MU is already host-resident.
+        fake_row = (np.asarray(Phase_row) == '_FAKE_')
+        fake = fake_row[idx]
+        has_fake = fake.any(axis=1)
+        if has_fake.any():
+            if GM_flat is None:
+                import cupy as _cp
+                gm_at = _cp.asnumpy(GM_rows.reshape(-1)[_cp.asarray(gm_base[:, None] + idx)])
+            else:
+                gm_at = GM_flat[(gm_base[:, None] + idx)]
+            w = np.where(fake, 0.0, fr[:, :ncomp])
+            molesum = w.sum(axis=1)
+            new_e = (w * gm_at).sum(axis=1)
+            recompute = has_fake & (molesum != 0)
+            oe = np.where(recompute, np.divide(new_e, molesum,
+                                               out=np.zeros_like(new_e),
+                                               where=molesum != 0), oe)
+        out = {'GM': oe, 'MU': mu, 'points_idx': sx.astype(np.int32),
+               'NP': np.zeros((n, ncomp + 1)),
+               'X': np.zeros((n, ncomp + 1, ncomp)),
+               'Y': np.zeros((n, ncomp + 1, Y_row.shape[1])),
+               'Phase': np.zeros((n, ncomp + 1), dtype='U1')}
+        if solver.backend != 'cpp':
+            out['_dev'] = _dev_handles
+        return out
     phase = Phase_row[idx]                        # (n, ncomp) object/str
     fake = phase == '_FAKE_'
     NP = np.full((n, ncomp + 1), np.nan)
@@ -901,8 +931,10 @@ def device_starting_point(unitless_conds, state_variables, phase_record_factory,
 
     _gx0 = np.ascontiguousarray(gx[0])
     _gy0 = np.ascontiguousarray(gy[0])
+    _light = (solver.backend != 'cpp'
+              and os.environ.get('PYCGPU_DEVICE_PIPE', '1') != '0')
     hull = device_point_hull(pts, solver, _gx0, GM_rows,
-                             combo, gp[0], _gy0, nonvacant)
+                             combo, gp[0], _gy0, nonvacant, light=_light)
 
     # ---- LightDataset with starting_point's exact structure ----
     max_phase_name_len = max(max(len(x) for x in solver.shim.phases), 6)

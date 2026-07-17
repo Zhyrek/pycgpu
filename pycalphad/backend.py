@@ -36,6 +36,11 @@ Accepted option keywords (apply to accelerated backends):
   iteration cap (cap-touching conditions are rerun at the full budget;
   results are bit-identical to a single full-budget run).
 * ``max_iters`` (int): full Newton-iteration budget (CPU parity value 1000).
+* ``threads`` (int): std::thread workers over conditions in the c++
+  backend's solver and hull (results are bit-identical at any count).
+  Default 1; intended for batch jobs with dedicated cores — pass the
+  job's core allocation rather than 0 (= all hardware threads), which
+  is unfriendly on shared/login nodes.
 * ``hull_procs`` (int): worker processes for the starting-point hull
   (default 1 = serial; 0 = auto-scale on large batches).
 * ``calc_procs`` (int): worker processes for grid energy sampling over the
@@ -73,6 +78,7 @@ _ALIASES = {
 # corresponding environment variable untouched.
 _OPTION_ENV = {
     'robust_phase_removal': ('PYCGPU_ROBUST', lambda v: '1' if v else ''),
+    'threads': ('PYCGPU_CPU_THREADS', str),
     'chunk': ('PYCGPU_CHUNK', str),
     'pass1_iters': ('PYCGPU_PASS1_ITERS', str),
     'max_iters': ('PYCGPU_MAXITER', str),

@@ -2606,19 +2606,45 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     # buffers are permuted together; results rows are inverse-permuted before
     # processing, so per-condition outputs are unchanged.
     _sort_perm = None
-    if os.environ.get('PYCGPU_SORT') and not (verbose and num_total_conditions_pts <= 10):
-        _sig = np.concatenate([
-            initial_phase_data_arrays['num_phases'][:, None].astype(np.int64),
-            initial_phase_data_arrays['phase_indices'].astype(np.int64)], axis=1)
+    # Assemblage sorting defaults ON for the cuda backend: grouping
+    # conditions with the same starting phase set makes warps homogeneous
+    # (3.3x alone on 37.6k-condition AlCuFe, bit-identical — results are
+    # unsorted back through _inv_perm). PYCGPU_SORT=0 disables; the c++
+    # backend has no warps and skips it.
+    _sort_default = '' if _cpu_backend_mode else '1'
+    if (os.environ.get('PYCGPU_SORT', _sort_default) not in ('', '0')
+            and not (verbose and num_total_conditions_pts <= 10)):
+        # Assemblage signature: (num_phases, phase_indices...). Under the
+        # device pipeline the host ipd arrays are unfilled — read the two
+        # signature fields back from the device rows (small D2H).
+        if not isinstance(initial_phase_data_struct, np.ndarray):
+            _MPl = int(dynamic_sizes['MAX_PHASES'])
+            _stride_l = int(initial_phase_data_struct.shape[1])
+            _sig = np.concatenate([
+                cp.asnumpy(initial_phase_data_struct[:, _stride_l - 1:_stride_l]).astype(np.int64),
+                cp.asnumpy(initial_phase_data_struct[:, :_MPl]).astype(np.int64)], axis=1)
+        else:
+            _sig = np.concatenate([
+                initial_phase_data_arrays['num_phases'][:, None].astype(np.int64),
+                initial_phase_data_arrays['phase_indices'].astype(np.int64)], axis=1)
         _, _group = np.unique(_sig, axis=0, return_inverse=True)
         _sort_perm = np.argsort(_group, kind='stable')
-        _spec_stride_tmp = len(system_specs_array) // num_total_conditions_pts
-        system_specs_array = np.ascontiguousarray(
-            system_specs_array.reshape(num_total_conditions_pts, _spec_stride_tmp)[_sort_perm]).reshape(-1)
-        condition_args_struct = np.ascontiguousarray(condition_args_struct[_sort_perm])
-        initial_phase_data_struct = np.ascontiguousarray(initial_phase_data_struct[_sort_perm])
+
+        def _permute_rows(arr, n_rows, flat=False):
+            # device arrays permute with a device copy of the permutation
+            if isinstance(arr, np.ndarray):
+                out = arr.reshape(n_rows, -1)[_sort_perm] if flat else arr[_sort_perm]
+                out = np.ascontiguousarray(out)
+            else:
+                _perm_dev = cp.asarray(_sort_perm)
+                out = arr.reshape(n_rows, -1)[_perm_dev] if flat else arr[_perm_dev]
+                out = cp.ascontiguousarray(out)
+            return out.reshape(-1) if flat else out
+        system_specs_array = _permute_rows(system_specs_array, num_total_conditions_pts, flat=True)
+        condition_args_struct = _permute_rows(condition_args_struct, num_total_conditions_pts)
+        initial_phase_data_struct = _permute_rows(initial_phase_data_struct, num_total_conditions_pts)
         if grid_block_indices_np is not None:
-            grid_block_indices_np = np.ascontiguousarray(grid_block_indices_np[_sort_perm])
+            grid_block_indices_np = _permute_rows(grid_block_indices_np, num_total_conditions_pts)
         if verbose or os.environ.get('PYCGPU_TIME'):
             print(f"[GPU] PYCGPU_SORT: {len(np.unique(_group))} assemblage groups over {num_total_conditions_pts} conditions")
     
@@ -2834,6 +2860,15 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         # generated slicing now uses (long long) arithmetic, so this cap is
         # belt-and-braces rather than the primary fix.
         _fit = min(_fit, (2**31 - 1) // max(int(SYSTEM_STATE_SIZE), 1))
+        if not _cpu_backend_mode and bool(getattr(cp.cuda.runtime, 'is_hip', False)):
+            # ROCm: a single ~38k-thread launch of a many-phase kernel
+            # (AlCuFe, ~0.8 MB work arrays/thread) hit a GPU memory access
+            # fault where 8192-condition launches run clean on the same card
+            # (and huge launches of SMALL kernels also run clean, so it is
+            # per-thread-footprint dependent — likely a scratch-aggregate
+            # limit inside ROCm). Cap HIP launches conservatively at the
+            # empirically safe size; PYCGPU_HIP_MAX_CHUNK overrides.
+            _fit = min(_fit, int(os.environ.get('PYCGPU_HIP_MAX_CHUNK', 8192)))
         _fit = max((_fit // threads_per_block) * threads_per_block,
                    threads_per_block)
         _chunk_size = min(num_total_conditions_pts, _fit)
@@ -3034,7 +3069,14 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     # Both caps are plain env-var tunables so N can be swept (50/100/150/...)
     # without recompiling anything.
     _full_iter_cap = int(os.environ.get('PYCGPU_MAXITER', 1000))
-    _pass1_iters = int(os.environ.get('PYCGPU_PASS1_ITERS', 0) or 0)
+    # Default ON for the cuda backend (50): wide grids have huge
+    # per-condition iteration variance and every 32-condition warp runs at
+    # its slowest member's speed; the two-pass driver is bit-identical by
+    # construction and measured 147s -> 110s alone / 44.5s -> 17.5s on top
+    # of assemblage sorting for 37.6k-condition AlCuFe. PYCGPU_PASS1_ITERS=0
+    # disables. The c++ backend has no warps and keeps single-pass.
+    _pass1_default = 0 if _cpu_backend_mode else 50
+    _pass1_iters = int(os.environ.get('PYCGPU_PASS1_ITERS', _pass1_default) or 0)
     _twopass_active = 0 < _pass1_iters < _full_iter_cap and not debug_enabled
     max_solver_iterations = np.int32(_pass1_iters if _twopass_active else _full_iter_cap)
 

@@ -477,10 +477,19 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
     }
     
     # Fill initial phase data from starting_point() properties.
+    # Device-resident path: the packed rows are built on device directly from
+    # the hull outputs (_build_device_ipd), so the host fill — including the
+    # large per-vertex Y/X gathers — is skipped entirely (the zero arrays
+    # above are never consumed; np.zeros is lazy so they cost nothing).
+    _skip_host_ipd = (getattr(properties, '_hull_dev', None) is not None
+                      and not os.environ.get('PYCGPU_CPU')
+                      and os.environ.get('PYCGPU_DEVICE_PIPE', '1') != '0')
     # FAST PATH (default): fully vectorized over conditions -- the original
     # per-condition loop cost ~1s at 10k conditions (linear in N).
     # PYCGPU_PREP_SLOW=1 forces the original loop (verification tooling).
-    if not os.environ.get('PYCGPU_PREP_SLOW'):
+    if _skip_host_ipd:
+        pass
+    elif not os.environ.get('PYCGPU_PREP_SLOW'):
         n_cond = num_conditions_total
         phase_arr = np.asarray(_extract_values(properties.Phase)).reshape(n_cond, -1)
         np_arr = np.asarray(_extract_values(properties.NP)).reshape(n_cond, -1).astype(np.float64)
@@ -1584,6 +1593,100 @@ def _create_condition_args_struct_array(condition_args_np, verbose=False):
     return np.ascontiguousarray(condition_args_np, dtype=np.float64)
 
 
+_IPD_BUILDER_SRC = r"""
+extern "C" __global__ void pycgpu_build_ipd(
+    const int* sx, const double* fr, const double* mu,
+    const double* X_row, const double* Y_row, const int* pid_lut,
+    double* ipd,
+    int n, int ncomp, int nvtx, int ydof,
+    int MP, int MD, int MC, int stride, double min_frac)
+{
+    int i = blockDim.x * blockIdx.x + threadIdx.x;
+    if (i >= n) return;
+    double* row = ipd + (long long)i * stride;
+    for (int k = 0; k < stride; ++k) row[k] = 0.0;
+    int n_slots = nvtx < MP ? nvtx : MP;
+    for (int k = n_slots; k < MP; ++k) row[k] = -1.0;
+    // stable compaction: valid vertices first, original order preserved,
+    // then the invalid ones (matches np.argsort(~valid, kind='stable'))
+    int order[32];
+    int inv[32];
+    int nvalid = 0, ninv = 0;
+    for (int v = 0; v < nvtx && v < 32; ++v) {
+        int gp = sx[(long long)i * nvtx + v];
+        int pid = (gp >= 0) ? pid_lut[gp] : -1;
+        double f = fr[(long long)i * nvtx + v];
+        if (pid >= 0 && f > 1e-10) order[nvalid++] = v;
+        else inv[ninv++] = v;
+    }
+    for (int k = 0; k < ninv; ++k) order[nvalid + k] = inv[k];
+    int y_cols = ydof < MD ? ydof : MD;
+    int x_cols = ncomp < MC ? ncomp : MC;
+    for (int slot = 0; slot < n_slots; ++slot) {
+        int v = order[slot];
+        bool valid = slot < nvalid;
+        int gp = sx[(long long)i * nvtx + v];
+        double f = fr[(long long)i * nvtx + v];
+        row[slot] = valid ? (double)pid_lut[gp] : 0.0;
+        row[MP + slot] = valid ? (f > min_frac ? f : min_frac) : 0.0;
+        if (valid) {
+            for (int c = 0; c < y_cols; ++c)
+                row[2*MP + slot*MD + c] = Y_row[(long long)gp * ydof + c];
+            for (int c = 0; c < x_cols; ++c)
+                row[2*MP + MP*MD + slot*MC + c] = X_row[(long long)gp * ncomp + c];
+        }
+    }
+    int mu_cols = ncomp < MC ? ncomp : MC;
+    for (int c = 0; c < mu_cols; ++c)
+        row[2*MP + MP*MD + MP*MC + c] = mu[(long long)i * ncomp + c];
+    row[stride - 1] = (double)(nvalid < MP ? nvalid : MP);
+}
+"""
+_ipd_builder_kernel = None
+
+
+def _build_device_ipd(hull_dev, name_to_idx_map, dynamic_sizes, num_conditions):
+    """Build the packed InitialPhaseData rows ON DEVICE from the hull's raw
+    outputs — replicates the host fast path (valid mask, stable compaction,
+    MIN_PHASE_FRACTION clamp, Y/X gathers) with identical arithmetic, so the
+    rows are bit-identical to the host-built ones without the host gather,
+    pack, and upload steps. Returns a cupy (n, stride) float64 array."""
+    global _ipd_builder_kernel
+    import cupy as cp
+    if _ipd_builder_kernel is None:
+        _ipd_builder_kernel = cp.RawKernel(_IPD_BUILDER_SRC, 'pycgpu_build_ipd')
+    MP = int(dynamic_sizes['MAX_PHASES'])
+    MD = int(dynamic_sizes['MAX_DOF_PER_PHASE'])
+    MC = int(dynamic_sizes['MAX_COMPONENTS'])
+    stride = 2 * MP + MP * MD + MP * MC + MC + 1
+    min_frac = float(dynamic_sizes.get('MIN_PHASE_FRACTION', 1e-6))
+    # grid-point -> unique-model-index LUT ('' and _FAKE_ -> -1), using the
+    # SAME name map the solve kernel uses
+    phase_row = np.asarray(hull_dev['Phase_row'])
+    uniq, invix = np.unique(phase_row, return_inverse=True)
+    lut = np.array([name_to_idx_map.get(nm, -1) if nm not in ('', '_FAKE_') else -1
+                    for nm in uniq], dtype=np.int32)
+    pid_lut = cp.asarray(lut[invix].astype(np.int32))
+    X_row = cp.asarray(np.ascontiguousarray(hull_dev['X_row'], dtype=np.float64))
+    Y_row = cp.asarray(np.ascontiguousarray(hull_dev['Y_row'], dtype=np.float64))
+    sx = cp.ascontiguousarray(hull_dev['sx'].astype(cp.int32))
+    fr = cp.ascontiguousarray(hull_dev['fr'])
+    mu = cp.ascontiguousarray(hull_dev['mu'])
+    n = int(num_conditions)
+    ncomp = int(hull_dev['ncomp'])
+    nvtx = int(sx.shape[1]) if sx.ndim == 2 else int(sx.size // n)
+    ydof = int(Y_row.shape[1])
+    out = cp.empty((n, stride), dtype=cp.float64)
+    tpb = 128
+    _ipd_builder_kernel(((n + tpb - 1) // tpb,), (tpb,),
+                        (sx.reshape(-1), fr.reshape(-1), mu.reshape(-1),
+                         X_row, Y_row, pid_lut, out,
+                         np.int32(n), np.int32(ncomp), np.int32(nvtx),
+                         np.int32(ydof), np.int32(MP), np.int32(MD),
+                         np.int32(MC), np.int32(stride), np.float64(min_frac)))
+    return out
+
+
 def _create_initial_phase_data_struct_array(initial_phase_data_arrays, num_conditions, dynamic_sizes=None, verbose=False):
     """
     Create a binary-compatible InitialPhaseDataSingle struct array from our flat arrays.
@@ -2429,8 +2532,20 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         if verbose:
             print(f"[GPU] DEBUG: ConditionArgsSingle struct array created with {len(condition_args_struct)} conditions")
         
-        # Create InitialPhaseDataSingle struct array
-        initial_phase_data_struct = _create_initial_phase_data_struct_array(initial_phase_data_arrays, num_total_conditions_pts, dynamic_sizes, verbose)
+        # Create InitialPhaseDataSingle struct array. Device-resident path
+        # (cuda backend): the packed rows are built ON DEVICE by
+        # _build_device_ipd from the hull's raw outputs — bit-identical to
+        # the host build, skipping the host gather/pack/upload.
+        _hull_dev = getattr(properties, '_hull_dev', None)
+        if (_hull_dev is not None and not _cpu_backend_mode
+                and os.environ.get('PYCGPU_DEVICE_PIPE', '1') != '0'):
+            initial_phase_data_struct = _build_device_ipd(
+                _hull_dev, py_phase_name_to_unique_idx_map, dynamic_sizes,
+                num_total_conditions_pts)
+            if verbose:
+                print(f"[GPU] InitialPhaseData built on device: {initial_phase_data_struct.shape}")
+        else:
+            initial_phase_data_struct = _create_initial_phase_data_struct_array(initial_phase_data_arrays, num_total_conditions_pts, dynamic_sizes, verbose)
         # Calculate stride for initial phase data based on actual struct size
         initial_phase_data_stride = initial_phase_data_struct.shape[1]  # doubles per condition
         if verbose:

@@ -740,6 +740,7 @@ def device_point_hull(points, solver, X_row, GM_rows, combo_idx, Phase_row,
               d['fi'], d['nf'], d['co'], d['rh'], d['nl'], np.int32(max_lc),
               d['mu'], d['oe'], d['fr'], d['sx'], np.int32(n)))
         cp.cuda.runtime.deviceSynchronize()
+        _dev_handles = {'sx': d['sx'], 'fr': d['fr'], 'mu': d['mu']}
         mu, oe, fr, sx = (cp.asnumpy(d['mu']), cp.asnumpy(d['oe']),
                           cp.asnumpy(d['fr']), cp.asnumpy(d['sx']))
 
@@ -779,8 +780,15 @@ def device_point_hull(points, solver, X_row, GM_rows, combo_idx, Phase_row,
         NP[:, :ncomp][fake] = np.nan
         Xv[:, :ncomp][fake] = np.nan
         Yv[:, :ncomp][fake] = np.nan
-    return {'GM': oe, 'MU': mu, 'NP': NP, 'points_idx': sx.astype(np.int32),
-            'Phase': Phase, 'X': Xv, 'Y': Yv}
+    out = {'GM': oe, 'MU': mu, 'NP': NP, 'points_idx': sx.astype(np.int32),
+           'Phase': Phase, 'X': Xv, 'Y': Yv}
+    if solver.backend != 'cpp':
+        # Device-resident pipeline: hand the raw device outputs to the
+        # caller so the solve's starting rows can be built ON DEVICE
+        # (gpu_equilibrium builds the packed ipd rows with a small kernel
+        # instead of gathering/packing/uploading them host-side).
+        out['_dev'] = _dev_handles
+    return out
 
 
 def get_point_solver(components, phases, models, phase_record_factory,
@@ -891,8 +899,10 @@ def device_starting_point(unitless_conds, state_variables, phase_record_factory,
     gy = np.asarray(grid.Y).reshape((-1,) + np.asarray(grid.Y).shape[-2:])
     gp = np.asarray(grid.Phase).reshape(-1, M)
 
-    hull = device_point_hull(pts, solver, np.ascontiguousarray(gx[0]), GM_rows,
-                             combo, gp[0], np.ascontiguousarray(gy[0]), nonvacant)
+    _gx0 = np.ascontiguousarray(gx[0])
+    _gy0 = np.ascontiguousarray(gy[0])
+    hull = device_point_hull(pts, solver, _gx0, GM_rows,
+                             combo, gp[0], _gy0, nonvacant)
 
     # ---- LightDataset with starting_point's exact structure ----
     max_phase_name_len = max(max(len(x) for x in solver.shim.phases), 6)
@@ -917,5 +927,14 @@ def device_starting_point(unitless_conds, state_variables, phase_record_factory,
                   hull['Phase'].astype('U%s' % max_phase_name_len)
                   .reshape(shape + (ncomp + 1,))),
     }
-    return LightDataset(ds_vars, coords=coord_dict,
-                        attrs={'engine': 'pycalphad %s' % pycalphad_version})
+    ds = LightDataset(ds_vars, coords=coord_dict,
+                       attrs={'engine': 'pycalphad %s' % pycalphad_version})
+    if '_dev' in hull:
+        # Device-resident pipeline handoff (cuda backend): everything the
+        # ipd-builder kernel needs. X/Y grid rows and the Phase-name row are
+        # per-system (small); the per-condition device arrays avoid the
+        # host gather/pack/upload of the starting rows entirely.
+        ds._hull_dev = dict(hull['_dev'],
+                            X_row=_gx0, Y_row=_gy0, Phase_row=gp[0],
+                            ncomp=ncomp)
+    return ds

@@ -14,6 +14,13 @@ __device__ inline void pycgpu_f32_arr(double* a, int n) {
 
 typedef double (*pycgpu_func_t)(const double*);
 typedef void (*pycgpu_array_func_t)(double*, const double*);
+/* Fused energy+gradient+Hessian evaluation: out_eg[0] = G (per formula
+ * unit), out_eg[1..num_vars] = dG/dx_i, out_hess = row-major d2G/dx_i dx_j.
+ * One shared CSE pool across all outputs — the values are bit-identical to
+ * the separate formulaobj/formulagrad/formulahess functions (CSE only names
+ * shared subtrees; it never reassociates arithmetic), but shared
+ * subexpressions are computed once instead of three times. */
+typedef void (*pycgpu_fused_func_t)(double*, double*, const double*);
 
 typedef struct PhaseRecord {
     pycgpu_func_t obj;
@@ -29,6 +36,10 @@ typedef struct PhaseRecord {
      * when fit parameters are present and requested; nullptr otherwise). */
     pycgpu_array_func_t formulaparamgrad;   /* out[p] = dG/dp            */
     pycgpu_array_func_t formulaparammixed;  /* out[j*MAX_PARAMS+p] = d2G/dy_j dp */
+    /* Fused G+grad+hess (set by emitted assignment after init() when the
+     * Hessian is generated; nullptr otherwise -> callers use the separate
+     * functions). */
+    pycgpu_fused_func_t formulafused;
     int num_statevars; //number of STATE variables
     int phase_dof; //number of SITE variables
     int num_vars;
@@ -47,6 +58,7 @@ typedef struct PhaseRecord {
         formulamole_grad = fmgn;
         formulaparamgrad = nullptr;
         formulaparammixed = nullptr;
+        formulafused = nullptr;
         num_statevars = ns;
         phase_dof = pd;
         num_vars = ns+pd;
@@ -68,6 +80,7 @@ typedef struct PhaseRecord {
         formulamole_grad = nullptr;
         formulaparamgrad = nullptr;
         formulaparammixed = nullptr;
+        formulafused = nullptr;
         num_statevars = 0;
         phase_dof = 0;
         num_vars = 0;

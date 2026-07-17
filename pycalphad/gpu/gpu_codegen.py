@@ -1671,7 +1671,12 @@ def notebook_source_from_expr_cse(
     c_input_arg_name = "x"
     
     # Start building the C function
-    if expr_type == "func" and c_output_type == "double" and (hasattr(expr_or_list_in, 'free_symbols') or len(expr_or_list_in) == 1):
+    if expr_type == "fused":
+        # Fused energy+gradient+Hessian: two output arrays (energy+gradient
+        # small, Hessian written into the caller's existing work buffer).
+        c_code = (f"__device__ void {full_c_func_name}(double* out_eg, "
+                  f"double* out_hess, const double* {c_input_arg_name}) {{\n")
+    elif expr_type == "func" and c_output_type == "double" and (hasattr(expr_or_list_in, 'free_symbols') or len(expr_or_list_in) == 1):
         # Scalar function - no output parameter
         c_code = f"__device__ {c_output_type} {full_c_func_name}(const double* {c_input_arg_name}) {{\n"
     else:
@@ -1772,6 +1777,48 @@ def notebook_source_from_expr_cse(
                     expr_index += 1
                     output_index += 1
         
+        elif expr_type == "fused":
+            # Fused energy + gradient + Hessian with ONE shared CSE pool.
+            # The expression trees are built EXACTLY as the func/grad/hess
+            # branches build them (same diff calls, same ordering), so every
+            # output evaluates the identical tree — cse() only names shared
+            # subtrees, it never reassociates arithmetic, hence the values
+            # are bit-identical to the separate functions while shared
+            # subexpressions are computed once.
+            ordered_symbols_for_diff = get_ordered_symbols_for_diff(model_obj, wks_obj, verbose)
+            if hasattr(expr_or_list_in, 'free_symbols'):
+                expr_list = [expr_or_list_in]
+            else:
+                expr_list = list(expr_or_list_in)
+            all_fused = list(expr_list)                     # energy
+            n_eg = len(all_fused)
+            for sub_expr in expr_list:                      # gradient
+                for sym in ordered_symbols_for_diff:
+                    all_fused.append(sub_expr.diff(sym))
+            n_grad = len(all_fused) - n_eg
+            for sub_expr in expr_list:                      # Hessian (row-major)
+                for sym_j in ordered_symbols_for_diff:
+                    first_deriv = sub_expr.diff(sym_j)
+                    for sym_k in ordered_symbols_for_diff:
+                        all_fused.append(first_deriv.diff(sym_k))
+            cse_start = time.time()
+            replacements, reduced_exprs = cse(all_fused)
+            if verbose:
+                print(f"[CSE CODEGEN] Fused CSE: {len(replacements)} shared "
+                      f"subexpressions over {len(all_fused)} outputs in "
+                      f"{time.time() - cse_start:.3f}s")
+            for symbol, subexpr in replacements:
+                c_subexpr = ccode(subexpr)
+                c_subexpr = apply_cse_variable_mapping(c_subexpr, model_obj, wks_obj, verbose)
+                c_code += f"    double {ccode(symbol)} = {c_subexpr};\n"
+            for i, reduced_expr in enumerate(reduced_exprs):
+                c_expr = ccode(reduced_expr)
+                c_expr = apply_cse_variable_mapping(c_expr, model_obj, wks_obj, verbose)
+                if i < n_eg + n_grad:
+                    c_code += f"    out_eg[{i}] = {c_expr};\n"
+                else:
+                    c_code += f"    out_hess[{i - n_eg - n_grad}] = {c_expr};\n"
+
         elif expr_type == "hess":
             # Process Hessian expressions
             if verbose:
@@ -2389,6 +2436,30 @@ def _nb_formulaobj_from_model(model_obj: Model, model_c_idx: int, wks_obj: Works
 def _nb_formulagrad_from_model(model_obj: Model, model_c_idx: int, wks_obj: Workspace, validate: bool = True, verbose: bool = False) -> str:
     return notebook_source_from_expr(model_obj.G, "formulagrad", model_obj, model_c_idx, wks_obj, expr_type="grad", c_output_type="void", validate=validate, verbose=verbose)
 
+# model_c_idx -> did _final_hessian_cleanup change that model's Hessian text?
+# (reset per generation pass; consulted before registering the fused function)
+_HESS_CLEANUP_FIRED = {}
+
+
+def _nb_formulafused_from_model(model_obj: Model, model_c_idx: int, wks_obj: Workspace, validate: bool = True, verbose: bool = False) -> str:
+    """Fused energy+gradient+Hessian device function (one shared CSE pool).
+
+    Values are bit-identical to the separate formulaobj/formulagrad/
+    formulahess functions (CSE never reassociates arithmetic; the
+    post-processing applied here is value-preserving: fix_piecewise_zeros
+    replaces all-zero piecewise with 0, fix_missing_operators repairs
+    syntax). Models where _final_hessian_cleanup fires are handled by the
+    caller (fused not registered).
+    """
+    result = notebook_source_from_expr_cse(
+        _realify_eps_complex(_zero_undefined_symbols(model_obj.G, wks_obj)),
+        "fused", model_obj, model_c_idx, wks_obj,
+        expr_type="fused", c_output_type="void", validate=validate, verbose=verbose)
+    result = fix_piecewise_zeros(result)
+    result = fix_missing_operators(result)
+    return result
+
+
 def _nb_formulahess_from_model(model_obj: Model, model_c_idx: int, wks_obj: Workspace, validate: bool = True, verbose: bool = False) -> str:
     if verbose:
         print(f"[GPU] _nb_formulahess_from_model called for model {model_c_idx}, verbose={verbose}")
@@ -2407,7 +2478,13 @@ def _nb_formulahess_from_model(model_obj: Model, model_c_idx: int, wks_obj: Work
     result = fix_missing_operators(result)
     
     # Apply final cleanup to remove spurious entropy terms
+    _pre_cleanup = result
     result = _final_hessian_cleanup(result)
+    # The fused function cannot reproduce this textual cleanup (its Hessian
+    # terms may be CSE-shared with the gradient), so models where the
+    # cleanup actually fires skip fused registration and keep the separate
+    # functions (see _HESS_CLEANUP_FIRED consumers).
+    _HESS_CLEANUP_FIRED[model_c_idx] = (result != _pre_cleanup)
     
     return result
 
@@ -2661,6 +2738,20 @@ def _generate_c_code_for_phase_models(wks_obj: Workspace, include_hess: bool = F
                 if wks_obj.verbose:
                     print(f"[GPU DEBUG] Generating Hessian for model {model_c_idx}, verbose={wks_obj.verbose}")
                 all_model_device_functions_c_code += _nb_formulahess_from_model(model_obj, model_c_idx, wks_obj, validate, wks_obj.verbose)
+                # Fused energy+grad+hess (hot path of recompute): emitted
+                # whenever the Hessian is, except for models whose Hessian
+                # needed the textual cleanup pass (fused falls back to the
+                # separate functions there via a null pointer).
+                _fused_ok = not _HESS_CLEANUP_FIRED.get(model_c_idx, False)
+                if _fused_ok and not os.environ.get('PYCGPU_NO_FUSED'):
+                    try:
+                        all_model_device_functions_c_code += _nb_formulafused_from_model(model_obj, model_c_idx, wks_obj, validate, wks_obj.verbose)
+                    except Exception as _fused_err:
+                        _fused_ok = False
+                        if wks_obj.verbose:
+                            print(f"[GPU] fused generation failed for model {model_c_idx}: {_fused_err}")
+                else:
+                    _fused_ok = False
                 
             all_model_device_functions_c_code += _nb_internal_cons_func_from_model(model_obj, model_c_idx, wks_obj, validate, wks_obj.verbose)
             all_model_device_functions_c_code += _nb_internal_cons_jac_from_model(model_obj, model_c_idx, wks_obj, validate, wks_obj.verbose)
@@ -2711,6 +2802,8 @@ def _generate_c_code_for_phase_models(wks_obj: Workspace, include_hess: bool = F
         if _jansson_params:
             init_call += f"    g_phase_records_array[{model_c_idx}].formulaparamgrad = &{func_prefix}formulaparamgrad;\n"
             init_call += f"    g_phase_records_array[{model_c_idx}].formulaparammixed = &{func_prefix}formulaparammixed;\n"
+        if include_hess and _fused_ok:
+            init_call += f"    g_phase_records_array[{model_c_idx}].formulafused = &{func_prefix}fused;\n"
         g_phase_record_array_init_calls_c_code.append(init_call)
 
     return (all_model_device_functions_c_code, g_phase_record_array_init_calls_c_code, 

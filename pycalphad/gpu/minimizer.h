@@ -923,7 +923,27 @@ typedef struct SystemState {
             // The generated functions now expect workspace DOF format [N, P, T, Y1, Y2...]
             // Use pr->formulaobj() for equilibrium matrix (per formula unit, not per mole atoms)
             // This matches the CPU behavior where equilibrium matrix uses unnormalized energy values
+            //
+            // Fused path: energy, gradient, and Hessian come from ONE
+            // generated call sharing a single CSE pool (bit-identical values,
+            // shared subexpressions computed once instead of three times).
+            // The gradient/Hessian consumers below copy from these buffers.
+            bool fused_done = false;
+            double fused_eg[2 + MAX_DOF_PER_PHASE];
+            double fused_hess[(MAX_DOF_PER_PHASE + 1) * (MAX_DOF_PER_PHASE + 1)];
+            if (pr->formulafused != nullptr) {
+                #ifdef PYCGPU_PROF
+                long long prof_fu0 = clock64();
+                #endif
+                pr->formulafused(fused_eg, fused_hess, compset->dof);
+                #ifdef PYCGPU_PROF
+                if (thread_id < PYCGPU_PROF_MAXT) g_prof_funcs[thread_id] += clock64() - prof_fu0;
+                #endif
+                csst->energy = fused_eg[0];
+                fused_done = true;
+            } else {
             csst->energy = pr->formulaobj(compset->dof);
+            }
             
             // Add numerical debug output for phase energy
             #ifdef VERBOSE_DEBUG
@@ -1084,7 +1104,12 @@ typedef struct SystemState {
                 #ifdef PYCGPU_PROF
                 long long prof_h0 = clock64();
                 #endif
+                if (fused_done) {
+                    for (int fi = 0; fi < (1 + pr->phase_dof) * (1 + pr->phase_dof); ++fi)
+                        temp_hess[fi] = fused_hess[fi];
+                } else {
                 pr->formulahess(temp_hess, compset->dof);
+                }
                 #ifdef PYCGPU_FP32EMU
                 pycgpu_f32_arr(temp_hess, (1 + pr->phase_dof) * (1 + pr->phase_dof));
                 #endif
@@ -1182,7 +1207,12 @@ typedef struct SystemState {
                 #ifdef PYCGPU_PROF
                 long long prof_f1 = clock64();
                 #endif
+                if (fused_done) {
+                    for (int fi = 0; fi < 1 + pr->phase_dof; ++fi)
+                        temp_grad[fi] = fused_eg[1 + fi];
+                } else {
                 pr->formulagrad(temp_grad, compset->dof);
+                }
                 #ifdef PYCGPU_FP32EMU
                 pycgpu_f32_arr(temp_grad, 1 + pr->phase_dof);
                 #endif

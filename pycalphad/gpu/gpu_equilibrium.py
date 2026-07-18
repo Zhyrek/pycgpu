@@ -1577,28 +1577,20 @@ def _create_system_specification_struct(global_spec_scalars, global_spec_arrays,
 
 def _create_condition_args_struct_array(condition_args_np, verbose=False):
     """
-    Create a binary-compatible ConditionArgsSingle struct array from our flat array.
+    Pass the per-condition data rows through for GPU transfer.
+
+    The kernel reads this buffer as raw doubles with stride
+    (dynamic MAX_STATEVARS + MAX_COMPONENTS): [state variables..., mole
+    fractions...] per condition — exactly condition_args_np's row layout,
+    so the packed rows must keep their full width. (This used to rebuild
+    rows sized by the STATIC header MAX_STATEVARS (8) and drop the
+    trailing columns; that matched the dynamic stride only while
+    MS + MC == 8 — every <= 4-padded-component system — and shifted every
+    condition >= 1 into garbage on 5+ component systems.)
     """
-    MAX_STATEVARS = int(_get_c_define("MAX_STATEVARS"))
-    
-    # ConditionArgsSingle has only one field: state_variables_values[MAX_STATEVARS]
-    condition_args_dtype = [
-        ('state_variables_values', f'{MAX_STATEVARS}f8')
-    ]
-    
-    num_conditions = condition_args_np.shape[0]
-    condition_args_struct = np.zeros(num_conditions, dtype=condition_args_dtype)
-    
-    # Copy only the state variable values (first MAX_STATEVARS elements, not the composition data)
-    MAX_STATEVARS = int(_get_c_define("MAX_STATEVARS"))
-    for i in range(num_conditions):
-        condition_args_struct[i]['state_variables_values'][:] = condition_args_np[i, :MAX_STATEVARS]
-        
-        # DEBUG: Print what we're storing in the struct
-        if i == 0 and verbose:
-            print(f"[GPU] DEBUG: ConditionArgsSingle[0] state_variables_values: {condition_args_struct[i]['state_variables_values']}")
-    
-    return condition_args_struct
+    if verbose:
+        print(f"[GPU] DEBUG: ConditionArgs rows passed through: shape {condition_args_np.shape}")
+    return np.ascontiguousarray(condition_args_np, dtype=np.float64)
 
 
 _IPD_BUILDER_SRC = r"""

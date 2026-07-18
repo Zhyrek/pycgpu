@@ -3,7 +3,7 @@ import numpy as np
 from pycalphad.mapping import BinaryStrategy, TernaryStrategy, plot_binary, plot_ternary
 import pycalphad.mapping.utils as map_utils
 
-def binplot(database, components, phases, conditions, return_strategy=False, plot_kwargs=None, **map_kwargs):
+def binplot(database, components, phases, conditions, return_strategy=False, plot_kwargs=None, method='zpf', eq_kwargs=None, **map_kwargs):
     """
     Calculate the binary isobaric phase diagram.
 
@@ -44,6 +44,17 @@ def binplot(database, components, phases, conditions, return_strategy=False, plo
         If return_strategy is True.
 
     """
+    if method == 'grid':
+        # Dense-equilibrium-grid diagram (fast under accelerated backends; see
+        # pycalphad.mapping.grid_plot). Boundary points are the tie-line
+        # endpoints of multi-phase grid points (solver accuracy).
+        from pycalphad.mapping.grid_plot import binplot_grid
+        if return_strategy:
+            raise ValueError("return_strategy is not supported with method='grid'")
+        return binplot_grid(database, components, phases, conditions,
+                            eq_kwargs=eq_kwargs, plot_kwargs=plot_kwargs)
+    elif method != 'zpf':
+        raise ValueError(f"Unknown binplot method {method!r}: use 'zpf' or 'grid'")
     indep_comps = [key for key, value in conditions.items() if not map_utils.is_state_variable(key) and len(np.atleast_1d(value)) > 1]
     indep_pots = [key for key, value in conditions.items() if map_utils.is_state_variable(key) and len(np.atleast_1d(value)) > 1]
     if (len(indep_comps) != 1) or (len(indep_pots) != 1):
@@ -62,7 +73,7 @@ def binplot(database, components, phases, conditions, return_strategy=False, plo
         return ax
 
 
-def ternplot(dbf, comps, phases, conds, x=None, y=None, return_strategy=False, map_kwargs=None, **plot_kwargs):
+def ternplot(dbf, comps, phases, conds, x=None, y=None, return_strategy=False, map_kwargs=None, method='zpf', eq_kwargs=None, **plot_kwargs):
     """
     Calculate the ternary isothermal, isobaric phase diagram.
 
@@ -107,6 +118,13 @@ def ternplot(dbf, comps, phases, conds, x=None, y=None, return_strategy=False, m
         If return_strategy is True.
 
     """
+    if method == 'grid':
+        from pycalphad.mapping.grid_plot import ternplot_grid
+        if return_strategy:
+            raise ValueError("return_strategy is not supported with method='grid'")
+        return ternplot_grid(dbf, comps, phases, conds, x=x, y=y, eq_kwargs=eq_kwargs)
+    elif method != 'zpf':
+        raise ValueError(f"Unknown ternplot method {method!r}: use 'zpf' or 'grid'")
     indep_comps = [key for key, value in conds.items() if not map_utils.is_state_variable(key) and len(np.atleast_1d(value)) > 1]
     indep_pots = [key for key, value in conds.items() if map_utils.is_state_variable(key) and len(np.atleast_1d(value)) > 1]
     if (len(indep_comps) != 2) or (len(indep_pots) != 0):

@@ -48,6 +48,9 @@ setup(
     cmdclass={"build_ext": Build},
     package_data={
         'pycalphad.core': ['*.pxd'] + (['*.pyx', '*.c', '*.h', '*.cpp', '*.hpp'] if os.getenv('CYTHON_COVERAGE', False) else []),
+        # GPU/C++ backend kernel sources are read at runtime and compiled on the
+        # user's machine (CuPy RawModule or g++/OpenMP), so they must ship.
+        'pycalphad.gpu': ['*.h', '*.c'],
         'pycalphad.tests.databases': ['*'],
     },
     # This include is for the compiler to find the *.h files during the build_ext phase

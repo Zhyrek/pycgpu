@@ -362,6 +362,7 @@ typedef struct SystemState {
 
     int iteration;
     int iterations_since_last_phase_change;
+    int lockstep_needs_add;  // gpu-fast: a suppressed phase-add occurred
     int metastable_phase_iterations[MAX_PHASES];
     int times_compset_removed[MAX_PHASES];
     double mass_residual;
@@ -2749,7 +2750,10 @@ __device__ bool check_convergence(SystemSpecification* spec, SystemState* state)
     // per-iteration deltas are tiny at step 0.05-0.5, so a shorter gate
     // declares convergence before the solution is polished (measured 0.066
     // J/mol short on the ill-conditioned alfe magnetic-Hessian test).
-    if (solution_is_feasible && (state->iterations_since_last_phase_change >= 10)) {
+#ifndef PYCGPU_QUIET_ITERS
+#define PYCGPU_QUIET_ITERS 10
+#endif
+    if (solution_is_feasible && (state->iterations_since_last_phase_change >= PYCGPU_QUIET_ITERS)) {
         gpu_debug_log_value("converged", 1.0);
         return true;
     }
@@ -3377,6 +3381,18 @@ __device__ bool change_phases(SystemSpecification* spec, SystemState* state,
 
     int max_allowed_to_add_now = spec->max_num_free_stable_phases + num_to_remove - state->num_free_stable_compsets;
 
+#ifdef PYCGPU_LOCKSTEP
+    // gpu-fast: phase ADDITIONS are the warp-divergence driver — never
+    // perform them. A would-be add (metastable compset with positive
+    // continuous driving force, the same trigger the faithful path uses,
+    // including for ordering-gap splits invisible to grid scans) flags the
+    // condition for a faithful-kernel rerun by the driver. Removals and
+    // consolidation still run — collapsed hull seeds must be able to leave.
+    if (num_to_add > 0) {
+        state->lockstep_needs_add = 1;
+        num_to_add = 0;
+    }
+#endif
     if (num_to_add > 0) {
         if (max_allowed_to_add_now < 1) {
             int least_removed_cs_original_idx = -1;

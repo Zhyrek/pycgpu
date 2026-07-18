@@ -537,7 +537,7 @@ def calculate(dbf, comps, phases, mode=None, output='GM', fake_points=False, bro
     _factory_syms = list(getattr(phase_records, 'param_symbols', []) or [])
     _params_ok = (len(_param_arr) == 0
                   or (list(map(str, _param_syms)) == list(map(str, _factory_syms))))
-    if (_accel_backend in ('cpp', 'cuda')
+    if (_accel_backend in ('cpp', 'cuda', 'cuda-fast')
             and _params_ok
             and _canonical_statevars):
         # The generated evaluators assume the canonical [N, P, T] state-variable

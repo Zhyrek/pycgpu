@@ -2120,6 +2120,10 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     # Check if GPU should be used - NO FALLBACK, FAIL HARD
     # The C++ backend (PYCGPU_CPU=1) does not need CUDA or CuPy.
     _cpu_backend_mode = bool(os.environ.get('PYCGPU_CPU'))
+    # gpu-fast backend (PYCGPU_GPU_FAST=1): frozen-set lockstep pass-1 kernel,
+    # faithful pass-2 rerun for flagged conditions.
+    _gpu_fast_mode = (bool(os.environ.get('PYCGPU_GPU_FAST'))
+                      and not _cpu_backend_mode)
     use_gpu = (GPU_AVAILABLE or _cpu_backend_mode) and not force_cpu and os.getenv('FORCE_CPU', '0') != '1'
 
     if not use_gpu:
@@ -2421,6 +2425,12 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             if os.environ.get('PYCGPU_PROF'):
                 # Per-thread run_loop segment cycle profiler (prints [PROF] lines).
                 define_flags.append('-DPYCGPU_PROF')
+            if _gpu_fast_mode:
+                define_flags = define_flags + ['-DPYCGPU_LOCKSTEP']
+            if os.environ.get('PYCGPU_QUIET_ITERS'):
+                # study/tuning knob: convergence quiet-iteration gate
+                define_flags = define_flags + [
+                    '-DPYCGPU_QUIET_ITERS=%d' % int(os.environ['PYCGPU_QUIET_ITERS'])]
             if os.environ.get('PYCGPU_FP32EMU'):
                 # FP32-emulation prototype: rounds generated-function outputs and
                 # linear-algebra solutions to float precision + relaxed convergence
@@ -2450,6 +2460,13 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                 if os.environ.get('PYCGPU_TIME'):
                     print(f"[GPU TIME] compile options: {' '.join(compile_options)}")
                 module = cp.RawModule(code=full_kernel_source, options=compile_options, backend=_detect_gpu_backend())
+                module_faithful = None
+                if _gpu_fast_mode:
+                    _opts_faithful = tuple(o for o in compile_options
+                                           if o != '-DPYCGPU_LOCKSTEP')
+                    module_faithful = cp.RawModule(code=full_kernel_source,
+                                                   options=_opts_faithful,
+                                                   backend=_detect_gpu_backend())
 
             if verbose:
                 print("[GPU] DEBUG: Kernel compilation successful")
@@ -2457,12 +2474,16 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             if verbose:
                 print(f"[GPU] ERROR: Kernel compilation failed: {e}")
             raise
-        _gpu_module_cache[cache_key] = module
+        _gpu_module_cache[cache_key] = (module, module_faithful if _gpu_fast_mode else None) \
+            if not _cpu_backend_mode else module
     else:
         if verbose:
             print(f"[GPU] Cache HIT - reusing compiled module for same phases/components")
             print(f"[GPU] Cache key: {cache_key}")
         module = _gpu_module_cache[cache_key]
+        module_faithful = None
+        if isinstance(module, tuple):
+            module, module_faithful = module
     
     # Call the global PhaseRecord initialization kernel every time
     # This must happen on every execution, not just when compiling a new module,
@@ -2481,7 +2502,15 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             raise
 
         try:
+            if isinstance(module, tuple):
+                module, module_faithful = module
             top_level_kernel = module.get_function("top_level_equilibrium_kernel")
+            pass2_kernel = top_level_kernel
+            if not _cpu_backend_mode and _gpu_fast_mode and module_faithful is not None:
+                # Each RawModule owns its device globals: initialize the
+                # faithful module's phase records before pass-2 uses it.
+                module_faithful.get_function("init_all_gpu_phase_records")((1,), (1,), ())
+                pass2_kernel = module_faithful.get_function("top_level_equilibrium_kernel")
             if verbose:
                 print(f"[GPU] DEBUG: Successfully got top_level_equilibrium_kernel function: {top_level_kernel}")
         except Exception as e:
@@ -3076,6 +3105,10 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     # of assemblage sorting for 37.6k-condition AlCuFe. PYCGPU_PASS1_ITERS=0
     # disables. The c++ backend has no warps and keeps single-pass.
     _pass1_default = 0 if _cpu_backend_mode else 50
+    if not _cpu_backend_mode and os.environ.get('PYCGPU_GPU_FAST'):
+        # gpu-fast: the lockstep kernel IS pass 1; failed/flagged conditions
+        # rerun on the faithful kernel at the full budget.
+        _pass1_default = int(os.environ.get('PYCGPU_LOCKSTEP_ITERS', 40))
     _pass1_iters = int(os.environ.get('PYCGPU_PASS1_ITERS', _pass1_default) or 0)
     _twopass_active = 0 < _pass1_iters < _full_iter_cap and not debug_enabled
     max_solver_iterations = np.int32(_pass1_iters if _twopass_active else _full_iter_cap)
@@ -3258,7 +3291,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                     # Default block=1 spreads each across its own SM.
                     _pass2_tpb = int(os.environ.get('PYCGPU_PASS2_BLOCK', 1))
                     _pass2_blocks = (_pn + _pass2_tpb - 1) // _pass2_tpb
-                    top_level_kernel((_pass2_blocks,), (_pass2_tpb,), _pass2_args)
+                    pass2_kernel((_pass2_blocks,), (_pass2_tpb,), _pass2_args)
             if not _cpu_backend_mode:
                 cp.cuda.runtime.deviceSynchronize()
                 if os.environ.get('PYCGPU_TIME'):
@@ -3575,7 +3608,8 @@ def run_accelerated_workspace(wks_obj, backend_name, options=None):
     implementation.
     """
     from pycalphad.backend import _option_env
-    overrides = {'PYCGPU_CPU': '1' if backend_name == 'cpp' else ''}
+    overrides = {'PYCGPU_CPU': '1' if backend_name == 'cpp' else '',
+                 'PYCGPU_GPU_FAST': '1' if backend_name == 'cuda-fast' else ''}
     if 'PYCGPU_ROBUST' not in os.environ:
         overrides['PYCGPU_ROBUST'] = '1'
     saved = {k: os.environ.get(k) for k in overrides}

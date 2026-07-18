@@ -235,6 +235,7 @@ def equilibrium(dbf, comps, phases, conditions, output=None, model=None,
         overrides = {}
         if backend is not None:
             overrides['PYCGPU_CPU'] = '1' if backend == 'cpp' else ''
+            overrides['PYCGPU_GPU_FAST'] = '1' if backend == 'cuda-fast' else ''
         if robust_phase_removal is None and 'PYCGPU_ROBUST' not in os.environ:
             # Default ON for the accelerated backends: terminates the
             # add/collapse cycles that otherwise burn the iteration budget on

@@ -354,7 +354,7 @@ class Workspace:
         # the reference implementation below unchanged.
         from pycalphad.backend import get_backend as _get_backend
         _backend_name, _backend_opts = _get_backend()
-        if _backend_name in ('cpp', 'cuda'):
+        if _backend_name in ('cpp', 'cuda', 'cuda-fast'):
             import os as _os
             from pycalphad.core.solver import Solver as _DefaultSolver
             from pycalphad.core import equilibrium as _eqmod

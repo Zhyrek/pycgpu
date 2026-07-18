@@ -10,6 +10,14 @@ pycalphad ships three execution backends for supported routines (currently
   design — parallelize by running your own pycalphad calls concurrently
   (calls from multiple threads/processes are safe).
 * ``"gpu"``    — the CUDA backend (CuPy RawModule), one condition per thread.
+* ``"gpu-fast"`` — the CUDA backend with a GPU-native two-pass strategy:
+  pass 1 runs a frozen-phase-set, capped-iteration "lockstep" kernel (no
+  phase-change branching — the warp-divergence killer on many-phase
+  systems); conditions whose assemblage needs to grow (positive driving
+  force at the end) or that fail to converge are rerun on the faithful
+  kernel. Results match the faithful gpu backend except where pass 1
+  legitimately converges to the same assemblage by a different route
+  (eps-class); the fallback pass bounds the deviation.
 
 Usage::
 
@@ -71,6 +79,7 @@ _ALIASES = {
     'default': 'default', 'cpu': 'default', 'reference': 'default',
     'c++': 'cpp', 'cpp': 'cpp', 'openmp': 'cpp',
     'gpu': 'cuda', 'cuda': 'cuda',
+    'gpu-fast': 'cuda-fast', 'cuda-fast': 'cuda-fast',
 }
 
 # Mapping of option keywords to the environment tunables the accelerated
@@ -105,7 +114,7 @@ def _validate(canonical):
                 "backend 'c++' needs a C++17 compiler (g++ or clang++) on PATH. "
                 "Install one (e.g. `apt install g++`, `brew install gcc`, or MinGW-w64/WSL "
                 "on Windows), or use set_backend('default').")
-    elif canonical == 'cuda':
+    elif canonical in ('cuda', 'cuda-fast'):
         try:
             import cupy as cp
             cp.cuda.Device().compute_capability

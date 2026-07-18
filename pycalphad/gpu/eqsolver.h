@@ -1651,7 +1651,20 @@ __device__ void solve_equilibrium_at_condition(
                        current_sys_state.chemical_potentials[0], current_sys_state.chemical_potentials[1]);
             }
             #endif
+#ifdef PYCGPU_LOCKSTEP
+            // gpu-fast frozen-set mode: a positive-driving-force candidate
+            // (grid scan) OR a suppressed in-loop add (continuous driving
+            // force of a metastable compset — catches ordering-gap splits
+            // the grid cannot see) means the assemblage needs growth. Do
+            // NOT add — flag for a faithful-kernel rerun and stop.
+            if ((found_phase && candidate_grid_idx >= 0)
+                || current_sys_state.lockstep_needs_add) {
+                hit_iteration_cap = true;
+            }
+            break;
+#else
             if (!found_phase || candidate_grid_idx < 0 || current_sys_state.num_compsets >= MAX_PHASES) break;
+#endif
 
             int phase_id = outer_grid->PhaseID_ptr[candidate_grid_idx];
             int phase_record_idx = get_phase_record_index(phase_data, phase_id);

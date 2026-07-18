@@ -124,7 +124,15 @@ def _profiled_run(dbf, comps, phases, conds, backend):
     total = time.time() - t0
 
     m = re.findall(r'kernel wall: ([\d.]+) s', buf.getvalue())
-    if m:  # gpu path: device time between launch and synchronize
+    m2 = re.findall(r'two-pass pass2 wall: ([\d.]+) s \((\d+) conditions\)', buf.getvalue())
+    if m and m2:
+        # gpu-fast (or explicit two-pass): report the pass split — pass 1 is
+        # the lockstep (or capped) kernel over ALL conditions, pass 2 the
+        # faithful kernel over the flagged subset.
+        timers['solver (pass 1 kernel)'] = sum(float(x) for x in m)
+        timers['solver (pass 2 faithful, %s conds)' % m2[-1][1]] = \
+            sum(float(x) for x, _ in m2)
+    elif m:  # gpu path: device time between launch and synchronize
         timers['solver (gpu kernel wall)'] = sum(float(x) for x in m)
     gm = np.asarray(eq.GM.values, dtype=float).ravel()
     return total, timers, gm
@@ -180,7 +188,7 @@ def _solver_internals(system, backend):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('system', choices=sorted(SYSTEMS))
-    ap.add_argument('--backend', default='c++', choices=['c++', 'gpu'])
+    ap.add_argument('--backend', default='c++', choices=['c++', 'gpu', 'gpu-fast'])
     ap.add_argument('--budget', type=float, default=60.0,
                     help='target wall seconds for the main run (default 60)')
     ap.add_argument('--threads', type=int, default=None,

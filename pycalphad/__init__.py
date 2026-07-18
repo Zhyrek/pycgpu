@@ -12,6 +12,7 @@ import pycalphad.io.cs_dat
 
 from pycalphad.model import Model, ReferenceState
 
+from pycalphad.backend import set_backend, get_backend, backend
 from pycalphad.core.calculate import calculate
 from pycalphad.core.equilibrium import equilibrium
 from pycalphad.core.workspace import Workspace

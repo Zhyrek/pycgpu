@@ -12,9 +12,131 @@ import numpy as np
 from pycalphad.property_framework import as_property
 
 
+_gate_reject_reason = None
+
+
+def _accelerated_conditions_supported(conditions, parameters, solver,
+                                      phase_records, output, extra_kwargs,
+                                      dbf=None, comps=None, phases=None):
+    """Whether the accelerated backends support this equilibrium problem shape.
+
+    Supported: standard N=1 / P / T / X(component) condition grids with no
+    parameter overrides, custom solver, prebuilt phase records, extra outputs,
+    or phase-local / chemical-potential / fixed-phase conditions.
+    """
+    import numpy as np
+    from pycalphad import variables as v
+    global _gate_reject_reason
+    _gate_reject_reason = None
+
+    def _gate_reject(reason):
+        global _gate_reject_reason
+        _gate_reject_reason = reason
+        return False
+
+    if parameters:
+        # Scalar parameter overrides are supported (runtime fit-parameter
+        # slots in the generated kernels); vectorized parameter sweeps are not.
+        try:
+            for pv in dict(parameters).values():
+                if np.asarray(pv, dtype=np.float64).size != 1:
+                    return _gate_reject('vectorized parameter sweep')
+        except Exception:
+            return _gate_reject('parameter extraction failed')
+    if solver is not None:
+        return _gate_reject('custom solver')
+    if phase_records is not None:
+        # plain prebuilt factories work (the pipeline consumes the Workspace's
+        # factory either way); anything else uses the reference path
+        from pycalphad.codegen.phase_record_factory import PhaseRecordFactory
+        if type(phase_records) is not PhaseRecordFactory:
+            return _gate_reject('non-standard phase_records')
+    if output not in (None, 'GM'):
+        # Plain Model property names (HM, SM, CPM, _MIX/_FORM variants, ...)
+        # are evaluated at the converged states with the generated property
+        # functions; phase-qualified ('HM(FCC_A1)'), dotted-derivative
+        # ('HM.T') and other ComputableProperty forms use the reference path.
+        _outs = [output] if isinstance(output, str) else list(output)
+        if not all(isinstance(o, str) and o.isidentifier() for o in _outs):
+            return _gate_reject('non-symbolic output property')
+    if extra_kwargs:
+        return _gate_reject('extra equilibrium kwargs')
+    try:
+        n_x_conds = sum(1 for c in conditions
+                        if isinstance(c, v.MoleFraction) and getattr(c, 'phase_name', None) is None)
+        n_w_conds = sum(1 for c in conditions
+                        if isinstance(c, v.MassFraction) and getattr(c, 'phase_name', None) is None)
+        n_mu_conds = sum(1 for c in conditions if isinstance(c, v.ChemicalPotential))
+        n_lc_conds = sum(1 for c in conditions if str(c).startswith('LinComb_'))
+        n_statevar_conds = sum(1 for c in conditions if c in (v.N, v.P, v.T))
+        # Invalid-input pre-flight: problems the REFERENCE path must reject
+        # with its canonical exceptions never enter the accelerated path
+        # (missing components, no active phases, under/overdetermined
+        # composition conditions). Runtime errors no longer fall back, so
+        # these must be declared here rather than discovered by crashing.
+        if dbf is not None and comps is not None:
+            _comp_names = {str(c).upper() for c in comps}
+            _db_elements = {str(e).upper() for e in dbf.elements}
+            if not (_comp_names - {'VA', '/-'}) <= _db_elements:
+                return _gate_reject('component not in database')
+            _n_nonvacant = len(_comp_names - {'VA', '/-'})
+            if (n_x_conds + n_w_conds + n_mu_conds + n_lc_conds) != _n_nonvacant - 1:
+                return _gate_reject('not a fully determined composition set')
+            if phases is not None:
+                from pycalphad.core.utils import filter_phases, unpack_species
+                _cand = [p for p in (phases if not isinstance(phases, dict) else list(phases))
+                         if p in dbf.phases]
+                if not filter_phases(dbf, unpack_species(dbf, list(comps)), _cand):
+                    return _gate_reject('no active phases')
+        # Phase-local conditions (X(phase,el) / Y(phase,subl,sp)) border the
+        # owning compset's phase matrix; scalar values only (the per-condition
+        # spec bakes one value system-wide).
+        n_plc_conds = sum(1 for c in conditions
+                          if isinstance(c, (v.MoleFraction, v.SiteFraction))
+                          and getattr(c, 'phase_name', None) is not None)
+        # Fully-determined standard problems only: every condition is
+        # N/P/T/X/W/MU/LinComb/phase-local and nothing else (under/over-
+        # determined problems must reach the reference path's validation
+        # errors).
+        if (n_x_conds + n_w_conds + n_mu_conds + n_lc_conds
+                + n_statevar_conds + n_plc_conds) != len(conditions):
+            return _gate_reject('unsupported condition type present')
+        for cond, value in conditions.items():
+            if getattr(cond, 'phase_name', None) is not None:
+                if not isinstance(cond, (v.MoleFraction, v.SiteFraction)):
+                    return _gate_reject('unsupported phase-local condition class')
+                if np.asarray(value, dtype=object).size != 1:
+                    return _gate_reject('array-valued phase-local condition')
+                continue
+            if cond == v.N:
+                if np.any(np.atleast_1d(np.asarray(value, dtype=object)).astype(float) != 1.0):
+                    return _gate_reject('N != 1')
+            elif cond == v.P or cond == v.T:
+                continue
+            elif isinstance(cond, v.ChemicalPotential):
+                continue
+            elif isinstance(cond, (v.MoleFraction, v.MassFraction)):
+                # Dilute/zero compositions are clamped into
+                # [minimum_composition, 1 - minimum_composition] by the
+                # Workspace Conditions container (with its warning), which
+                # the accelerated path constructs identically — no special
+                # handling needed here.
+                continue
+            elif str(cond).startswith('LinComb_'):
+                continue
+            else:
+                # SiteFraction, phase-local, ...
+                return _gate_reject('unsupported condition class')
+    except Exception:
+        return _gate_reject('gate exception')
+    return True
+
+
 def equilibrium(dbf, comps, phases, conditions, output=None, model=None,
                 verbose=False, calc_opts=None, to_xarray=True,
-                parameters=None, solver=None, phase_records=None, **kwargs):
+                parameters=None, solver=None, phase_records=None,
+                gpu=False, force_cpu=False, fallback_on_error=True,
+                backend=None, robust_phase_removal=None, **kwargs):
     """
     Calculate the equilibrium state of a system containing the specified
     components and phases, under the specified conditions.
@@ -49,6 +171,23 @@ def equilibrium(dbf, comps, phases, conditions, output=None, model=None,
         Mapping of phase names to PhaseRecord objects with `'GM'` output. Must include
         all active phases. The `model` argument must be a mapping of phase names to
         instances of Model objects.
+    gpu : bool, optional
+        Whether to use GPU acceleration for equilibrium calculations. Defaults to False.
+    force_cpu : bool, optional
+        Force CPU calculation even if GPU is available (useful for testing and comparison).
+    fallback_on_error : bool, optional
+        Automatically fall back to CPU if GPU calculation fails (default True).
+    backend : str, optional
+        Accelerated solver backend: 'cuda' (CuPy/CUDA GPU) or 'cpp' (C++/OpenMP
+        on the host, no CUDA required). Passing a backend implies gpu=True.
+        Default (None): 'cuda', or 'cpp' if the PYCGPU_CPU environment variable is set.
+    robust_phase_removal : bool, optional
+        Count phase removals from consolidation toward the per-compset removal
+        budget, so add/collapse/re-add cycles on near-duplicate composition sets
+        terminate instead of consuming the iteration budget. Applies to both the
+        reference CPU solver and the accelerated backends. Default (None): off,
+        unless the PYCALPHAD_ROBUST_REMOVAL / PYCGPU_ROBUST environment
+        variables are set.
 
     Returns
     -------
@@ -58,6 +197,109 @@ def equilibrium(dbf, comps, phases, conditions, output=None, model=None,
     --------
     None yet.
     """
+    import os
+    from pycalphad.backend import get_backend, _option_env
+    # Resolution order for the execution backend: explicit per-call kwarg,
+    # else the global set_backend()/PYCALPHAD_BACKEND setting, else 'default'.
+    _global_backend, _global_options = get_backend()
+    _backend_from_global = False
+    if backend is not None:
+        from pycalphad.backend import _normalize
+        backend = _normalize(backend)  # accepts 'gpu', 'c++', aliases
+        if backend == 'default':
+            backend = None
+        else:
+            gpu = True
+    if backend is not None:
+        pass
+    elif _global_backend != 'default' and not force_cpu:
+        # A GLOBAL backend only takes the accelerated path for problem shapes
+        # it supports; everything else silently uses the reference solver so
+        # `set_backend(...)` is always safe. An explicit per-call `backend=`
+        # kwarg bypasses this gate (deliberate user demand).
+        _gate_ok = _accelerated_conditions_supported(conditions, parameters, solver,
+                                             phase_records, output, kwargs,
+                                             dbf=dbf, comps=comps, phases=phases)
+        if os.environ.get('PYCGPU_COUNT_DISPATCH'):
+            with open(os.environ['PYCGPU_COUNT_DISPATCH'], 'a') as _f:
+                _f.write('gate_pass\n' if _gate_ok else
+                         f'gate_fallback: {_gate_reject_reason}\n')
+        if _gate_ok:
+            backend = _global_backend
+            gpu = True
+            _backend_from_global = True
+
+    if gpu:
+        # Environment variables steer the accelerated pipeline; set them for the
+        # duration of the call so explicit kwargs win, then restore.
+        overrides = {}
+        if backend is not None:
+            overrides['PYCGPU_CPU'] = '1' if backend == 'cpp' else ''
+            overrides['PYCGPU_GPU_FAST'] = '1' if backend == 'cuda-fast' else ''
+        if robust_phase_removal is None and 'PYCGPU_ROBUST' not in os.environ:
+            # Default ON for the accelerated backends: terminates the
+            # add/collapse cycles that otherwise burn the iteration budget on
+            # near-duplicate composition sets (alni_tough, AlCuFe cond 76/47).
+            # The reference solver keeps its stock behavior.
+            robust_phase_removal = True
+        if robust_phase_removal is not None:
+            overrides['PYCGPU_ROBUST'] = '1' if robust_phase_removal else ''
+        saved = {k: os.environ.get(k) for k in overrides}
+        try:
+            for k, val in overrides.items():
+                if val:
+                    os.environ[k] = val
+                else:
+                    os.environ.pop(k, None)
+            from ..gpu.gpu_equilibrium import equilibrium_gpu
+            try:
+                with _option_env(_global_options):
+                    # GPU mode handles its own debug output
+                    return equilibrium_gpu(dbf, comps, phases, conditions, output=output, model=model,
+                                         verbose=verbose, calc_opts=calc_opts, to_xarray=to_xarray,
+                                         parameters=parameters, solver=solver, phase_records=phase_records,
+                                         force_cpu=force_cpu, fallback_on_error=fallback_on_error, **kwargs)
+            except Exception as _accel_err:
+                if not _backend_from_global:
+                    raise
+                from pycalphad.backend import AcceleratedCapabilityError
+                _fall_back = (isinstance(_accel_err, AcceleratedCapabilityError)
+                              or bool(os.environ.get('PYCGPU_FALLBACK')))
+                if os.environ.get('PYCGPU_COUNT_DISPATCH'):
+                    import traceback
+                    _tb = traceback.extract_tb(_accel_err.__traceback__)
+                    _loc = f'{_tb[-1].filename.rsplit("/", 1)[-1]}:{_tb[-1].lineno}' if _tb else '?'
+                    _test = os.environ.get('PYTEST_CURRENT_TEST', '')
+                    _kind = 'runtime_fallback' if _fall_back else 'runtime_error'
+                    with open(os.environ['PYCGPU_COUNT_DISPATCH'], 'a') as _f:
+                        _f.write(f'{_kind} [{_loc}] <{_test}>: {str(_accel_err)[:100]}\n')
+                if not _fall_back:
+                    # Runtime failures RAISE: silently degrading to the
+                    # reference solver hides broken backends behind
+                    # perfect-looking (self-compared) results. Only declared
+                    # capability limits fall back.
+                    raise RuntimeError(
+                        "the accelerated backend failed at runtime (chained "
+                        "below). Not falling back silently: set "
+                        "PYCGPU_FALLBACK=1 to run the reference solver on "
+                        "accelerated-path errors, or use the 'default' "
+                        "backend.") from _accel_err
+                import logging
+                logging.getLogger(__name__).debug(
+                    "Accelerated backend capability fallback: %r", _accel_err)
+        finally:
+            for k, old in saved.items():
+                if old is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = old
+
+    # robust_phase_removal applies to the ACCELERATED backends only (their
+    # kernels implement the robust-removal gate; the reference Cython solver
+    # is upstream-unmodified and has no such switch). On the reference path
+    # the kwarg is accepted and ignored so backend-defaulted options do not
+    # change reference behavior.
+
     if output is None:
         output = set()
     elif (not isinstance(output, Iterable)) or isinstance(output, str):
@@ -68,23 +310,107 @@ def equilibrium(dbf, comps, phases, conditions, output=None, model=None,
     # Compute equilibrium values of any additional user-specified properties
     # We already computed these properties so don't recompute them
     properties = wks.eq
+    if verbose:
+        print(f"DEBUG equilibrium: properties = {properties}")
+        # Don't access wks.eq again as it may trigger another recompute
+    if verbose and properties is not None:
+        print("\n=== CPU EQUILIBRIUM FINAL RESULTS ===\n")
+        
+        # GM (Gibbs energy)
+        if hasattr(properties, 'GM') and properties.GM is not None:
+            gm_values = properties.GM
+            if hasattr(gm_values, 'values'):
+                gm_flat = gm_values.values.flatten()
+            else:
+                gm_flat = gm_values.flatten()
+            print(f"CPU Final GM: {gm_flat[0]:.6f} J/mol")
+        
+        # Phase amounts
+        if hasattr(properties, 'NP') and properties.NP is not None:
+            np_values = properties.NP
+            if hasattr(np_values, 'values'):
+                np_flat = np_values.values.flatten()
+            else:
+                np_flat = np_values.flatten()
+            active_phases = np_flat[np_flat > 1e-12]
+            print(f"CPU Final active phase amounts: {active_phases}")
+            
+            # Show all phase amounts (including zero)
+            print(f"CPU All phase amounts: {np_flat[:10]}...")  # Show first 10 to avoid clutter
+        
+        # Chemical potentials
+        if hasattr(properties, 'MU') and properties.MU is not None:
+            mu_values = properties.MU
+            if hasattr(mu_values, 'values'):
+                mu_flat = mu_values.values.flatten()
+            else:
+                mu_flat = mu_values.flatten()
+            print(f"CPU Final chemical potentials: {mu_flat}")
+        
+        # Phase names
+        if hasattr(properties, 'Phase') and properties.Phase is not None:
+            phase_values = properties.Phase
+            if hasattr(phase_values, 'values'):
+                phase_flat = phase_values.values.flatten()
+            else:
+                phase_flat = phase_values.flatten()
+            active_phase_names = [p for p in phase_flat if p != '' and p != '_FAKE_']
+            print(f"CPU Final active phases: {active_phase_names}")
+        
+        # Compositions
+        if hasattr(properties, 'X') and properties.X is not None:
+            x_values = properties.X
+            if hasattr(x_values, 'values'):
+                x_flat = x_values.values
+            else:
+                x_flat = x_values
+            # Print composition of first few active phases
+            for i in range(min(3, x_flat.shape[-2])):
+                phase_comp = x_flat.flatten()[i*x_flat.shape[-1]:(i+1)*x_flat.shape[-1]]
+                if np.sum(phase_comp) > 1e-12:  # Only show if phase has composition
+                    print(f"CPU Phase {i} composition: {phase_comp}")
+        
+        print("=== END CPU EQUILIBRIUM DEBUG ===\n")
+    
+    # END DEBUG
+    
+    
+    if properties is None:
+        if verbose:
+            print("WARNING: properties is None, returning None")
+        return None
+    
     conds_keys = [str(k) for k in properties.coords.keys() if k not in ('vertex', 'component', 'internal_dof')]
+    if verbose:
+        print(f"  condition_keys: {conds_keys}")
     output = sorted(set(output) - {'GM', 'MU'})
+    if verbose:
+        print(f"  additional_properties: {output}")
+    
     for out in output:
         cprop = as_property(out)
         out = str(cprop)
         result_array = np.zeros(properties.GM.shape) # Will not work for non-scalar properties
+        
         for index, composition_sets in wks.enumerate_composition_sets():
             cur_conds = OrderedDict(zip(conds_keys,
                                         [np.asarray(properties.coords[b][a], dtype=np.float64)
                                         for a, b in zip(index, conds_keys)]))
             chemical_potentials = properties.MU[index]
             result_array[index] = cprop.compute_property(composition_sets, cur_conds, chemical_potentials)
+            if verbose:
+                print(f"  result: {result_array[index]}")
+        
         result = LightDataset({out: (conds_keys, result_array)}, coords=properties.coords)
         properties.merge(result, inplace=True, compat='equals')
+    
     if to_xarray:
         properties = wks.eq.get_dataset()
+        if verbose:
+            print("  converted to xarray Dataset")
     properties.attrs['created'] = datetime.now().isoformat()
+    if verbose:
+        print(f"  added creation timestamp: {properties.attrs['created']}")
     if len(kwargs) > 0:
         warnings.warn('The following equilibrium keyword arguments were passed, but unused:\n{}'.format(kwargs))
     return properties

@@ -193,7 +193,7 @@ def _sample_phase_constitution(model, sampler, fixed_grid, pdens, phase_local_co
 def _compute_phase_values(components, statevar_dict, str_phase_local_conditions,
                           points, phase_record, output, maximum_internal_dof, broadcast=True,
                           parameters=None, fake_points=False,
-                          largest_energy=None):
+                          largest_energy=None, accel_evaluator=None):
     """
     Calculate output values for a particular phase.
 
@@ -272,11 +272,26 @@ def _compute_phase_values(components, statevar_dict, str_phase_local_conditions,
         if parameter_array_length == 0:
             # No parameters specified
             phase_output = np.zeros(dof.shape[0], order='C')
-            phase_record.prop_2d(phase_output, dof, output.encode('utf-8'))
+            if accel_evaluator is not None and dof.shape[0] >= getattr(accel_evaluator, 'min_points', 0):
+                # Accelerated backend (see pycalphad.set_backend): evaluate the
+                # energy over the sampled points with the generated GPU/C++
+                # functions; everything else in this routine stays unchanged.
+                # Small point sets stay on the reference callables, which win
+                # below the per-call overhead crossover (mapping makes thousands
+                # of small calculate calls).
+                accel_evaluator(phase_record.phase_name, dof, phase_output)
+            else:
+                phase_record.prop_2d(phase_output, dof, output.encode('utf-8'))
         else:
             # Vectorized parameter arrays
             phase_output = np.zeros((dof.shape[0], parameter_array_length), order='C')
-            phase_record.prop_parameters_2d(phase_output, dof, parameter_array, output.encode('utf-8'))
+            if accel_evaluator is not None and dof.shape[0] >= getattr(accel_evaluator, 'min_points', 0):
+                # Accelerated backend: every (point, parameter-sample) pair in
+                # one launch; layout matches prop_parameters_2d (point-major).
+                accel_evaluator(phase_record.phase_name, dof,
+                                phase_output.reshape(-1), param_rows=parameter_array)
+            else:
+                phase_record.prop_parameters_2d(phase_output, dof, parameter_array, output.encode('utf-8'))
 
         for el_idx in range(len(pure_elements)):
             phase_record.mass_obj_2d(phase_compositions[:, el_idx], dof, el_idx)
@@ -509,6 +524,48 @@ def calculate(dbf, comps, phases, mode=None, output='GM', fake_points=False, bro
     plc_shape = tuple(len(x) for x in phase_local_conditions.values())
     # TODO: move state variable conditions into conditions dict
 
+    # Accelerated property evaluation (pycalphad.set_backend('c++'|'gpu')):
+    # only the output evaluation over sampled points moves to the backend; the
+    # sampling and dataset assembly below are unchanged. Any failure to build
+    # the accelerated evaluator (including unsupported output names) falls
+    # back silently to the reference path.
+    accel_evaluator = None
+    from pycalphad.backend import get_backend as _get_backend
+    _accel_backend, _ = _get_backend()
+    _canonical_statevars = [str(sv) for sv in getattr(phase_records, 'state_variables', [])] == ['N', 'P', 'T']
+    _param_syms, _param_arr = extract_parameters(parameters)
+    _factory_syms = list(getattr(phase_records, 'param_symbols', []) or [])
+    _params_ok = (len(_param_arr) == 0
+                  or (list(map(str, _param_syms)) == list(map(str, _factory_syms))))
+    if (_accel_backend in ('cpp', 'cuda', 'cuda-fast')
+            and _params_ok
+            and _canonical_statevars):
+        # The generated evaluators assume the canonical [N, P, T] state-variable
+        # layout; problems with omitted/extra state variables use the reference
+        # callables (gh-116-style calls with default state variables).
+        try:
+            from pycalphad.gpu.gpu_calculate import get_grid_evaluator
+            accel_evaluator = get_grid_evaluator(_accel_backend, comps,
+                                                 sorted(active_phases), models,
+                                                 phase_records, output=output)
+        except Exception as _accel_err:
+            import os as _os
+            from pycalphad.backend import AcceleratedCapabilityError
+            if not (isinstance(_accel_err, AcceleratedCapabilityError)
+                    or _os.environ.get('PYCGPU_FALLBACK')):
+                # Runtime failures RAISE (see core/equilibrium.py): only
+                # declared capability limits fall back silently.
+                raise RuntimeError(
+                    "the accelerated calculate() evaluator failed to build "
+                    "(chained below). Not falling back silently: set "
+                    "PYCGPU_FALLBACK=1 to use the reference path on "
+                    "accelerated-path errors, or use the 'default' "
+                    "backend.") from _accel_err
+            import logging
+            logging.getLogger(__name__).debug(
+                "Accelerated calculate() capability fallback: %r", _accel_err)
+            accel_evaluator = None
+
     for phase_name in sorted(active_phases):
         mod = models[phase_name]
         phase_record = phase_records[phase_name]
@@ -543,7 +600,8 @@ def calculate(dbf, comps, phases, mode=None, output='GM', fake_points=False, bro
         phase_ds = _compute_phase_values(nonvacant_components, str_statevar_dict, str_phase_local_conditions,
                                          points, phase_record, output,
                                          maximum_internal_dof, broadcast=broadcast, parameters=parameters,
-                                         largest_energy=float(largest_energy), fake_points=fp)
+                                         largest_energy=float(largest_energy), fake_points=fp,
+                                         accel_evaluator=accel_evaluator)
         if phase_ds[output].size == 0:
             warnings.warn(f"No valid points found for phase {phase_name}. This can be caused by the point samplers failing to produce feasible points with the given conditions ({conditions}) and state variables ({statevar_dict}).")
         all_phase_data.append(phase_ds)

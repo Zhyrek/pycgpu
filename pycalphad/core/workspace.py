@@ -348,6 +348,65 @@ class Workspace:
         self._suspend_dependency_updates = False
 
     def recompute(self):
+        # Accelerated backend dispatch (pycalphad.set_backend): supported
+        # standard problems compute the equilibrium with the compiled
+        # solvers; anything else — and any accelerated-path failure — uses
+        # the reference implementation below unchanged.
+        from pycalphad.backend import get_backend as _get_backend
+        _backend_name, _backend_opts = _get_backend()
+        if _backend_name in ('cpp', 'cuda', 'cuda-fast'):
+            import os as _os
+            from pycalphad.core.solver import Solver as _DefaultSolver
+            from pycalphad.core import equilibrium as _eqmod
+            _conds = {key: as_quantity(key, value).to(key.implementation_units).magnitude
+                      for key, value in self.conditions.items()}
+            if self.calc_opts and set(self.calc_opts) - {'pdens'}:
+                # the accelerated grid replicates recompute's grid_opts
+                # handling for pdens; other calculate options (samplers,
+                # fixed grids, ...) use the reference path
+                _gate_ok, _reason = False, 'unsupported calc_opts'
+            elif type(self.solver) is not _DefaultSolver:
+                _gate_ok, _reason = False, 'non-default solver'
+            else:
+                _gate_ok = _eqmod._accelerated_conditions_supported(
+                    _conds, self.parameters.unwrap(), None, None, None, {},
+                    dbf=self.database, comps=[str(c) for c in self.components],
+                    phases=list(self.phases))
+                _reason = getattr(_eqmod, '_gate_reject_reason', None)
+            if _os.environ.get('PYCGPU_COUNT_DISPATCH'):
+                _test = _os.environ.get('PYTEST_CURRENT_TEST', '')
+                with open(_os.environ['PYCGPU_COUNT_DISPATCH'], 'a') as _f:
+                    _f.write('wks_gate_pass\n' if _gate_ok else
+                             f'wks_gate_fallback: {_reason} <{_test}>\n')
+            if _gate_ok:
+                try:
+                    # same parameter refresh the reference path performs below
+                    self.phase_record_factory.update_parameters(self.parameters.unwrap())
+                    from pycalphad.gpu.gpu_equilibrium import run_accelerated_workspace
+                    return run_accelerated_workspace(self, _backend_name, _backend_opts)
+                except Exception as _accel_err:
+                    from pycalphad.backend import AcceleratedCapabilityError
+                    _fall_back = (isinstance(_accel_err, AcceleratedCapabilityError)
+                                  or bool(_os.environ.get('PYCGPU_FALLBACK')))
+                    if _os.environ.get('PYCGPU_COUNT_DISPATCH'):
+                        import traceback
+                        _tb = traceback.extract_tb(_accel_err.__traceback__)
+                        _loc = f'{_tb[-1].filename.rsplit("/", 1)[-1]}:{_tb[-1].lineno}' if _tb else '?'
+                        _kind = 'wks_runtime_fallback' if _fall_back else 'wks_runtime_error'
+                        with open(_os.environ['PYCGPU_COUNT_DISPATCH'], 'a') as _f:
+                            _f.write(f'{_kind} [{_loc}]: {str(_accel_err)[:100]}\n')
+                    if not _fall_back:
+                        # Runtime failures RAISE (see core/equilibrium.py):
+                        # only declared capability limits fall back silently.
+                        raise RuntimeError(
+                            "the accelerated backend failed at runtime "
+                            "(chained below). Not falling back silently: set "
+                            "PYCGPU_FALLBACK=1 to run the reference solver on "
+                            "accelerated-path errors, or use the 'default' "
+                            "backend.") from _accel_err
+                    import logging
+                    logging.getLogger(__name__).debug(
+                        "Accelerated backend capability fallback: %r", _accel_err)
         # Assumes implementation units from this point
         unitless_conds = OrderedDict((key, as_quantity(key, value).to(key.implementation_units).magnitude) for key, value in self.conditions.items())
         str_conds = OrderedDict((str(key), value) for key, value in unitless_conds.items())

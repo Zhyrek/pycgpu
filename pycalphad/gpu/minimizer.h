@@ -4328,9 +4328,11 @@ __device__ void lstsq(double* A, int nrows, int ncols, double* b, double toleran
  * Output layout per condition (PYJAN_OUT_STRIDE doubles):
  *   [0 .. MAX_COMPONENTS)                       delta chemical potentials
  *   [MAX_COMPONENTS .. +MAX_STATEVARS)          delta state variables
- *   [.. +MAX_PHASES)                            delta phase amounts (moles
- *                                               of formula units, matching
- *                                               state->phase_amt convention)
+ *   [.. +MAX_PHASES)                            delta phase amounts (MOLES
+ *                                               OF ATOMS — converted from
+ *                                               the solver's formula-unit
+ *                                               convention, see
+ *                                               pyjan_amounts_to_moles)
  *   [.. +MAX_PHASES*MAX_DOF_PER_PHASE)          delta site fractions per
  *                                               compset (compset-major)
  *   [last slot]                                 status: 1.0 ok, 0.0 failed
@@ -4364,6 +4366,36 @@ __device__ static void pyjan_site_fraction_differential(
                    * delta_chempots[cp];
         }
         delta_y[i] = acc;
+    }
+}
+
+/* Convert phase-amount deltas from the solver's formula-unit convention to
+ * MOLES OF ATOMS, the unit CompositionSet.NP (and the Eq. 73 chain rule)
+ * uses:  dNP_at = dNP_fu * moles_normalization
+ *                 + NP_fu * (grad_y moles_normalization) . delta_y.
+ * The gradient term vanishes when no vacancies participate in mixing
+ * (per-sublattice site-fraction deltas sum to zero) but is required in
+ * general.  NOTE: the upstream reference pairs the RAW formula-unit deltas
+ * with per-mole-atom properties in Eq. 73, which disagrees with finite
+ * differences on multi-atom-per-formula-unit phases (e.g. cumg LAVES_C15,
+ * dGM/dT analytic -60.36 vs FD -58.96); this port emits the consistent
+ * atom-unit deltas instead. */
+__device__ static void pyjan_amounts_to_moles(
+    const SystemSpecification* spec, const SystemState* state,
+    double* delta_phase_amounts, const double* delta_y)
+{
+    for (int cs = 0; cs < state->num_compsets && cs < MAX_PHASES; ++cs) {
+        const CompositionSet* compset = &state->compsets[cs];
+        if (compset->phase_record == (const PhaseRecord*)0) continue;
+        const CompsetState* csst = &state->cs_states[cs];
+        int pdof = compset->phase_record->phase_dof;
+        double acc = delta_phase_amounts[cs] * csst->moles_normalization;
+        for (int j = 0; j < pdof; ++j) {
+            acc += state->phase_amt[cs]
+                   * csst->moles_normalization_grad[spec->num_statevars + j]
+                   * delta_y[cs * MAX_DOF_PER_PHASE + j];
+        }
+        delta_phase_amounts[cs] = acc;
     }
 }
 
@@ -4648,6 +4680,7 @@ __device__ static int pyjan_parameter_differential(
             for (int j = 0; j < pdof; ++j) dy[j] += cp_tmp[j];
         }
     }
+    pyjan_amounts_to_moles(spec, state, delta_phase_amounts, delta_y_out);
     return 1;
 }
 #endif /* PYCGPU_JANSSON_KIND == 2 && MAX_PARAMS > 0 */
@@ -4775,6 +4808,7 @@ __device__ static void pyjan_compute_deltas(
             spec, &state->cs_states[cs], compset->phase_record->phase_dof,
             d_mu, d_sv, &d_y[cs * MAX_DOF_PER_PHASE]);
     }
+    pyjan_amounts_to_moles(spec, state, d_amt, d_y);
 #endif
     *status = 1.0;
 #endif /* PYCGPU_JANSSON_KIND == 2 */

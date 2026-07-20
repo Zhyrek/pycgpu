@@ -2129,6 +2129,18 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     if not use_gpu:
         reason = "forced by parameter" if force_cpu else "not available"
         raise RuntimeError(f"[GPU] GPU {reason}, no fallback allowed")
+
+    # Release pool blocks retained from PREVIOUS calls before this run sizes
+    # anything. CuPy's pool keeps freed blocks claimed from the driver, so
+    # without this (a) repeated equilibrium() calls in one process ratchet
+    # driver-free memory down until an allocation fails ("enough calls ->
+    # GPU out of memory"), and (b) the auto-chunk budget below, which reads
+    # driver-level mem_info, undercounts what is actually available.
+    if not _cpu_backend_mode:
+        try:
+            cp.get_default_memory_pool().free_all_blocks()
+        except Exception:
+            pass
     
     if verbose:
         print("[GPU] Starting GPU equilibrium calculation...")
@@ -2891,12 +2903,19 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         _fit = min(_fit, (2**31 - 1) // max(int(SYSTEM_STATE_SIZE), 1))
         if not _cpu_backend_mode and bool(getattr(cp.cuda.runtime, 'is_hip', False)):
             # ROCm: a single ~38k-thread launch of a many-phase kernel
-            # (AlCuFe, ~0.8 MB work arrays/thread) hit a GPU memory access
+            # (AlCuFe, ~264 KB work arrays/thread) hit a GPU memory access
             # fault where 8192-condition launches run clean on the same card
             # (and huge launches of SMALL kernels also run clean, so it is
-            # per-thread-footprint dependent — likely a scratch-aggregate
-            # limit inside ROCm). Cap HIP launches conservatively at the
-            # empirically safe size; PYCGPU_HIP_MAX_CHUNK overrides.
+            # per-thread-FOOTPRINT dependent — likely a scratch-aggregate
+            # limit inside ROCm). The safe point is therefore a BYTE budget,
+            # not a thread count: 8192 threads x AlCuFe's 264 KB ~= 2 GiB.
+            # A flat 8192-thread cap re-faulted on heavier kernels (alcocrni
+            # quaternary is 420 KB/thread -> 3.3 GiB at 8192 threads). Cap
+            # the aggregate work-array bytes per launch at the validated
+            # budget; PYCGPU_HIP_MAX_WORK_BYTES / PYCGPU_HIP_MAX_CHUNK
+            # override the byte / thread caps respectively.
+            _hip_bytes = int(os.environ.get('PYCGPU_HIP_MAX_WORK_BYTES', 2 << 30))
+            _fit = min(_fit, max(_hip_bytes // _per_thread_bytes, 1))
             _fit = min(_fit, int(os.environ.get('PYCGPU_HIP_MAX_CHUNK', 8192)))
         _fit = max((_fit // threads_per_block) * threads_per_block,
                    threads_per_block)

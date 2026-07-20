@@ -13,6 +13,8 @@ Recommended order on a fresh machine:
 | `profile_pipeline.py <binary\|ternary\|quaternary> [--backend c++\|gpu] [--budget 60] [--threads N] [--solver-internals]` | Where does the time go on THIS machine — grid, hull, solver/kernel wall, packing, results, glue? Sizes the run to the budget; `--solver-internals` adds in-kernel segment shares. On gpu, the kernel-wall vs host split tells you whether the card (e.g. consumer FP64 rates) or the host pipeline bounds throughput. | the budget you pass (+ compile on first use) |
 | `benchmark_speed.py [backend] [nx nt]` | What speedup does this machine get, with compile time excluded? | ~1-2 min |
 | `check_reference_threading.py [nx nt]` | Is the reference solver helped, hurt, or untouched by BLAS thread pools on this machine? | ~1-2 min |
+| `gpufast_pass_split.py [--systems ...] [--budget 60]` | On THIS card, is the gpu-fast solve bound by the lockstep pass-1 kernel or by the pass-2 straggler re-solve? Decides the next gpu-fast lever: straggler solver (semismooth) vs evaluation rate (tensorized GEMM). | ~2x budget per system |
+| `warmstart_calibration.py <binary\|ternary\|quaternary> [--backend c++\|gpu] [--nx N]` | For dense-grid sweeps (billions of equilibria): how much does seeding each point from a solved neighbor save (iteration CDF vs cold and vs the convergence-gate floor), how often does it land in the wrong basin, and does the driving-force acceptance check catch those? Feeds the marching-solver design. | ~5-20 min |
 
 Things these scripts teach you to watch for anywhere else:
 

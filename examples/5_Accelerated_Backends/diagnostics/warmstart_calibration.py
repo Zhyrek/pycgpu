@@ -430,6 +430,15 @@ def main():
     print(f'  budget for 90% convergence: cold {c90 or ">" + str(args.ladder[-1])}, '
           f'warm {w90 or ">" + str(args.ladder[-1])}, '
           f'gate floor (self-seed) {s90 or ">" + str(args.ladder[-1])}')
+    # the 90% crossing is set by the straggler TAIL, which neither start
+    # helps — the warm-start payoff is the BULK converging at the gate
+    # floor. Report the separation there so the summary carries it.
+    b_floor = s90 or args.ladder[-1]
+    row = next((r for r in ladder_rows if r[0] == b_floor), ladder_rows[-1])
+    print(f'  bulk separation at the gate-floor budget ({row[0]} iters): '
+          f'cold {row[1]:.1f}% vs warm {row[2]:.1f}% converged '
+          f'(warm-start payoff = this gap; the shared tail past 90% is '
+          f'straggler work for the pass-2/semismooth lever, not seeding)')
     n_serious = int((wrong & ~reject & (gm_diff >= 1.0)).sum()) if wrong.any() else 0
     print(f'  wrong-basin rate: {100 * wrong.sum() / max((both_conv & interior).sum(), 1):.2f}% '
           f'({caught} df-caught, {n_serious} real escapes)')

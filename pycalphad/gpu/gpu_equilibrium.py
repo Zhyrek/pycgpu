@@ -2314,7 +2314,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     # gpu_codegen.py is included because the cached artifact is the GENERATED
     # source: codegen changes must invalidate cached kernels.
     for _hdr in ("phase_rec.h", "comp_set.h", "hyperplane.h", "minimizer.h",
-                 "eqsolver.h", "gpu_codegen.py"):
+                 "eqsolver.h", "semismooth.h", "gpu_codegen.py"):
         with open(os.path.join(_gpu_dir, _hdr), "rb") as _f:
             _header_hash.update(_f.read())
 
@@ -2340,6 +2340,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
         "robust:" + str(bool(os.environ.get('PYCGPU_ROBUST'))),
         "prof:" + str(bool(os.environ.get('PYCGPU_PROF'))),
         "fp32emu:" + str(bool(os.environ.get('PYCGPU_FP32EMU'))),
+        "ss:" + str(bool(os.environ.get('PYCGPU_SS'))),
         "jansson:" + str(os.environ.get('PYCGPU_JANSSON_TARGET'))
         + "/" + str(os.environ.get('PYCGPU_JANSSON_KIND')),
     ]
@@ -3266,6 +3267,129 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
             _sub_gbi = (xp.ascontiguousarray(grid_block_indices_gpu[_redo])
                         if grid_block_indices_gpu is not None else None)
             _sub_res = xp.ascontiguousarray(_res_view[_redo]).reshape(-1)
+            # ---- Semismooth pass 2 (PYCGPU_SS=1, experimental) ----
+            # Try the SS kernel on the flagged conditions first: accepted
+            # conditions clear their cap flag in-place; the faithful rerun
+            # below then only runs on what is still flagged.
+            _ss_kernel = None
+            if os.environ.get('PYCGPU_SS') and not _cpu_backend_mode:
+                try:
+                    _ss_mod = module_faithful if _gpu_fast_mode else module
+                    _ss_kernel = _ss_mod.get_function("pycgpu_ss_pass")
+                except Exception as _e:
+                    if verbose or os.environ.get('PYCGPU_TIME'):
+                        print(f"[GPU] PYCGPU_SS: kernel unavailable ({_e})")
+            if _ss_kernel is not None:
+                _t_ss = time.time()
+                _MC = int(dynamic_sizes['MAX_COMPONENTS'])
+                _MFC = _MC
+                # parse ncomp/nsv and the plain element-amount vector b from
+                # the packed spec rows (dtype layout of
+                # _create_system_specification_struct: [i4 nsv][i4 ncomp]
+                # [f8 N][MC f8 mu0][MFC*MC f8 coeffs][MFC f8 rhs][i4 npmfc]
+                # [i4 ncols]...). A NaN b row marks the condition
+                # not-SS-eligible (non-simple conditions).
+                # the packed spec is ALL-DOUBLE (ints stored as f8):
+                # [0]=nsv [1]=ncomp [2]=N [3..3+MC)=mu0 [3+MC..)=coeffs
+                # (MFC*MC) then rhs (MFC) then npmfc, ncols as doubles
+                _spec_host = _to_numpy(_sub_spec).reshape(_k, system_spec_stride)
+                _ss_nsv = int(_spec_host[0, 0]); _ss_ncomp = int(_spec_host[0, 1])
+                _off_co = 3 + _MC
+                _off_rhs = _off_co + _MFC * _MC
+                _off_n = _off_rhs + _MFC
+                _n_i32 = np.stack([_spec_host[:, _off_n].astype(np.int64),
+                                   _spec_host[:, _off_n + 1].astype(np.int64)], axis=1)
+                _b_all = np.full((_k, _MC), np.nan)
+                if os.environ.get('PYCGPU_SS_DEBUG'):
+                    print(f"[SSDBG] nsv={_ss_nsv} ncomp={_ss_ncomp} "
+                          f"N={_spec_host[0, 2]!r} npr/ncols={_n_i32[0].tolist()}")
+                    print(f"[SSDBG] slots0..12: {np.round(_spec_host[0, :13], 4).tolist()}")
+                    print(f"[SSDBG] coeffs: {np.round(_spec_host[0, _off_co:_off_co + _MFC * _MC], 4).tolist()}")
+                    print(f"[SSDBG] rhs: {np.round(_spec_host[0, _off_rhs:_off_rhs + _MFC], 4).tolist()}")
+                for _i in range(_k):
+                    _npr = int(_n_i32[_i, 0])
+                    if not (0 < _npr < _ss_ncomp):
+                        continue
+                    if abs(float(_spec_host[_i, 2]) - 1.0) > 1e-12:
+                        continue  # prescribed N != 1
+                    _co = _spec_host[_i, _off_co:_off_co + _MFC * _MC].reshape(_MFC, _MC)
+                    _rh = _spec_host[_i, _off_rhs:_off_rhs + _MFC]
+                    _bv = np.full(_MC, np.nan)
+                    _ok = True
+                    for _r in range(_npr):
+                        _row = _co[_r, :_ss_ncomp]
+                        _one = np.isclose(_row, 1.0)
+                        if _one.sum() != 1 or np.abs(_row[~_one]).max(initial=0.0) > 1e-12:
+                            _ok = False; break
+                        _bv[int(np.argmax(_one))] = _rh[_r]
+                    _free = [c for c in range(_ss_ncomp) if not np.isfinite(_bv[c])]
+                    if _ok and len(_free) == 1:
+                        _bv[_free[0]] = 1.0 - np.nansum(_bv[:_ss_ncomp])
+                        if _bv[_free[0]] > 1e-8:
+                            _b_all[_i, :] = np.nan_to_num(_bv, nan=0.0)
+                if verbose or os.environ.get('PYCGPU_TIME'):
+                    print(f"[GPU] PYCGPU_SS: {int(np.isfinite(_b_all[:, 0]).sum())}"
+                          f"/{_k} conditions SS-eligible (b parsed)")
+                _b_gpu = cp.asarray(np.ascontiguousarray(_b_all))
+                # per-thread work: J + A (SS_NVAR^2 each) + vectors + scratch
+                _SSC = 8  # SS_MAX_CANDS in semismooth.h
+                _MD = int(dynamic_sizes['MAX_DOF_PER_PHASE'])
+                _MIC = int(dynamic_sizes['MAX_INTERNAL_CONSTRAINTS'])
+                _MSV = int(dynamic_sizes['MAX_STATEVARS'])
+                _ss_nvar = _MC + _SSC * (1 + _MD + _MIC)
+                _ss_wstride = (2 * _ss_nvar * _ss_nvar + 6 * _ss_nvar
+                               + (_MSV + _MD) + (2 + _MD) + (_MD + 1) ** 2
+                               + _MC + _MC * (_MSV + _MD) + _MIC
+                               + _MIC * (_MSV + _MD) + 64)
+                _ss_chunk = max(1, min(_k, int((2 << 30) // (8 * _ss_wstride))))
+                _ss_work = cp.empty(_ss_chunk * _ss_wstride, dtype=cp.float64)
+                _ss_ipiv = cp.empty(_ss_chunk * _ss_nvar, dtype=cp.int32)
+                for _ss_s in range(0, _k, _ss_chunk):
+                    _ss_e = min(_ss_s + _ss_chunk, _k)
+                    _ss_n = _ss_e - _ss_s
+                    _ss_args = (
+                        _dev_ptr(_sub_cond) + _ss_s * condition_data_stride * 8,
+                        np.int32(condition_data_stride),
+                        _dev_ptr(_sub_res) + _ss_s * results_per_condition * 8,
+                        np.int32(results_per_condition),
+                        _dev_ptr(_sub_ipd) + _ss_s * initial_phase_data_stride * 8,
+                        np.int32(initial_phase_data_stride),
+                        np.int32(num_unique_models_for_gpu),
+                        grid_data_ptr_for_kernel,
+                        (_dev_ptr(_sub_gbi) + _ss_s * 4) if _sub_gbi is not None else 0,
+                        np.int64(grid_block_stride_bytes),
+                        _dev_ptr(_b_gpu) + _ss_s * _MC * 8,
+                        np.int32(_ss_ncomp), np.int32(_ss_nsv), np.int32(_ss_n),
+                        _dev_ptr(_ss_work), np.int64(_ss_wstride),
+                        _dev_ptr(_ss_ipiv), np.int32(_ss_nvar),
+                        np.int32(1 if os.environ.get('PYCGPU_SS_DEBUG') else 0))
+                    _ss_blocks = (_ss_n + 63) // 64
+                    _ss_kernel((_ss_blocks,), (64,), _ss_args)
+                cp.cuda.runtime.deviceSynchronize()
+                # shrink the redo set to still-flagged conditions
+                _flag_local = 5 + _MC + MAX_PHASES
+                _sub_view = _sub_res.reshape(_k, results_per_condition)
+                _still = np.nonzero(_to_numpy(_sub_view[:, _flag_local]) > 0.5)[0]
+                if verbose or os.environ.get('PYCGPU_TIME'):
+                    print(f"[GPU TIME] semismooth pass2: {time.time() - _t_ss:.3f} s "
+                          f"({_k - _still.size}/{_k} accepted)")
+                if _still.size < _k:
+                    # scatter accepted rows back now; compact the rest
+                    _res_view[_redo] = _sub_view
+                    _redo = _redo[xp.asarray(_still)]
+                    _redo_np = _redo_np[_still]
+                    _k = int(_still.size)
+                    if _k:
+                        _keep_idx = xp.asarray(_still)
+                        _sub_spec = xp.ascontiguousarray(
+                            _sub_spec.reshape(-1, system_spec_stride)[_keep_idx]).reshape(-1)
+                        _sub_cond = xp.ascontiguousarray(
+                            _sub_cond.reshape(-1, condition_data_stride)[_keep_idx]).reshape(-1)
+                        _sub_ipd = xp.ascontiguousarray(
+                            _sub_ipd.reshape(-1, initial_phase_data_stride)[_keep_idx]).reshape(-1)
+                        _sub_res = xp.ascontiguousarray(_sub_view[_keep_idx]).reshape(-1)
+                        if _sub_gbi is not None:
+                            _sub_gbi = xp.ascontiguousarray(_sub_gbi[_keep_idx])
             _t_pass2 = time.time()
             # Pass 2 must respect the same work-array chunk bound as pass 1.
             for _ps in range(0, _k, _chunk_size):

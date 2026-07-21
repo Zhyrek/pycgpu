@@ -2961,6 +2961,10 @@ def _generate_full_gpu_source(wks_obj: Workspace,
     hyperplane_h_source = _read_gpu_header("hyperplane.h")
     minimizer_h_source = _read_gpu_header("minimizer.h")
     eqsolver_h_source = _read_gpu_header("eqsolver.h")
+    # Semismooth pass-2 solver (PYCGPU_SS=1): opt-in experimental kernel;
+    # excluded from the module entirely when off (cache key carries the flag)
+    semismooth_h_source = (_read_gpu_header("semismooth.h")
+                           if os.environ.get('PYCGPU_SS') else "")
     jansson_h_source = ""  # jansson code folded into minimizer.h
 
     full_source = f"""
@@ -3035,6 +3039,9 @@ __device__ void gpu_debug_log_array(const char* message, const double* arr, int 
 
 // Content of eqsolver.h (defines solve_equilibrium_at_condition, helpers)
 {eqsolver_h_source}
+
+// Semismooth straggler solver (empty unless PYCGPU_SS=1)
+{semismooth_h_source}
 
 // --- Dynamically Generated __device__ Model Functions ---
 // Strength-reduced pow for the generated model functions (CUDA/HIP only):

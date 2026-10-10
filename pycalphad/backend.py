@@ -1,210 +1,317 @@
 """
-Global computation-backend selection for pycalphad.
+Computation-backend selection for pycalphad.
 
-pycalphad ships three execution backends for supported routines (currently
-``equilibrium``; ``calculate`` energy evaluation where available):
-
-* ``"default"`` — the reference CPU implementation (Cython + LAPACK).
-* ``"c++"``    — the C++ backend: the generated solver compiled with the
-  host compiler. Same algorithm, typically 40-80x faster, SINGLE-THREADED by
-  design — parallelize by running your own pycalphad calls concurrently
-  (calls from multiple threads/processes are safe).
-* ``"gpu"``    — the CUDA backend (CuPy RawModule), one condition per thread.
-* ``"gpu-fast"`` — the CUDA backend with a GPU-native two-pass strategy:
-  pass 1 runs a frozen-phase-set, capped-iteration "lockstep" kernel (no
-  phase-change branching — the warp-divergence killer on many-phase
-  systems); conditions whose assemblage needs to grow (positive driving
-  force at the end) or that fail to converge are rerun on the faithful
-  kernel. Results match the faithful gpu backend except where pass 1
-  legitimately converges to the same assemblage by a different route
-  (eps-class); the fallback pass bounds the deviation.
-
-Usage::
+Pick a backend once and every ``equilibrium()``, ``calculate()`` and
+``Workspace`` call after that uses it::
 
     import pycalphad
-    pycalphad.set_backend("c++")                 # global default from here on
+    pycalphad.set_backend('auto')      # fastest backend available here
     eq = pycalphad.equilibrium(dbf, comps, phases, conds)
 
-    with pycalphad.backend("gpu", robust_phase_removal=True):
-        eq = pycalphad.equilibrium(...)          # scoped override
+Backends
+--------
+``'default'`` (aliases ``'cpu'``, ``'reference'``)
+    The reference implementation (Cython + LAPACK). Always available.
+``'cpp'`` (aliases ``'c++'``, ``'openmp'``)
+    The generated solver compiled for the host with the system C++
+    compiler, using all available CPU cores by default.
+``'cuda'``
+    The generated solver on an NVIDIA (or ROCm) GPU through CuPy.
+    ``'cuda-fast'`` adds a lockstep first pass that pays off on cards with
+    full-rate FP64.
+``'metal'``
+    The generated solver on an Apple-silicon GPU. Apple GPUs have no FP64
+    hardware, so the kernels run in emulated double precision; conditions
+    the GPU pass does not settle quickly are finished by the C++ solver.
+``'gpu'``
+    The GPU backend for this machine: ``'cuda'`` when CuPy finds a device,
+    otherwise ``'metal'`` on Apple silicon.
+``'auto'``
+    The fastest backend available: ``'cuda'`` if usable, else ``'cpp'``,
+    else ``'default'``.
 
-The per-call ``backend=`` keyword of ``equilibrium`` always wins over the
-global setting. The initial default may be set with the ``PYCALPHAD_BACKEND``
-environment variable. Backend availability is validated eagerly at
-``set_backend`` time so misconfiguration fails immediately with a clear
-message instead of minutes into a calculation.
+Problems a compiled backend cannot handle exactly (custom ``Model``
+subclasses, unsupported condition types, vectorized parameter sweeps, ...)
+run on the reference implementation automatically, so a backend can be set
+globally without changing any other code.
 
-Accepted option keywords (apply to accelerated backends):
+Scoped and per-call selection::
 
-* ``robust_phase_removal`` (bool): count consolidation phase-removals toward
-  the per-compset removal budget (terminates add/collapse cycles).
-* ``chunk`` (int): conditions per solver launch (bounds work-array memory;
-  required for batches beyond VRAM/RAM).
-* ``pass1_iters`` (int): enable the two-pass driver with this pass-1
-  iteration cap (cap-touching conditions are rerun at the full budget;
-  results are bit-identical to a single full-budget run).
-* ``max_iters`` (int): full Newton-iteration budget (CPU parity value 1000).
-* ``threads`` (int): std::thread workers over conditions in the c++
-  backend's solver and hull (results are bit-identical at any count).
-  Default 1; intended for batch jobs with dedicated cores — pass the
-  job's core allocation rather than 0 (= all hardware threads), which
-  is unfriendly on shared/login nodes.
-* ``hull_procs`` (int): worker processes for the starting-point hull
-  (default 1 = serial; 0 = auto-scale on large batches).
-* ``calc_procs`` (int): worker processes for grid energy sampling over the
-  temperature axis (default 1 = serial; 0 = auto).
+    with pycalphad.backend('cpp', threads=4):
+        eq = pycalphad.equilibrium(...)
+
+    eq = pycalphad.equilibrium(..., backend='metal')
+
+The initial default comes from the ``PYCALPHAD_BACKEND`` environment
+variable when it is set.
+
+Options
+-------
+``threads`` (int)
+    Worker threads for the C++ solver and starting-point hull. Default: all
+    cores available to the process. Use ``threads=1`` when you already run
+    pycalphad in parallel processes (e.g. ESPEI MCMC walkers). Results are
+    bit-identical for any thread count.
+``max_iters`` (int)
+    Newton-iteration budget per condition (reference value: 1000).
+``chunk`` (int)
+    Conditions per solver launch; bounds memory for very large batches.
+    Chosen automatically from free memory by default.
+``pass1_iters`` (int)
+    Two-pass solving: run every condition with this iteration cap first and
+    rerun the ones that hit it at the full budget (results are identical to
+    a single full-budget pass). CUDA default 50; 0 disables.
+``robust_phase_removal`` (bool)
+    Count phase removals during composition-set consolidation toward the
+    per-set removal budget, which terminates add/remove cycles between
+    near-duplicate composition sets. Default True.
+``hull_procs``, ``calc_procs`` (int)
+    Worker processes for the reference starting-point hull and for grid
+    sampling over temperatures (1 = serial, 0 = automatic).
 """
+import contextvars
 import os
+import platform
 import shutil
 from contextlib import contextmanager
+from dataclasses import dataclass, fields, replace
 
-__all__ = ['set_backend', 'get_backend', 'backend', 'AcceleratedCapabilityError']
+__all__ = ['set_backend', 'get_backend', 'backend', 'available_backends',
+           'AcceleratedCapabilityError', 'BackendOptions']
 
 
 class AcceleratedCapabilityError(RuntimeError):
-    """The problem or environment is outside the accelerated backends'
-    declared capabilities (e.g. CuPy missing for the gpu backend, custom
-    Model subclasses). The dispatch treats this like a capability-gate
-    rejection and runs the reference solver instead.
+    """The problem is outside a compiled backend's capabilities (e.g. a custom
+    Model subclass). Raised inside the accelerated path; the dispatch then runs
+    the reference implementation instead.
 
-    Every OTHER exception raised on the accelerated path — compilation
-    failures, kernel errors, pipeline bugs — PROPAGATES to the caller by
-    default rather than silently degrading to the reference solver
-    (set PYCGPU_FALLBACK=1 to restore fall-back-on-any-error behavior for
-    unattended production runs)."""
+    Any OTHER exception from a compiled backend (a compiler failure, a kernel
+    error) propagates to the caller rather than silently degrading to the
+    reference solver. Set PYCGPU_FALLBACK=1 to fall back on any error."""
 
 
-# Canonical internal names are 'default', 'cpp', 'cuda'.
+@dataclass(frozen=True)
+class BackendOptions:
+    """Tunables for the compiled backends (see the module docstring)."""
+    threads: int = None
+    max_iters: int = 1000
+    chunk: int = None
+    pass1_iters: int = None
+    robust_phase_removal: bool = True
+    hull_procs: int = 1
+    calc_procs: int = 1
+
+    @classmethod
+    def from_kwargs(cls, options):
+        known = {f.name for f in fields(cls)}
+        unknown = set(options) - known
+        if unknown:
+            raise TypeError(f"Unknown backend option(s) {sorted(unknown)}; "
+                            f"valid options are {sorted(known)}")
+        return cls(**options)
+
+
+# Canonical names: 'default', 'cpp', 'cuda', 'cuda-fast', 'metal', plus the
+# selectors 'gpu' and 'auto' that resolve to one of them.
 _ALIASES = {
     'default': 'default', 'cpu': 'default', 'reference': 'default',
-    'c++': 'cpp', 'cpp': 'cpp', 'openmp': 'cpp',
-    'gpu': 'cuda', 'cuda': 'cuda',
-    'gpu-fast': 'cuda-fast', 'cuda-fast': 'cuda-fast',
+    'cpp': 'cpp', 'c++': 'cpp', 'openmp': 'cpp',
+    'cuda': 'cuda', 'cuda-fast': 'cuda-fast', 'gpu-fast': 'cuda-fast',
+    'metal': 'metal', 'mps': 'metal',
+    'gpu': 'gpu', 'auto': 'auto',
 }
+_DISPLAY = {'default': 'default', 'cpp': 'cpp', 'cuda': 'cuda', 'cuda-fast': 'cuda-fast',
+            'metal': 'metal'}
 
-# Mapping of option keywords to the environment tunables the accelerated
-# pipeline reads. Values are stringified; None/absent options leave the
-# corresponding environment variable untouched.
-_OPTION_ENV = {
-    'robust_phase_removal': ('PYCGPU_ROBUST', lambda v: '1' if v else ''),
-    'threads': ('PYCGPU_CPU_THREADS', str),
-    'chunk': ('PYCGPU_CHUNK', str),
-    'pass1_iters': ('PYCGPU_PASS1_ITERS', str),
-    'max_iters': ('PYCGPU_MAXITER', str),
-    'hull_procs': ('PYCGPU_HULL_PROCS', str),
-    'calc_procs': ('PYCGPU_CALC_PROCS', str),
-}
-
-_state = {'backend': None, 'options': {}}
+_global = {'name': None, 'options': BackendOptions()}
+_scoped = contextvars.ContextVar('pycalphad_backend', default=None)
+_probe_cache = {}
 
 
 def _normalize(name):
     try:
         return _ALIASES[str(name).strip().lower()]
     except KeyError:
-        raise ValueError(
-            f"Unknown backend {name!r}. Valid choices: 'default', 'c++', 'gpu'.")
+        raise ValueError(f"Unknown backend {name!r}. Valid choices: "
+                         "'auto', 'default', 'cpp', 'gpu', 'cuda', 'metal'.") from None
 
 
-def _validate(canonical):
-    """Fail fast at set time with an actionable message."""
-    if canonical == 'cpp':
-        if shutil.which('g++') is None and shutil.which('clang++') is None:
-            raise RuntimeError(
-                "backend 'c++' needs a C++17 compiler (g++ or clang++) on PATH. "
-                "Install one (e.g. `apt install g++`, `brew install gcc`, or MinGW-w64/WSL "
-                "on Windows), or use set_backend('default').")
+# ---------------------------------------------------------------------------
+# availability probes (cached: they can be slow, e.g. building the Metal bridge)
+# ---------------------------------------------------------------------------
+
+def _probe(canonical):
+    """None if the backend is usable here, else a reason string."""
+    if canonical in _probe_cache:
+        return _probe_cache[canonical]
+    reason = None
+    if canonical == 'default':
+        pass
+    elif canonical == 'cpp':
+        if shutil.which('clang++' if platform.system() == 'Darwin' else 'g++') is None \
+                and shutil.which('clang++') is None:
+            reason = ("needs a C++17 compiler on PATH (Xcode command line tools on macOS, "
+                      "g++ on Linux, MinGW-w64 or WSL on Windows)")
     elif canonical in ('cuda', 'cuda-fast'):
         try:
             import cupy as cp
             cp.cuda.Device().compute_capability
         except Exception as e:
-            raise RuntimeError(
-                "backend 'gpu' needs CuPy and a working CUDA device "
-                f"(import/probe failed: {e!r}). Install cupy matching your CUDA "
-                "toolkit, or use set_backend('c++') for the host-only accelerated "
-                "backend.") from e
+            reason = f"needs CuPy and a CUDA/ROCm device ({type(e).__name__}: {e})"
+    elif canonical == 'metal':
+        if platform.system() != 'Darwin' or platform.machine() != 'arm64':
+            reason = "needs macOS on Apple silicon"
+        elif _probe('cpp') is not None:
+            reason = "needs the Xcode command line tools (clang++)"
+        else:
+            try:
+                from pycalphad.gpu.metal_backend import runtime
+                runtime()
+            except Exception as e:
+                reason = f"Metal device unavailable ({e})"
+    _probe_cache[canonical] = reason
+    return reason
 
 
-def _validate_options(options):
-    unknown = set(options) - set(_OPTION_ENV)
-    if unknown:
-        raise TypeError(f"Unknown backend option(s): {sorted(unknown)}. "
-                        f"Valid options: {sorted(_OPTION_ENV)}")
+def _resolve(canonical):
+    """Map the 'gpu'/'auto' selectors to a concrete, usable backend."""
+    if canonical == 'gpu':
+        for candidate in ('cuda', 'metal'):
+            if _probe(candidate) is None:
+                return candidate
+        raise RuntimeError(
+            "backend 'gpu' found no usable GPU: "
+            f"cuda {_probe('cuda')}; metal {_probe('metal')}. "
+            "Use set_backend('cpp') for the compiled CPU backend.")
+    if canonical == 'auto':
+        for candidate in ('cuda', 'cpp'):
+            if _probe(candidate) is None:
+                return candidate
+        return 'default'
+    reason = _probe(canonical)
+    if reason is not None:
+        raise RuntimeError(f"backend {_DISPLAY[canonical]!r} {reason}. "
+                           "set_backend('auto') picks the best available backend.")
+    return canonical
 
 
-def set_backend(name, **options):
-    """Set the global computation backend (and optional tunables).
+def available_backends():
+    """{name: None if usable, else the reason it is not} for every backend."""
+    return {_DISPLAY[c]: _probe(c) for c in ('default', 'cpp', 'cuda', 'metal')}
+
+
+# ---------------------------------------------------------------------------
+# selection
+# ---------------------------------------------------------------------------
+
+def set_backend(name='auto', **options):
+    """Set the computation backend for all subsequent calls.
 
     Parameters
     ----------
     name : str
-        'default' (reference CPU), 'c++' (single-threaded host backend), or 'gpu' (CUDA).
+        'auto' (default), 'default', 'cpp', 'gpu', 'cuda', 'cuda-fast' or
+        'metal' ('cpu' is an alias of 'default', the reference solver). The 'gpu' and 'auto' selectors are resolved immediately, so
+        a missing toolchain or device is reported here rather than in the
+        middle of a calculation.
     **options
-        Backend tunables; see the module docstring. Options replace any
-        previously set options entirely.
+        Backend tunables (see the module docstring). They replace any
+        previously set options.
     """
-    canonical = _normalize(name)
-    _validate_options(options)
-    if canonical != 'default':
-        _validate(canonical)
-    _state['backend'] = canonical
-    _state['options'] = dict(options)
+    opts = BackendOptions.from_kwargs(options)
+    _global['name'] = _resolve(_normalize(name))
+    _global['options'] = opts
+    return _DISPLAY[_global['name']]
+
+
+def _current():
+    """(canonical backend, BackendOptions) in effect for the calling context."""
+    scoped = _scoped.get()
+    if scoped is not None:
+        return scoped
+    if _global['name'] is None:
+        env = os.environ.get('PYCALPHAD_BACKEND')
+        if env:
+            # Resolved lazily: importing pycalphad must not fail because the
+            # environment names a backend this machine lacks.
+            try:
+                _global['name'] = _resolve(_normalize(env))
+            except RuntimeError as e:
+                import warnings
+                warnings.warn(f"PYCALPHAD_BACKEND={env!r} is not usable here ({e}); "
+                              "using the reference implementation.")
+                _global['name'] = 'default'
+        else:
+            _global['name'] = 'default'
+    return _global['name'], _global['options']
 
 
 def get_backend():
-    """Return (canonical_backend_name, options_dict) currently in effect.
+    """Return ``(name, options)`` for the backend in effect.
 
-    Resolution order: last ``set_backend`` call, else the
-    ``PYCALPHAD_BACKEND`` environment variable, else 'default'.
+    ``name`` is the canonical backend ('default', 'cpp', 'cuda', 'cuda-fast'
+    or 'metal'); ``options`` is a dict of the non-default options.
     """
-    if _state['backend'] is not None:
-        return _state['backend'], dict(_state['options'])
-    env = os.environ.get('PYCALPHAD_BACKEND')
-    if env:
-        # Environment-selected backends are validated lazily (at first use):
-        # import of pycalphad must not fail on a machine where the env var is
-        # set but the backend is unavailable.
-        return _normalize(env), {}
-    return 'default', {}
+    name, opts = _current()
+    defaults = BackendOptions()
+    return name, {f.name: getattr(opts, f.name) for f in fields(opts)
+                  if getattr(opts, f.name) != getattr(defaults, f.name)}
 
 
 @contextmanager
 def backend(name, **options):
-    """Context manager: temporarily switch the global backend.
+    """Use a backend for the duration of a ``with`` block.
 
-    ::
+    The selection is context-local (safe with threads and asyncio)::
 
-        with pycalphad.backend("gpu", chunk=8192):
+        with pycalphad.backend('cpp', threads=4):
             eq = pycalphad.equilibrium(...)
     """
-    prev = (_state['backend'], _state['options'])
-    set_backend(name, **options)
+    token = _scoped.set((_resolve(_normalize(name)), BackendOptions.from_kwargs(options)))
     try:
         yield
     finally:
-        _state['backend'], _state['options'] = prev
+        _scoped.reset(token)
 
 
 @contextmanager
-def _option_env(options):
-    """Apply backend options as environment tunables for the duration of a call.
-
-    Explicit per-call kwargs and pre-existing environment variables set by the
-    user are NOT overridden: options only fill in unset variables, so the
-    priority is call kwarg > user env > set_backend option.
-    """
-    applied = {}
+def _use(name, options):
+    """Internal: run a block with an already-resolved backend and options."""
+    token = _scoped.set((name, options))
     try:
-        for key, value in options.items():
-            env_name, conv = _OPTION_ENV[key]
-            if env_name in os.environ:
-                continue  # user's explicit environment wins
-            sval = conv(value)
-            if sval:
-                os.environ[env_name] = sval
-                applied[env_name] = None
         yield
     finally:
-        for env_name in applied:
-            os.environ.pop(env_name, None)
+        _scoped.reset(token)
+
+
+def _resolve_per_call(name, **overrides):
+    """Backend and options for one call: a per-call `backend=` keyword wins
+    over the scoped/global selection; `overrides` (non-None values) replace
+    individual options."""
+    if name is None:
+        canonical, opts = _current()
+    else:
+        canonical = _resolve(_normalize(name))
+        opts = _current()[1]
+    overrides = {k: v for k, v in overrides.items() if v is not None}
+    if overrides:
+        opts = replace(opts, **overrides)
+    return canonical, opts
+
+
+def available_cpus():
+    """CPU cores this process may use (respects affinity masks, e.g. the
+    cores a cluster job was allocated)."""
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except AttributeError:
+        return max(1, os.cpu_count() or 1)
+
+
+def solver_threads():
+    """Threads the C++ solver should use in the current context."""
+    threads = _current()[1].threads
+    if threads is None:
+        env = os.environ.get('PYCGPU_CPU_THREADS')
+        threads = int(env) if env else available_cpus()
+    return int(threads)

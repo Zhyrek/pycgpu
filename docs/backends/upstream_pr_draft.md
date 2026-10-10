@@ -1,3 +1,6 @@
+> Historical draft (July 2026): predates the Metal backend and the backend
+> API cleanup. See `BACKENDS.md` for current behavior.
+
 # [DRAFT — do not submit yet] Accelerated equilibrium backends (C++ / CUDA)
 
 **Target:** `pycalphad/pycalphad` `develop` ← `Zhyrek/pycgpu` `accelerated-backends-pr` (curated 3-commit branch: engine / dispatch+tests / packaging+docs+plotting; `gpu-port-sync` is the full development history)

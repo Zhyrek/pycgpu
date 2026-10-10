@@ -40,7 +40,12 @@ class EnsemblePointBatcher:
         self.models = dict(models)
         self.prf = phase_record_factory
         self.param_names = [str(p) for p in param_names]
-        self.backend = backend
+        # The point solver runs on CUDA or the host C++ solver; selectors
+        # ('gpu', 'auto') resolve as in pycalphad.set_backend, and Metal
+        # (no point-solver kernels) uses the host solver.
+        from pycalphad.backend import _normalize, _resolve
+        resolved = _resolve(_normalize(backend))
+        self.backend = 'cuda' if resolved in ('cuda', 'cuda-fast') else 'cpp'
         self.walker_chunk = int(walker_chunk)
         self.pdens = pdens
         self.verbose = verbose
@@ -50,8 +55,7 @@ class EnsemblePointBatcher:
         self.state_variables = phase_record_factory.state_variables
         self.solver = get_point_solver(species, self.phases, self.models,
                                        phase_record_factory, robust=robust,
-                                       backend=('cuda' if backend in ('cuda', 'gpu')
-                                                else 'cpp'),
+                                       backend=self.backend,
                                        verbose=verbose)
         self.dof_of_model = {}
         for ph in self.phases:

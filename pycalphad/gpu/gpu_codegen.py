@@ -437,58 +437,6 @@ def validate_generated_c_code(c_code: str, function_name: str = "") -> List[str]
     return warnings
 
 
-def compile_test_c_code(c_code: str, verbose: bool = False) -> Tuple[bool, str]:
-    """
-    Test compile C code to check for syntax errors.
-    
-    Args:
-        c_code: C code to compile
-        verbose: Print compilation output
-        
-    Returns:
-        Tuple of (success, error_message)
-    """
-    # Create a minimal test program
-    test_program = f"""
-#include <math.h>
-#include <float.h>
-
-{c_code}
-
-int main() {{
-    // Test program - just check compilation
-    return 0;
-}}
-"""
-    
-    try:
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.c', delete=False) as f:
-            f.write(test_program)
-            temp_c_file = f.name
-        
-        # Try to compile with gcc
-        result = subprocess.run(
-            ['gcc', '-c', '-std=c99', '-Wall', '-Werror', temp_c_file, '-o', '/dev/null'],
-            capture_output=True, text=True, timeout=10
-        )
-        
-        os.unlink(temp_c_file)  # Clean up
-        
-        if result.returncode == 0:
-            return True, ""
-        else:
-            error_msg = result.stderr.strip()
-            if verbose:
-                print(f"Compilation failed: {error_msg}")
-            return False, error_msg
-            
-    except subprocess.TimeoutExpired:
-        return False, "Compilation timeout"
-    except FileNotFoundError:
-        # gcc not available, skip compile test
-        return True, "gcc not available - skipped compile test"
-    except Exception as e:
-        return False, f"Compilation test error: {e}"
 
 
 # --- Notebook-style string manipulation functions ---
@@ -1175,35 +1123,6 @@ def notebook_model_c_func_name_prefix(model_c_idx: int) -> str:
     return f"pycgpu_model_{model_c_idx}_"
 
 
-def debug_expression_conversion(expr, context: str = ""):
-    """Debug helper to trace expression conversion steps."""
-    print(f"[DEBUG] {context} - Original: {expr}")
-    
-    # Step 1: Convert to string
-    s = str(expr)
-    print(f"[DEBUG] {context} - After str(): {s}")
-    
-    # Step 2: Replace piecewise 
-    s_piecewise = notebook_replace_piecewise(s)
-    print(f"[DEBUG] {context} - After piecewise: {s_piecewise}")
-    
-    # Step 2.5: Fix malformed pow functions caused by piecewise conversion
-    s_pow_fixed = fix_malformed_pow_functions(s_piecewise)
-    print(f"[DEBUG] {context} - After pow fix: {s_pow_fixed}")
-    
-    # Step 3: Convert variable names (simplified debug)
-    print(f"[DEBUG] {context} - After var conversion: [variable conversion applied]")
-    
-    # Step 4: Replace exp 
-    s_exp = notebook_replace_exp(s_pow_fixed)
-    print(f"[DEBUG] {context} - After exp: {s_exp}")
-    
-    # Check balance
-    paren_balance = s_exp.count('(') - s_exp.count(')')
-    bracket_balance = s_exp.count('[') - s_exp.count(']')
-    print(f"[DEBUG] {context} - Balance: parens={paren_balance}, brackets={bracket_balance}")
-    
-    return s_exp
 
 
 def fix_piecewise_zeros(expression: str) -> str:
@@ -1301,344 +1220,13 @@ def fix_piecewise_zeros(expression: str) -> str:
     return expression
 
 
-def fix_missing_operators(code_str: str) -> str:
-    """Fix missing operators between numbers in generated code.
-    
-    This handles cases where dependent variable substitution or other
-    transformations leave bare numbers next to each other without operators.
-    """
-    import re
-    
-    # Fix patterns like "9.0* 1 11.0*" -> "9.0* 1 + 11.0*"
-    code_str = re.sub(r'(\* )\s*(\d+)\s+(\d+\.?\d*\*)', r'\1\2 + \3', code_str)
-    
-    # Fix patterns like ") + 1 11.0*" -> ") + 1 + 11.0*"
-    code_str = re.sub(r'(\) \+ )\s*(\d+)\s+(\d+\.?\d*\*)', r'\1\2 + \3', code_str)
-    
-    # Fix patterns like "+ 1 11.0*" -> "+ 1 + 11.0*"
-    code_str = re.sub(r'(\+ )\s*(\d+)\s+(\d+\.?\d*\*)', r'\1\2 + \3', code_str)
-    
-    # Fix patterns where a number is followed by another number with * like "1 11.0*"
-    # but be careful not to match things like "x[1]" or decimal numbers
-    code_str = re.sub(r'(?<=[^0-9.\[\]])(\d+)\s+(\d+\.?\d*\*)', r'\1 + \2', code_str)
-    
-    return code_str
-
-
-def fix_hessian_spurious_terms_v2(hess_str, i_idx, j_idx, var_i, var_j):
-    """
-    Remove spurious entropy cross-terms from diagonal hessian elements.
-    
-    For d²G/dY_i², remove RT/Y_j terms where j != i.
-    This fixes the issue where GPU hessian values are ~2.5x larger than CPU values.
-    
-    Args:
-        hess_str: The Hessian expression string
-        i_idx, j_idx: Indices (for debugging)
-        var_i, var_j: The actual variables being differentiated
-    """
-    import re
-    
-    # Only process diagonal elements
-    if var_i != var_j:
-        return hess_str
-        
-    # Check if this is a site fraction variable
-    var_i_str = str(var_i)
-    if not ('BCC_A2' in var_i_str and ('NB' in var_i_str or 'TI' in var_i_str)):
-        return hess_str
-    
-    print(f"[GPU HESSIAN FIX V2] Processing diagonal element for {var_i_str}")
-    
-    # Determine which spurious terms to remove
-    if 'NB' in var_i_str:
-        # For Y_NB diagonal, remove 1/Y_TI terms
-        spurious_var = 'BCC_A20TI'
-    elif 'TI' in var_i_str:
-        # For Y_TI diagonal, remove 1/Y_NB terms  
-        spurious_var = 'BCC_A20NB'
-    else:
-        return hess_str
-        
-    # Pattern for the spurious term
-    spurious_pattern = rf'1\.0\*\(\(1e-15 < {spurious_var}\) \? \(pow\({spurious_var}, \(-1\)\)\) : 0\)'
-    
-    # Find all occurrences
-    matches = list(re.finditer(spurious_pattern, hess_str))
-    
-    if matches:
-        print(f"[GPU HESSIAN FIX V2] Found {len(matches)} occurrences of spurious 1/{spurious_var} terms")
-        
-        # Process matches in reverse order to maintain string positions
-        fixed = hess_str
-        for match in reversed(matches):
-            start = match.start()
-            end = match.end()
-            
-            # Check if this is part of a sum (look for preceding ' + ')
-            if start >= 3 and fixed[start-3:start] == ' + ':
-                # Remove the ' + ' as well
-                fixed = fixed[:start-3] + fixed[end:]
-            # Check if this is at the beginning of a sum (look for following ' + ')
-            elif end + 3 <= len(fixed) and fixed[end:end+3] == ' + ':
-                # Remove the following ' + '
-                fixed = fixed[:start] + fixed[end+3:]
-            else:
-                # Just remove the term
-                fixed = fixed[:start] + fixed[end:]
-                
-        # Clean up
-        fixed = re.sub(r'\s+', ' ', fixed)
-        fixed = re.sub(r'\(\s*\+', '(', fixed)
-        fixed = re.sub(r'\+\s*\)', ')', fixed)
-        
-        return fixed
-    
-    return hess_str
 
 
 
-def fix_hessian_spurious_terms_post_conversion(hess_str, i_idx, j_idx, num_statevars=3, debug=False):
-    """
-    Remove spurious entropy cross-terms from diagonal hessian elements AFTER variable conversion.
-    
-    This is a robust implementation that handles multiple formats and ensures
-    spurious terms are removed at any stage of the code generation pipeline.
-    
-    For d²G/dx[i]², remove RT/x[j] terms where j != i.
-    The spurious terms come from the (Y_NB + Y_TI) denominator in the entropy expression.
-    """
-    import re
-    
-    # Only process diagonal elements
-    if i_idx != j_idx:
-        return hess_str
-        
-    # Only process site fraction indices (after state variables)
-    if i_idx < num_statevars:
-        return hess_str
-    
-    if debug:
-        print(f"[ROBUST HESSIAN FIX] Processing diagonal element [{i_idx},{j_idx}]")
-    
-    # Build a list of all site fraction indices
-    all_indices = set(re.findall(r'x\[(\d+)\]', hess_str))
-    site_fraction_indices = [int(idx) for idx in all_indices if int(idx) >= num_statevars]
-    
-    if not site_fraction_indices:
-        if debug:
-            print(f"[ROBUST HESSIAN FIX] No site fraction variables found")
-        return hess_str
-    
-    if debug:
-        print(f"[ROBUST HESSIAN FIX] Site fraction indices: {site_fraction_indices}")
-    
-    # For each spurious index (not equal to i_idx)
-    modified = False
-    result = hess_str
-    total_removed = 0
-    
-    for spurious_idx in site_fraction_indices:
-        if spurious_idx == i_idx:
-            continue  # This is the correct term, don't remove
-        
-        # Pattern 1: Simple pow(x[j], (-1))
-        pattern1 = rf'pow\(x\[{spurious_idx}\], \(-1\)\)'
-        
-        # Pattern 2: Conditional (1e-15 < x[j]) ? (pow(x[j], (-1))) : 0
-        pattern2 = rf'\(\(1e-15 < x\[{spurious_idx}\]\) \? \(pow\(x\[{spurious_idx}\], \(-1\)\)\) : 0\)'
-        
-        # Pattern 3: With coefficient 1.0*((1e-15 < x[j]) ? (pow(x[j], (-1))) : 0)
-        pattern3 = rf'1\.0\*\(\(1e-15 < x\[{spurious_idx}\]\) \? \(pow\(x\[{spurious_idx}\], \(-1\)\)\) : 0\)'
-        
-        # Try each pattern from most specific to least specific
-        for pattern_name, pattern in [("pattern3", pattern3), ("pattern2", pattern2), ("pattern1", pattern1)]:
-            matches = list(re.finditer(pattern, result))
-            if matches:
-                if debug:
-                    print(f"[ROBUST HESSIAN FIX] Found {len(matches)} matches for spurious 1/x[{spurious_idx}] using {pattern_name}")
-                
-                # Process in reverse order to maintain positions
-                for match in reversed(matches):
-                    start = match.start()
-                    end = match.end()
-                    
-                    # Check context to determine how to remove
-                    before = result[:start]
-                    after = result[end:]
-                    
-                    # Look for arithmetic operators around the term
-                    # Remove preceding ' + ' if present
-                    if before.endswith(' + '):
-                        before = before[:-3]
-                        result = before + after
-                        modified = True
-                        total_removed += 1
-                    # Remove following ' + ' if present
-                    elif after.startswith(' + '):
-                        after = after[3:]
-                        result = before + after
-                        modified = True
-                        total_removed += 1
-                    # Handle case where it's part of a larger sum in parentheses
-                    elif before.endswith('(') and ' + ' in after:
-                        # This is the first term in a sum, remove it and the following +
-                        plus_pos = after.find(' + ')
-                        after = after[plus_pos + 3:]
-                        result = before + after
-                        modified = True
-                        total_removed += 1
-                    # Handle case where it's the last term in a sum
-                    elif ' + ' in before and after.startswith(')'):
-                        # Find the last + before this term
-                        plus_pos = before.rfind(' + ')
-                        if plus_pos >= 0:
-                            before = before[:plus_pos]
-                            result = before + after
-                            modified = True
-                            total_removed += 1
-                    else:
-                        # Just remove the term
-                        result = before + after
-                        modified = True
-                        total_removed += 1
-                
-                # Only use the first matching pattern
-                break
-    
-    if modified:
-        # Clean up any issues introduced by removal
-        result = re.sub(r'\s+', ' ', result)  # Remove double spaces
-        result = re.sub(r'\(\s*\)', '(0)', result)  # Empty parentheses -> (0)
-        result = re.sub(r'\+\s*\+', '+', result)  # Double plus
-        result = re.sub(r'\(\s*\+', '(', result)  # Leading plus in parentheses
-        result = re.sub(r'\+\s*\)', ')', result)  # Trailing plus in parentheses
-        result = re.sub(r'\(\s*\)\s*/\s*\([^)]+\)', '0', result)  # Empty sum divided by something
-        result = re.sub(r'[\d.]+\*[^(]*\*\(0\)\s*/\s*\([^)]+\)', '0', result)  # Coefficient * stuff * (0) / something
-        
-        if debug:
-            # Count final spurious terms
-            final_spurious = 0
-            for spurious_idx in site_fraction_indices:
-                if spurious_idx != i_idx:
-                    final_spurious += len(re.findall(rf'pow\(x\[{spurious_idx}\], \(-1\)\)', result))
-            
-            print(f"[ROBUST HESSIAN FIX] Removed {total_removed} spurious terms. Final spurious count: {final_spurious}")
-    else:
-        if debug:
-            print(f"[ROBUST HESSIAN FIX] No modifications made")
-    
-    return result
 
 
-def fix_hessian_spurious_terms(hess_str, i_idx, j_idx):
-    """
-    Remove spurious entropy cross-terms from diagonal hessian elements.
-    
-    For d²G/dY_i², remove RT/Y_j terms where j != i.
-    This fixes the issue where GPU hessian values are ~2.5x larger than CPU values.
-    
-    The spurious terms come from the (Y1+Y2) factor in model.G that doesn't get
-    simplified in the GPU code generation process.
-    """
-    import re
-    
-    # Only fix diagonal elements for site fractions
-    # In the model-level generation, site fractions start at index 1 (after T at index 0)
-    # We need to fix diagonal elements where both indices are site fractions
-    if i_idx != j_idx or i_idx < 1:
-        return hess_str
-        
-    # DEBUG: Check what variables we're working with
-    print(f"[GPU HESSIAN FIX DEBUG] i_idx={i_idx}, j_idx={j_idx}")
-    
-    print(f"[GPU HESSIAN FIX] Processing diagonal element [{i_idx},{j_idx}]")
-    
-    # DEBUG: Check expression content for diagonal elements  
-    if i_idx == 3 or i_idx == 4:  # These should be the Y-Y diagonal elements in a 5x5 Hessian
-        print(f"[GPU HESSIAN FIX DEBUG] Element [{i_idx},{j_idx}] length: {len(hess_str)}")
-        # Search for any 1/var terms
-        if 'pow(BCC_A20TI, (-1))' in hess_str:
-            print(f"[GPU HESSIAN FIX DEBUG] Found pow(BCC_A20TI, (-1)) in expression")
-        if 'pow(BCC_A20NB, (-1))' in hess_str:
-            print(f"[GPU HESSIAN FIX DEBUG] Found pow(BCC_A20NB, (-1)) in expression")
-    
-    # For diagonal element of site fraction i, we need to remove 1/Y_j terms where j != i
-    # This function is now called BEFORE notebook_convert_var_names, so we need to
-    # work with model variable names like BCC_A20NB and BCC_A20TI
-    
-    # Find the variable names we need to work with
-    # The model variables will be something like: ['T', 'BCC_A20NB', 'BCC_A20TI'] 
-    # where indices 1 and 2 are the site fractions
-    
-    # Map index to variable name patterns
-    var_patterns = {}
-    spurious_vars = []
-    
-    if i_idx == 1:  # Y_NB diagonal - remove Y_TI terms
-        # We're in the d²G/dY_NB² element, need to remove 1/Y_TI terms
-        # Y_TI could be named something like BCC_A20TI
-        spurious_vars = [r'BCC_A2\d*TI']
-    elif i_idx == 2:  # Y_TI diagonal - remove Y_NB terms
-        # We're in the d²G/dY_TI² element, need to remove 1/Y_NB terms
-        # Y_NB could be named something like BCC_A20NB
-        spurious_vars = [r'BCC_A2\d*NB']
-    
-    fixed = hess_str
-    
-    # Remove spurious 1/Y_j terms from compound expressions
-    # Look for specific variable names
-    if i_idx == 1:  # Y_NB diagonal - remove BCC_A20TI terms
-        var_name = 'BCC_A20TI'
-    elif i_idx == 2:  # Y_TI diagonal - remove BCC_A20NB terms
-        var_name = 'BCC_A20NB'
-    else:
-        return fixed
-        
-    # Pattern for the spurious term with the specific variable
-    spurious_pattern = rf'1\.0\*\(\(1e-15 < {var_name}\) \? \(pow\({var_name}, \(-1\)\)\) : 0\)'
-    
-    # Find all occurrences
-    matches = list(re.finditer(spurious_pattern, fixed))
-    
-    if matches:
-        print(f"[GPU HESSIAN FIX] Found {len(matches)} occurrences of spurious 1/{var_name} terms")
-        
-        # Process matches in reverse order to maintain string positions
-        for match in reversed(matches):
-            start = match.start()
-            end = match.end()
-            
-            # Check if this is part of a sum (look for preceding ' + ')
-            if start >= 3 and fixed[start-3:start] == ' + ':
-                # Remove the ' + ' as well
-                fixed = fixed[:start-3] + fixed[end:]
-            # Check if this is at the beginning of a sum (look for following ' + ')
-            elif end + 3 <= len(fixed) and fixed[end:end+3] == ' + ':
-                # Remove the following ' + '
-                fixed = fixed[:start] + fixed[end+3:]
-            else:
-                # Just remove the term
-                fixed = fixed[:start] + fixed[end:]
-    
-    # Clean up any resulting issues
-    # Remove empty sums: (1.0*) -> (0)
-    fixed = re.sub(r'\(1\.0\*\)', '(0)', fixed)
-    
-    # Clean up double spaces
-    fixed = re.sub(r'\s+', ' ', fixed)
-    
-    # Remove leading/trailing operators in parentheses
-    fixed = re.sub(r'\(\s*\+', '(', fixed)
-    fixed = re.sub(r'\+\s*\)', ')', fixed)
-    
-    # Count how many terms were removed
-    original_count = hess_str.count('pow(x[')
-    final_count = fixed.count('pow(x[')
-    if original_count != final_count:
-        print(f"[GPU HESSIAN FIX] Removed {original_count - final_count} spurious 1/Y terms")
-    
-    return fixed
+
+
 
 
 def notebook_source_from_expr_cse(
@@ -1872,14 +1460,12 @@ def notebook_source_from_expr_cse(
         return c_code
         
     except Exception as e:
-        print(f"[CSE CODEGEN ERROR] Failed to generate {expr_type}: {e}")
-        # Fall back to original method
-        if verbose:
-            print(f"[CSE CODEGEN] Falling back to original regex-based method...")
-        return notebook_source_from_expr_original(
-            expr_or_list_in, c_function_name_base_suffix, model_obj, model_c_idx, 
-            wks_obj, expr_type, c_output_type, validate, verbose
-        )
+        # A model expression the generator cannot lower (e.g. unevaluated
+        # Derivative nodes): a capability limit, so the dispatch uses the
+        # reference implementation for this system.
+        from pycalphad.backend import AcceleratedCapabilityError
+        raise AcceleratedCapabilityError(
+            f"cannot generate code for {model_obj.phase_name} {expr_type}: {e}") from e
 
 def apply_cse_variable_mapping(c_expr: str, model_obj: Model, wks_obj: Workspace, verbose: bool = False) -> str:
     """Apply variable name to array index mapping using existing logic."""
@@ -2002,333 +1588,6 @@ def get_ordered_symbols_for_diff(model_obj: Model, wks_obj: Workspace, verbose: 
     
     return ordered_symbols
 
-def notebook_source_from_expr_original(
-    expr_or_list_in, 
-    c_function_name_base_suffix: str,
-    model_obj: Model,
-    model_c_idx: int,
-    wks_obj: Workspace,
-    expr_type: str = "func", 
-    c_output_type: str = "double",
-    validate: bool = True,
-    verbose: bool = False,
-) -> str:
-    """
-    Converts SymPy/SymEngine expression(s) to a C __device__ function string.
-    
-    Args:
-        validate: Whether to validate generated code (default True)
-        verbose: Whether to print validation warnings
-    """
-    c_code_body = ""
-    c_output_arg_name = "out"
-    c_input_arg_name = _C_PYCALPHAD_VARIABLE_PREFIX_NOTEBOOK
-    
-    full_c_func_name = notebook_model_c_func_name_prefix(model_c_idx) + c_function_name_base_suffix
-    
-    # Validate model properties if validation enabled
-    if validate:
-        try:
-            prop_warnings = validate_model_properties(model_obj)
-            if prop_warnings and verbose:
-                print(f"[VALIDATION] Model warnings for {full_c_func_name}: {prop_warnings}")
-            
-            max_idx, idx_warnings = validate_variable_indices(model_obj, wks_obj)
-            if idx_warnings and verbose:
-                print(f"[VALIDATION] Variable index warnings for {full_c_func_name}: {idx_warnings}")
-                
-        except CodeValidationError as e:
-            raise CodeValidationError(f"Model validation failed for {full_c_func_name}: {e}")
-    
-    # Get symbol lists based on the current model and workspace context
-    ordered_symbols_for_diff = notebook_get_all_syms_for_model(model_obj, wks_obj)
-    
-    if expr_or_list_in is None:  # Handle optional expressions like Hessian
-        if c_output_type == "void":
-            return f"__device__ void {full_c_func_name}(double* {c_output_arg_name}, const double* {c_input_arg_name}) {{ /* Expression was None */ }}\n\n"
-        else:  # Scalar func
-            return f"__device__ double {full_c_func_name}(const double* {c_input_arg_name}) {{ /* Expression was None */ return 0.0; }}\n\n"
-
-    if isinstance(expr_or_list_in, (list, tuple)):  # Output is an array
-        if c_output_type != "void": 
-            c_output_type = "void"  # Force void for array outputs
-
-        c_code = f"__device__ {c_output_type} {full_c_func_name}(double* {c_output_arg_name}, const double* {c_input_arg_name}) {{\n"
-        
-        current_out_idx = 0
-        if expr_type == "func":
-            for i, sub_expr in enumerate(expr_or_list_in):
-                s = str(sub_expr)
-                # Fix all-zero Piecewise BEFORE conversion to ternary
-                s = fix_all_zero_piecewise_from_logs(s)
-                s = notebook_replace_piecewise(s)
-                s = notebook_convert_var_names(s, model_obj, wks_obj, verbose)
-                s = notebook_replace_exp(s)
-                # Fix syntax issues from Piecewise conversion
-                # Fix 1: Remove extra parenthesis in number comparisons
-                s = re.sub(r'\((\d+\.?\d*)\)\s*([<>=]+)', r'\1 \2', s)
-                
-                # Fix 2: Fix malformed scientific notation
-                s = re.sub(r'\((\d+e)\)-(\d+)', r'\1-\2', s)
-                s = re.sub(r'\(1\.0\*1e-(\d+)', r'(1e-\1', s)
-                s = re.sub(r'\(1e\)-(\d+)', r'(1e-\1)', s)  # Fix (1e)-15 -> (1e-15)
-                
-                # Fix 3: Fix multiplication patterns that are wrong
-                s = re.sub(r'x\[4\]\*\(x\[2\]\)\s*<\s*1155', '(x[2] < 1155', s)
-                
-                # Fix 4: Fix malformed ternary operators - key issues
-                # Fix pattern: "expr : (number) <= x[i]) ?" -> "expr : ((number <= x[i])) ?"
-                s = re.sub(r':\s*\((\d+\.?\d*)\)\s*<=\s*x\[(\d+)\]\)\s*\?', r': ((\1 <= x[\2])) ?', s)
-                s = re.sub(r':\s*\((\d+\.?\d*)\)\s*>=\s*x\[(\d+)\]\)\s*\?', r': ((\1 >= x[\2])) ?', s)  
-                s = re.sub(r':\s*\((\d+\.?\d*)\)\s*<\s*x\[(\d+)\]\)\s*\?', r': ((\1 < x[\2])) ?', s)
-                s = re.sub(r':\s*\((\d+\.?\d*)\)\s*>\s*x\[(\d+)\]\)\s*\?', r': ((\1 > x[\2])) ?', s)
-                
-                # Fix 5: Fix broken parentheses around ternary expressions 
-                # Pattern: "x[3]*(x[1]) < condition) ?" should be "x[3]*((x[1] < condition) ?"
-                s = re.sub(r'x\[(\d+)\]\*\(x\[(\d+)\]\)\s*<\s*(\d+\.?\d*)\)\s*\?', r'x[\1]*((x[\2] < \3) ?', s)
-                
-                # Fix 6: Apply ternary operator precedence fixes
-                s = fix_ternary_operator_precedence(s)
-                
-                # Fix 7: Final cleanup
-                s = re.sub(r'\)\s*<=\s*x\[(\d+)\]', r' <= x[\1]', s)
-                s = re.sub(r'\)\s*>=\s*x\[(\d+)\]', r' >= x[\1]', s)
-                
-                # Fix 8: Clean up Piecewise expressions that are all zeros
-                s = fix_piecewise_zeros(s)
-                
-                # Fix missing operators
-                s = fix_missing_operators(s)
-                
-                c_code_body += f"    {c_output_arg_name}[{i}] = {s};\n"
-        elif expr_type == "grad":
-            for m_expr_idx, sub_expr in enumerate(expr_or_list_in):
-                for i_sym_idx, sym_to_diff_against in enumerate(ordered_symbols_for_diff):
-                    deriv_expr = sub_expr.diff(sym_to_diff_against)
-                    s = str(deriv_expr)
-                    # Fix all-zero Piecewise BEFORE conversion to ternary
-                    s = fix_all_zero_piecewise_from_logs(s)
-                    s = notebook_replace_piecewise(s)
-                    s = notebook_convert_var_names(s, model_obj, wks_obj, verbose)
-                    s = notebook_replace_exp(s)
-                    s = fix_ternary_operator_precedence(s)  # Fix operator precedence issues
-                    s = fix_piecewise_zeros(s)  # Clean up all-zero Piecewise expressions
-                    # Fix missing operators
-                    s = fix_missing_operators(s)
-                    c_code_body += f"    {c_output_arg_name}[{current_out_idx}] = {s};\n"
-                    current_out_idx += 1
-        elif expr_type == "hess":
-            print(f"[GPU HESS] Processing Hessian with {len(expr_or_list_in)} expressions (list branch)")
-            for m_expr_idx, sub_expr in enumerate(expr_or_list_in):
-                for i_sym_idx, sym_j in enumerate(ordered_symbols_for_diff):
-                    first_deriv = sub_expr.diff(sym_j)
-                    for j_sym_idx, sym_k in enumerate(ordered_symbols_for_diff):
-                        second_deriv_expr = first_deriv.diff(sym_k)
-                        s = str(second_deriv_expr)
-                        
-                        # DEBUG: Print indices being processed
-                        if i_sym_idx == j_sym_idx and i_sym_idx >= 1:
-                            print(f"[GPU HESS DEBUG] Processing diagonal element [{i_sym_idx},{j_sym_idx}]")
-                        # Fix all-zero Piecewise BEFORE conversion to ternary
-                        # Check for all-zero patterns BEFORE fix
-                        import re as re_check
-                        all_zero_before = len(re_check.findall(r'Piecewise\(\(0,\s*1e-15\s*<\s*[A-Za-z0-9_]+\),\s*\(0,\s*True\)\)', s))
-                        if all_zero_before > 0:
-                            print(f"[GPU PRE-FIX] Hessian element [{i_sym_idx},{j_sym_idx}] has {all_zero_before} all-zero Piecewise patterns")
-                        
-                        s = fix_all_zero_piecewise_from_logs(s)
-                        
-                        # Check again after fix
-                        all_zero_after = len(re_check.findall(r'Piecewise\(\(0,\s*1e-15\s*<\s*[A-Za-z0-9_]+\),\s*\(0,\s*True\)\)', s))
-                        if all_zero_before > 0:
-                            print(f"[GPU POST-FIX] Hessian element [{i_sym_idx},{j_sym_idx}] has {all_zero_after} all-zero Piecewise patterns (fixed {all_zero_before - all_zero_after})")
-                        
-                        s = notebook_replace_piecewise(s)
-                        s = notebook_convert_var_names(s, model_obj, wks_obj, verbose)
-                        s = notebook_replace_exp(s)
-                        # Fix syntax issues from Piecewise conversion
-                        # Fix 1: Remove extra parenthesis in number comparisons
-                        s = re.sub(r'\((\d+\.?\d*)\)\s*([<>=]+)', r'\1 \2', s)
-                        
-                        # Fix 2: Fix malformed scientific notation
-                        s = re.sub(r'\((\d+e)\)-(\d+)', r'\1-\2', s)
-                        s = re.sub(r'\(1\.0\*1e-(\d+)', r'(1e-\1', s)
-                        s = re.sub(r'\(1e\)-(\d+)', r'(1e-\1)', s)  # Fix (1e)-15 -> (1e-15)
-                        
-                        # Fix 3: Fix multiplication patterns that are wrong
-                        s = re.sub(r'x\[4\]\*\(x\[2\]\)\s*<\s*1155', '(x[2] < 1155', s)
-                        
-                        # Fix 4: Fix malformed ternary operators - key issues
-                        # Fix pattern: "expr : (number) <= x[i]) ?" -> "expr : ((number <= x[i])) ?"
-                        s = re.sub(r':\s*\((\d+\.?\d*)\)\s*<=\s*x\[(\d+)\]\)\s*\?', r': ((\1 <= x[\2])) ?', s)
-                        s = re.sub(r':\s*\((\d+\.?\d*)\)\s*>=\s*x\[(\d+)\]\)\s*\?', r': ((\1 >= x[\2])) ?', s)  
-                        s = re.sub(r':\s*\((\d+\.?\d*)\)\s*<\s*x\[(\d+)\]\)\s*\?', r': ((\1 < x[\2])) ?', s)
-                        s = re.sub(r':\s*\((\d+\.?\d*)\)\s*>\s*x\[(\d+)\]\)\s*\?', r': ((\1 > x[\2])) ?', s)
-                        
-                        # Fix 5: Fix broken parentheses around ternary expressions 
-                        # Pattern: "x[3]*(x[1]) < condition) ?" should be "x[3]*((x[1] < condition) ?"
-                        s = re.sub(r'x\[(\d+)\]\*\(x\[(\d+)\]\)\s*<\s*(\d+\.?\d*)\)\s*\?', r'x[\1]*((x[\2] < \3) ?', s)
-                        
-                        # Fix 6: Apply ternary operator precedence fixes
-                        s = fix_ternary_operator_precedence(s)
-                        
-                        # Fix 7: Final cleanup
-                        s = re.sub(r'\)\s*<=\s*x\[(\d+)\]', r' <= x[\1]', s)
-                        s = re.sub(r'\)\s*>=\s*x\[(\d+)\]', r' >= x[\1]', s)
-                        
-                        # Fix 8: Clean up Piecewise expressions that are all zeros
-                        # This also fixes ideal mixing Hessian patterns
-                        # DEBUG: Count patterns before and after fix
-                        import re as re_debug
-                        before_count = len(re_debug.findall(r'1\.0\*\(\(1e-15 < x\[\d+\]\) \? \(0\) : \(0\)\)', s))
-                        s = fix_piecewise_zeros(s)
-                        after_count = len(re_debug.findall(r'1\.0\*\(\(1e-15 < x\[\d+\]\) \? \(0\) : \(0\)\)', s))
-                        if before_count > 0:
-                            print(f"[GPU FIX] Hessian element [{i_sym_idx},{j_sym_idx}]: Fixed {before_count - after_count} of {before_count} all-zero patterns")
-                        
-                        # Fix 9: Remove spurious entropy cross-terms from diagonal hessian elements
-                        # This fixes the issue where GPU hessian is ~2.6x larger than CPU
-                        # Apply the robust post-conversion fix
-                        s = fix_hessian_spurious_terms_post_conversion(s, i_sym_idx, j_sym_idx, num_statevars=3, debug=(i_sym_idx == j_sym_idx and i_sym_idx >= 3))
-                        
-                        # Fix missing operators
-                        s = fix_missing_operators(s)
-                        
-                        c_code_body += f"    {c_output_arg_name}[{current_out_idx}] = {s};\n"
-                        current_out_idx += 1
-        c_code += c_code_body
-        c_code += "}\n\n"
-    else:  # Single expression
-        single_expr = expr_or_list_in
-        if expr_type == "func":
-            if c_output_type != "double": 
-                c_output_type = "double"  # Ensure scalar for this path
-            c_code = f"__device__ {c_output_type} {full_c_func_name}(const double* {c_input_arg_name}) {{\n"
-            s = str(single_expr)
-            s = notebook_replace_piecewise(s)
-            s = notebook_convert_var_names(s, model_obj, wks_obj)
-            s = notebook_replace_exp(s)
-            # Fix syntax issues from Piecewise conversion
-            # Fix 1: Remove extra parenthesis in number comparisons
-            s = re.sub(r'\((\d+\.?\d*)\)\s*([<>=]+)', r'\1 \2', s)
-            
-            # Fix 2: Fix malformed scientific notation
-            s = re.sub(r'\((\d+e)\)-(\d+)', r'\1-\2', s)
-            s = re.sub(r'\(1\.0\*1e-(\d+)', r'(1e-\1', s)
-            s = re.sub(r'\(1e\)-(\d+)', r'(1e-\1)', s)  # Fix (1e)-15 -> (1e-15)
-            
-            # Fix 3: Fix multiplication patterns that are wrong
-            s = re.sub(r'x\[4\]\*\(x\[2\]\)\s*<\s*1155', '(x[2] < 1155', s)
-            
-            # Fix 4: Fix malformed ternary operators - key issues
-            # Fix pattern: "expr : (number) <= x[i]) ?" -> "expr : ((number <= x[i])) ?"
-            s = re.sub(r':\s*\((\d+\.?\d*)\)\s*<=\s*x\[(\d+)\]\)\s*\?', r': ((\1 <= x[\2])) ?', s)
-            s = re.sub(r':\s*\((\d+\.?\d*)\)\s*>=\s*x\[(\d+)\]\)\s*\?', r': ((\1 >= x[\2])) ?', s)  
-            s = re.sub(r':\s*\((\d+\.?\d*)\)\s*<\s*x\[(\d+)\]\)\s*\?', r': ((\1 < x[\2])) ?', s)
-            s = re.sub(r':\s*\((\d+\.?\d*)\)\s*>\s*x\[(\d+)\]\)\s*\?', r': ((\1 > x[\2])) ?', s)
-            
-            # Fix 5: Fix broken parentheses around ternary expressions 
-            # Pattern: "x[3]*(x[1]) < condition) ?" should be "x[3]*((x[1] < condition) ?"
-            s = re.sub(r'x\[(\d+)\]\*\(x\[(\d+)\]\)\s*<\s*(\d+\.?\d*)\)\s*\?', r'x[\1]*((x[\2] < \3) ?', s)
-            
-            # Fix 6: Apply ternary operator precedence fixes
-            s = fix_ternary_operator_precedence(s)
-            
-            # Fix 7: Final cleanup - ensure no obvious syntax errors remain
-            s = re.sub(r'\)\s*<=\s*x\[(\d+)\]', r' <= x[\1]', s)
-            s = re.sub(r'\)\s*>=\s*x\[(\d+)\]', r' >= x[\1]', s)
-            
-            # Fix 5b: Fix nested ternary operators
-            # The nested ternaries are already properly parenthesized by the Piecewise converter
-            
-            # Fix 6: Ensure parentheses are balanced before division
-            # The structure should be: 1.0*(x[3]*(...) + x[4]*(...))/(x[3] + x[4])
-            # But we often have too many closing parens before the division
-            # Count how many consecutive ) we have before /(x[3] + x[4])
-            div_pattern = r'(\)+)/(x\[3\] \+ x\[4\])'
-            match = re.search(div_pattern, s)
-            if match:
-                closes = match.group(1)
-                num_closes = len(closes)
-                # We should have exactly 3 closing parens:
-                # - 2 for x[4]*((ternary))
-                # - 1 for 1.0*(sum)
-                if num_closes > 3:
-                    # Remove extra closing parens
-                    s = s[:match.start()] + ')))' + s[match.start() + num_closes:]
-                elif num_closes < 3:
-                    # Add missing closing parens
-                    s = s[:match.start()] + ')' * 3 + s[match.start() + num_closes:]
-            
-            c_code += f"    return {s};\n"
-            c_code += "}\n\n"
-        elif expr_type == "grad":
-            if c_output_type != "void": 
-                c_output_type = "void"
-            c_code = f"__device__ {c_output_type} {full_c_func_name}(double* {c_output_arg_name}, const double* {c_input_arg_name}) {{\n"
-            for i, sym_to_diff_against in enumerate(ordered_symbols_for_diff):
-                deriv_expr = single_expr.diff(sym_to_diff_against)
-                s = str(deriv_expr)
-                s = notebook_replace_piecewise(s)
-                s = notebook_convert_var_names(s, model_obj, wks_obj, verbose)
-                s = notebook_replace_exp(s)
-                s = fix_ternary_operator_precedence(s)  # Fix operator precedence issues
-                # Fix missing operators
-                s = fix_missing_operators(s)
-                c_code_body += f"    {c_output_arg_name}[{i}] = {s};\n"
-            c_code += c_code_body
-            c_code += "}\n\n"
-        elif expr_type == "hess":
-            if c_output_type != "void": 
-                c_output_type = "void"
-            print(f"[GPU HESS] Processing single expression Hessian")
-            c_code = f"__device__ {c_output_type} {full_c_func_name}(double* {c_output_arg_name}, const double* {c_input_arg_name}) {{\n"
-            current_out_idx = 0
-            for i, sym_j in enumerate(ordered_symbols_for_diff):
-                first_deriv = single_expr.diff(sym_j)
-                for j, sym_k in enumerate(ordered_symbols_for_diff):
-                    second_deriv_expr = first_deriv.diff(sym_k)
-                    s = str(second_deriv_expr)
-                    s = notebook_replace_piecewise(s)
-                    s = notebook_replace_exp(s)
-                    s = fix_ternary_operator_precedence(s)  # Fix operator precedence issues
-                    
-                    # Fix spurious entropy cross-terms from diagonal Hessian elements
-                    # MUST be called BEFORE notebook_convert_var_names
-                    # Pass the actual variables being differentiated
-                    if i < len(ordered_symbols_for_diff) and j < len(ordered_symbols_for_diff):
-                        s = fix_hessian_spurious_terms_v2(s, i, j, ordered_symbols_for_diff[i], ordered_symbols_for_diff[j])
-                    
-                    # Convert variable names last
-                    s = notebook_convert_var_names(s, model_obj, wks_obj, verbose)
-                    
-                    # Also apply post-conversion fix for any remaining spurious terms
-                    # Standard state variables are N, P, T (indices 0, 1, 2)
-                    s = fix_hessian_spurious_terms_post_conversion(s, i, j, num_statevars=3, debug=(i == j and i >= 3))
-                    
-                    # Fix missing operators
-                    s = fix_missing_operators(s)
-                    
-                    c_code_body += f"    {c_output_arg_name}[{current_out_idx}] = {s};\n"
-                    current_out_idx += 1
-            c_code += c_code_body
-            c_code += "}\n\n"
-
-    # Validate the generated C code if validation enabled
-    if validate and verbose:
-        try:
-            code_warnings = validate_generated_c_code(c_code, full_c_func_name)
-            if code_warnings and verbose:
-                print(f"[VALIDATION] Code warnings for {full_c_func_name}: {code_warnings}")
-            
-            # Removed compilation test - gcc can't handle __device__ qualifier properly
-                    
-        except CodeValidationError as e:
-            if verbose:
-                print(f"[VALIDATION] Generated code validation warning for {full_c_func_name}: {e}")
-            # Don't raise error - let the GPU compilation catch real issues
-
-    return c_code
 
 def _zero_undefined_symbols(expr_or_list, wks_obj):
     """Reference semantics for symbols the database leaves undefined.
@@ -2406,23 +1665,13 @@ def notebook_source_from_expr(
     verbose: bool = False,
 ) -> str:
     """
-    Wrapper function that uses the new CSE-based code generation by default.
-    Falls back to original regex-based method if CSE fails.
+    C source for a model expression (CSE + SymEngine's C printer).
     """
     expr_or_list_in = _zero_undefined_symbols(expr_or_list_in, wks_obj)
     expr_or_list_in = _realify_eps_complex(expr_or_list_in)
-    # Try the new CSE-based method first
-    try:
-        return notebook_source_from_expr_cse(
-            expr_or_list_in, c_function_name_base_suffix, model_obj, model_c_idx,
-            wks_obj, expr_type, c_output_type, validate, verbose
-        )
-    except Exception as e:
-        print(f"[CODEGEN] CSE method failed, falling back to original: {e}")
-        return notebook_source_from_expr_original(
-            expr_or_list_in, c_function_name_base_suffix, model_obj, model_c_idx,
-            wks_obj, expr_type, c_output_type, validate, verbose
-        )
+    return notebook_source_from_expr_cse(
+        expr_or_list_in, c_function_name_base_suffix, model_obj, model_c_idx,
+        wks_obj, expr_type, c_output_type, validate, verbose)
 
 
 # --- Property-specific C code generator functions ---
@@ -2436,57 +1685,26 @@ def _nb_formulaobj_from_model(model_obj: Model, model_c_idx: int, wks_obj: Works
 def _nb_formulagrad_from_model(model_obj: Model, model_c_idx: int, wks_obj: Workspace, validate: bool = True, verbose: bool = False) -> str:
     return notebook_source_from_expr(model_obj.G, "formulagrad", model_obj, model_c_idx, wks_obj, expr_type="grad", c_output_type="void", validate=validate, verbose=verbose)
 
-# model_c_idx -> did _final_hessian_cleanup change that model's Hessian text?
-# (reset per generation pass; consulted before registering the fused function)
-_HESS_CLEANUP_FIRED = {}
-
-
 def _nb_formulafused_from_model(model_obj: Model, model_c_idx: int, wks_obj: Workspace, validate: bool = True, verbose: bool = False) -> str:
     """Fused energy+gradient+Hessian device function (one shared CSE pool).
 
     Values are bit-identical to the separate formulaobj/formulagrad/
-    formulahess functions (CSE never reassociates arithmetic; the
-    post-processing applied here is value-preserving: fix_piecewise_zeros
-    replaces all-zero piecewise with 0, fix_missing_operators repairs
-    syntax). Models where _final_hessian_cleanup fires are handled by the
-    caller (fused not registered).
+    formulahess functions (CSE never reassociates arithmetic, and
+    fix_piecewise_zeros only folds all-zero piecewise branches to 0).
     """
     result = notebook_source_from_expr_cse(
         _realify_eps_complex(_zero_undefined_symbols(model_obj.G, wks_obj)),
         "fused", model_obj, model_c_idx, wks_obj,
         expr_type="fused", c_output_type="void", validate=validate, verbose=verbose)
-    result = fix_piecewise_zeros(result)
-    result = fix_missing_operators(result)
-    return result
+    return fix_piecewise_zeros(result)
 
 
 def _nb_formulahess_from_model(model_obj: Model, model_c_idx: int, wks_obj: Workspace, validate: bool = True, verbose: bool = False) -> str:
-    if verbose:
-        print(f"[GPU] _nb_formulahess_from_model called for model {model_c_idx}, verbose={verbose}")
-    result = notebook_source_from_expr(model_obj.G, "formulahess", model_obj, model_c_idx, wks_obj, expr_type="hess", c_output_type="void", validate=validate, verbose=verbose)
-    
-    # Apply fix_piecewise_zeros to the entire result as a post-processing step
-    import re
-    before_count = len(re.findall(r'1\.0\*\(\(1e-15 < x\[\d+\]\) \? \(0\) : \(0\)\)', result))
-    result = fix_piecewise_zeros(result)
-    after_count = len(re.findall(r'1\.0\*\(\(1e-15 < x\[\d+\]\) \? \(0\) : \(0\)\)', result))
-    
-    if verbose:
-        print(f"[GPU] Hessian post-processed: fixed {before_count - after_count} of {before_count} all-zero patterns")
-    
-    # Apply fix for missing operators
-    result = fix_missing_operators(result)
-    
-    # Apply final cleanup to remove spurious entropy terms
-    _pre_cleanup = result
-    result = _final_hessian_cleanup(result)
-    # The fused function cannot reproduce this textual cleanup (its Hessian
-    # terms may be CSE-shared with the gradient), so models where the
-    # cleanup actually fires skip fused registration and keep the separate
-    # functions (see _HESS_CLEANUP_FIRED consumers).
-    _HESS_CLEANUP_FIRED[model_c_idx] = (result != _pre_cleanup)
-    
-    return result
+    result = notebook_source_from_expr(model_obj.G, "formulahess", model_obj, model_c_idx, wks_obj,
+                                       expr_type="hess", c_output_type="void", validate=validate,
+                                       verbose=verbose)
+    return fix_piecewise_zeros(result)
+
 
 def _nb_formulaparamgrad_from_model(model_obj: Model, model_c_idx: int, wks_obj: Workspace, validate: bool = True, verbose: bool = False) -> str:
     """dG/dp for each fit parameter (formula-unit G, matching formulagrad)."""
@@ -2738,20 +1956,16 @@ def _generate_c_code_for_phase_models(wks_obj: Workspace, include_hess: bool = F
                 if wks_obj.verbose:
                     print(f"[GPU DEBUG] Generating Hessian for model {model_c_idx}, verbose={wks_obj.verbose}")
                 all_model_device_functions_c_code += _nb_formulahess_from_model(model_obj, model_c_idx, wks_obj, validate, wks_obj.verbose)
-                # Fused energy+grad+hess (hot path of recompute): emitted
-                # whenever the Hessian is, except for models whose Hessian
-                # needed the textual cleanup pass (fused falls back to the
-                # separate functions there via a null pointer).
-                _fused_ok = not _HESS_CLEANUP_FIRED.get(model_c_idx, False)
-                if _fused_ok and not os.environ.get('PYCGPU_NO_FUSED'):
+                # Fused energy+grad+hess (hot path of recompute); the solver
+                # uses the separate functions when it is absent.
+                _fused_ok = not os.environ.get('PYCGPU_NO_FUSED')
+                if _fused_ok:
                     try:
                         all_model_device_functions_c_code += _nb_formulafused_from_model(model_obj, model_c_idx, wks_obj, validate, wks_obj.verbose)
                     except Exception as _fused_err:
                         _fused_ok = False
                         if wks_obj.verbose:
                             print(f"[GPU] fused generation failed for model {model_c_idx}: {_fused_err}")
-                else:
-                    _fused_ok = False
                 
             all_model_device_functions_c_code += _nb_internal_cons_func_from_model(model_obj, model_c_idx, wks_obj, validate, wks_obj.verbose)
             all_model_device_functions_c_code += _nb_internal_cons_jac_from_model(model_obj, model_c_idx, wks_obj, validate, wks_obj.verbose)
@@ -2810,249 +2024,67 @@ def _generate_c_code_for_phase_models(wks_obj: Workspace, include_hess: bool = F
             unique_py_models, py_phase_name_to_unique_idx_map)
 
 
-def _final_hessian_cleanup(full_code: str) -> str:
-    """
-    Final cleanup pass to remove spurious entropy terms from the generated Hessian.
-    This operates on the complete generated code to catch any terms that slipped through.
-    
-    For a binary substitutional solution with entropy S = -R*T*sum(Y_i*log(Y_i))/(Y_1+Y_2),
-    the correct Hessian should be:
-    - Diagonal H[i,i] = R*T/Y_i (only one 1/Y_i term)
-    - Off-diagonal H[i,j] = R*T (no 1/Y terms)
-    
-    The generated code has spurious terms from the (Y_1+Y_2) normalization.
-    """
-    import re
-    
-    # First fix missing operators in the entire code
-    full_code = fix_missing_operators(full_code)
-    
-    lines = full_code.split('\n')
-    modified_lines = []
-    total_removed = 0
-    
-    for line in lines:
-        # Check if this is a Hessian output line
-        match = re.match(r'(\s*)out\[(\d+)\]\s*=\s*(.+);', line)
-        if match:
-            indent = match.group(1)
-            out_idx = int(match.group(2))
-            expression = match.group(3)
-            
-            # Map output index to i,j indices for 5x5 Hessian
-            # out[k] = hess[i,j] where k = i*5 + j
-            n = 5  # 5 variables: N, P, T, Y_NB, Y_TI
-            i = out_idx // n
-            j = out_idx % n
-            
-            # Process site fraction Hessian elements
-            if i >= 3 and j >= 3:  # Indices 3 and 4 are Y_NB and Y_TI
-                if i == j:
-                    # DIAGONAL ELEMENTS: Should have only 1/x[i] terms, no 1/x[j] where j≠i
-                    spurious_idx = 4 if i == 3 else 3  # The other site fraction
-                    
-                    # Pattern that captures entropy terms with the spurious 1/x[j]
-                    # Must be careful not to break other ternary operators
-                    patterns = [
-                        # Pattern with coefficient: 1.0*((1e-15 < x[j]) ? (pow(x[j], (-1))) : 0)
-                        rf'1\.0\*\(\(1e-15 < x\[{spurious_idx}\]\) \? \(pow\(x\[{spurious_idx}\], \(-1(?:\.0)?\)\)\) : 0\)',
-                        # Without coefficient but with parentheses
-                        rf'\(\(1e-15 < x\[{spurious_idx}\]\) \? \(pow\(x\[{spurious_idx}\], \(-1(?:\.0)?\)\)\) : 0\)'
-                    ]
-                    
-                    for pattern in patterns:
-                        matches = list(re.finditer(pattern, expression))
-                        
-                        # Process in reverse to maintain positions
-                        for match in reversed(matches):
-                            start = match.start()
-                            end = match.end()
-                            
-                            # Check context
-                            before = expression[:start].rstrip()
-                            after = expression[end:].lstrip()
-                            
-                            # Remove the term with proper operator handling
-                            if before and before[-1] in '+-':
-                                expression = before[:-1].rstrip() + ' ' + after
-                            elif after and after[0] in '+-':
-                                expression = before + ' ' + after[1:].lstrip()
-                            else:
-                                expression = before + after
-                            
-                            total_removed += 1
-                
-                elif i != j:
-                    # OFF-DIAGONAL ELEMENTS: Should have NO entropy 1/x terms
-                    for var_idx in [3, 4]:
-                        patterns = [
-                            # Pattern with coefficient: 1.0*((1e-15 < x[j]) ? (pow(x[j], (-1))) : 0)
-                            rf'1\.0\*\(\(1e-15 < x\[{var_idx}\]\) \? \(pow\(x\[{var_idx}\], \(-1(?:\.0)?\)\)\) : 0\)',
-                            # Without coefficient but with parentheses
-                            rf'\(\(1e-15 < x\[{var_idx}\]\) \? \(pow\(x\[{var_idx}\], \(-1(?:\.0)?\)\)\) : 0\)'
-                        ]
-                        
-                        for pattern in patterns:
-                            matches = list(re.finditer(pattern, expression))
-                            
-                            for match in reversed(matches):
-                                start = match.start()
-                                end = match.end()
-                                
-                                before = expression[:start].rstrip()
-                                after = expression[end:].lstrip()
-                                
-                                if before and before[-1] in '+-':
-                                    expression = before[:-1].rstrip() + ' ' + after
-                                elif after and after[0] in '+-':
-                                    expression = before + ' ' + after[1:].lstrip()
-                                else:
-                                    expression = before + after
-                                
-                                total_removed += 1
-                
-                # Clean up the expression
-                expression = re.sub(r'\s+', ' ', expression)
-                expression = re.sub(r'\+\s*\+', '+', expression)
-                expression = re.sub(r'-\s*-', '+', expression) 
-                expression = re.sub(r'\(\s*\)', '(0)', expression)
-                expression = re.sub(r'\+\s*-', '-', expression)
-                expression = re.sub(r'-\s*\+', '-', expression)
-                expression = re.sub(r'^\s*\+\s*', '', expression)  # Remove leading +
-                expression = expression.strip()
-                
-                # Reconstruct the line
-                line = f"{indent}out[{out_idx}] = {expression};"
-        
-        modified_lines.append(line)
-    
-    if total_removed > 0:
-        print(f"[GPU FINAL CLEANUP] Removed {total_removed} spurious entropy terms from generated Hessian code")
-    
-    return '\n'.join(modified_lines)
+
+
+# Kernel headers in dependency order. The LAPACK transliteration chain is
+# bitwise-identical to reference LAPACK (leaf -> dbdsqr -> mid -> top).
+_SOLVER_HEADERS = ("lapack_leaf.h", "lapack_dbdsqr.h", "lapack_mid.h", "lapack_top.h",
+                   "phase_rec.h", "comp_set.h", "hyperplane.h", "minimizer.h",
+                   "eqsolver.h", "solve_condition.h")
+
+
+def solver_headers_source(include_semismooth=False):
+    """The solver's kernel headers, inlined in dependency order."""
+    names = _SOLVER_HEADERS + (("semismooth.h",) if include_semismooth else ())
+    return "\n".join(_read_gpu_header(name) for name in names)
+
+
+def solver_headers_fingerprint():
+    """Hash of everything that shapes generated kernel source."""
+    import hashlib
+    h = hashlib.md5()
+    here = os.path.dirname(os.path.abspath(__file__))
+    for name in _SOLVER_HEADERS + ("semismooth.h", "gpu_codegen.py"):
+        with open(os.path.join(here, name), "rb") as f:
+            h.update(f.read())
+    return h.hexdigest()
 
 
 def _generate_full_gpu_source(wks_obj: Workspace,
                                model_functions_c_code: str,
                                g_phase_record_array_init_calls_c_code: list,
                                num_unique_models: int):
-    """
-    Assembles the complete CUDA C++ source string for the equilibrium calculation.
-    """
-    if wks_obj.verbose:
-        print("[GPU] Assembling full GPU source code...")
-    
-    # Define template variables for the kernel
-    max_phases = _get_c_define("MAX_PHASES")
-    max_components = _get_c_define("MAX_COMPONENTS")
-    max_dof_per_phase = _get_c_define("MAX_DOF_PER_PHASE")
-    max_grid_points = _get_c_define("MAX_GRID_POINTS")
+    """Assemble the CUDA/C++ source for the equilibrium module.
 
-    svd_c_source = ""  # legacy svd.c removed (LAPACK transliteration replaces it)
-    # LAPACK transliteration chain (bitwise-identical to reference LAPACK;
-    # order matters: leaf -> dbdsqr -> mid -> top)
-    lapack_source = (_read_gpu_header("lapack_leaf.h")
-                     + "\n" + _read_gpu_header("lapack_dbdsqr.h")
-                     + "\n" + _read_gpu_header("lapack_mid.h")
-                     + "\n" + _read_gpu_header("lapack_top.h"))
-    phase_rec_h_source = _read_gpu_header("phase_rec.h")
-    comp_set_h_source = _read_gpu_header("comp_set.h")
-    lu_solver_h_source = ""  # legacy lu_solver.h removed
-    hyperplane_h_source = _read_gpu_header("hyperplane.h")
-    minimizer_h_source = _read_gpu_header("minimizer.h")
-    eqsolver_h_source = _read_gpu_header("eqsolver.h")
+    The per-condition logic lives in solve_condition.h; the kernels here only
+    hand each thread its slices of the shared work arrays.
+    """
+    num_records = num_unique_models if num_unique_models > 0 else 1
     # Semismooth pass-2 solver (PYCGPU_SS=1): opt-in experimental kernel;
     # excluded from the module entirely when off (cache key carries the flag)
-    semismooth_h_source = (_read_gpu_header("semismooth.h")
-                           if os.environ.get('PYCGPU_SS') else "")
-    jansson_h_source = ""  # jansson code folded into minimizer.h
-
+    headers = solver_headers_source(include_semismooth=bool(os.environ.get('PYCGPU_SS')))
     full_source = f"""
-// Removed cupy/complex.cuh as it may cause CUDA_ERROR_INVALID_VALUE
 #if !defined(__CUDACC_RTC__) && !defined(__HIPCC_RTC__)
 #include <float.h>
 #include <math.h>
-#include <stdio.h>          // For printf debugging
-#endif // under NVRTC/hipRTC the RTC-compat block in minimizer.h/svd.c applies
+#include <stdio.h>
+#endif
 
-// --- WorkArrays struct to reduce kernel parameters for AMD compatibility ---
-// AMD compatibility: Define WorkArrays carefully for cross-platform compatibility
-// AMD/HIP may be stricter about struct alignment and pointer dereferencing
+// Per-thread work-array table (one device pointer per array; each thread
+// uses its own slice).
 typedef struct WorkArrays {{
-    double* arrays[23];  // Pack all work array pointers together (expanded for SystemState arrays)
+    double* arrays[23];
 }} WorkArrays;
 
-// --- GPU Debug logging helpers (must be outside extern "C") ---
-__device__ void gpu_debug_log(int segment, const char* message, int condition_idx) {{
-    #ifdef VERBOSE_DEBUG
-    // Only print for first 3 conditions to reduce clutter
-    if (condition_idx >= 3 && condition_idx >= 0) return;
-    
-    if (condition_idx >= 0) {{
-        printf("[GPU] SEGMENT %02d: %s (condition %d)\\n", segment, message, condition_idx);
-    }} else {{
-        printf("[GPU] SEGMENT %02d: %s\\n", segment, message);
-    }}
-    #endif
-}}
+{headers}
 
-__device__ void gpu_debug_log_value(const char* message, double value) {{
-    #ifdef VERBOSE_DEBUG
-    printf("[GPU]   %s: %.15e\\n", message, value);
-    #endif
-}}
-
-__device__ void gpu_debug_log_array(const char* message, const double* arr, int size) {{
-    #ifdef VERBOSE_DEBUG
-    printf("[GPU]   %s: [", message);
-    for (int i = 0; i < size && i < 5; ++i) {{
-        printf("%.6f", arr[i]);
-        if (i < size - 1) printf(", ");
-    }}
-    if (size > 5) printf("...");
-    printf("]\\n");
-    #endif
-}}
-
-// --- Static C Code Includes ---
-// Content of svd.c
-{lapack_source}
-
-{svd_c_source}
-
-// Content of phase_rec.h
-{phase_rec_h_source}
-
-// Content of comp_set.h
-{comp_set_h_source}
-
-// Content of lu_solver.h (LU decomposition solver)
-{lu_solver_h_source}
-
-// Content of hyperplane.h (device lower-convex-hull tangent search)
-{hyperplane_h_source}
-
-// Content of minimizer.h (defines SystemSpecification, SystemState, run_loop, etc.)
-{minimizer_h_source}
-
-{jansson_h_source}
-
-// Content of eqsolver.h (defines solve_equilibrium_at_condition, helpers)
-{eqsolver_h_source}
-
-// Semismooth straggler solver (empty unless PYCGPU_SS=1)
-{semismooth_h_source}
-
-// --- Dynamically Generated __device__ Model Functions ---
+// --- Generated model functions ---
 // Strength-reduced pow for the generated model functions (CUDA/HIP only):
 // every exponent the codegen emits is a small integer literal, and libdevice
-// pow costs ~100+ cycles vs single digits for an inlined multiply chain that
-// the compiler constant-folds. Accuracy differs from libdevice pow by <=1-2
-// ulp -- the same eps-class distance from the CPU's correctly-rounded glibc
-// pow as libdevice itself. The C++ backend is excluded so it stays
-// bit-identical to CPU pycalphad. Defined AFTER all system headers (math.h)
-// so the function-like macro cannot mangle their pow declarations; it only
-// rewrites calls in the generated functions below.
+// pow costs ~100+ cycles vs single digits for an inlined multiply chain.
+// Accuracy differs from libdevice pow by <=1-2 ulp. The C++ backend is
+// excluded so it stays bit-identical to CPU pycalphad. Defined AFTER all
+// system headers so the macro only rewrites calls in the generated code.
 #if defined(__CUDACC__) || defined(__HIP__)
 __device__ inline double pycgpu_pow(double b, double e) {{
     int ei = (int)e;
@@ -3068,109 +2100,16 @@ __device__ inline double pycgpu_pow(double b, double e) {{
 #endif
 {model_functions_c_code}
 
-// --- Global Device-Side PhaseRecord Array ---
-__device__ PhaseRecord g_phase_records_array[{num_unique_models if num_unique_models > 0 else 1}]; // Must be at least 1
+__device__ PhaseRecord g_phase_records_array[{num_records}];
 
-// --- Kernel Functions (must be extern "C" for CuPy to find them) ---
-
-// --- Simple test kernel to verify GPU setup ---
 extern "C" {{
-__global__ void test_kernel(double* output, const double* input, int n) {{
-    int tid = blockDim.x * blockIdx.x + threadIdx.x;
-    if (tid < n) {{
-        output[tid] = input[tid] * 2.0 + 1.0;
-    }}
+
+__global__ void init_all_gpu_phase_records() {{
+{"".join(g_phase_record_array_init_calls_c_code)}
 }}
 
-// --- Test kernel for struct pointer arguments ---
-__global__ void test_struct_kernel(
-    const void* ptr1,
-    const void* ptr2, 
-    void* ptr3,
-    int num_items,
-    const void* ptr4,
-    const void* ptr5
-) {{
-    int tid = blockDim.x * blockIdx.x + threadIdx.x;
-    if (tid == 0) {{
-        // Just verify we can access the pointers without crashing
-        // Write a simple marker to the output
-        double* output = (double*)ptr3;
-        if (output != nullptr) {{
-            output[0] = 42.0; // Magic number to verify kernel executed
-        }}
-    }}
-}}
-
-// --- Simplified equilibrium kernel for testing ---
-__global__ void simple_equilibrium_test(
-    const void* global_spec_ptr,
-    const void* condition_args_ptr,
-    void* results_ptr,
-    int num_conditions,
-    const void* initial_data_ptr,
-    const void* grid_data_ptr
-) {{
-    int tid = blockDim.x * blockIdx.x + threadIdx.x;
-    
-    // Just write a simple marker to show the kernel executed
-    if (tid == 0 && results_ptr != nullptr) {{
-        double* output = (double*)results_ptr;
-        output[0] = 123.456; // Magic number to verify execution
-        output[1] = (double)num_conditions; // Echo back the condition count
-    }}
-}}
-
-// --- Minimal fallback kernel with basic functionality ---
-__global__ void minimal_equilibrium_kernel(
-    double* system_data,        // Flattened system data
-    double* condition_data,     // Flattened condition data 
-    double* results_data,       // Flattened results data
-    int num_conditions,         // Number of conditions
-    int data_size_per_condition // Size of data per condition
-) {{
-    int tid = blockDim.x * blockIdx.x + threadIdx.x;
-    int total_threads = blockDim.x * gridDim.x;
-    
-    // Process conditions assigned to this thread using stride pattern
-    for (int condition_idx = tid; condition_idx < num_conditions; condition_idx += total_threads) {{
-        // Calculate correct result offset based on actual results layout
-        int results_per_condition = 7 + MAX_COMPONENTS + MAX_PHASES + 
-                                   (MAX_PHASES * MAX_DOF_PER_PHASE) + 
-                                   (MAX_PHASES * MAX_COMPONENTS) + MAX_PHASES;
-        int result_offset = condition_idx * results_per_condition;
-        int condition_offset = condition_idx * data_size_per_condition;
-        
-        if (result_offset + results_per_condition <= num_conditions * results_per_condition) {{
-            // Mark this condition as processed with some dummy values
-            results_data[result_offset + 0] = 1000.0 + condition_idx; // GM
-            // Initialize chemical potentials
-            for (int i = 0; i < MAX_COMPONENTS; i++) {{
-                results_data[result_offset + 1 + i] = 0.0;
-            }}
-            // Initialize phase amounts
-            for (int i = 0; i < MAX_PHASES; i++) {{
-                results_data[result_offset + 1 + MAX_COMPONENTS + i] = 0.0;
-            }}
-            results_data[result_offset + 1 + MAX_COMPONENTS + MAX_PHASES] = 1.0; // converged
-            results_data[result_offset + 2 + MAX_COMPONENTS + MAX_PHASES] = 0.0; // num_stable_phases
-            results_data[result_offset + 3 + MAX_COMPONENTS + MAX_PHASES] = 500.0; // Temperature
-            results_data[result_offset + 4 + MAX_COMPONENTS + MAX_PHASES] = 1.0; // Pressure
-            results_data[result_offset + 5 + MAX_COMPONENTS + MAX_PHASES] = 1.0; // Status: success
-            // Fill remaining (Y_phases, X_phases, phase_ids) with zeros
-            int remaining_start = result_offset + 6 + MAX_COMPONENTS + MAX_PHASES;
-            int remaining_count = (MAX_PHASES * MAX_DOF_PER_PHASE) + 
-                                 (MAX_PHASES * MAX_COMPONENTS) + MAX_PHASES;
-            for (int i = 0; i < remaining_count; i++) {{
-                results_data[remaining_start + i] = 0.0;
-            }}
-        }}
-    }}
-}}
-
-// --- Kernel to Initialize Global PhaseRecords ---
-// Grid energy evaluation for the accelerated calculate() backend: one
-// thread per sample point, dof rows in workspace format [statevars..., Y...].
+// Grid energy evaluation for calculate(): one thread per sample point, dof
+// rows in workspace format [statevars..., Y...].
 __global__ void grid_eval_kernel(int model_idx, const double* dof, double* out,
                                  long long n_points, int dof_stride) {{
     long long i = (long long)blockDim.x * blockIdx.x + threadIdx.x;
@@ -3199,28 +2138,17 @@ __global__ void grid_eval_params_kernel(
 // Per-condition lower convex hull (device twin of pycalphad's
 // lower_convex_hull/hyperplane): one thread per condition. Each condition
 // selects its grid sample via a flat base ROW into the (rows x N) X buffer
-// and aligned GM buffer (walker-stacked and phase-filtered layouts both
-// reduce to this). Chemical potentials are in-out (fixed entries pre-set).
+// and aligned GM buffer. Chemical potentials are in-out (fixed entries
+// pre-set).
 __global__ void point_hull_kernel(
-    const double* grid_X,        // (x_rows x num_components)
-    const double* grid_GM,       // (gm_rows)
-    const long long* x_base_row, // (n) first X row of this condition's sample
-    const long long* gm_base_row,// (n) first GM row (X repeats across T/walker
-                                 //     combos; GM does not — separate bases
-                                 //     avoid duplicating X for stacked grids)
-    const int* m_points,         // (n) sample rows for this condition
-    int num_components,
-    const int* fixed_chempot_indices,   // (n x num_components), -1-padded
-    const int* num_fixed_chempots,      // (n)
-    const double* lincomb_coefs,        // (n x max_lincomb x num_components)
-    const double* lincomb_rhs,          // (n x max_lincomb)
-    const int* num_lincomb,             // (n)
-    int max_lincomb,
-    double* chemical_potentials,        // (n x num_components) in-out
-    double* out_energy,                 // (n)
-    double* result_fractions,           // (n x (num_components+1))
-    int* result_simplex,                // (n x (num_components+1)) local idx
-    int n_conditions)
+    const double* grid_X, const double* grid_GM,
+    const long long* x_base_row, const long long* gm_base_row,
+    const int* m_points, int num_components,
+    const int* fixed_chempot_indices, const int* num_fixed_chempots,
+    const double* lincomb_coefs, const double* lincomb_rhs,
+    const int* num_lincomb, int max_lincomb,
+    double* chemical_potentials, double* out_energy,
+    double* result_fractions, int* result_simplex, int n_conditions)
 {{
     int t = (int)(blockDim.x * blockIdx.x + threadIdx.x);
     if (t >= n_conditions) return;
@@ -3236,1275 +2164,89 @@ __global__ void point_hull_kernel(
         &result_simplex[(long long)t * (num_components + 1)]);
 }}
 
-__global__ void init_all_gpu_phase_records() {{
-    #ifdef VERBOSE_DEBUG
-    if (threadIdx.x == 0 && blockIdx.x == 0) {{
-        printf("GPU DEBUG: init_all_gpu_phase_records kernel called\\n");
-    }}
-    #endif
-    {"".join(g_phase_record_array_init_calls_c_code)}
-    #ifdef VERBOSE_DEBUG
-    if (threadIdx.x == 0 && blockIdx.x == 0) {{
-        printf("GPU DEBUG: init_all_gpu_phase_records kernel completed\\n");
-        // Debug: Print what was initialized
-        for (int i = 0; i < {num_unique_models if num_unique_models > 0 else 1}; ++i) {{
-            // printf("GPU DEBUG: g_phase_records_array[%d].obj = %p\\n", i, (void*)g_phase_records_array[i].obj);
-            // printf("GPU DEBUG: g_phase_records_array[%d].formulamole_obj = %p\\n", i, (void*)g_phase_records_array[i].formulamole_obj);
-        }}
-    }}
-    #endif
-}}
-
-// --- COMMENTED OUT: Original complex solver implementation ---
-// This function contains the full equilibrium solver logic but causes stack overflow
-// due to large local arrays. Need to re-implement using global memory arrays.
-/*
-COMMENTED OUT: Original complex solver implementation that caused stack overflow
-This implementation needs to be adapted to use global memory arrays instead of stack arrays.
-The function signature and basic structure is preserved for reference.
-*/
-
-// Add missing constants that might not be defined
-#ifndef MAX_EQ_SOLN_LEN
-#define MAX_EQ_SOLN_LEN 50
-#endif
-
-// Functions moved to minimizer.h for better organization
-
-}} // Close extern "C" temporarily for C++ linkage functions
-
-
-// Reopen extern "C" for kernel functions
-extern "C" {{
-
-// --- Back to Basics: Simple GPU kernel that mirrors successful CPU logic ---
+// One condition per thread. The debug_* arguments are unused and kept only
+// for launch-signature compatibility.
 __global__ void top_level_equilibrium_kernel(
-    const void* global_spec_ptr_raw, // Array of SystemSpecifications, one per condition
-    const void* condition_args_list_ptr_raw, // Array of conditions, one per condition (passed as raw memory)
-    void* results_list_ptr_raw, // Array for results (passed as raw memory)
+    const void* global_spec_ptr_raw,
+    const void* condition_args_list_ptr_raw,
+    void* results_list_ptr_raw,
     int num_conditions_total,
-    int condition_stride, // Python-provided stride for condition data
-    int python_max_statevars, // Python's MAX_STATEVARS value for proper offset calculation
-    // DevicePhaseData contents are now implicitly g_phase_records_array and num_unique_models
-    const void* initial_phase_data_ptr, // Array of InitialPhaseDataSingle structs from lower_convex_hull
-    int initial_phase_data_stride, // Python-provided stride for initial phase data
-    int system_spec_stride, // Python-provided stride for SystemSpec array
-    const void* grid_data_ptr_raw, // Pointer to grid data (can be null if not using add_new/nearly_stable in kernel)
-    // Debug arrays for step-by-step solver tracking (can be null if debug disabled)
-    double* debug_gm_history,           // Array: [num_conditions, max_debug_steps]
-    double* debug_mu_history,           // Array: [num_conditions, max_debug_steps, MAX_COMPONENTS]
-    int* debug_convergence_history,     // Array: [num_conditions, max_debug_steps]
-    int* debug_iteration_count,         // Array: [num_conditions]
-    int debug_max_steps,                // Maximum debug steps to track
-    // WORK ARRAYS STRUCT: All 20 global memory arrays packed into a single struct pointer
-    const WorkArrays* work_arrays,      // Struct containing all 20 work array pointers
-    // Per-condition grid block selection: the calculate() grid has one block of
-    // points per statevar combination (e.g. per T); each condition must use ITS
-    // block (energies are T-dependent).
-    const int* grid_block_indices,      // [num_conditions] index into grid blocks (may be null)
-    long long grid_block_stride_bytes,  // byte stride between grid blocks (0 = single shared block)
-    int max_solver_iterations           // Newton-loop budget (CPU parity: 1000; pass 1 of two-pass uses less)
-) {{
-    int tid = blockDim.x * blockIdx.x + threadIdx.x;
-
-    if (tid < 3) {{
-        #ifdef VERBOSE_DEBUG
-        printf("GPU DEBUG: top_level_equilibrium_kernel STARTED with tid=%d, num_conditions=%d\\n", tid, num_conditions_total);
-        #endif
-    }}
-
-    // AMD compatibility: Check bounds BEFORE any pointer arithmetic
-    // AMD GPUs may fault on invalid pointer calculations even if never dereferenced
-    if (tid >= num_conditions_total) {{
-        return;  // Exit immediately for threads beyond valid conditions
-    }}
-
-    // GLOBAL MEMORY SETUP: Calculate thread-specific offsets for global memory arrays
-    // Each thread gets its own slice of the global memory arrays
-    // Now safe to use tid as array index since we've verified tid < num_conditions_total
-    int thread_idx = tid;  // Safe after bounds check
-    #ifdef PYCGPU_GUARD_SLICES
-    // Memory-safety validation mode (env PYCGPU_GUARD=1): every thread uses the
-    // even slice of a doubled allocation; the odd slices are magic-filled guards
-    // that Python scans after the run to detect any cross-slice (OOB) writes.
-    thread_idx = tid * 2;
-    #endif
-    
-    // Define missing constants for global memory array sizing
-    #ifndef MAX_EQ_MATRIX_SIZE
-    #define MAX_EQ_MATRIX_SIZE 1000
-    #endif
-    #ifndef MAX_EQ_MATRIX_ROWS
-    #define MAX_EQ_MATRIX_ROWS 50
-    #endif
-    #ifndef MAX_EQ_SOLN_LEN
-    #define MAX_EQ_SOLN_LEN 50
-    #endif
-    #ifndef SYSTEM_STATE_SIZE
-    #define SYSTEM_STATE_SIZE 50000
-    #endif
-    
-    // Calculate array sizes (matching the original stack array dimensions)
-    const int SVD_MN_SIZE = MAX_SVD_M * MAX_SVD_N;  // 18*18 = 324
-    const int SVD_NN_SIZE = MAX_SVD_N * MAX_SVD_N;  // 18*18 = 324
-    const int SVD_N_SIZE = MAX_SVD_N;               // 18
-    const int PHASE_MATRIX_SIZE = MAX_PHASE_MATRIX_DIM * MAX_PHASE_MATRIX_DIM;
-    const int DOF_SIZE = MAX_STATEVARS + MAX_DOF_PER_PHASE;  // 4+4 = 8
-    const int HESS_SIZE = DOF_SIZE * DOF_SIZE;      // 8*8 = 64
-    const int MASS_JAC_SIZE = MAX_COMPONENTS * DOF_SIZE;  // 4*8 = 32
-    const int CONSTRAINT_MATRIX_SIZE = (MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS) * (MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS);
-    
-    // AMD compatibility: Safely unpack WorkArrays struct
-    // AMD GPUs may have stricter memory access checking
-    // Cast and check each pointer access carefully
-    double* thread_A_lstsq_copy = nullptr;
-    double* thread_U_lstsq = nullptr;
-    double* thread_V_lstsq = nullptr;
-    double* thread_singular_values_lstsq = nullptr;
-    double* thread_superdiag_lstsq = nullptr;
-    double* thread_U_inv = nullptr;
-    double* thread_V_inv = nullptr;
-    double* thread_singular_values_inv = nullptr;
-    double* thread_superdiag_inv = nullptr;
-    double* thread_work_inv = nullptr;
-    double* thread_x_dof = nullptr;
-    double* thread_grad = nullptr;
-    double* thread_hess = nullptr;
-    double* thread_masses = nullptr;
-    double* thread_mass_jac = nullptr;
-    double* thread_phase_matrix = nullptr;
-    double* thread_equilibrium_matrix = nullptr;
-    double* thread_equilibrium_rhs = nullptr;
-    double* thread_eq_soln = nullptr;
-    double* thread_delta_ms = nullptr;
-    double* thread_phase_compositions = nullptr;
-    double* thread_phase_amounts_per_mole_atoms = nullptr;
-
-    if (work_arrays != nullptr) {{
-        // Cast to double** to access as array of pointers
-        // This avoids struct member access which may fail on AMD
-        double** work_ptrs = (double**)work_arrays;
-
-        if (work_ptrs[0]) thread_A_lstsq_copy = &work_ptrs[0][(long long)thread_idx * SVD_MN_SIZE];
-        if (work_ptrs[1]) thread_U_lstsq = &work_ptrs[1][(long long)thread_idx * SVD_MN_SIZE];
-        if (work_ptrs[2]) thread_V_lstsq = &work_ptrs[2][(long long)thread_idx * SVD_NN_SIZE];
-        if (work_ptrs[3]) thread_singular_values_lstsq = &work_ptrs[3][(long long)thread_idx * SVD_N_SIZE];
-        if (work_ptrs[4]) thread_superdiag_lstsq = &work_ptrs[4][(long long)thread_idx * SVD_N_SIZE];
-        if (work_ptrs[5]) thread_U_inv = &work_ptrs[5][(long long)thread_idx * PHASE_MATRIX_SIZE];
-        if (work_ptrs[6]) thread_V_inv = &work_ptrs[6][(long long)thread_idx * PHASE_MATRIX_SIZE];
-        if (work_ptrs[7]) thread_singular_values_inv = &work_ptrs[7][(long long)thread_idx * MAX_PHASE_MATRIX_DIM];
-        if (work_ptrs[8]) thread_superdiag_inv = &work_ptrs[8][(long long)thread_idx * MAX_PHASE_MATRIX_DIM];
-        if (work_ptrs[9]) thread_work_inv = &work_ptrs[9][(long long)thread_idx * PHASE_MATRIX_SIZE];
-        if (work_ptrs[10]) thread_x_dof = &work_ptrs[10][(long long)thread_idx * DOF_SIZE];
-        if (work_ptrs[11]) thread_grad = &work_ptrs[11][(long long)thread_idx * DOF_SIZE];
-        if (work_ptrs[12]) thread_hess = &work_ptrs[12][(long long)thread_idx * HESS_SIZE];
-        if (work_ptrs[13]) thread_masses = &work_ptrs[13][(long long)thread_idx * MAX_COMPONENTS];
-        if (work_ptrs[14]) thread_mass_jac = &work_ptrs[14][(long long)thread_idx * MASS_JAC_SIZE];
-        if (work_ptrs[15]) thread_phase_matrix = &work_ptrs[15][(long long)thread_idx * CONSTRAINT_MATRIX_SIZE];
-        if (work_ptrs[16]) thread_equilibrium_matrix = &work_ptrs[16][(long long)thread_idx * MAX_EQ_MATRIX_SIZE];
-        if (work_ptrs[17]) thread_equilibrium_rhs = &work_ptrs[17][(long long)thread_idx * MAX_EQ_MATRIX_ROWS];
-        if (work_ptrs[18]) thread_eq_soln = &work_ptrs[18][(long long)thread_idx * MAX_EQ_SOLN_LEN];
-        // Skip 19 - handled separately for system_states
-        if (work_ptrs[20]) thread_delta_ms = &work_ptrs[20][(long long)thread_idx * (MAX_PHASES * MAX_COMPONENTS)];
-        if (work_ptrs[21]) thread_phase_compositions = &work_ptrs[21][(long long)thread_idx * (MAX_PHASES * MAX_COMPONENTS)];
-        if (work_ptrs[22]) thread_phase_amounts_per_mole_atoms = &work_ptrs[22][(long long)thread_idx * (MAX_PHASES * MAX_COMPONENTS)];
-    }}
-
-    // MIRROR CPU LOGIC: Start with what definitely works on CPU
-    // We've already checked tid < num_conditions_total above, so safe to proceed
-    if (results_list_ptr_raw != nullptr) {{
-        // Cast to simple double array for efficient GPU memory access
-        double* results_array = (double*)results_list_ptr_raw;
-
-        // Use direct indexing - must match Python side calculation exactly
-        // Layout: GM, chemical_potentials[MAX_COMPONENTS], phase_amounts[MAX_PHASES], converged, num_stable_phases, temp, pressure, success_marker, Y_phases[MAX_PHASES * MAX_DOF_PER_PHASE], X_phases[MAX_PHASES * MAX_COMPONENTS], phase_ids[MAX_PHASES]
-        int condition_idx = tid;
-
-        // No need for redundant bounds check - already done at function entry
-        
-        int results_per_condition = 7 + MAX_COMPONENTS + MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * MAX_COMPONENTS) + MAX_PHASES;  // Include phase_ids
-        int base_offset = condition_idx * results_per_condition;
-        
-        // Initialize all results to zero (safe default)
-        // Now safe because we've already checked condition_idx < num_conditions_total
-        for (int i = 0; i < results_per_condition; ++i) {{
-            results_array[base_offset + i] = 0.0;
-        }}
-        
-        // Step 1: Get condition data using safe byte-level access instead of struct casting
-        const double* condition_data_array = (const double*)condition_args_list_ptr_raw;
-        if (condition_data_array == nullptr) {{
-            if (tid == 0) {{
-                #ifdef VERBOSE_DEBUG
-                printf("GPU DEBUG: condition_data_array is null\\n");
-                #endif
-            }}
-            // Set error marker for null data
-            results_array[base_offset + 0] = -999999.0;  // Invalid GM marker
-            return;
-        }}
-        
-        // Use Python-provided stride instead of hardcoded calculation
-        // This ensures GPU respects Python's data layout regardless of constant values
-        int condition_offset = condition_idx * condition_stride;
-        
-        // Extract conditions based on actual state variables layout
-        // Layout: [state_vars (MAX_STATEVARS), mole_fractions (MAX_COMPONENTS)]
-        // The Python side packs state variables in the order they appear in phase_record_factory.state_variables
-        // Common cases:
-        // - If state_vars = [T]: T at 0
-        // - If state_vars = [N, T]: N at 0, T at 1
-        // - If state_vars = [N, P, T]: N at 0, P at 1, T at 2
-        
-        // For this kernel, we'll extract based on the actual number of state variables
-        // The SystemSpecification tells us how many state variables there are
-        double amount = 1.0;      // Default N
-        double pressure = 101325.0; // Default P (1 atm)
-        double temp = 298.15;     // Default T
-        
-        // Extract state variables based on actual count, not hardcoded positions
-        // Common cases:
-        // - If num_statevars = 2: [N, T] (no pressure)
-        // - If num_statevars = 3: [N, P, T] or [N, T, P] depending on order
-        
-        // Access thread-specific SystemSpecification
-        // Each thread gets its own SystemSpec from the array
-        const double* system_specs_array = (const double*)global_spec_ptr_raw;
-        
-        // Calculate spec size in doubles (must match Python calculation)
-        const int svd_dim_calc = MAX_PHASES + MAX_FIXED_MOLE_FRACTION_CONDITIONS + MAX_COMPONENTS + MAX_STATEVARS + 2;
-        const int svd_m_calc = svd_dim_calc;
-        const int svd_n_calc = svd_dim_calc;
-        const int phase_matrix_dim_calc = MAX_COMPONENTS + MAX_COMPONENTS;
-        
-        int spec_core_doubles_calc = 3 + MAX_COMPONENTS + (MAX_FIXED_MOLE_FRACTION_CONDITIONS * MAX_COMPONENTS) + 
-                               MAX_FIXED_MOLE_FRACTION_CONDITIONS + 2 + (MAX_COMPONENTS + 1) + 
-                               (MAX_STATEVARS + 1) + (MAX_COMPONENTS + 1) + (MAX_STATEVARS + 1) + 
-                               (MAX_PHASES + 1) + 1 + 1;
-                               
-        int spec_work_doubles_calc = (svd_m_calc * svd_n_calc) + (svd_m_calc * svd_n_calc) + 
-                                    (svd_n_calc * svd_n_calc) + svd_n_calc + svd_n_calc + 
-                                    (phase_matrix_dim_calc * phase_matrix_dim_calc) + 
-                                    (phase_matrix_dim_calc * phase_matrix_dim_calc) +
-                                    phase_matrix_dim_calc + phase_matrix_dim_calc + 
-                                    (phase_matrix_dim_calc * phase_matrix_dim_calc);
-                                    
-        int spec_size_doubles = spec_core_doubles_calc + spec_work_doubles_calc;
-        
-        // Get pointer to this thread's SystemSpec data
-        // Use Python-provided stride instead of calculating it
-        const double* my_spec_data = &system_specs_array[condition_idx * system_spec_stride];
-        
-        if (tid < 2) {{
-            #ifdef VERBOSE_DEBUG
-            printf("GPU DEBUG: Thread %d - using system_spec_stride=%d, offset=%d\\n", 
-                   tid, system_spec_stride, condition_idx * system_spec_stride);
-            #endif
-        }}
-        
-        // Read num_statevars from the correct position (first field)
-        int num_statevars = (int)my_spec_data[0];
-        int num_components = (int)my_spec_data[1];
-        
-        if (tid < 2) {{
-            #ifdef VERBOSE_DEBUG
-            printf("GPU DEBUG: Thread %d - SystemSpec: num_statevars=%d, num_components=%d\\n", 
-                   tid, num_statevars, num_components);
-            printf("GPU DEBUG: Thread %d - First 10 values from my_spec_data: ", tid);
-            for (int k = 0; k < 10; ++k) {{
-                printf("%f ", my_spec_data[k]);
-            }}
-            printf("\\n");
-            // Also check prescribed_mole_fraction_rhs value
-            int rhs_offset = 3 + MAX_COMPONENTS + (MAX_FIXED_MOLE_FRACTION_CONDITIONS * MAX_COMPONENTS);
-            printf("GPU DEBUG: Thread %d - prescribed_mole_fraction_rhs[0] at offset %d = %f\\n", 
-                   tid, rhs_offset, my_spec_data[rhs_offset]);
-            // Check initial chemical potentials
-            printf("GPU DEBUG: Thread %d - initial_chemical_potentials: ", tid);
-            for (int k = 0; k < MAX_COMPONENTS && k < 3; ++k) {{
-                printf("[%d]=%f ", k, my_spec_data[3 + k]);
-            }}
-            printf("\\n");
-            #endif
-        }}
-        
-        if (num_statevars == 2) {{
-            // Most common case: [N, T] with no pressure variable
-            amount = condition_data_array[condition_offset + 0];    // N at position 0
-            temp = condition_data_array[condition_offset + 1];      // T at position 1
-            // pressure keeps default value of 101325.0
-        }} else if (num_statevars >= 3) {{
-            // Full case: [N, P, T] 
-            amount = condition_data_array[condition_offset + 0];    // N at position 0
-            pressure = condition_data_array[condition_offset + 1];  // P at position 1
-            temp = condition_data_array[condition_offset + 2];      // T at position 2
-        }} else {{
-            // Fallback: use defaults
-            if (num_statevars >= 1) {{
-                amount = condition_data_array[condition_offset + 0];
-            }}
-        }}
-        
-        // Extract composition values for this specific thread
-        double thread_mole_fractions[MAX_COMPONENTS];
-        double prescribed_sum = 0.0;
-        int num_comp = (int)my_spec_data[1]; // num_components is at offset 1
-        
-        // First, copy all prescribed mole fractions from the condition data
-        for (int i = 0; i < MAX_COMPONENTS; ++i) {{
-            if (i < num_comp) {{
-                // Use Python's MAX_STATEVARS value directly
-                // Python layout: [state_vars (padded to Python's MAX_STATEVARS), compositions]
-                // Compositions start at: condition_offset + python_max_statevars
-                int comp_idx = condition_offset + python_max_statevars + i;
-                thread_mole_fractions[i] = condition_data_array[comp_idx];
-            }} else {{
-                thread_mole_fractions[i] = 0.0;
-            }}
-        }}
-        
-        // For ternary+ systems, need to calculate unprescribed component
-        // In Al-Cu-Fe with X(AL)=0.5, X(CU)=0.2, we need X(FE)=0.3
-        // VA is always 0 for element-only calculations
-        // First, sum all non-VA prescribed components (those with values > -1e-10)
-        prescribed_sum = 0.0;
-        int num_prescribed = 0;
-        int unprescribed_idx = -1;
-        
-        for (int i = 0; i < num_comp - 1; ++i) {{ // Exclude VA (last component)
-            if (thread_mole_fractions[i] > -1e-10) {{ // Prescribed components have non-negative values
-                prescribed_sum += thread_mole_fractions[i];
-                num_prescribed++;
-            }} else {{
-                unprescribed_idx = i; // Track which component needs to be calculated
-            }}
-        }}
-        
-        // Calculate the unprescribed component to sum to 1.0
-        if (unprescribed_idx >= 0 && unprescribed_idx < num_comp - 1) {{
-            thread_mole_fractions[unprescribed_idx] = 1.0 - prescribed_sum;
-        }}
-        
-        // Set VA to 0 (last component)
-        if (num_comp > 0) {{
-            thread_mole_fractions[num_comp - 1] = 0.0;
-        }}
-        
-        if (tid == 0 || tid < 5) {{
-            #ifdef VERBOSE_DEBUG
-            printf("GPU DEBUG: Thread %d extracted conditions - T=%f\\n", tid, temp);
-            printf("GPU DEBUG: Thread %d condition_offset=%d, condition_stride=%d, python_max_statevars=%d (GPU MAX_STATEVARS=%d)\\n", 
-                   tid, condition_offset, condition_stride, python_max_statevars, MAX_STATEVARS);
-            // Debug the actual values in condition_data_array
-            printf("GPU DEBUG: Thread %d condition_data_array values at offset %d:\\n", tid, condition_offset);
-            for (int j = 0; j < 8; ++j) {{
-                printf("  [%d] = %f\\n", condition_offset + j, condition_data_array[condition_offset + j]);
-            }}
-            printf("GPU DEBUG: Thread %d mole fractions: X[0]=%f, X[1]=%f, X[2]=%f\\n",
-                   tid, thread_mole_fractions[0], thread_mole_fractions[1], thread_mole_fractions[2]);
-            #endif
-        }}
-        
-        // Store input conditions for verification
-        results_array[base_offset + 4 + MAX_COMPONENTS] = temp;
-        results_array[base_offset + 5 + MAX_COMPONENTS] = pressure;
-        // Store X[1] for verification
-        results_array[base_offset + 6 + MAX_COMPONENTS] = thread_mole_fractions[1];
-        
-        // Step 2: SIMPLIFIED EQUILIBRIUM CALCULATION (following CPU logic but avoiding complex function calls)
-        // This mirrors the essential CPU pathway without calling complex minimizer functions
-        
-        // FIX: Use direct byte-level array access instead of struct casting to avoid alignment issues
-        const double* initial_data_byte_array = (const double*)initial_phase_data_ptr;
-        
-        // Remove __syncthreads() here - it causes undefined behavior when not all threads reach it
-        // Only threads with valid conditions (0-31) would reach this point, but all 256 threads in the block
-        // must reach __syncthreads() for correct behavior
-        
-        if (initial_data_byte_array != nullptr && condition_idx < num_conditions_total) {{
-            
-            if (tid == 0) {{
-                #ifdef VERBOSE_DEBUG
-                printf("GPU DEBUG: Initial data check passed, proceeding with calculation\\n");
-                #endif
-            }}
-            
-            // Store success marker  
-            results_array[base_offset + 6 + MAX_COMPONENTS] = 6000.0 + (double)condition_idx;  // Success marker
-            
-            // SEGMENT 13: CREATE COMPOSITION SETS FROM STARTING POINT
-            bool verbose = (tid == 0 || tid < 3);  // Enable verbose for first few threads
-            if (condition_idx < 3) {{
-                gpu_debug_log(13, "Create composition sets from starting point", condition_idx);
-            }}
-            
-            // Declare variables outside the if/else blocks to avoid scope issues
-            int debug_num_phases = 0;
-            double chemical_potentials[MAX_COMPONENTS];
-            
-            // Initialize chemical potentials array
-            for (int i = 0; i < MAX_COMPONENTS; ++i) {{
-                chemical_potentials[i] = 0.0;
-            }}
-            
-            // STRUCT ACCESS FIX: Calculate byte offset for per-thread data instead of struct pointer casting
-            // InitialPhaseDataSingle layout: phase_indices[MAX_PHASES] + phase_amounts[MAX_PHASES] + 
-            //                                site_fractions[MAX_PHASES*MAX_DOF_PER_PHASE] + 
-            //                                compositions[MAX_PHASES*MAX_COMPONENTS] + 
-            //                                chemical_potentials[MAX_COMPONENTS] + num_phases(int)
-            //
-            // Convert to all-double layout: 
-            // doubles_per_struct = MAX_PHASES + MAX_PHASES + MAX_PHASES*MAX_DOF_PER_PHASE + MAX_PHASES*MAX_COMPONENTS + MAX_COMPONENTS + 1
-            // where phase_indices and num_phases are stored as doubles for simplicity
-            // Use Python-provided stride instead of calculating it
-            int struct_offset = condition_idx * initial_phase_data_stride;
-            
-            // Extract num_phases (stored as double at the correct offset)
-            // Calculate the actual offset for num_phases based on struct layout
-            // offset = 2*MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * MAX_COMPONENTS) + MAX_COMPONENTS
-            int num_phases_offset = 2*MAX_PHASES + (MAX_PHASES * MAX_DOF_PER_PHASE) + (MAX_PHASES * MAX_COMPONENTS) + MAX_COMPONENTS;
-            debug_num_phases = (int)initial_data_byte_array[struct_offset + num_phases_offset];
-            
-            // DEBUG: Print struct_offset calculation for failing threads specifically
-            if (tid == 10 || tid == 17 || tid < 2) {{
-                #ifdef VERBOSE_DEBUG
-                printf("GPU DEBUG: Thread %d - condition_idx=%d, initial_phase_data_stride=%d, struct_offset=%d\\n", 
-                       tid, condition_idx, initial_phase_data_stride, struct_offset);
-                printf("  Memory address for chem pots: base=%p + offset=%d\\n", 
-                       initial_data_byte_array, struct_offset + 60);
-                #endif
-            }}
-            
-            // Extract phase_indices (first MAX_PHASES doubles, stored as doubles)
-            int phase_indices[MAX_PHASES];
-            for (int i = 0; i < MAX_PHASES; ++i) {{
-                phase_indices[i] = (int)initial_data_byte_array[struct_offset + i];
-            }}
-            
-            // Extract phase_amounts (next MAX_PHASES doubles)
-            double phase_amounts[MAX_PHASES];
-            for (int i = 0; i < MAX_PHASES; ++i) {{
-                phase_amounts[i] = initial_data_byte_array[struct_offset + MAX_PHASES + i];
-            }}
-            
-            // DEBUG: Print what thread 1 is reading
-            if (tid == 1) {{
-                #ifdef VERBOSE_DEBUG
-                printf("GPU DEBUG: Thread 1 reading from offset %d:\\n", struct_offset);
-                printf("  phase_amounts[0] at offset %d = %f\\n", struct_offset + MAX_PHASES, phase_amounts[0]);
-                printf("  phase_amounts[1] at offset %d = %f\\n", struct_offset + MAX_PHASES + 1, phase_amounts[1]);
-                #endif
-            }}
-            
-            // GPU DEBUG: Store what this thread is reading for first few threads
-            if (condition_idx < 5) {{
-                results_array[base_offset + 5 + MAX_COMPONENTS] = (double)phase_indices[0];  // Store first phase index for debug
-                results_array[base_offset + 4 + MAX_COMPONENTS] = phase_amounts[0];          // Store first phase amount for debug
-            }}
-            
-            // Use SystemSpecification->initial_chemical_potentials instead of extracting from grid data  
-            // The correct initial chemical potentials are in the SystemSpecification, not in grid_data
-            // NOTE: global_spec_ptr_raw is now an array of SystemSpecs, we'll access the appropriate one later
-            
-            // Read per-condition chemical potentials from initial_data array
-            // Chemical potentials are stored after: phase_indices + phase_amounts + site_fractions + compositions
-            // Use the same MAX constants that Python used to create the data layout
-            const int chem_pot_offset = MAX_PHASES + MAX_PHASES + 
-                                       (MAX_PHASES * MAX_DOF_PER_PHASE) + 
-                                       (MAX_PHASES * MAX_COMPONENTS);
-            
-            // BOUNDS CHECK: Ensure we don't read beyond the array
-            const int total_array_size = num_conditions_total * initial_phase_data_stride;
-            const int chem_pot_read_offset = struct_offset + chem_pot_offset;
-            
-            if (tid < 2) {{
-                #ifdef VERBOSE_DEBUG
-                printf("GPU DEBUG: Thread %d bounds check - trying to read from offset %d, total array size is %d\\n",
-                       tid, chem_pot_read_offset, total_array_size);
-                // Direct test: Try to read the exact offsets we know should have data
-                if (tid == 1) {{
-                    printf("GPU DEBUG: Thread 1 direct read test:\\n");
-                    printf("  initial_data_byte_array[60] = %f (should be -31525.5 for cond 0)\\n", initial_data_byte_array[60]);
-                    printf("  initial_data_byte_array[125] = %f (should be -31525.5 for cond 1)\\n", initial_data_byte_array[125]);
-                    printf("  initial_data_byte_array[126] = %f (should be -40730.8 for cond 1)\\n", initial_data_byte_array[126]);
-                }}
-                #endif
-            }}
-            
-            for (int i = 0; i < MAX_COMPONENTS; ++i) {{
-                if (i < (int)my_spec_data[1] && (chem_pot_read_offset + i) < total_array_size) {{ // num_components is at offset 1
-                    chemical_potentials[i] = initial_data_byte_array[chem_pot_read_offset + i];
-                    if (tid == 1 && i < 2) {{
-                        #ifdef VERBOSE_DEBUG
-                        printf("GPU DEBUG: Thread 1 reading chem_pot[%d] from offset %d, value = %f\\n", 
-                               i, chem_pot_read_offset + i, initial_data_byte_array[chem_pot_read_offset + i]);
-                        // Also try reading some nearby values to see if there's an offset issue
-                        if (i == 0) {{
-                            printf("GPU DEBUG: Thread 1 - values at offsets 123-127: [%f, %f, %f, %f, %f]\\n",
-                                   initial_data_byte_array[123], initial_data_byte_array[124], 
-                                   initial_data_byte_array[125], initial_data_byte_array[126], 
-                                   initial_data_byte_array[127]);
-                        }}
-                        #endif
-                    }}
-                }} else {{
-                    chemical_potentials[i] = 0.0;
-                }}
-            }}
-            
-            if (tid < 3) {{
-                #ifdef VERBOSE_DEBUG
-                printf("GPU DEBUG: Thread %d reading chemical potentials from struct_offset=%d + chem_pot_offset=%d = %d\\n", 
-                       tid, struct_offset, chem_pot_offset, chem_pot_read_offset);
-                printf("GPU DEBUG: Thread %d SystemSpecification check - num_components=%d\\n", tid, (int)my_spec_data[1]);
-                if (tid == 1) {{
-                    printf("GPU DEBUG: Thread 1 - my_spec_data[0]=%f (num_statevars), my_spec_data[1]=%f (num_components)\\n",
-                           my_spec_data[0], my_spec_data[1]);
-                }}
-                // Print the actual values being read
-                printf("GPU DEBUG: Thread %d chemical_potentials after reading: [%f, %f, %f, %f]\\n",
-                       tid, chemical_potentials[0], chemical_potentials[1], chemical_potentials[2], chemical_potentials[3]);
-                for (int i = 0; i < 3; ++i) {{
-                    printf("  Thread %d chemical_potentials[%d] = %.6e (from initial_data offset %d)\\n", 
-                           tid, i, chemical_potentials[i], struct_offset + chem_pot_offset + i);
-                }}
-                #endif
-            }}
-            
-            // Store essential info for verification
-            results_array[base_offset + 3 + MAX_COMPONENTS] = (double)debug_num_phases;
-            
-            if (tid < 2) {{
-                #ifdef VERBOSE_DEBUG
-                printf("GPU DEBUG: Thread %d extracted phase data - phase_indices[0]=%d, phase_amounts[0]=%f\\n", 
-                       tid, phase_indices[0], phase_amounts[0]);
-                printf("GPU DEBUG: Thread %d chem_pot[0]=%f, chem_pot[1]=%f\\n", 
-                       tid, chemical_potentials[0], chemical_potentials[1]);
-                #endif
-            }}
-            
-            // Step 2b: Calculate system Gibbs energy using initial phases (like CPU does)
-            double system_gm = 0.0;
-            int num_stable_phases = 0;
-            double first_phase_amount = 0.0;
-            
-            // Process initial phases from lower_convex_hull (mirrors CPU logic)
-            int safe_num_phases = (debug_num_phases > 0 && debug_num_phases <= MAX_PHASES) ? debug_num_phases : 0;
-            
-            if (condition_idx < 3) {{
-                gpu_debug_log_value("total_composition_sets_created", (double)safe_num_phases);
-            }}
-            
-            if (tid == 0) {{
-                #ifdef VERBOSE_DEBUG
-                printf("GPU DEBUG: debug_num_phases=%d, safe_num_phases=%d\\n", debug_num_phases, safe_num_phases);
-                #endif
-            }}
-            
-            // DEBUG: Store early exit info if no phases
-            if (safe_num_phases == 0) {{
-                results_array[base_offset + 0] = -777.0;  // Mark as no phases available
-                results_array[base_offset + 6 + MAX_COMPONENTS] = -30.0 - (double)condition_idx;  // No phases error marker  
-                return;  // Early exit for debugging
-            }}
-            
-            for (int ph_idx = 0; ph_idx < safe_num_phases; ++ph_idx) {{
-                if (tid == 0 && ph_idx == 0) {{
-                    #ifdef VERBOSE_DEBUG
-                    printf("GPU DEBUG: Starting phase loop with %d phases\\n", safe_num_phases);
-                    #endif
-                }}
-                // Use direct array access instead of struct pointer
-                int phase_record_idx = phase_indices[ph_idx];
-                double phase_amount = phase_amounts[ph_idx];
-                
-                if (tid == 0) {{
-                    #ifdef VERBOSE_DEBUG
-                    printf("GPU DEBUG: Processing phase %d - record_idx=%d, amount=%f\\n", 
-                           ph_idx, phase_record_idx, phase_amount);
-                    #endif
-                }}
-                
-                // Validate phase data
-                bool phase_valid = (phase_amount > 1e-12 && phase_record_idx >= 0 && phase_record_idx < {num_unique_models if num_unique_models > 0 else 1});
-                
-                if (tid == 0) {{
-                    #ifdef VERBOSE_DEBUG
-                    printf("GPU DEBUG: Phase %d validation - valid=%d (amount>1e-12=%d, idx>=0=%d, idx<max=%d)\\n", 
-                           ph_idx, phase_valid, (phase_amount > 1e-12), (phase_record_idx >= 0), 
-                           (phase_record_idx < {num_unique_models if num_unique_models > 0 else 1}));
-                    #endif
-                }}
-                
-                if (phase_valid) {{
-                    
-                    if (tid == 0) {{
-                        #ifdef VERBOSE_DEBUG
-                        printf("GPU DEBUG: Entered phase_valid block for phase %d\\n", ph_idx);
-                        #endif
-                    }}
-                    
-                    // Get phase record (mirrors CPU phase_records[phase_name] access)
-                    const PhaseRecord* phase_rec = &g_phase_records_array[phase_record_idx];
-                    
-                    // Set up DOF array for this phase (mirrors CPU compset.dof setup)
-                    // Trailing MAX_PARAMS slots hold runtime fit-parameter values,
-                    // read by the generated functions as x[3 + phase_dof + j].
-                    double phase_dof[MAX_STATEVARS + MAX_DOF_PER_PHASE + MAX_PARAMS];
-                    
-                    // State variables - from condition args
-                    // GPU functions expect [N, P, T, site_fractions] format
-                    // This is because gpu_codegen.py inserts P into state variables
-                    if (tid == 0 && ph_idx == 0) {{
-                        #ifdef VERBOSE_DEBUG
-                        printf("GPU DEBUG: Setting up DOF array (GPU format: N, P, T, site_fractions)\\n");
-                        #endif
-                    }}
-                    
-                    // Extract values from condition data based on actual state_variables order
-                    // Extract state variables based on actual count from SystemSpecification
-                    double moles_val = 1.0;      // Default N
-                    double pressure_val = 101325.0; // Default P
-                    double temp_val = 298.15;    // Default T
-                    
-                    // Access per-thread SystemSpec data instead of casting shared pointer
-                    // global_spec_ptr_raw is an array of SystemSpecs in double format, not a single struct
-                    const double* system_specs_array = (const double*)global_spec_ptr_raw;
-                    const double* my_spec_doubles = &system_specs_array[condition_idx * system_spec_stride];
-                    int actual_num_statevars = (int)my_spec_doubles[0];  // num_statevars is first field
-                    
-                    if (actual_num_statevars == 2) {{
-                        // Most common case: [N, T] with no pressure variable
-                        moles_val = condition_data_array[condition_offset + 0];    // N from position 0
-                        temp_val = condition_data_array[condition_offset + 1];      // T from position 1
-                        // pressure_val keeps default value of 101325.0
-                    }} else if (actual_num_statevars >= 3) {{
-                        // Full case: [N, P, T]
-                        moles_val = condition_data_array[condition_offset + 0];      // N from position 0
-                        pressure_val = condition_data_array[condition_offset + 1];   // P from position 1
-                        temp_val = condition_data_array[condition_offset + 2];       // T from position 2
-                    }}
-                    
-                    // Set up phase_dof based on what the energy function expects
-                    // GPU functions now expect ALL state variables [N, P, T] just like CPU
-                    // This matches the fix in notebook_get_all_syms_for_model
-                    phase_dof[0] = moles_val;       // x[0] = N
-                    phase_dof[1] = pressure_val;    // x[1] = P
-                    phase_dof[2] = temp_val;        // x[2] = T
-                    // Site fractions will be added starting at index 3
-                    
-                    if (tid == 0 && ph_idx == 0) {{
-                        #ifdef VERBOSE_DEBUG
-                        printf("GPU DEBUG: DOF state vars from condition_data: N=%f (pos 0), P=%f (pos 1), T=%f (pos 2)\\n", 
-                               moles_val, pressure_val, temp_val);
-                        #endif
-                    }}
-                    
-                    // SAFETY CHECK: Validate state variables
-                    if (isnan(moles_val) || isinf(moles_val) || moles_val <= 0.0) {{
-                        results_array[base_offset + 0] = -333.0 - (double)condition_idx;  // Invalid N marker
-                        results_array[base_offset + 1] = 0.0;                              // N = index 0
-                        results_array[base_offset + 1 + MAX_COMPONENTS] = moles_val;       // The problematic value
-                        results_array[base_offset + 6 + MAX_COMPONENTS] = -100.0 - (double)condition_idx; // Invalid state var error marker
-                        return;
-                    }}
-                    if (isnan(temp_val) || isinf(temp_val) || temp_val <= 0.0) {{
-                        results_array[base_offset + 0] = -333.0 - (double)condition_idx;  // Invalid T marker
-                        results_array[base_offset + 1] = 1.0;                              // T = index 1 (was 2)
-                        results_array[base_offset + 1 + MAX_COMPONENTS] = temp_val;        // The problematic value
-                        results_array[base_offset + 6 + MAX_COMPONENTS] = -101.0 - (double)condition_idx; // Invalid state var error marker
-                        return;
-                    }}
-                    
-                    if (tid == 0 && ph_idx == 0) {{
-                        #ifdef VERBOSE_DEBUG
-                        printf("GPU DEBUG: State variables processed, moving to site fractions\\n");
-                        #endif
-                    }}
-                    
-                    // Site fractions - extract from per-thread data using direct array access
-                    int site_frac_offset = struct_offset + MAX_PHASES + MAX_PHASES + (ph_idx * MAX_DOF_PER_PHASE);
-                    for (int sf = 0; sf < phase_rec->phase_dof && sf < MAX_DOF_PER_PHASE; ++sf) {{
-                        double site_frac_val = initial_data_byte_array[site_frac_offset + sf];
-                        if (tid == 0 && ph_idx == 0) {{
-                            #ifdef VERBOSE_DEBUG
-                            printf("GPU DEBUG: Site fraction %d = %.15f (phase_dof=%d)\\n", sf, site_frac_val, phase_rec->phase_dof);
-                            #endif
-                        }}
-                        // SAFETY CHECK: Validate site fractions
-                        if (isnan(site_frac_val) || isinf(site_frac_val) || site_frac_val < 0.0 || site_frac_val > 1.0) {{
-                            results_array[base_offset + 0] = -222.0 - (double)condition_idx;  // Invalid site fraction marker
-                            results_array[base_offset + 1] = (double)sf;                      // Which site fraction
-                            results_array[base_offset + 1 + MAX_COMPONENTS] = site_frac_val;                   // The problematic value
-                            results_array[base_offset + 6 + MAX_COMPONENTS] = -110.0 - (double)condition_idx; // Invalid site fraction error marker
-                            return;
-                        }}
-                        phase_dof[3 + sf] = site_frac_val;  // Site fractions start after [N, P, T] (position 3)
-                    }}
-
-                    #if MAX_PARAMS > 0
-                    {{
-                        // Runtime fit parameters ride in trailing dof slots after this
-                        // phase's site fractions, exactly as at the compset-creation
-                        // sites in eqsolver.h. They are the LAST (MAX_PARAMS + 1)
-                        // doubles of the spec row's CORE section (fit_params then
-                        // num_params) — apply_safe_padding appends padding AFTER the
-                        // core, so they are NOT at the end of the stride. Offsets
-                        // mirror create_flat_system_specification in
-                        // gpu_systemspec_flat.py field-for-field. Without this fill
-                        // the energy evaluation below reads unwritten stack slots.
-                        const int spec_core_doubles =
-                            3                                                       // num_statevars, num_components, prescribed_system_amount
-                            + MAX_COMPONENTS                                        // initial_chemical_potentials
-                            + MAX_FIXED_MOLE_FRACTION_CONDITIONS * MAX_COMPONENTS   // prescribed_mole_fraction_coefficients
-                            + MAX_FIXED_MOLE_FRACTION_CONDITIONS                    // prescribed_mole_fraction_rhs
-                            + 2                                                     // num_prescribed_mole_fraction_{{conditions,coefficients_cols}}
-                            + (MAX_COMPONENTS + 1)                                  // free_chemical_potential_indices + count
-                            + (MAX_STATEVARS + 1)                                   // free_statevar_indices + count
-                            + (MAX_COMPONENTS + 1)                                  // fixed_chemical_potential_indices + count
-                            + (MAX_STATEVARS + 1)                                   // fixed_statevar_indices + count
-                            + (MAX_PHASES + 1)                                      // fixed_stable_compset_indices + count
-                            + 1                                                     // max_num_free_stable_phases
-                            + 1                                                     // ALLOWED_MASS_RESIDUAL
-                            + (1 + 4 * MAX_PHASE_LOCAL_CONDITIONS)                  // phase-local conditions block
-                            + (MAX_PARAMS + 1);                                     // fit_params + num_params
-                        const double* spec_fit_params = my_spec_doubles + (spec_core_doubles - (MAX_PARAMS + 1));
-                        int spec_num_params = (int)spec_fit_params[MAX_PARAMS];
-                        for (int pj = 0; pj < spec_num_params && pj < MAX_PARAMS; ++pj) {{
-                            phase_dof[3 + phase_rec->phase_dof + pj] = spec_fit_params[pj];
-                        }}
-                    }}
-                    #endif
-                    
-                    if (verbose && ph_idx < 2 && condition_idx < 3) {{
-                        gpu_debug_log_array("phase_site_fractions", &phase_dof[3], phase_rec->phase_dof);
-                    }}
-                    
-                    if (tid == 0 && ph_idx == 0) {{
-                        #ifdef VERBOSE_DEBUG
-                        printf("GPU DEBUG: Site fractions processed, calculating phase energy\\n");
-                        #endif
-                    }}
-                    
-                    // Calculate phase energy using the phase record (mirrors CPU compset.energy calculation)
-                    double phase_energy = 0.0;
-                    if (phase_rec->obj != nullptr) {{
-                        if (tid == 0 && ph_idx == 0) {{
-                            #ifdef VERBOSE_DEBUG
-                            printf("GPU DEBUG: DOF for energy calc - N=%.15f, P=%.15f, T=%.15f, Y[0]=%.15f, Y[1]=%.15f\\n", 
-                                   phase_dof[0], phase_dof[1], phase_dof[2], phase_dof[3], phase_dof[4]);
-                            #endif
-                        }}
-                        phase_energy = phase_rec->obj(phase_dof);
-                        
-                        if (verbose && ph_idx < 2) {{
-                            #ifdef VERBOSE_DEBUG
-                            printf("[GPU]   phase_%d_energy: %.15e\\n", ph_idx, phase_energy);
-                            #endif
-                        }}
-                        
-                        if (tid == 0) {{
-                            #ifdef VERBOSE_DEBUG
-                            printf("GPU DEBUG: Phase %d energy = %.6f J/mol\\n", ph_idx, phase_energy);
-                            #endif
-                        }}
-                        
-                        // NUMERICAL STABILITY CHECK: Detect and prevent NaN/inf propagation
-                        if (isnan(phase_energy) || isinf(phase_energy)) {{
-                            // Store debug info about which phase/condition caused NaN
-                            results_array[base_offset + 0] = -999.0 - (double)condition_idx;  // NaN error marker
-                            results_array[base_offset + 1] = (double)ph_idx;                  // Which phase caused NaN
-                            results_array[base_offset + 1 + MAX_COMPONENTS] = phase_energy;                    // The problematic energy value
-                            results_array[base_offset + 6 + MAX_COMPONENTS] = -40.0 - (double)condition_idx;  // NaN error marker
-                            return;  // Early exit to prevent NaN propagation
-                        }}
-                        
-                        // Additional range check: Ensure energy is within reasonable bounds (increased limit for thermodynamic energies)
-                        if (phase_energy > 1e8 || phase_energy < -1e8) {{
-                            if (tid == 0) {{
-                                #ifdef VERBOSE_DEBUG
-                                printf("GPU DEBUG: Phase energy %f exceeds range check (1e6), triggering early return\\n", phase_energy);
-                                #endif
-                            }}
-                            // Store debug info about extreme energy values
-                            results_array[base_offset + 0] = -888.0 - (double)condition_idx;  // Extreme energy error marker
-                            results_array[base_offset + 1] = (double)ph_idx;                  // Which phase
-                            results_array[base_offset + 1 + MAX_COMPONENTS] = phase_energy;                    // The extreme energy value
-                            results_array[base_offset + 6 + MAX_COMPONENTS] = -50.0 - (double)condition_idx;  // Extreme energy error marker
-                            return;  // Early exit to prevent numerical issues
-                        }}
-                    }}
-                    
-                    // SAFETY CHECK: Validate phase amount before multiplication
-                    if (tid == 0 && ph_idx < 2) {{
-                        #ifdef VERBOSE_DEBUG
-                        printf("GPU DEBUG: Phase %d - amount=%f, energy=%f\\n", ph_idx, phase_amount, phase_energy);
-                        #endif
-                    }}
-                    if (isnan(phase_amount) || isinf(phase_amount) || phase_amount < 0.0) {{
-                        results_array[base_offset + 0] = -777.0 - (double)condition_idx;  // Invalid phase amount marker
-                        results_array[base_offset + 1] = (double)ph_idx;                  // Which phase
-                        results_array[base_offset + 1 + MAX_COMPONENTS] = phase_amount;                    // The problematic amount
-                        results_array[base_offset + 6 + MAX_COMPONENTS] = -60.0 - (double)condition_idx;  // Invalid amount error marker
-                        return;
-                    }}
-                    
-                    // Add to system Gibbs energy (weighted by phase amount, like CPU)
-                    double contribution = phase_amount * phase_energy;
-                    
-                    // SAFETY CHECK: Validate the contribution before adding to system_gm
-                    if (isnan(contribution) || isinf(contribution)) {{
-                        results_array[base_offset + 0] = -666.0 - (double)condition_idx;  // Invalid contribution marker
-                        results_array[base_offset + 1] = phase_amount;                    // The amounts that caused issue
-                        results_array[base_offset + 1 + MAX_COMPONENTS] = phase_energy;                    // The energy that caused issue
-                        results_array[base_offset + 6 + MAX_COMPONENTS] = -70.0 - (double)condition_idx;  // Invalid contribution error marker
-                        return;
-                    }}
-                    
-                    system_gm += contribution;
-                    num_stable_phases++;
-                    
-                    // Store first phase amount for output
-                    if (ph_idx == 0) {{
-                        first_phase_amount = phase_amount;
-                    }}
-                }}
-            }}
-            
-            // Step 2c: NOW CALLING THE ACTUAL EQUILIBRIUM SOLVER
-            // Let's use debug arrays to track what happens when we call the real solver
-            
-            // Store starting point in debug arrays (if enabled)
-            if (debug_gm_history != nullptr && debug_max_steps > 0 && condition_idx < num_conditions_total) {{
-                int debug_idx = condition_idx * debug_max_steps;
-                // Step 0: Store starting point from lower_convex_hull
-                debug_gm_history[debug_idx] = system_gm;
-                for (int comp = 0; comp < MAX_COMPONENTS && comp < 2; ++comp) {{
-                    debug_mu_history[condition_idx * debug_max_steps * MAX_COMPONENTS + comp] = chemical_potentials[comp];
-                }}
-                debug_convergence_history[debug_idx] = 0;  // Starting point - not converged yet
-                debug_iteration_count[condition_idx] = 0;   // Will increment as solver runs
-            }}
-            
-            // Prepare data structures for the real solver
-            if (tid == 0) {{
-                #ifdef VERBOSE_DEBUG
-                printf("GPU DEBUG: About to prepare solver data structures\\n");
-                #endif
-            }}
-            
-            // Create thread-local copy of SystemSpecification with correct composition
-            // Create thread-local SystemSpecification from global_spec_ptr_raw
-            char thread_spec_bytes[sizeof(SystemSpecification)];
-            memset(thread_spec_bytes, 0, sizeof(SystemSpecification));
-            SystemSpecification* thread_spec_ptr = (SystemSpecification*)thread_spec_bytes;
-            SystemSpecification& thread_spec = *thread_spec_ptr;
-            
-            // Copy thread-specific SystemSpec instead of shared one
-            // Calculate offset to this thread's SystemSpec in the array
-            const double* system_specs_array = (const double*)global_spec_ptr_raw;
-            
-            // Calculate size including work arrays to match Python
-            const int svd_dim_local = MAX_PHASES + MAX_FIXED_MOLE_FRACTION_CONDITIONS + MAX_COMPONENTS + MAX_STATEVARS + 2;
-            const int svd_m_local = svd_dim_local;
-            const int svd_n_local = svd_dim_local;
-            const int phase_matrix_dim_local = MAX_COMPONENTS + MAX_COMPONENTS;  // Approximation
-            
-            int spec_core_doubles = 3 + MAX_COMPONENTS + (MAX_FIXED_MOLE_FRACTION_CONDITIONS * MAX_COMPONENTS) + 
-                                   MAX_FIXED_MOLE_FRACTION_CONDITIONS + 2 + (MAX_COMPONENTS + 1) + 
-                                   (MAX_STATEVARS + 1) + (MAX_COMPONENTS + 1) + (MAX_STATEVARS + 1) + 
-                                   (MAX_PHASES + 1) + 1 + 1;
-                                   
-            int spec_work_doubles = (svd_m_local * svd_n_local) + (svd_m_local * svd_n_local) + (svd_n_local * svd_n_local) + 
-                                   svd_n_local + svd_n_local + 
-                                   (phase_matrix_dim_local * phase_matrix_dim_local) + (phase_matrix_dim_local * phase_matrix_dim_local) +
-                                   phase_matrix_dim_local + phase_matrix_dim_local + (phase_matrix_dim_local * phase_matrix_dim_local);
-                                   
-            int spec_size_doubles = spec_core_doubles + spec_work_doubles;
-            const double* my_spec_doubles = &system_specs_array[condition_idx * system_spec_stride];
-            
-            // Manually copy fields from double array to struct
-            // Python stores everything as doubles in a flat array, we need to 
-            // reconstruct the struct with proper types
-            int py_offset = 0;
-            
-            // Basic integer fields (stored as doubles in Python)
-            thread_spec.num_statevars = (int)my_spec_doubles[py_offset++];
-            thread_spec.num_components = (int)my_spec_doubles[py_offset++];
-            thread_spec.prescribed_system_amount = my_spec_doubles[py_offset++];
-            
-            // Initial chemical potentials array
-            for (int i = 0; i < MAX_COMPONENTS; ++i) {{
-                thread_spec.initial_chemical_potentials[i] = my_spec_doubles[py_offset++];
-            }}
-            
-            // Prescribed mole fraction coefficients (2D array)
-            for (int i = 0; i < MAX_FIXED_MOLE_FRACTION_CONDITIONS; ++i) {{
-                for (int j = 0; j < MAX_COMPONENTS; ++j) {{
-                    thread_spec.prescribed_mole_fraction_coefficients[i][j] = my_spec_doubles[py_offset++];
-                }}
-            }}
-            
-            // Prescribed mole fraction RHS
-            for (int i = 0; i < MAX_FIXED_MOLE_FRACTION_CONDITIONS; ++i) {{
-                thread_spec.prescribed_mole_fraction_rhs[i] = my_spec_doubles[py_offset++];
-            }}
-            
-            // More integer fields
-            thread_spec.num_prescribed_mole_fraction_conditions = (int)my_spec_doubles[py_offset++];
-            thread_spec.num_prescribed_mole_fraction_coefficients_cols = (int)my_spec_doubles[py_offset++];
-            
-            // DEBUG: Print what we just copied
-            if (condition_idx <= 2) {{
-                #ifdef VERBOSE_DEBUG
-                printf("GPU DEBUG: Thread %d - Copied from my_spec_doubles at offset %d:\\n", 
-                       condition_idx, condition_idx * system_spec_stride);
-                printf("  First 10 doubles: ");
-                for (int i = 0; i < 10; ++i) {{
-                    printf("%.3f ", my_spec_doubles[i]);
-                }}
-                printf("\\n");
-                printf("  Resulting thread_spec: num_statevars=%d, num_components=%d\\n",
-                       thread_spec.num_statevars, thread_spec.num_components);
-                #endif
-                
-                // Print prescribed_mole_fraction_rhs values
-                #ifdef VERBOSE_DEBUG
-                printf("GPU DEBUG: Thread %d using prescribed_mole_fraction_rhs[0] = %f (should be X[1] for this condition)\\n",
-                       condition_idx, thread_spec.prescribed_mole_fraction_rhs[0]);
-                #endif
-            }}
-            
-            // Index arrays with their counts
-            for (int i = 0; i < MAX_COMPONENTS; ++i) {{
-                thread_spec.free_chemical_potential_indices[i] = (int)my_spec_doubles[py_offset++];
-            }}
-            thread_spec.num_free_chemical_potentials = (int)my_spec_doubles[py_offset++];
-            
-            for (int i = 0; i < MAX_STATEVARS; ++i) {{
-                thread_spec.free_statevar_indices[i] = (int)my_spec_doubles[py_offset++];
-            }}
-            thread_spec.num_free_statevars = (int)my_spec_doubles[py_offset++];
-            
-            for (int i = 0; i < MAX_COMPONENTS; ++i) {{
-                thread_spec.fixed_chemical_potential_indices[i] = (int)my_spec_doubles[py_offset++];
-            }}
-            thread_spec.num_fixed_chemical_potentials = (int)my_spec_doubles[py_offset++];
-            
-            for (int i = 0; i < MAX_STATEVARS; ++i) {{
-                thread_spec.fixed_statevar_indices[i] = (int)my_spec_doubles[py_offset++];
-            }}
-            thread_spec.num_fixed_statevars = (int)my_spec_doubles[py_offset++];
-            
-            for (int i = 0; i < MAX_PHASES; ++i) {{
-                thread_spec.fixed_stable_compset_indices[i] = (int)my_spec_doubles[py_offset++];
-            }}
-            thread_spec.num_fixed_stable_compsets = (int)my_spec_doubles[py_offset++];
-            
-            thread_spec.max_num_free_stable_phases = (int)my_spec_doubles[py_offset++];
-            thread_spec.ALLOWED_MASS_RESIDUAL = my_spec_doubles[py_offset++];
-            thread_spec.num_phase_local_conditions_total = (int)my_spec_doubles[py_offset++];
-            for (int pi = 0; pi < MAX_PHASE_LOCAL_CONDITIONS; ++pi) {{
-                thread_spec.plc_model[pi] = (int)my_spec_doubles[py_offset++];
-                thread_spec.plc_type[pi] = (int)my_spec_doubles[py_offset++];
-                thread_spec.plc_target[pi] = (int)my_spec_doubles[py_offset++];
-                thread_spec.plc_value[pi] = my_spec_doubles[py_offset++];
-            }}
-            for (int pi = 0; pi < MAX_PARAMS; ++pi) {{
-                thread_spec.fit_params[pi] = my_spec_doubles[py_offset++];
-            }}
-            thread_spec.num_params = (int)my_spec_doubles[py_offset++];
-            
-            // Work arrays are not copied - they're allocated separately in global memory
-            
-            // Safely read SystemSpecification fields
-            // sys_spec_data no longer needed - we copy the struct directly
-            // Read fields by offset: num_statevars=0, num_components=1, prescribed_system_amount=2
-            ConditionArgsSingle condition_args_single;
-            EquilibriumResultSingle equilibrium_result;
-            DevicePhaseData device_phase_data;
-            InitialPhaseDataSingle initial_phase_data_single;
-            // Select this condition's grid block (per-T energies); falls back to the
-            // shared base pointer when block info is absent.
-            const void* my_grid_block_raw = grid_data_ptr_raw;
-            if (grid_data_ptr_raw != nullptr && grid_block_indices != nullptr && grid_block_stride_bytes > 0) {{
-                my_grid_block_raw = (const void*)((const char*)grid_data_ptr_raw +
-                    (long long)grid_block_indices[condition_idx] * grid_block_stride_bytes);
-            }}
-            DeviceGrid* device_grid = (DeviceGrid*)my_grid_block_raw;
-            
-            // Set up condition args - copy actual state variables from Python
-            // The SystemSpecification tells us which state variables are actually in use
-            // Common cases:
-            // - If state_vars = [N, T]: copy N at 0, T at 1  
-            // - If state_vars = [N, P, T]: copy N at 0, P at 1, T at 2
-            // For now, assume [N, T] order which is most common
-            int actual_num_statevars = thread_spec.num_statevars;
-            
-            // Copy the actual state variables that were sent from Python
-            for (int i = 0; i < MAX_STATEVARS; ++i) {{
-                if (i < actual_num_statevars) {{
-                    // Copy all state variables from condition_data_array
-                    condition_args_single.state_variables_values[i] = condition_data_array[condition_offset + i];
-                }} else {{
-                    condition_args_single.state_variables_values[i] = 0.0;
-                }}
-            }}
-            
-            if (tid == 0) {{
-                #ifdef VERBOSE_DEBUG
-                printf("GPU DEBUG: Copied %d state variables to condition_args_single:\\n", actual_num_statevars);
-                printf("  [0]=%f (N), [1]=%f (P), [2]=%f (T)\\n", 
-                       condition_args_single.state_variables_values[0],
-                       condition_args_single.state_variables_values[1],
-                       condition_args_single.state_variables_values[2]);
-                #endif
-            }}
-            
-            // Set up initial phase data single
-            initial_phase_data_single.num_phases = safe_num_phases;
-            for (int i = 0; i < MAX_PHASES; ++i) {{
-                initial_phase_data_single.phase_indices[i] = (i < safe_num_phases) ? phase_indices[i] : -1;
-                initial_phase_data_single.phase_amounts[i] = (i < safe_num_phases) ? phase_amounts[i] : 0.0;
-            }}
-            for (int i = 0; i < MAX_COMPONENTS; ++i) {{
-                initial_phase_data_single.chemical_potentials[i] = chemical_potentials[i];
-            }}
-            
-            // thread_spec already created above - no need to recreate
-            // The prescribed_mole_fraction_rhs values are already correctly set in the SystemSpecification array
-            // DO NOT overwrite them here - that was a binary-system-specific hack that breaks ternary systems
-            
-            // Set up device phase data  
-            device_phase_data.phase_records_array = g_phase_records_array;
-            device_phase_data.num_unique_phase_records = {num_unique_models if num_unique_models > 0 else 1};
-            device_phase_data.grid_phase_id_to_record_index = nullptr; // Not using grid mapping for now
-            device_phase_data.max_grid_phase_id = 0;
-            
-            // Initialize result structure
-            equilibrium_result.converged = false;
-            equilibrium_result.final_system_gm = system_gm;  // Start with initial value
-            equilibrium_result.num_stable_phases = 0;
-            for (int i = 0; i < MAX_COMPONENTS; ++i) {{
-                equilibrium_result.final_chemical_potentials[i] = chemical_potentials[i];
-            }}
-            for (int i = 0; i < MAX_PHASES; ++i) {{
-                equilibrium_result.phase_ids[i] = -1;
-                equilibrium_result.NP[i] = 0.0;
-            }}
-            // Initialize X_phases and Y_phases to zero to avoid garbage values
-            for (int i = 0; i < MAX_PHASES * MAX_COMPONENTS; ++i) {{
-                equilibrium_result.X_phases[i] = 0.0;
-            }}
-            for (int i = 0; i < MAX_PHASES * MAX_DOF_PER_PHASE; ++i) {{
-                equilibrium_result.Y_phases[i] = 0.0;
-            }}
-            
-            // Debug: Store values before calling solver
-            if (debug_gm_history != nullptr && debug_max_steps > 1 && condition_idx < num_conditions_total) {{
-                int debug_idx = condition_idx * debug_max_steps + 1;
-                debug_gm_history[debug_idx] = -999.0;  // Marker: about to call solver
-                debug_convergence_history[debug_idx] = -1;  // Marker: solver call attempt
-            }}
-            
-            // ISSUE IDENTIFIED: Stack overflow in solve_equilibrium_at_condition
-            // The solver function allocates large stack arrays (SVD matrices, etc.) that exceed GPU thread stack limits
-            // ROOT CAUSE: MAX_SVD_DIM = 18, so arrays like A_lstsq_copy[18*18], U_lstsq[18*18], V_lstsq[18*18] 
-            //            = ~324 doubles each = ~2.6KB each, plus many more arrays = total stack usage > GPU limits
-            // SOLUTION NEEDED: Refactor solver to use global/shared memory instead of stack arrays, or
-            //                  implement simplified GPU-specific solver that fits in stack limits
-            
-            // Mark step: entering solver (COMMENTED OUT - causes stack overflow)
-            if (debug_gm_history != nullptr && debug_max_steps > 3) {{
-                debug_gm_history[condition_idx * debug_max_steps + 3] = -1000.0;  // Marker: would enter solver
-            }}
-            
-            // REFACTORED: Call sophisticated solver with global memory arrays
-            // This is the full equilibrium solver using global memory to avoid stack overflow
-            
-            
-            if (condition_idx == 0 || condition_idx == 1 || condition_idx == 2) {{
-                #ifdef VERBOSE_DEBUG
-                printf("GPU DEBUG: CALLING solve_equilibrium_at_condition for condition %d\\n", condition_idx);
-                printf("GPU DEBUG: global_spec_ptr_raw=%p, thread_spec address=%p\\n", global_spec_ptr_raw, &thread_spec);
-                printf("GPU DEBUG: Thread %d thread_spec fields after copy:\\n", condition_idx);
-                printf("  num_statevars=%d (should be 3)\\n", thread_spec.num_statevars);
-                printf("  num_components=%d (should be 3)\\n", thread_spec.num_components);
-                printf("  prescribed_system_amount=%f\\n", thread_spec.prescribed_system_amount);
-                printf("  num_prescribed_mole_fraction_conditions=%d\\n", thread_spec.num_prescribed_mole_fraction_conditions);
-                printf("  initial_chemical_potentials[0]=%f\\n", thread_spec.initial_chemical_potentials[0]);
-                printf("  initial_chemical_potentials[1]=%f\\n", thread_spec.initial_chemical_potentials[1]);
-                #endif
-                if (thread_spec.num_prescribed_mole_fraction_conditions > 0) {{
-                    #ifdef VERBOSE_DEBUG
-                    printf("  prescribed_mole_fraction_rhs[0]=%f (should be X[1] for this condition)\\n",
-                           thread_spec.prescribed_mole_fraction_rhs[0]);
-                    #endif
-                }}
-            }}
-            solve_equilibrium_at_condition(
-                condition_idx,           // thread_id
-                &thread_spec,           // thread-local system specification with correct X[1]
-                &condition_args_single, // conditions for this point
-                &equilibrium_result,    // result structure
-                &device_phase_data,     // phase data
-                initial_data_byte_array + struct_offset, // initial phases for THIS thread (offset into array)
-                device_grid,            // grid data (can be null)
-                thread_mole_fractions,  // NEW: Pass the actual mole fractions from condition
-                // Global memory arrays (per-thread slices)
-                thread_A_lstsq_copy, thread_U_lstsq, thread_V_lstsq,
-                thread_singular_values_lstsq, thread_superdiag_lstsq,
-                thread_U_inv, thread_V_inv, thread_singular_values_inv, 
-                thread_superdiag_inv, thread_work_inv,
-                thread_x_dof, thread_grad, thread_hess,
-                thread_masses, thread_mass_jac, thread_phase_matrix,
-                thread_equilibrium_matrix, thread_equilibrium_rhs, thread_eq_soln,
-                work_arrays ? &((double**)work_arrays)[19][(long long)thread_idx * SYSTEM_STATE_SIZE] : nullptr,
-                thread_delta_ms,  // Pass delta_ms global memory pointer
-                thread_phase_compositions,  // Pass phase_compositions global memory pointer
-                thread_phase_amounts_per_mole_atoms,  // Pass phase_amounts_per_mole_atoms global memory pointer
-                max_solver_iterations,
-#ifdef PYCGPU_JANSSON_TARGET
-                // Jansson delta block: trailing region of the results buffer,
-                // laid out after all per-condition result records.
-                results_array + (long long)num_conditions_total * results_per_condition
-                             + (long long)condition_idx * PYJAN_COND_STRIDE
+    int condition_stride,
+    int python_max_statevars,
+    const void* initial_phase_data_ptr,
+    int initial_phase_data_stride,
+    int system_spec_stride,
+    const void* grid_data_ptr_raw,
+    double* debug_gm_history,
+    double* debug_mu_history,
+    int* debug_convergence_history,
+    int* debug_iteration_count,
+    int debug_max_steps,
+    const WorkArrays* work_arrays,
+    const int* grid_block_indices,
+    long long grid_block_stride_bytes,
+    int max_solver_iterations)
+{{
+    const int tid = blockDim.x * blockIdx.x + threadIdx.x;
+    if (tid >= num_conditions_total || work_arrays == nullptr || results_list_ptr_raw == nullptr) return;
+#ifdef PYCGPU_GUARD_SLICES
+    // Memory-safety validation mode (PYCGPU_GUARD=1): threads use even slices
+    // of doubled allocations; odd slices hold magic guards scanned afterwards.
+    const long long slot = (long long)tid * 2;
 #else
-                (double*)0
+    const long long slot = tid;
 #endif
-            );
-            
-            // COMMENTED OUT: Temporary placeholder values (real solver is now being called above)
-            /*
-            equilibrium_result.converged = true;  // Assume convergence for demo
-            equilibrium_result.final_system_gm = system_gm - 100.0;  // Slight improvement to show solver ran
-            for (int i = 0; i < MAX_COMPONENTS; ++i) {{
-                // Demonstrate that solver would modify chemical potentials
-                equilibrium_result.final_chemical_potentials[i] = chemical_potentials[i] - 1000.0 * (i + 1);
-            }}
-            equilibrium_result.num_stable_phases = safe_num_phases;
-            for (int i = 0; i < safe_num_phases && i < MAX_PHASES; ++i) {{
-                equilibrium_result.phase_ids[i] = phase_indices[i];
-                equilibrium_result.NP[i] = phase_amounts[i];
-            }}
-            */
-            
-            // Mark step: solver completed (demo)
-            if (debug_gm_history != nullptr && debug_max_steps > 4) {{
-                debug_gm_history[condition_idx * debug_max_steps + 4] = -2000.0;  // Marker: solver demo completed
-            }}
-            
-            // Debug: Store values after calling solver
-            if (debug_gm_history != nullptr && debug_max_steps > 2 && condition_idx < num_conditions_total) {{
-                int debug_idx = condition_idx * debug_max_steps + 2;
-                debug_gm_history[debug_idx] = equilibrium_result.final_system_gm;  // Result from solver
-                for (int comp = 0; comp < MAX_COMPONENTS && comp < 2; ++comp) {{
-                    debug_mu_history[condition_idx * debug_max_steps * MAX_COMPONENTS + 2 * MAX_COMPONENTS + comp] = equilibrium_result.final_chemical_potentials[comp];
-                }}
-                debug_convergence_history[debug_idx] = equilibrium_result.converged ? 1 : 0;
-                debug_iteration_count[condition_idx] = 6;  // Start + before + solver call + after
-            }}
-            
-            
-            // SAFETY CHECK: Validate solver results
-            if (isnan(equilibrium_result.final_system_gm) || isinf(equilibrium_result.final_system_gm)) {{
-                results_array[base_offset + 0] = -777.0 - (double)condition_idx;  // Solver returned NaN GM
-                results_array[base_offset + 6 + MAX_COMPONENTS] = -100.0 - (double)condition_idx;  // Solver NaN error marker
-                return;
-            }}
-            
-            if (isnan(equilibrium_result.final_chemical_potentials[0]) || isinf(equilibrium_result.final_chemical_potentials[0])) {{
-                results_array[base_offset + 0] = -666.0 - (double)condition_idx;  // Solver returned NaN MU
-                results_array[base_offset + 1] = equilibrium_result.final_chemical_potentials[0];  // Store problematic value
-                results_array[base_offset + 6 + MAX_COMPONENTS] = -110.0 - (double)condition_idx;  // Solver MU NaN error marker
-                return;
-            }}
-            
-            // Store final results from the REAL solver
-            if (tid <= 2) {{
-                #ifdef VERBOSE_DEBUG
-                printf("GPU DEBUG: Thread %d storing final result - equilibrium_result.final_system_gm=%f\\n", 
-                       tid, equilibrium_result.final_system_gm);
-                #endif
-            }}
-            results_array[base_offset + 0] = equilibrium_result.final_system_gm;       // Final GM from solver
-            for (int i = 0; i < MAX_COMPONENTS; ++i) {{
-                results_array[base_offset + 1 + i] = equilibrium_result.final_chemical_potentials[i]; // Final MU from solver
-            }}
-            // Store ALL phase amounts, not just the first one
-            // The old code only stored NP[0], causing GPU to report only 1 phase even when 2 were found
-            // Store phase amounts starting at offset 1 + MAX_COMPONENTS
-            for (int ph_idx = 0; ph_idx < MAX_PHASES; ++ph_idx) {{
-                results_array[base_offset + 1 + MAX_COMPONENTS + ph_idx] = equilibrium_result.NP[ph_idx];
-            }}
-            
-            // Shift other results to make room for all phase amounts
-            int shift_offset = MAX_PHASES - 1;  // We need MAX_PHASES-1 extra spots since we already had 1
-            results_array[base_offset + 1 + MAX_COMPONENTS + MAX_PHASES] = equilibrium_result.converged ? 1.0 : 0.0; // Real convergence from solver
-            results_array[base_offset + 2 + MAX_COMPONENTS + MAX_PHASES] = (double)equilibrium_result.num_stable_phases; // Number of stable phases from solver
-            results_array[base_offset + 3 + MAX_COMPONENTS + MAX_PHASES] = temp;
-            results_array[base_offset + 4 + MAX_COMPONENTS + MAX_PHASES] = pressure;
-            // Two-pass driver flag: 1.0 if any inner run_loop exhausted its
-            // iteration budget (such conditions must be rerun at the full cap).
-            results_array[base_offset + 5 + MAX_COMPONENTS + MAX_PHASES] = equilibrium_result.hit_iteration_cap ? 1.0 : 0.0;
-            
-            // Store Y_phases values (site fractions) from equilibrium_result
-            // Updated offset to account for all phase amounts being stored
-            int y_offset = base_offset + 6 + MAX_COMPONENTS + MAX_PHASES;  // Start after the standard results + all phase amounts
-            for (int phase_idx = 0; phase_idx < MAX_PHASES; ++phase_idx) {{
-                for (int dof_idx = 0; dof_idx < MAX_DOF_PER_PHASE; ++dof_idx) {{
-                    int y_index = phase_idx * MAX_DOF_PER_PHASE + dof_idx;
-                    if (y_index < MAX_PHASES * MAX_DOF_PER_PHASE) {{
-                        results_array[y_offset + y_index] = equilibrium_result.Y_phases[y_index];
-                    }}
-                }}
-            }}
-            
-            // Store X_phases values (mole fractions) from equilibrium_result
-            int x_offset = y_offset + (MAX_PHASES * MAX_DOF_PER_PHASE);  // Start after Y_phases
-            for (int phase_idx = 0; phase_idx < MAX_PHASES; ++phase_idx) {{
-                for (int comp_idx = 0; comp_idx < MAX_COMPONENTS; ++comp_idx) {{
-                    int x_index = phase_idx * MAX_COMPONENTS + comp_idx;
-                    if (x_index < MAX_PHASES * MAX_COMPONENTS) {{
-                        results_array[x_offset + x_index] = equilibrium_result.X_phases[x_index];
-                    }}
-                }}
-            }}
-            
-            // Store phase_ids from equilibrium_result
-            // This was missing, causing all phases to be labeled with ID 0
-            int phase_ids_offset = x_offset + (MAX_PHASES * MAX_COMPONENTS);  // Start after X_phases
-            for (int phase_idx = 0; phase_idx < MAX_PHASES; ++phase_idx) {{
-                results_array[phase_ids_offset + phase_idx] = (double)equilibrium_result.phase_ids[phase_idx];
-            }}
-            
-        }} else {{
-            // No initial data available
-            results_array[base_offset + 0] = -888888.0;  // Mark as no initial data
-            results_array[base_offset + 6 + MAX_COMPONENTS] = -20.0 - (double)condition_idx;  // Error marker
-            
-            // Initialize Y_phases to zero
-            int y_offset = base_offset + 6 + MAX_COMPONENTS + MAX_PHASES;
-            for (int i = 0; i < MAX_PHASES * MAX_DOF_PER_PHASE; ++i) {{
-                results_array[y_offset + i] = 0.0;
-            }}
-            
-            // Initialize X_phases to zero
-            int x_offset = y_offset + (MAX_PHASES * MAX_DOF_PER_PHASE);
-            for (int i = 0; i < MAX_PHASES * MAX_COMPONENTS; ++i) {{
-                results_array[x_offset + i] = 0.0;
-            }}
-        }}
-    }}
+    const long long svd_mn = (long long)MAX_SVD_M * MAX_SVD_N;
+    const long long svd_nn = (long long)MAX_SVD_N * MAX_SVD_N;
+    const long long pm = (long long)MAX_PHASE_MATRIX_DIM * MAX_PHASE_MATRIX_DIM;
+    const long long ndof = MAX_STATEVARS + MAX_DOF_PER_PHASE;
+    const long long cons = (long long)(MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS)
+                           * (MAX_DOF_PER_PHASE + MAX_INTERNAL_CONSTRAINTS);
+    const long long pc = (long long)MAX_PHASES * MAX_COMPONENTS;
+    double* const* w = work_arrays->arrays;
+    PycgpuWork work;
+    work.A_lstsq_copy = w[0] + slot * svd_mn;
+    work.U_lstsq = w[1] + slot * svd_mn;
+    work.V_lstsq = w[2] + slot * svd_nn;
+    work.singular_values_lstsq = w[3] + slot * MAX_SVD_N;
+    work.superdiag_lstsq = w[4] + slot * MAX_SVD_N;
+    work.U_inv = w[5] + slot * pm;
+    work.V_inv = w[6] + slot * pm;
+    work.singular_values_inv = w[7] + slot * MAX_PHASE_MATRIX_DIM;
+    work.superdiag_inv = w[8] + slot * MAX_PHASE_MATRIX_DIM;
+    work.work_inv = w[9] + slot * pm;
+    work.x_dof = w[10] + slot * ndof;
+    work.grad = w[11] + slot * ndof;
+    work.hess = w[12] + slot * ndof * ndof;
+    work.masses = w[13] + slot * MAX_COMPONENTS;
+    work.mass_jac = w[14] + slot * MAX_COMPONENTS * ndof;
+    work.phase_matrix = w[15] + slot * cons;
+    work.equilibrium_matrix = w[16] + slot * MAX_EQ_MATRIX_SIZE;
+    work.equilibrium_rhs = w[17] + slot * MAX_EQ_MATRIX_ROWS;
+    work.eq_soln = w[18] + slot * MAX_EQ_SOLN_LEN;
+    work.system_state = w[19] + slot * SYSTEM_STATE_SIZE;
+    work.delta_ms = w[20] + slot * pc;
+    work.phase_compositions = w[21] + slot * pc;
+    work.phase_amounts_per_mole_atoms = w[22] + slot * pc;
+    double* results = (double*)results_list_ptr_raw;
+    double* jansson_out = (double*)0;
+#ifdef PYCGPU_JANSSON_TARGET
+    // Jansson delta block: trailing region of the results buffer, laid out
+    // after all per-condition result records.
+    jansson_out = results + (long long)num_conditions_total * PYCGPU_RESULTS_PER_CONDITION
+                  + (long long)tid * PYJAN_COND_STRIDE;
+#endif
+    pycgpu_solve_condition(
+        tid,
+        (const double*)global_spec_ptr_raw, system_spec_stride,
+        (const double*)condition_args_list_ptr_raw, condition_stride, python_max_statevars,
+        results,
+        (const double*)initial_phase_data_ptr, initial_phase_data_stride,
+        (const char*)grid_data_ptr_raw, grid_block_indices, grid_block_stride_bytes,
+        g_phase_records_array, {num_records},
+        work, max_solver_iterations, jansson_out);
 }}
 
 }} // extern "C"
 """
-
-    # Apply final cleanup to remove any spurious terms that slipped through
-    full_source = _final_hessian_cleanup(full_source)
-    
-    # NOTE: We keep csst->energy = pr->formulaobj(compset->dof) because it's needed for final GM calculation
-    # The normalization issue is elsewhere
-    
     return full_source

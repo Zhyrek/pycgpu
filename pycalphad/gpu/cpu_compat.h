@@ -1,6 +1,6 @@
 #pragma once
 // Compatibility shims so the generated GPU kernel source compiles as plain C++
-// for the CPU backend (PYCGPU_CPU=1). CUDA qualifiers vanish; the thread-index
+// for the C++ backend ('cpp'). CUDA qualifiers vanish; the thread-index
 // builtins become variables the driver sets per condition so
 // `tid = blockDim.x * blockIdx.x + threadIdx.x` yields the condition index.
 // They stay thread_local NOT for internal parallelism (the backend is

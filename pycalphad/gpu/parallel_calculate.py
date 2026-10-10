@@ -41,7 +41,8 @@ def parallel_calculate(calc_func, call_args, call_kwargs, t_key='T', procs=None,
     """
     t_values = np.atleast_1d(np.asarray(call_kwargs.get(t_key, [])))
     if procs is None:
-        env = os.environ.get('PYCGPU_CALC_PROCS')
+        from pycalphad.backend import _current
+        env = os.environ.get('PYCGPU_CALC_PROCS', _current()[1].calc_procs)
         if env is None:
             procs = 1
         elif int(env) == 0:

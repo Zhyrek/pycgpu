@@ -1,16 +1,92 @@
 #ifndef PHASE_REC_H
 #define PHASE_REC_H
 
-#ifdef PYCGPU_FP32EMU
-// FP32-emulation prototype: round values to float precision at the outputs of
-// the generated model functions and the linear-algebra solves, so the FP64
-// kernel behaves as if those stages ran in single precision. Used to answer
-// empirically whether an FP32 solver pass could produce usable warm starts.
-__device__ inline double pycgpu_f32(double v) { return (double)(float)v; }
-__device__ inline void pycgpu_f32_arr(double* a, int n) {
-    for (int i = 0; i < n; ++i) a[i] = (double)(float)a[i];
-}
-#endif
+
+#ifdef PYCGPU_METAL
+/* Metal has no function pointers. Each callable member is a functor that
+ * stores the model index and dispatches through generated switch functions
+ * (pycgpu_dispatch_*, emitted after the model functions), so call sites such
+ * as `phase_record->obj(x)` and `phase_record->formulafused != nullptr` read
+ * exactly as they do with the CUDA/C++ function-pointer table. */
+enum {
+    PYCGPU_FN_OBJ = 0, PYCGPU_FN_FORMULAOBJ, PYCGPU_FN_FORMULAGRAD, PYCGPU_FN_FORMULAHESS,
+    PYCGPU_FN_INTERNAL_CONS_FUNC, PYCGPU_FN_INTERNAL_CONS_JAC, PYCGPU_FN_MASS_OBJ,
+    PYCGPU_FN_FORMULAMOLE_OBJ, PYCGPU_FN_FORMULAMOLE_GRAD, PYCGPU_FN_FORMULAPARAMGRAD,
+    PYCGPU_FN_FORMULAPARAMMIXED
+};
+double pycgpu_dispatch_scalar(int fn, int model, const double* x);
+void pycgpu_dispatch_array(int fn, int model, double* out, const double* x);
+void pycgpu_dispatch_fused(int model, double* out_eg, double* out_hess, const double* x);
+
+struct pycgpu_func_t {
+    int fn;
+    int model;  /* -1: not provided */
+    double operator()(const double* x) const { return pycgpu_dispatch_scalar(fn, model, x); }
+    explicit operator bool() const { return model >= 0; }
+};
+struct pycgpu_array_func_t {
+    int fn;
+    int model;
+    void operator()(double* out, const double* x) const { pycgpu_dispatch_array(fn, model, out, x); }
+    explicit operator bool() const { return model >= 0; }
+};
+struct pycgpu_fused_func_t {
+    int model;
+    void operator()(double* out_eg, double* out_hess, const double* x) const {
+        pycgpu_dispatch_fused(model, out_eg, out_hess, x);
+    }
+    explicit operator bool() const { return model >= 0; }
+};
+static inline bool operator==(pycgpu_func_t f, decltype(nullptr)) { return f.model < 0; }
+static inline bool operator!=(pycgpu_func_t f, decltype(nullptr)) { return f.model >= 0; }
+static inline bool operator==(pycgpu_array_func_t f, decltype(nullptr)) { return f.model < 0; }
+static inline bool operator!=(pycgpu_array_func_t f, decltype(nullptr)) { return f.model >= 0; }
+static inline bool operator==(pycgpu_fused_func_t f, decltype(nullptr)) { return f.model < 0; }
+static inline bool operator!=(pycgpu_fused_func_t f, decltype(nullptr)) { return f.model >= 0; }
+
+typedef struct PhaseRecord {
+    pycgpu_func_t obj;
+    pycgpu_func_t formulaobj;
+    pycgpu_array_func_t formulagrad;
+    pycgpu_array_func_t formulahess;
+    pycgpu_array_func_t internal_cons_func;
+    pycgpu_array_func_t internal_cons_jac;
+    pycgpu_array_func_t mass_obj;
+    pycgpu_array_func_t formulamole_obj;
+    pycgpu_array_func_t formulamole_grad;
+    pycgpu_array_func_t formulaparamgrad;
+    pycgpu_array_func_t formulaparammixed;
+    pycgpu_fused_func_t formulafused;
+    int num_statevars;
+    int phase_dof;
+    int num_vars;
+    int num_elements;
+    int num_internal_cons;
+    int nonvacant_elements;
+    void init_model(int m, bool has_hess, bool has_fused, bool has_param_derivs,
+                    int ns, int pd, int ne, int nic, int nve) {
+        obj = pycgpu_func_t{PYCGPU_FN_OBJ, m};
+        formulaobj = pycgpu_func_t{PYCGPU_FN_FORMULAOBJ, m};
+        formulagrad = pycgpu_array_func_t{PYCGPU_FN_FORMULAGRAD, m};
+        formulahess = pycgpu_array_func_t{PYCGPU_FN_FORMULAHESS, has_hess ? m : -1};
+        internal_cons_func = pycgpu_array_func_t{PYCGPU_FN_INTERNAL_CONS_FUNC, m};
+        internal_cons_jac = pycgpu_array_func_t{PYCGPU_FN_INTERNAL_CONS_JAC, m};
+        mass_obj = pycgpu_array_func_t{PYCGPU_FN_MASS_OBJ, m};
+        formulamole_obj = pycgpu_array_func_t{PYCGPU_FN_FORMULAMOLE_OBJ, m};
+        formulamole_grad = pycgpu_array_func_t{PYCGPU_FN_FORMULAMOLE_GRAD, m};
+        formulaparamgrad = pycgpu_array_func_t{PYCGPU_FN_FORMULAPARAMGRAD, has_param_derivs ? m : -1};
+        formulaparammixed = pycgpu_array_func_t{PYCGPU_FN_FORMULAPARAMMIXED, has_param_derivs ? m : -1};
+        formulafused = pycgpu_fused_func_t{has_fused ? m : -1};
+        num_statevars = ns;
+        phase_dof = pd;
+        num_vars = ns + pd;
+        num_elements = ne;
+        num_internal_cons = nic;
+        nonvacant_elements = nve > 0 ? nve : ne;
+    }
+} PhaseRecord;
+
+#else  // CUDA / HIP / C++: function-pointer table
 
 typedef double (*pycgpu_func_t)(const double*);
 typedef void (*pycgpu_array_func_t)(double*, const double*);
@@ -89,5 +165,7 @@ typedef struct PhaseRecord {
         nonvacant_elements = 0;
     }
 } PhaseRecord;
+
+#endif // PYCGPU_METAL
 
 #endif // PHASE_REC_H

@@ -425,13 +425,18 @@ __device__ static int pyclap_lstsq_pycalphad(const double* a_rowmajor, int m,
 /* the reference's lowercase/EBCDIC normalization (labels 10-40) is    */
 /* dropped exactly as in pyclap_ilaenv.                                */
 /* ------------------------------------------------------------------ */
-__device__ static int pyclap_ilaenv_lu(int ispec, const char* name,
-                                       const char* opts, int n1, int n2,
+/* OPTS is ignored, and callers pass both literals and local buffers:
+ * Metal deduces its address space. */
+#ifdef PYCGPU_METAL
+template <typename PyclapOpts>
+#endif
+__device__ static int pyclap_ilaenv_lu(int ispec, PYCGPU_LITERAL const char* name,
+                                       PyclapOpts opts, int n1, int n2,
                                        int n3, int n4)
 {
     int nb, nbmin, sname, cname;
     char c1;
-    const char *c2, *c3;
+    PYCGPU_LITERAL const char *c2, *c3;
     (void)opts;   /* OPTS never participates in the TRF/TRI cases */
     (void)n1;
     (void)n2;
@@ -830,93 +835,133 @@ __device__ static void pyclap_dgetf2(int m, int n, double* a, int lda,
 
 /* ------------------------------------------------------------------ */
 /* DGETRF2 (LAPACK master 2026): LU factorization with partial         */
-/* pivoting, recursive version.  RECURSIVE SUBROUTINE in the Fortran;  */
-/* transliterated as a recursive C function (depth <= ~log2(n)+1;      */
-/* n <= 64 in this port, each frame holds a handful of scalars).       */
+/* pivoting, recursive version.  RECURSIVE SUBROUTINE in the Fortran.  */
+/* Metal gives recursive calls no stack, so the recursion runs on an   */
+/* explicit stack of frames instead; the operations and their order    */
+/* are exactly those of the recursive form.  Each level halves         */
+/* MIN(M,N), so 32 frames cover any size.                              */
 /* ------------------------------------------------------------------ */
+struct pyclap_dgetrf2_frame {
+    int m, n;       /* this call's M, N */
+    int off, poff;  /* this call's A and IPIV offsets in the top-level arrays */
+    int n1;
+    int stage;      /* 0: entry; 1: [A11;A21] factored; 2: A22 factored */
+    int info;
+};
+
 __device__ static void pyclap_dgetrf2(int m, int n, double* a, int lda,
                                       int* ipiv, int* info)
 {
     const double one = 1.0, zero = 0.0;
     double sfmin, temp;
-    int i, iinfo, n1, n2;
+    int i, n2, iinfo = 0;
+    struct pyclap_dgetrf2_frame st[32];
+    int sp = 0;
 
-    *info = 0;
-    /* (XERBLA argument validation dropped) */
+    st[0].m = m; st[0].n = n; st[0].off = 0; st[0].poff = 0; st[0].n1 = 0; st[0].stage = 0;
+    for (;;) {
+        double* A = &a[st[sp].off];
+        int* P = &ipiv[st[sp].poff];
+        int fm = st[sp].m, fn = st[sp].n, n1 = st[sp].n1;
+        bool done = true;
 
-    /* Quick return if possible */
-    if (m == 0 || n == 0)
-        return;
-
-    if (m == 1) {
-        /* Use unblocked code for one row case.
-           Just need to handle IPIV and INFO. */
-        ipiv[0] = 1;
-        if (a[0] == zero)
-            *info = 1;
-    } else if (n == 1) {
-        /* Use unblocked code for one column case. */
-        /* Compute machine safe minimum */
-        sfmin = pyclap_dlamch('S');
-        /* Find pivot and test for singularity */
-        i = pyclap_idamax(m, &a[0], 1);
-        ipiv[0] = i;
-        if (a[i - 1] != zero) {
-            /* Apply the interchange */
-            if (i != 1) {
-                temp = a[0];
-                a[0] = a[i - 1];
-                a[i - 1] = temp;
-            }
-            /* Compute elements 2:M of the column */
-            if (fabs(a[0]) >= sfmin) {
-                pyclap_dscal(m - 1, one / a[0], &a[1], 1);
-            } else {
-                for (i = 1; i <= m - 1; i++) {               /* DO 10 */
-                    a[i] = a[i] / a[0];      /* A(1+I,1) = A(1+I,1)/A(1,1) */
+        if (st[sp].stage == 0) {
+            st[sp].info = 0;
+            /* (XERBLA argument validation dropped) */
+            if (fm == 0 || fn == 0) {
+                /* Quick return if possible */
+            } else if (fm == 1) {
+                /* Use unblocked code for one row case.
+                   Just need to handle IPIV and INFO. */
+                P[0] = 1;
+                if (A[0] == zero)
+                    st[sp].info = 1;
+            } else if (fn == 1) {
+                /* Use unblocked code for one column case. */
+                /* Compute machine safe minimum */
+                sfmin = pyclap_dlamch('S');
+                /* Find pivot and test for singularity */
+                i = pyclap_idamax(fm, &A[0], 1);
+                P[0] = i;
+                if (A[i - 1] != zero) {
+                    /* Apply the interchange */
+                    if (i != 1) {
+                        temp = A[0];
+                        A[0] = A[i - 1];
+                        A[i - 1] = temp;
+                    }
+                    /* Compute elements 2:M of the column */
+                    if (fabs(A[0]) >= sfmin) {
+                        pyclap_dscal(fm - 1, one / A[0], &A[1], 1);
+                    } else {
+                        for (i = 1; i <= fm - 1; i++) {          /* DO 10 */
+                            A[i] = A[i] / A[0];  /* A(1+I,1) = A(1+I,1)/A(1,1) */
+                        }
+                    }
+                } else {
+                    st[sp].info = 1;
                 }
+            } else {
+                /* Use recursive code */
+                n1 = pyclap_imin(fm, fn) / 2;
+                st[sp].n1 = n1;
+                st[sp].stage = 1;
+                /*        [ A11 ]
+                   Factor [ --- ]
+                          [ A21 ]   */
+                st[sp + 1].m = fm; st[sp + 1].n = n1;
+                st[sp + 1].off = st[sp].off; st[sp + 1].poff = st[sp].poff;
+                st[sp + 1].n1 = 0; st[sp + 1].stage = 0;
+                ++sp;
+                done = false;
             }
+        } else if (st[sp].stage == 1) {
+            if (st[sp].info == 0 && iinfo > 0)
+                st[sp].info = iinfo;
+            n2 = fn - n1;
+
+            /*                       [ A12 ]
+               Apply interchanges to [ --- ]
+                                     [ A22 ]   */
+            pyclap_dlaswp(n2, &A[n1 * lda], lda, 1, n1, P, 1);
+
+            /* Solve A12 */
+            pyclap_dtrsm('L', 'L', 'N', 'U', n1, n2, one, A, lda,
+                         &A[n1 * lda], lda);
+
+            /* Update A22 */
+            pyclap_dgemm('N', 'N', fm - n1, n2, n1, -one, &A[n1], lda,
+                         &A[n1 * lda], lda, one, &A[n1 + n1 * lda], lda);
+
+            /* Factor A22 */
+            st[sp].stage = 2;
+            st[sp + 1].m = fm - n1; st[sp + 1].n = n2;
+            st[sp + 1].off = st[sp].off + n1 + n1 * lda;
+            st[sp + 1].poff = st[sp].poff + n1;
+            st[sp + 1].n1 = 0; st[sp + 1].stage = 0;
+            ++sp;
+            done = false;
         } else {
-            *info = 1;
-        }
-    } else {
-        /* Use recursive code */
-        n1 = pyclap_imin(m, n) / 2;
-        n2 = n - n1;
+            /* Adjust INFO and the pivot indices */
+            if (st[sp].info == 0 && iinfo > 0)
+                st[sp].info = iinfo + n1;
+            for (i = n1 + 1; i <= pyclap_imin(fm, fn); i++) {    /* DO 20 */
+                P[i - 1] = P[i - 1] + n1;
+            }
 
-        /*        [ A11 ]
-           Factor [ --- ]
-                  [ A21 ]   */
-        pyclap_dgetrf2(m, n1, a, lda, ipiv, &iinfo);
-        if (*info == 0 && iinfo > 0)
-            *info = iinfo;
-
-        /*                       [ A12 ]
-           Apply interchanges to [ --- ]
-                                 [ A22 ]   */
-        pyclap_dlaswp(n2, &a[n1 * lda], lda, 1, n1, ipiv, 1);
-
-        /* Solve A12 */
-        pyclap_dtrsm('L', 'L', 'N', 'U', n1, n2, one, a, lda,
-                     &a[n1 * lda], lda);
-
-        /* Update A22 */
-        pyclap_dgemm('N', 'N', m - n1, n2, n1, -one, &a[n1], lda,
-                     &a[n1 * lda], lda, one, &a[n1 + n1 * lda], lda);
-
-        /* Factor A22 */
-        pyclap_dgetrf2(m - n1, n2, &a[n1 + n1 * lda], lda, &ipiv[n1],
-                       &iinfo);
-
-        /* Adjust INFO and the pivot indices */
-        if (*info == 0 && iinfo > 0)
-            *info = iinfo + n1;
-        for (i = n1 + 1; i <= pyclap_imin(m, n); i++) {      /* DO 20 */
-            ipiv[i - 1] = ipiv[i - 1] + n1;
+            /* Apply interchanges to A21 */
+            pyclap_dlaswp(n1, &A[0], lda, n1 + 1, pyclap_imin(fm, fn), P, 1);
         }
 
-        /* Apply interchanges to A21 */
-        pyclap_dlaswp(n1, &a[0], lda, n1 + 1, pyclap_imin(m, n), ipiv, 1);
+        if (done) {
+            /* Return from this call: its INFO becomes the caller's IINFO. */
+            iinfo = st[sp].info;
+            if (sp == 0) {
+                *info = iinfo;
+                return;
+            }
+            --sp;
+        }
     }
 }
 

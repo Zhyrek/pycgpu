@@ -58,6 +58,7 @@ env/
 
 # Exception for GPU source files - these should be tracked
 !pycalphad/gpu/*.h
+!tools/*.h
 !pycalphad/gpu/*.c
 !pycalphad/gpu/*.cu
 
@@ -80,3 +81,4 @@ STANDUP_REPORT.md
 deploy_gpu.sh
 advanced_strategy/
 NOTES_PYCALPHAD_CORE.md
+.DS_Store

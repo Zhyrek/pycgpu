@@ -1,7 +1,7 @@
 """
-CPU backend (initial pass): compiles the SAME generated kernel source as the
-GPU path into a plain C++ shared library (single-threaded loop over conditions)
-and runs it on the host. Enabled with PYCGPU_CPU=1 alongside gpu=True.
+The 'cpp' backend: compiles the SAME generated kernel source as the GPU
+path into a plain C++ shared library and runs it on the host, one thread per
+core, each thread looping over its share of the conditions.
 
 Reusing the generated source byte-for-byte gives full logic parity with the
 CPU-matched GPU solver; only the execution substrate differs.
@@ -98,15 +98,11 @@ extern "C" void pycgpu_cpu_point_hull(
     const double* lincomb_coefs, const double* lincomb_rhs,
     const int* num_lincomb, int max_lincomb,
     double* chemical_potentials, double* out_energy,
-    double* result_fractions, int* result_simplex, int n_conditions)
+    double* result_fractions, int* result_simplex, int n_conditions, int n_threads)
 {
-    // Same opt-in threading as pycgpu_cpu_run_all: conditions are
-    // independent, outputs are per-condition slots, and the CUDA-index
-    // shims are thread_local, so results are bit-identical at any thread
-    // count. The hull dominates the accelerated wall for many-phase
-    // systems (8.6 of 10.5 s for the 9.4k-condition AlCuFe example).
-    const char* nthr_env = std::getenv("PYCGPU_CPU_THREADS");
-    int n_threads = nthr_env ? atoi(nthr_env) : 1;
+    // Threads over conditions: conditions are independent, outputs are
+    // per-condition slots, and the CUDA-index shims are thread_local, so
+    // results are bit-identical at any thread count.
     if (n_threads <= 0) n_threads = (int)std::thread::hardware_concurrency();
     if (n_threads > n_conditions) n_threads = n_conditions;
     if (n_threads > 1) {
@@ -164,23 +160,16 @@ extern "C" void pycgpu_cpu_run_all(
     const void* work_arrays,
     const int* grid_block_indices,
     long long grid_block_stride_bytes,
-    int max_solver_iterations)
+    int max_solver_iterations,
+    int n_threads)
 {
     init_all_gpu_phase_records();
-    // PYCGPU_CPU_TSTART=<t>: start the serial loop at condition t (debug aid
-    // for isolating cross-condition state carryover; earlier conditions keep
-    // their initialization values in the results buffer).
-    const char* tstart_env = std::getenv("PYCGPU_CPU_TSTART");
-    const int t_start = tstart_env ? atoi(tstart_env) : 0;
-    // PYCGPU_CPU_THREADS=<n>: opt-in in-process parallelism over conditions
-    // (0 = all hardware threads). Safe by construction: each condition is
-    // independent, indexes its OWN work-array slot, and the CUDA-index shims
-    // (threadIdx/blockIdx) are thread_local, so per-condition results are
-    // BIT-IDENTICAL for any thread count. Default 1 keeps the documented
-    // single-threaded behavior (process-based parallelism, e.g. ESPEI
-    // walkers, composes without oversubscription).
-    const char* nthr_env = std::getenv("PYCGPU_CPU_THREADS");
-    int n_threads = nthr_env ? atoi(nthr_env) : 1;
+    const int t_start = 0;
+    // Threads over conditions (0 = all hardware threads). Safe by
+    // construction: each condition is independent, indexes its OWN
+    // work-array slot, and the CUDA-index shims (threadIdx/blockIdx) are
+    // thread_local, so per-condition results are BIT-IDENTICAL for any
+    // thread count.
     if (n_threads <= 0) n_threads = (int)std::thread::hardware_concurrency();
     if (n_threads > num_conditions_total - t_start) n_threads = num_conditions_total - t_start;
     if (n_threads < 1) n_threads = 1;
@@ -306,7 +295,7 @@ def build_cpu_library(full_kernel_source: str, define_flags, cache_dir: str, ver
                         ctypes.c_void_p, ctypes.c_void_p,
                         ctypes.c_void_p, ctypes.c_int,
                         ctypes.c_void_p, ctypes.c_void_p,
-                        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
+                        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
     fn = lib.pycgpu_cpu_run_all
     fn.restype = None
     fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
@@ -316,7 +305,7 @@ def build_cpu_library(full_kernel_source: str, define_flags, cache_dir: str, ver
                    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
                    ctypes.c_int,
                    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_longlong,
-                   ctypes.c_int]
+                   ctypes.c_int, ctypes.c_int]
     return lib
 
 
@@ -324,7 +313,8 @@ def run_cpu_backend(lib, *, system_spec, condition_args_doubles, results,
                     num_conditions, condition_stride, python_max_statevars,
                     initial_phase_data, initial_phase_data_stride, system_spec_stride,
                     grid_data, grid_block_indices, grid_block_stride_bytes,
-                    work_arrays_ptr_table, max_solver_iterations=1000, verbose=False):
+                    work_arrays_ptr_table, max_solver_iterations=1000, threads=None,
+                    verbose=False):
     """Run the single-threaded C++ solver directly on host numpy buffers (zero copies).
 
     All array arguments are contiguous host numpy arrays allocated by the
@@ -343,7 +333,69 @@ def run_cpu_backend(lib, *, system_spec, condition_args_doubles, results,
         _p(work_arrays_ptr_table),
         _p(grid_block_indices),
         ctypes.c_longlong(grid_block_stride_bytes),
-        int(max_solver_iterations))
+        int(max_solver_iterations), solver_threads() if threads is None else int(threads))
 
     if verbose:
-        print(f"[CPU-C++] Solved {num_conditions} conditions on host (single-threaded)")
+        print(f"[CPU-C++] Solved {num_conditions} conditions on host")
+
+
+def solver_threads():
+    """Worker threads for the C++ solver and hull (0 = all cores)."""
+    from pycalphad.backend import solver_threads as _threads
+    return _threads()
+
+
+def solve_rows(lib, *, sizes, rows, system_spec, condition_args, initial_phase_data, results,
+               grid_data, grid_block_indices, grid_block_stride_bytes,
+               condition_stride, python_max_statevars, initial_phase_data_stride,
+               system_spec_stride, results_per_condition, max_solver_iterations=1000,
+               threads=None, memory_budget=None, jansson=None):
+    """Solve the conditions listed in `rows` (indices into the packed
+    per-condition buffers) and write their results rows in place, and their
+    Jansson delta rows into `jansson` ((n, PYJAN_COND_STRIDE)) for libraries
+    built with the Jansson epilogue.
+
+    Work arrays are allocated per chunk so the memory stays bounded."""
+    from pycalphad.gpu.work_arrays import allocate_work_arrays, per_condition_bytes
+    rows = np.asarray(rows, dtype=np.int64)
+    if rows.size == 0:
+        return
+    take = lambda flat, stride: np.ascontiguousarray(flat.reshape(-1, stride)[rows]).reshape(-1)
+    spec = take(system_spec, system_spec_stride)
+    cond = take(condition_args, condition_stride)
+    ipd = take(initial_phase_data, initial_phase_data_stride)
+    res_view = results.reshape(-1, results_per_condition)
+    res = np.ascontiguousarray(res_view[rows]).reshape(-1)
+    gbi = (np.ascontiguousarray(np.asarray(grid_block_indices, dtype=np.int32)[rows])
+           if grid_block_indices is not None else None)
+    budget = memory_budget or (1 << 30)
+    chunk = max(1, min(rows.size, budget // per_condition_bytes(sizes)))
+    _, table = allocate_work_arrays(np, sizes, chunk, lambda a: a.ctypes.data)
+    work = _  # keep the arrays alive while the table is in use
+    jansson_stride = jansson.shape[1] if jansson is not None else 0
+    for s in range(0, rows.size, chunk):
+        e = min(s + chunk, rows.size)
+        chunk_res = res[s * results_per_condition:e * results_per_condition]
+        if jansson_stride:
+            # The library writes the delta blocks after the chunk's result
+            # records, so the chunk gets a private buffer with room for them.
+            chunk_res = np.zeros((e - s) * (results_per_condition + jansson_stride))
+        run_cpu_backend(
+            lib, system_spec=spec[s * system_spec_stride:e * system_spec_stride],
+            condition_args_doubles=cond[s * condition_stride:e * condition_stride],
+            results=chunk_res,
+            num_conditions=e - s, condition_stride=condition_stride,
+            python_max_statevars=python_max_statevars,
+            initial_phase_data=ipd[s * initial_phase_data_stride:e * initial_phase_data_stride],
+            initial_phase_data_stride=initial_phase_data_stride,
+            system_spec_stride=system_spec_stride, grid_data=grid_data,
+            grid_block_indices=gbi[s:e] if gbi is not None else None,
+            grid_block_stride_bytes=grid_block_stride_bytes,
+            work_arrays_ptr_table=table, max_solver_iterations=max_solver_iterations,
+            threads=threads)
+        if jansson_stride:
+            n_rec = (e - s) * results_per_condition
+            res[s * results_per_condition:e * results_per_condition] = chunk_res[:n_rec]
+            jansson[rows[s:e]] = chunk_res[n_rec:].reshape(e - s, jansson_stride)
+    del work
+    res_view[rows] = res.reshape(-1, results_per_condition)

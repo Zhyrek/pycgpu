@@ -3,7 +3,7 @@
 Solves an arbitrary LIST of conditions (T, P, N, X-vector per point) in one
 kernel launch, with optional per-point phase restriction (single-phase
 "isolated" solves) and per-point fit-parameter vectors (walker batching).
-See POINT_SOLVER_DESIGN.md for the verified array-format notes.
+See docs/backends/point_solver.md for the verified array-format notes.
 
 This module deliberately does NOT modify the reference CPU code: the hull
 twin below calls the same Cython ``hyperplane()`` routine the reference
@@ -415,12 +415,7 @@ class PointBatchSolver:
         if os.environ.get('PYCGPU_OUTER_ADD', '1') not in ('0', 'off', ''):
             define_flags.append('-DPYCGPU_OUTER_ADD')
 
-        gpu_dir = os.path.dirname(os.path.abspath(__file__))
-        hasher = hashlib.md5()
-        for hdr in ("phase_rec.h", "comp_set.h", "hyperplane.h",
-                    "minimizer.h", "eqsolver.h", "gpu_codegen.py"):
-            with open(os.path.join(gpu_dir, hdr), "rb") as f:
-                hasher.update(f.read())
+        from pycalphad.gpu.gpu_codegen import solver_headers_fingerprint
         model_hasher = hashlib.md5()
         for ph in sorted(shim.phases):
             model_hasher.update(ph.encode())
@@ -430,7 +425,7 @@ class PointBatchSolver:
             ",".join(sorted(c.name for c in shim.components)),
             "statevars:" + ",".join(str(sv) for sv in shim.phase_record_factory.state_variables),
             "models:" + model_hasher.hexdigest(),
-            str(sorted(self.dynamic_sizes.items())), hasher.hexdigest(),
+            str(sorted(self.dynamic_sizes.items())), solver_headers_fingerprint(),
         ])
         cache_key = hashlib.md5(key_input.encode()).hexdigest()
         cache_dir = _kernel_cache_dir()
@@ -564,10 +559,8 @@ class PointBatchSolver:
         EQS = int(ds['MAX_EQ_SOLN_LEN'])
         SSS = int(ds['SYSTEM_STATE_SIZE'])
         tpb = 64
-        wa_shapes = [SVD * SVD, SVD * SVD, SVD * SVD, SVD, SVD,
-                     PMD * PMD, PMD * PMD, PMD, PMD, PMD * PMD,
-                     DOFS, DOFS, DOFS * DOFS, MC, MC * DOFS, PMD * PMD,
-                     EQM, EQR, EQS, SSS, MP * MC, MP * MC, MP * MC]
+        from pycalphad.gpu.work_arrays import work_array_strides
+        wa_shapes = [stride for _, stride in work_array_strides(self.dynamic_sizes)]
         # Thread-chunked launches bound the dominant work-array memory (same
         # rationale as PYCGPU_CHUNK in the main pipeline); slices of the
         # per-condition buffers are zero-copy views and sequential launches
@@ -675,6 +668,7 @@ def device_point_hull(points, solver, X_row, GM_rows, combo_idx, Phase_row,
         with X_row (for the starting-data extraction).
     """
     import ctypes
+    from pycalphad.gpu.cpu_backend import solver_threads
     ncomp = len(nonvacant_elements)
     n = len(points)
     m = X_row.shape[0]
@@ -731,7 +725,7 @@ def device_point_hull(points, solver, X_row, GM_rows, combo_idx, Phase_row,
             p(X_row), p(GM_flat), p(x_base), p(gm_base), p(m_points),
             ctypes.c_int(ncomp), p(fixed_idx), p(nfixed),
             p(coefs), p(rhs), p(nlc), ctypes.c_int(max_lc),
-            p(mu), p(oe), p(fr), p(sx), ctypes.c_int(n))
+            p(mu), p(oe), p(fr), p(sx), ctypes.c_int(n), ctypes.c_int(solver_threads()))
     else:
         cp = solver._cp
         d = {k: cp.asarray(v) for k, v in

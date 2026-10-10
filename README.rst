@@ -55,6 +55,19 @@ Installation
 ------------
 See `Installation Instructions`_.
 
+Compiled backends
+-----------------
+Equilibrium calculations can run on a compiled solver (multi-core CPU,
+NVIDIA GPUs through CuPy, or Apple-silicon GPUs through Metal). Select one
+once and existing scripts use it unchanged::
+
+    import pycalphad
+    pycalphad.set_backend('auto')   # or 'cpp', 'gpu', 'cuda', 'metal'
+
+See `BACKENDS.md`_ for requirements, options, accuracy and benchmarks.
+
+.. _BACKENDS.md: BACKENDS.md
+
 Examples
 --------
 Jupyter notebooks with examples are available on `NBViewer`_ and `pycalphad.org`_.

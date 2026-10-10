@@ -1,8 +1,7 @@
 """Create an array of SystemSpecification structs for multi-condition GPU calculations."""
 
 import numpy as np
-from .gpu_equilibrium import (_get_c_define, _populate_system_specification, 
-                             _create_system_specification_struct)
+from .gpu_equilibrium import _get_c_define, _populate_system_specification
 from .gpu_systemspec_flat import create_flat_system_specification, apply_safe_padding
 from .gpu_properties_subset import PropertiesSubset
 

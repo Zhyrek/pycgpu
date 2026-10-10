@@ -19,29 +19,18 @@
  *     is NOT transliterated: this port is always called with NCVT>0 and
  *     NRU>0, so that branch returns info = -999 to make misuse loud.
  *
- * GOTO label mapping (Fortran label -> C construct):
- *   10  -> for loop  (lower-to-upper bidiagonal rotation)
- *   20  -> for loop  (smax over d)
- *   30  -> for loop  (smax over e)
- *   40  -> for loop  (sminoa recurrence), GO TO 50 -> C goto L50
- *   50  -> C label L50
- *   60  -> C label L60 (top of main iteration loop)
- *   70  -> for loop  (find split), GO TO 80 -> C goto L80
- *   80  -> C label L80
- *   90  -> C label L90
- *   100 -> for loop  (forward convergence test), GO TO 60 -> C goto L60
- *   110 -> for loop  (backward convergence test), GO TO 60 -> C goto L60
- *   120 -> for loop  (zero-shift QR, top to bottom)
- *   130 -> for loop  (zero-shift QR, bottom to top)
- *   140 -> for loop  (shifted QR, top to bottom)
- *   150 -> for loop  (shifted QR, bottom to top)
- *   160 -> C label L160 (make singular values positive)
- *   170 -> for loop  (sign fix)
- *   180 -> for loop  (scan for smallest d)
- *   190 -> for loop  (insertion-sort outer)
- *   200 -> C label L200 (nonconvergence: count nonzero e)
- *   210 -> for loop  (count nonzero e)
- *   220 -> C label L220 (return)
+ * Fortran label -> C construct (structured control flow, no goto: Metal
+ * Shading Language has none):
+ *   10..40   -> for loops; GO TO 50 -> break out of the DO 40 loop
+ *   60       -> top of the main for(;;) loop; GO TO 60 -> continue
+ *   70       -> for loop (find split); GO TO 80 -> break with split = 1
+ *   80, 90   -> the split / no-split branches after the DO 70 loop
+ *   100, 110 -> convergence-test loops; GO TO 60 -> break + continue
+ *   120..150 -> for loops (zero-shift and shifted QR sweeps)
+ *   160      -> the code after the main loop (GO TO 160 -> break)
+ *   170..190 -> for loops (sign fix, insertion sort)
+ *   200, 210 -> nonconvergence: failed = 1, count nonzero e, return
+ *   220      -> return info
  */
 
 #ifndef PYCLAP_LAPACK_DBDSQR_H
@@ -116,8 +105,11 @@ __device__ static int pyclap_dbdsqr(char uplo, int n, int ncvt, int nru,
 
     if (n == 0)
         return info;
-    if (n == 1)
-        goto L160; /* Fortran: IF( N.EQ.1 ) GO TO 160 */
+    /* Structured control flow (Metal has no goto): Fortran label 60 is the
+     * main for(;;) loop, GO TO 60 is `continue`, GO TO 160 breaks out to the
+     * sorting epilogue, and GO TO 200 sets `failed`. */
+    int failed = 0;
+    if (n != 1) { /* Fortran: IF( N.EQ.1 ) GO TO 160 */
 
     /* ROTATE is true if any singular vectors desired, false otherwise */
     rotate = (ncvt > 0) || (nru > 0) || (ncc > 0);
@@ -175,16 +167,16 @@ __device__ static int pyclap_dbdsqr(char uplo, int n, int ncvt, int nru,
     if (tol >= ZERO) {
         /* Relative accuracy desired */
         sminoa = fabs(d[0]);
-        if (sminoa == ZERO)
-            goto L50; /* GO TO 50 */
-        mu = sminoa;
-        for (i = 2; i <= n; i++) { /* DO 40 */
-            mu = fabs(d[i - 1]) * (mu / (mu + fabs(e[i - 2])));
-            sminoa = pyclap_bdsqr_dmin(sminoa, mu);
-            if (sminoa == ZERO)
-                goto L50; /* GO TO 50 */
+        if (sminoa != ZERO) { /* IF( SMINOA.EQ.ZERO ) GO TO 50 */
+            mu = sminoa;
+            for (i = 2; i <= n; i++) { /* DO 40 */
+                mu = fabs(d[i - 1]) * (mu / (mu + fabs(e[i - 2])));
+                sminoa = pyclap_bdsqr_dmin(sminoa, mu);
+                if (sminoa == ZERO)
+                    break; /* GO TO 50 */
+            }
         }
-    L50: /* Fortran label 50 */
+        /* Fortran label 50 */
         sminoa = sminoa / sqrt((double)n);
         thresh = pyclap_bdsqr_dmax(tol * sminoa,
                                    MAXITR * (n * (n * unfl)));
@@ -206,46 +198,52 @@ __device__ static int pyclap_dbdsqr(char uplo, int n, int ncvt, int nru,
     /* M points to last element of unconverged part of matrix */
     m = n;
 
-/* Begin main iteration loop */
-L60: /* Fortran label 60 */
+    /* Begin main iteration loop (Fortran label 60) */
+    for (;;) {
 
     /* Check for convergence or exceeding iteration count */
     if (m <= 1)
-        goto L160; /* GO TO 160 */
+        break; /* GO TO 160 */
 
     if (iter >= n) {
         iter = iter - n;
         iterdivn = iterdivn + 1;
-        if (iterdivn >= maxitdivn)
-            goto L200; /* GO TO 200 */
+        if (iterdivn >= maxitdivn) {
+            failed = 1;
+            break; /* GO TO 200 */
+        }
     }
 
     /* Find diagonal block of matrix to work on */
     if (tol < ZERO && fabs(d[m - 1]) <= thresh)
         d[m - 1] = ZERO;
     smax = fabs(d[m - 1]);
+    int split = 0;
     for (lll = 1; lll <= m - 1; lll++) { /* DO 70 */
         ll = m - lll;
         abss = fabs(d[ll - 1]);
         abse = fabs(e[ll - 1]);
         if (tol < ZERO && abss <= thresh)
             d[ll - 1] = ZERO;
-        if (abse <= thresh)
-            goto L80; /* GO TO 80 */
+        if (abse <= thresh) {
+            split = 1;
+            break; /* GO TO 80 */
+        }
         smax = pyclap_bdsqr_dmax(pyclap_bdsqr_dmax(smax, abss), abse);
     }
-    ll = 0;
-    goto L90; /* GO TO 90 */
-L80: /* Fortran label 80 */
-    e[ll - 1] = ZERO;
+    if (split) { /* Fortran label 80 */
+        e[ll - 1] = ZERO;
 
-    /* Matrix splits since E(LL) = 0 */
-    if (ll == m - 1) {
-        /* Convergence of bottom singular value, return to top of loop */
-        m = m - 1;
-        goto L60; /* GO TO 60 */
+        /* Matrix splits since E(LL) = 0 */
+        if (ll == m - 1) {
+            /* Convergence of bottom singular value, return to top of loop */
+            m = m - 1;
+            continue; /* GO TO 60 */
+        }
+    } else {
+        ll = 0; /* GO TO 90 */
     }
-L90: /* Fortran label 90 */
+    /* Fortran label 90 */
     ll = ll + 1;
 
     /* E(LL) through E(M-1) are nonzero, E(LL-1) is zero */
@@ -268,7 +266,7 @@ L90: /* Fortran label 90 */
             pyclap_drot(ncc, &c[m - 2], ldc, &c[m - 1], ldc, cosl,
                         sinl); /* C( M-1, 1 ), C( M, 1 ) */
         m = m - 2;
-        goto L60; /* GO TO 60 */
+        continue; /* GO TO 60 */
     }
 
     /* If working on new submatrix, choose shift direction
@@ -290,7 +288,7 @@ L90: /* Fortran label 90 */
         if (fabs(e[m - 2]) <= fabs(tol) * fabs(d[m - 1]) ||
             (tol < ZERO && fabs(e[m - 2]) <= thresh)) {
             e[m - 2] = ZERO;
-            goto L60; /* GO TO 60 */
+            continue; /* GO TO 60 */
         }
 
         if (tol >= ZERO) {
@@ -298,14 +296,18 @@ L90: /* Fortran label 90 */
              * apply convergence criterion forward */
             mu = fabs(d[ll - 1]);
             smin = mu;
+            int restart = 0;
             for (lll = ll; lll <= m - 1; lll++) { /* DO 100 */
                 if (fabs(e[lll - 1]) <= tol * mu) {
                     e[lll - 1] = ZERO;
-                    goto L60; /* GO TO 60 */
+                    restart = 1;
+                    break; /* GO TO 60 */
                 }
                 mu = fabs(d[lll]) * (mu / (mu + fabs(e[lll - 1])));
                 smin = pyclap_bdsqr_dmin(smin, mu);
             }
+            if (restart)
+                continue;
         }
 
     } else {
@@ -314,7 +316,7 @@ L90: /* Fortran label 90 */
         if (fabs(e[ll - 1]) <= fabs(tol) * fabs(d[ll - 1]) ||
             (tol < ZERO && fabs(e[ll - 1]) <= thresh)) {
             e[ll - 1] = ZERO;
-            goto L60; /* GO TO 60 */
+            continue; /* GO TO 60 */
         }
 
         if (tol >= ZERO) {
@@ -322,14 +324,18 @@ L90: /* Fortran label 90 */
              * apply convergence criterion backward */
             mu = fabs(d[m - 1]);
             smin = mu;
+            int restart = 0;
             for (lll = m - 1; lll >= ll; lll--) { /* DO 110 */
                 if (fabs(e[lll - 1]) <= tol * mu) {
                     e[lll - 1] = ZERO;
-                    goto L60; /* GO TO 60 */
+                    restart = 1;
+                    break; /* GO TO 60 */
                 }
                 mu = fabs(d[lll - 1]) * (mu / (mu + fabs(e[lll - 1])));
                 smin = pyclap_bdsqr_dmin(smin, mu);
             }
+            if (restart)
+                continue;
         }
     }
     oldll = ll;
@@ -525,11 +531,23 @@ L90: /* Fortran label 90 */
         }
     }
 
-    /* QR iteration finished, go back and check convergence */
-    goto L60; /* GO TO 60 */
+    /* QR iteration finished, go back and check convergence (GO TO 60) */
+    } /* main iteration loop */
 
-/* All singular values converged, so make them positive */
-L160: /* Fortran label 160 */
+    if (failed) {
+        /* Maximum number of iterations exceeded, failure to converge
+         * (Fortran label 200) */
+        info = 0;
+        for (i = 1; i <= n - 1; i++) { /* DO 210 */
+            if (e[i - 1] != ZERO)
+                info = info + 1;
+        }
+        return info; /* GO TO 220 */
+    }
+    } /* n != 1 */
+
+    /* All singular values converged, so make them positive
+     * (Fortran label 160) */
     for (i = 1; i <= n; i++) { /* DO 170 */
         if (d[i - 1] == ZERO) {
             /* Avoid -ZERO */
@@ -571,17 +589,7 @@ L160: /* Fortran label 160 */
                              ldc); /* C( ISUB, 1 ), C( N+1-I, 1 ) */
         }
     }
-    goto L220; /* GO TO 220 */
-
-/* Maximum number of iterations exceeded, failure to converge */
-L200: /* Fortran label 200 */
-    info = 0;
-    for (i = 1; i <= n - 1; i++) { /* DO 210 */
-        if (e[i - 1] != ZERO)
-            info = info + 1;
-    }
-L220: /* Fortran label 220 */
-    return info;
+    return info; /* Fortran label 220 */
 }
 
 #endif /* PYCLAP_LAPACK_DBDSQR_H */

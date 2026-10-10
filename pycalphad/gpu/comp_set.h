@@ -86,25 +86,8 @@ struct CompositionSet {
         NP = phase_amt;
         // Pass full workspace DOF to energy functions - they now expect workspace format
         energy = phase_record->obj(dof);
-        #ifdef PYCGPU_FP32EMU
-        energy = pycgpu_f32(energy);
-        #endif
-        
-        // DEBUG: Check memory before mass_obj
-        #ifdef VERBOSE_DEBUG
-        if (workspace_num_statevars == 3) {
-            printf("GPU DEBUG: update() before mass_obj - workspace_num_statevars still = %d\\n", workspace_num_statevars);
-        }
-        #endif
         
         phase_record->mass_obj(X, dof);  // Fills entire X array at once
-        
-        // DEBUG: Check memory after mass_obj
-        #ifdef VERBOSE_DEBUG
-        if (workspace_num_statevars != 3) {
-            printf("GPU ERROR: update() after mass_obj - workspace_num_statevars corrupted to %d!\\n", workspace_num_statevars);
-        }
-        #endif
     }
     
     __device__ double calculate_phase_comp_sum(int workspace_num_statevars) {
@@ -121,9 +104,6 @@ struct CompositionSet {
         if (phase_record && phase_record->formulamole_obj) {
             // With updated energy functions, pass the full DOF array directly
             phase_record->formulamole_obj(formulamoles, dof);
-            #ifdef PYCGPU_FP32EMU
-            pycgpu_f32_arr(formulamoles, phase_record->nonvacant_elements > 0 ? phase_record->nonvacant_elements : phase_record->num_elements);
-            #endif
         }
         
         // Sum up the moles of atoms per formula unit

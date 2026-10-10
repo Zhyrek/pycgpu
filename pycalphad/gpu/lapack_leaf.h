@@ -34,6 +34,22 @@
 #define __device__
 #endif
 
+/* Pointers to string literals (Metal places literals in its `constant`
+ * address space; empty elsewhere). */
+#ifndef PYCGPU_LITERAL
+#define PYCGPU_LITERAL
+#endif
+/* Pointers into buffers shared by all threads (Metal `device`; empty
+ * elsewhere). */
+#ifndef PYCGPU_GLOBAL
+#define PYCGPU_GLOBAL
+#endif
+/* Size of a float64 in packed GPU buffers (the Metal backend's in-register
+ * double type is wider than its 8-byte storage format). */
+#ifndef PYCGPU_F64_BYTES
+#define PYCGPU_F64_BYTES 8
+#endif
+
 /* <float.h> fallbacks for RTC compilers without hosted headers.
  * Decimal spellings (bit-exact round-trips of the intended powers of two):
  * hex float literals are C++17 and NVRTC in -std=c++11 mode rejects them

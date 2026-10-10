@@ -27,7 +27,7 @@ batching is the win.
   reference LLVM callables, zero recompilation). Both the grid-evaluation
   and equilibrium-solver paths carry them.
 - Point-list batch solver + compiled lower convex hull (see
-  POINT_SOLVER_DESIGN.md).
+  point_solver.md).
 - Walker-ensemble machinery (`ensemble.EnsemblePointBatcher`):
   walker-stacked grids, device-resident energy buffers, external-pointer
   grid blocks — the substrate for whole-ensemble evaluation.

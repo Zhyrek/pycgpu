@@ -524,47 +524,12 @@ def calculate(dbf, comps, phases, mode=None, output='GM', fake_points=False, bro
     plc_shape = tuple(len(x) for x in phase_local_conditions.values())
     # TODO: move state variable conditions into conditions dict
 
-    # Accelerated property evaluation (pycalphad.set_backend('c++'|'gpu')):
-    # only the output evaluation over sampled points moves to the backend; the
-    # sampling and dataset assembly below are unchanged. Any failure to build
-    # the accelerated evaluator (including unsupported output names) falls
-    # back silently to the reference path.
-    accel_evaluator = None
-    from pycalphad.backend import get_backend as _get_backend
-    _accel_backend, _ = _get_backend()
-    _canonical_statevars = [str(sv) for sv in getattr(phase_records, 'state_variables', [])] == ['N', 'P', 'T']
-    _param_syms, _param_arr = extract_parameters(parameters)
-    _factory_syms = list(getattr(phase_records, 'param_symbols', []) or [])
-    _params_ok = (len(_param_arr) == 0
-                  or (list(map(str, _param_syms)) == list(map(str, _factory_syms))))
-    if (_accel_backend in ('cpp', 'cuda', 'cuda-fast')
-            and _params_ok
-            and _canonical_statevars):
-        # The generated evaluators assume the canonical [N, P, T] state-variable
-        # layout; problems with omitted/extra state variables use the reference
-        # callables (gh-116-style calls with default state variables).
-        try:
-            from pycalphad.gpu.gpu_calculate import get_grid_evaluator
-            accel_evaluator = get_grid_evaluator(_accel_backend, comps,
-                                                 sorted(active_phases), models,
-                                                 phase_records, output=output)
-        except Exception as _accel_err:
-            import os as _os
-            from pycalphad.backend import AcceleratedCapabilityError
-            if not (isinstance(_accel_err, AcceleratedCapabilityError)
-                    or _os.environ.get('PYCGPU_FALLBACK')):
-                # Runtime failures RAISE (see core/equilibrium.py): only
-                # declared capability limits fall back silently.
-                raise RuntimeError(
-                    "the accelerated calculate() evaluator failed to build "
-                    "(chained below). Not falling back silently: set "
-                    "PYCGPU_FALLBACK=1 to use the reference path on "
-                    "accelerated-path errors, or use the 'default' "
-                    "backend.") from _accel_err
-            import logging
-            logging.getLogger(__name__).debug(
-                "Accelerated calculate() capability fallback: %r", _accel_err)
-            accel_evaluator = None
+    # Compiled backends (pycalphad.set_backend) evaluate the output property
+    # over the sampled points with generated functions; sampling and dataset
+    # assembly are unchanged.
+    from pycalphad.gpu.gpu_calculate import accelerated_evaluator
+    accel_evaluator = accelerated_evaluator(comps, sorted(active_phases), models,
+                                            phase_records, output, parameters)
 
     for phase_name in sorted(active_phases):
         mod = models[phase_name]

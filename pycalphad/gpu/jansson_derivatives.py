@@ -20,7 +20,25 @@ import numpy as np
 
 from pycalphad import Workspace
 
-__all__ = ['jansson_deltas', 'jansson_derivative']
+__all__ = ['jansson_deltas', 'jansson_derivative', 'workspace_jansson_deltas',
+           'workspace_jansson_derivative']
+
+
+def _solver_backend(backend):
+    """The compiled solver that runs the Jansson epilogue: the selected
+    compiled backend, or 'cpp' for the reference backends (which have no
+    batched equivalent)."""
+    from pycalphad.backend import _normalize, _resolve, get_backend
+    if backend is None:
+        backend, _ = get_backend()
+    name = _normalize(backend)
+    return 'cpp' if name == 'default' else _resolve(name)
+
+
+def _evaluator_backend(solver_backend):
+    """Backend of the generated property evaluators: CUDA kernels on the
+    CUDA backends, the C++ library otherwise (Metal included)."""
+    return 'cuda' if solver_backend in ('cuda', 'cuda-fast') else 'cpp'
 
 
 def jansson_deltas(dbf, comps, phases, conditions, denominator, backend=None,
@@ -46,19 +64,19 @@ def jansson_deltas(dbf, comps, phases, conditions, denominator, backend=None,
       plus ``grid_dims``/``grid_coords`` describing the condition grid and
       ``statevar_index`` of the denominator.
     """
+    wks = Workspace(dbf, comps, phases, conditions, **wks_kwargs)
+    return workspace_jansson_deltas(wks, denominator, backend=backend)
+
+
+def workspace_jansson_deltas(wks, denominator, backend=None):
+    """:func:`jansson_deltas` for the conditions of an existing Workspace
+    (its models and phase records are reused; the Workspace itself is not
+    modified)."""
     import pycalphad
     from pycalphad.gpu.gpu_equilibrium import calculate_equilibrium_gpu
-
-    if backend is None:
-        from pycalphad.backend import get_backend
-        backend, _ = get_backend()
-        if backend in (None, 'default'):
-            backend = 'c++'
-    backend = {'cpp': 'c++', 'cuda': 'gpu'}.get(backend, backend)
-
     from pycalphad import variables as v
 
-    wks = Workspace(dbf, comps, phases, conditions, **wks_kwargs)
+    backend = _solver_backend(backend)
     state_variables = sorted(wks.phase_record_factory.state_variables, key=str)
     kind = 0
     if isinstance(denominator, str) and denominator == 'parameters':
@@ -81,20 +99,19 @@ def jansson_deltas(dbf, comps, phases, conditions, denominator, backend=None,
                 f'{denominator} must be a fixed state variable '
                 f'({state_variables}) or a fixed mole-fraction condition')
 
-    # The c++ driver is selected via the PYCGPU_CPU env (the same switch
-    # run_accelerated_workspace uses); force_cpu means "no accelerated path".
+    # The Jansson target is a compile-time define of the solver module.
     _env_saves = {}
     for key, val in (('PYCGPU_JANSSON_TARGET', str(sv_idx)),
-                     ('PYCGPU_JANSSON_KIND', str(kind)),
-                     ('PYCGPU_CPU', '1' if backend == 'c++' else None)):
+                     ('PYCGPU_JANSSON_KIND', str(kind))):
         _env_saves[key] = os.environ.get(key)
         if val is None:
             os.environ.pop(key, None)
         else:
             os.environ[key] = val
+    solve_wks = wks.copy()  # the pipeline stashes the deltas on it
     try:
         with pycalphad.backend(backend):
-            eq = calculate_equilibrium_gpu(wks)
+            eq = calculate_equilibrium_gpu(solve_wks)
     finally:
         for key, old_val in _env_saves.items():
             if old_val is None:
@@ -102,7 +119,7 @@ def jansson_deltas(dbf, comps, phases, conditions, denominator, backend=None,
             else:
                 os.environ[key] = old_val
 
-    stash = getattr(wks, '_jansson_deltas', None)
+    stash = getattr(solve_wks, '_jansson_deltas', None)
     if stash is None:
         raise RuntimeError('accelerated pipeline did not produce Jansson '
                            'deltas (dispatch fell back?)')
@@ -158,21 +175,19 @@ def jansson_derivative(dbf, comps, phases, conditions, numerator, denominator,
     the gradient terms by the compset's NP (moles of atoms) and add the
     delta-phase-amount term.
     """
-    import numpy as np
-    from pycalphad.gpu.gpu_calculate import get_grid_evaluator
-    from pycalphad import Model
-
-    res = jansson_deltas(dbf, comps, phases, conditions, denominator,
-                         backend=backend, **wks_kwargs)
-    eq = res['eq']
-    if backend is None:
-        from pycalphad.backend import get_backend
-        backend, _ = get_backend()
-        if backend in (None, 'default'):
-            backend = 'c++'
-    backend_name = {'c++': 'cpp', 'gpu': 'gpu'}.get(backend, backend)
-
     wks = Workspace(dbf, comps, phases, conditions, **wks_kwargs)
+    return workspace_jansson_derivative(wks, numerator, denominator, backend=backend)
+
+
+def workspace_jansson_derivative(wks, numerator, denominator, backend=None):
+    """:func:`jansson_derivative` for the conditions of an existing
+    Workspace (its models and phase records are reused; the Workspace itself
+    is not modified)."""
+    from pycalphad.gpu.gpu_calculate import get_grid_evaluator
+
+    res = workspace_jansson_deltas(wks, denominator, backend=backend)
+    eq = res['eq']
+    backend_name = _evaluator_backend(_solver_backend(backend))
     models = wks.models
     prf = wks.phase_record_factory
     state_variables = sorted(prf.state_variables, key=str)

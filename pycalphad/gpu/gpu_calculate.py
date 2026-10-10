@@ -233,12 +233,9 @@ def _build_module(backend_name, shim, verbose=False, output='GM',
     dynamic_sizes = compute_dynamic_kernel_sizes(shim)
     define_flags = [f'-D{k}={v}' for k, v in dynamic_sizes.items()]
 
-    gpu_dir = os.path.dirname(os.path.abspath(__file__))
-    hasher = hashlib.md5()
-    for hdr in ("phase_rec.h", "comp_set.h", "hyperplane.h",
-                "minimizer.h", "eqsolver.h", "gpu_codegen.py", "gpu_calculate.py"):
-        with open(os.path.join(gpu_dir, hdr), "rb") as f:
-            hasher.update(f.read())
+    from pycalphad.gpu.gpu_codegen import solver_headers_fingerprint
+    with open(os.path.abspath(__file__), 'rb') as f:
+        _self_hash = hashlib.md5(f.read()).hexdigest()
     # Fingerprint the model expressions being compiled: phase/component names
     # alone collide between different assessments of the same system. For
     # non-GM outputs the property expression itself is the fingerprint.
@@ -259,7 +256,7 @@ def _build_module(backend_name, shim, verbose=False, output='GM',
         "statevars:" + ",".join(str(sv) for sv in shim.phase_record_factory.state_variables),
         "models:" + model_hasher.hexdigest(),
         str(sorted(dynamic_sizes.items())),
-        hasher.hexdigest(),
+        solver_headers_fingerprint(), _self_hash,
     ])
     cache_key = hashlib.md5(key_input.encode()).hexdigest()
 
@@ -476,3 +473,42 @@ def get_grid_evaluator(backend_name, components, phases, models,
     evaluate.grad = evaluate_grad
     evaluate.param_grad = evaluate_param_grad
     return evaluate
+
+
+def accelerated_evaluator(components, phases, models, phase_records, output, parameters):
+    """calculate()'s hook: the grid evaluator for the selected compiled
+    backend, or None to use the reference callables.
+
+    Unsupported requests (custom Model subclasses, unknown outputs,
+    non-canonical state variables, mismatched parameters) return None; any
+    other failure raises, so a broken backend is never silently replaced by
+    the reference path (unless PYCGPU_FALLBACK is set).
+    """
+    from pycalphad.backend import _current, AcceleratedCapabilityError
+    from pycalphad.core.utils import extract_parameters
+    backend_name, _ = _current()
+    if backend_name == 'default':
+        return None
+    # The generated evaluators assume the canonical [N, P, T] state variables
+    # and the factory's own fit-parameter symbols.
+    if [str(sv) for sv in getattr(phase_records, 'state_variables', [])] != ['N', 'P', 'T']:
+        return None
+    param_syms, param_arr = extract_parameters(parameters)
+    factory_syms = list(getattr(phase_records, 'param_symbols', []) or [])
+    if len(param_arr) and list(map(str, param_syms)) != list(map(str, factory_syms)):
+        return None
+    # Point evaluation is cheap enough on the host that the Metal backend
+    # uses the C++ evaluator (GPU launches only pay off for the solver).
+    evaluator_backend = 'cuda' if backend_name in ('cuda', 'cuda-fast') else 'cpp'
+    try:
+        return get_grid_evaluator(evaluator_backend, components, phases, models,
+                                  phase_records, output=output)
+    except AcceleratedCapabilityError:
+        return None
+    except Exception as err:
+        if os.environ.get('PYCGPU_FALLBACK'):
+            return None
+        raise RuntimeError(
+            f"the {backend_name!r} backend could not build the calculate() evaluator "
+            "(chained below). Use set_backend('default') for the reference "
+            "implementation.") from err

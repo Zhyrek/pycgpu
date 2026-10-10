@@ -6,13 +6,18 @@ from pycalphad.core.errors import *
 import pycalphad.variables as v
 from pycalphad.io.database import Database
 
+# Monkey patches for reference-implementation bugs that are fixed upstream
+# but not yet merged; see pycalphad/_upstream_patches.py.
+import pycalphad._upstream_patches
+pycalphad._upstream_patches.apply()
+
 # Trigger format extension hooks
 import pycalphad.io.tdb
 import pycalphad.io.cs_dat
 
 from pycalphad.model import Model, ReferenceState
 
-from pycalphad.backend import set_backend, get_backend, backend
+from pycalphad.backend import set_backend, get_backend, backend, available_backends
 from pycalphad.core.calculate import calculate
 from pycalphad.core.equilibrium import equilibrium
 from pycalphad.core.workspace import Workspace

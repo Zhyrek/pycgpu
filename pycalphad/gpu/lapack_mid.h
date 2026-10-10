@@ -38,19 +38,19 @@
 /* ILAENV helpers: 2- and 3-character name-field comparisons           */
 /* (Fortran CHARACTER*2 / CHARACTER*3 .EQ. tests).                     */
 /* ------------------------------------------------------------------ */
-__device__ static int pyclap_ilaenv_eq2(const char* s, const char* t)
+__device__ static int pyclap_ilaenv_eq2(PYCGPU_LITERAL const char* s, PYCGPU_LITERAL const char* t)
 {
     return s[0] == t[0] && s[1] == t[1];
 }
 
-__device__ static int pyclap_ilaenv_eq3(const char* s, const char* t)
+__device__ static int pyclap_ilaenv_eq3(PYCGPU_LITERAL const char* s, PYCGPU_LITERAL const char* t)
 {
     return s[0] == t[0] && s[1] == t[1] && s[2] == t[2];
 }
 
 /* The C4 membership test that ilaenv.f repeats for the OR/UN families:
    C4.EQ.'QR' .OR. 'RQ' .OR. 'LQ' .OR. 'QL' .OR. 'HR' .OR. 'TR' .OR. 'BR' */
-__device__ static int pyclap_ilaenv_c4gen(const char* c4)
+__device__ static int pyclap_ilaenv_c4gen(PYCGPU_LITERAL const char* c4)
 {
     return pyclap_ilaenv_eq2(c4, "QR") || pyclap_ilaenv_eq2(c4, "RQ") ||
            pyclap_ilaenv_eq2(c4, "LQ") || pyclap_ilaenv_eq2(c4, "QL") ||
@@ -89,13 +89,20 @@ __device__ static int pyclap_ilaenv_c4gen(const char* c4)
 /* the reference's lowercase/EBCDIC normalization (labels 10-40) and   */
 /* the ISPEC=12..17 IPARMQ forwarding (label 160) are dropped.         */
 /* ------------------------------------------------------------------ */
-__device__ static int pyclap_ilaenv(int ispec, const char* name,
-                                    const char* opts, int n1, int n2,
+/* OPTS is ignored, and callers pass both literals and local buffers:
+ * Metal deduces its address space. */
+#ifdef PYCGPU_METAL
+template <typename PyclapOpts>
+#else
+#define PyclapOpts const char*
+#endif
+__device__ static int pyclap_ilaenv(int ispec, PYCGPU_LITERAL const char* name,
+                                    PyclapOpts opts, int n1, int n2,
                                     int n3, int n4)
 {
     int nb, nbmin, nx, sname, cname;
     char c1;
-    const char *c2, *c3, *c4;
+    PYCGPU_LITERAL const char *c2, *c3, *c4;
     (void)opts;   /* OPTS never participates in the transliterated cases */
     (void)n3;
     (void)n4;

@@ -70,7 +70,8 @@ def parallel_starting_point(conditions, state_variables, phase_records, grid,
     # calls concurrently. Set PYCGPU_HULL_PROCS (or the hull_procs backend
     # option) to a worker count, or to 0 for auto (cpu_count above the
     # PYCGPU_HULL_MIN condition threshold, default 512).
-    procs_env = os.environ.get('PYCGPU_HULL_PROCS')
+    from pycalphad.backend import _current
+    procs_env = os.environ.get('PYCGPU_HULL_PROCS', _current()[1].hull_procs)
     if procs_env is None:
         procs = 1
     elif int(procs_env) == 0:

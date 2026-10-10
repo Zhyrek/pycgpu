@@ -174,6 +174,80 @@ def _batched_jansson_supported(wks, prop):
     return None
 
 
+def _workspace_cur_conds(wks):
+    """Workspace.get_dict's per-condition `cur_conds`, in its condition order."""
+    from collections import OrderedDict
+    eq = wks.eq
+    str_conds_keys = [str(k) for k in eq.coords.keys() if k not in ('vertex', 'component', 'internal_dof')]
+    conds_keys = [None] * len(str_conds_keys)
+    for k in wks.conditions.keys():
+        conds_keys[str_conds_keys.index(str(k))] = k
+    return [OrderedDict(zip(conds_keys, [np.asarray(eq.coords[b][a], dtype=np.float64)
+                                         for a, b in zip(index, str_conds_keys)]))
+            for index in np.ndindex(eq.GM.shape)]
+
+
+def _isolated_phase_properties(wks, props, display_units):
+    """IsolatedPhase properties for the whole grid: one compiled solve chain
+    per IsolatedPhase object, replaying Workspace.get_dict's evaluation order
+    (conditions in order; within a condition, that object's properties in
+    order, one solve each) so every solve starts where the reference would."""
+    from pycalphad.core.composition_set import CompositionSet
+    from pycalphad.property_framework.units import Q_
+    from pycalphad.gpu.metaproperty_chains import chain_supported, isolated_phase_steps
+    groups = {}
+    for prop in props:
+        meta = getattr(prop, 'isolated_phase', None)
+        if meta is not None:
+            groups.setdefault(id(meta), (meta, []))[1].append(prop)
+    if not groups:
+        return {}
+    cur_conds = _workspace_cur_conds(wks)
+    out = {}
+    for meta, group in groups.values():
+        compset = meta._compset
+        reason = chain_supported(wks, compset)
+        convert = [display_units and str(p.implementation_units) != str(p.display_units) for p in group]
+        if reason is None:
+            try:
+                for p, needed in zip(group, convert):
+                    if needed:
+                        Q_(1.0, p.implementation_units).to(p.display_units)
+            except Exception:
+                reason = 'unit conversion needs composition sets'
+        if reason is not None:
+            for p in group:
+                _audit(f'property_reference: {p} ({reason})')
+            continue
+        start = (np.array(compset.dof), compset.NP)
+        try:
+            steps = isolated_phase_steps(wks, compset, [c for c in cur_conds for _ in group])
+            pr = compset.phase_record
+            state_variables = [str(sv) for sv in pr.state_variables]
+            values = [np.full((len(cur_conds),) + p.shape, np.nan) for p in group]
+            for c, conds in enumerate(cur_conds):
+                by_name = {str(k): float(val) for k, val in conds.items()}
+                statevars = np.array([by_name[sv] for sv in state_variables], dtype=np.float64)
+                for j, p in enumerate(group):
+                    y, amount, mu = steps[c * len(group) + j]
+                    step_compset = CompositionSet(pr)
+                    step_compset.update(y, amount, statevars)
+                    values[j][c, ...] = p.inner_property.compute_property([step_compset], conds, mu)
+        except Exception as err:
+            nsv = len(compset.phase_record.state_variables)
+            compset.update(start[0][nsv:nsv + compset.phase_record.phase_dof], start[1], start[0][:nsv])
+            for p in group:
+                _audit(f'property_reference: {p} ({type(err).__name__}: {str(err)[:80]})')
+            _log.debug("IsolatedPhase evaluated per condition (%r)", err)
+            continue
+        for p, vals, needed in zip(group, values, convert):
+            if needed:
+                vals = Q_(vals, p.implementation_units).to(p.display_units).magnitude
+            _audit(f'property_compiled: {p}')
+            out[p] = vals
+    return out
+
+
 # Below this many conditions the per-condition evaluation is as fast as the
 # vectorized one's fixed setup cost.
 _MIN_VECTORIZED_CONDITIONS = int(os.environ.get('PYCGPU_VECTORIZED_MIN_CONDITIONS', 50))
@@ -192,9 +266,11 @@ def workspace_properties(wks, props, display_units=True):
     if not getattr(wks, '_solved_by_backend', False) or _current()[0] == 'default':
         return {}
     from pycalphad.gpu import grid_properties
-    out = {}
+    out = _isolated_phase_properties(wks, props, display_units)
     grid_state = None
     for prop in props:
+        if getattr(prop, 'isolated_phase', None) is not None:
+            continue  # handled above (or left to the per-condition path)
         if grid_properties.supported(prop) and wks.eq.GM.size >= _MIN_VECTORIZED_CONDITIONS:
             # (no de-duplication: equal properties with different display
             # units overwrite each other in order, as in Workspace.get_dict)

@@ -189,6 +189,37 @@ def test_workspace_properties_vectorized(load_database):
             assert np.array_equal(np.asarray(vectorized[key]), np.asarray(reference[key]), equal_nan=True), key
 
 
+@needs_cpp
+@select_database("alni_dupin_2001.tdb")
+def test_isolated_phase_compiled_chain(load_database):
+    """IsolatedPhase properties on a compiled backend replay Workspace.get's
+    warm-started sequence of single-phase solves (conditions in order, then
+    each property sharing the IsolatedPhase) on the compiled solver; values
+    and the final composition set match the reference sequence."""
+    import pycalphad.gpu.dispatch as dispatch
+    from pycalphad.property_framework import IsolatedPhase
+    dbf = load_database()
+    conds = {v.N: 1, v.P: 101325, v.T: (900, 1700, 100), v.X('AL'): (0.1, 0.6, 0.05)}
+    results, final_dof = {}, {}
+    for mode in ('compiled', 'reference'):
+        with pycalphad.backend('cpp'):
+            wks = Workspace(dbf, ['AL', 'NI', 'VA'], list(dbf.phases.keys()), conds)
+            iph = IsolatedPhase('BCC_B2', wks=wks)
+            props = [iph('GM'), iph('MU(AL)'), iph('Y(BCC_B2,0,AL)'), iph.driving_force]
+            original = dispatch.workspace_properties
+            if mode == 'reference':
+                dispatch.workspace_properties = lambda *args, **kwargs: {}
+            try:
+                results[mode] = [np.asarray(x, dtype=float) for x in wks.get(*props)]
+            finally:
+                dispatch.workspace_properties = original
+            final_dof[mode] = np.array(iph._compset.dof)
+    for compiled, reference in zip(results['compiled'], results['reference']):
+        assert np.array_equal(np.isnan(compiled), np.isnan(reference))
+        np.testing.assert_allclose(compiled, reference, rtol=1e-8, atol=1e-6)
+    np.testing.assert_allclose(final_dof['compiled'], final_dof['reference'], atol=1e-10)
+
+
 @select_database("alzn_mey.tdb")
 def test_invalid_backend_rejected(load_database):
     dbf = load_database()

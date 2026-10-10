@@ -57,17 +57,37 @@ _CPU_DRIVER_SRC = r"""
 #include <atomic>
 #include <vector>
 // ===== CPU backend driver (appended by pycalphad.gpu.cpu_backend) =====
-// Single-threaded by design: parallelism is the caller's job (multiple
-// pycalphad calls in threads/processes; thread_local shims in cpu_compat.h
-// keep concurrent calls from different threads safe).
+// thread_local shims in cpu_compat.h keep concurrent calls from different
+// threads safe.
+
+// Point evaluation over many rows: rows split evenly across n_threads
+// std::threads (small batches stay on the calling thread, where thread
+// start-up would cost more than it saves). The generated functions are pure.
+template <class F>
+static void pycgpu_parallel_rows(long long n_rows, int n_threads, F work)
+{
+    const long long min_rows_per_thread = 2048;
+    long long threads = n_threads > 0 ? n_threads : 1;
+    if (threads > n_rows / min_rows_per_thread) threads = n_rows / min_rows_per_thread;
+    if (threads <= 1) { work(0LL, n_rows); return; }
+    const long long chunk = (n_rows + threads - 1) / threads;
+    std::vector<std::thread> pool;
+    for (long long t = 0; t < threads; ++t) {
+        const long long begin = t * chunk, end = begin + chunk < n_rows ? begin + chunk : n_rows;
+        if (begin < end) pool.emplace_back(work, begin, end);
+    }
+    for (auto& th : pool) th.join();
+}
 
 extern "C" void pycgpu_cpu_grid_eval(int model_idx, const double* dof, double* out,
-                                     long long n_points, int dof_stride)
+                                     long long n_points, int dof_stride, int n_threads)
 {
     init_all_gpu_phase_records();
-    for (long long i = 0; i < n_points; ++i) {
-        out[i] = g_phase_records_array[model_idx].obj(&dof[i * (long long)dof_stride]);
-    }
+    pycgpu_parallel_rows(n_points, n_threads, [&](long long begin, long long end) {
+        for (long long i = begin; i < end; ++i) {
+            out[i] = g_phase_records_array[model_idx].obj(&dof[i * (long long)dof_stride]);
+        }
+    });
 }
 
 #include <cstdlib>

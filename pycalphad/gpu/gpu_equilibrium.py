@@ -1889,7 +1889,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     # Cache key includes: phases, components, dynamic sizes, and flags
     # It does NOT include the actual generated code (which has CSE variations)
     # Hash the static GPU header sources so edits to them invalidate cached kernels
-    from pycalphad.gpu.gpu_codegen import solver_headers_fingerprint
+    from pycalphad.gpu.gpu_codegen import solver_headers_fingerprint, model_expression_digest
 
     # The generated kernel embeds the MODEL ENERGY EXPRESSIONS, so the cache
     # key must fingerprint them: phase/component NAMES alone collide between
@@ -1898,7 +1898,7 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     _model_hash = hashlib.md5()
     for _ph in sorted_phases:
         _model_hash.update(_ph.encode())
-        _model_hash.update(str(wks_obj.models[_ph].GM).encode())
+        _model_hash.update(model_expression_digest(wks_obj.models[_ph]).encode())
 
     cache_key_parts = [
         "phases:" + ",".join(sorted_phases),

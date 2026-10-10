@@ -7,7 +7,7 @@ points; the sampling and dataset assembly stay on the CPU. This module builds
 uses and exposes a per-phase evaluator that computes GM over a dof matrix
 with the generated obj functions:
 
-* backend 'cpp':  pycgpu_cpu_grid_eval, single-threaded loop over points,
+* backend 'cpp':  pycgpu_cpu_grid_eval, loop over points split across threads,
   zero copies.
 * backend 'cuda': grid_eval_kernel, one point per thread.
 
@@ -23,6 +23,8 @@ import re
 from types import SimpleNamespace
 
 import numpy as np
+
+from pycalphad.backend import solver_threads
 
 try:
     import cupy as cp
@@ -52,28 +54,57 @@ __device__ inline double pycgpu_pow(double b, double e) {
 """
 
 _PROP_CPU_DRIVER = r"""
-extern "C" void pycgpu_cpu_grid_eval(int model_idx, const double* dof, double* out,
-                                     long long n_points, int dof_stride)
+#include <thread>
+#include <vector>
+// Point evaluation over many rows: rows split evenly across n_threads
+// std::threads (small batches stay on the calling thread, where thread
+// start-up would cost more than it saves). The generated functions are pure.
+template <class F>
+static void pycgpu_parallel_rows(long long n_rows, int n_threads, F work)
 {
-    for (long long i = 0; i < n_points; ++i) {
-        out[i] = pycgpu_eval_prop(model_idx, &dof[i * (long long)dof_stride]);
+    const long long min_rows_per_thread = 2048;
+    long long threads = n_threads > 0 ? n_threads : 1;
+    if (threads > n_rows / min_rows_per_thread) threads = n_rows / min_rows_per_thread;
+    if (threads <= 1) { work(0LL, n_rows); return; }
+    const long long chunk = (n_rows + threads - 1) / threads;
+    std::vector<std::thread> pool;
+    for (long long t = 0; t < threads; ++t) {
+        const long long begin = t * chunk, end = begin + chunk < n_rows ? begin + chunk : n_rows;
+        if (begin < end) pool.emplace_back(work, begin, end);
     }
+    for (auto& th : pool) th.join();
+}
+
+extern "C" void pycgpu_cpu_grid_eval(int model_idx, const double* dof, double* out,
+                                     long long n_points, int dof_stride, int n_threads)
+{
+    pycgpu_parallel_rows(n_points, n_threads, [&](long long begin, long long end) {
+        for (long long i = begin; i < end; ++i) {
+            out[i] = pycgpu_eval_prop(model_idx, &dof[i * (long long)dof_stride]);
+        }
+    });
 }
 extern "C" void pycgpu_cpu_grid_eval_grad(int model_idx, const double* dof, double* out,
-                                          long long n_points, int dof_stride, int grad_len)
+                                          long long n_points, int dof_stride, int grad_len,
+                                          int n_threads)
 {
-    for (long long i = 0; i < n_points; ++i) {
-        pycgpu_eval_prop_grad(model_idx, &dof[i * (long long)dof_stride],
-                              &out[i * (long long)grad_len]);
-    }
+    pycgpu_parallel_rows(n_points, n_threads, [&](long long begin, long long end) {
+        for (long long i = begin; i < end; ++i) {
+            pycgpu_eval_prop_grad(model_idx, &dof[i * (long long)dof_stride],
+                                  &out[i * (long long)grad_len]);
+        }
+    });
 }
 extern "C" void pycgpu_cpu_grid_eval_pgrad(int model_idx, const double* dof, double* out,
-                                           long long n_points, int dof_stride, int n_params)
+                                           long long n_points, int dof_stride, int n_params,
+                                           int n_threads)
 {
-    for (long long i = 0; i < n_points; ++i) {
-        pycgpu_eval_prop_pgrad(model_idx, &dof[i * (long long)dof_stride],
-                               &out[i * (long long)n_params]);
-    }
+    pycgpu_parallel_rows(n_points, n_threads, [&](long long begin, long long end) {
+        for (long long i = begin; i < end; ++i) {
+            pycgpu_eval_prop_pgrad(model_idx, &dof[i * (long long)dof_stride],
+                                   &out[i * (long long)n_params]);
+        }
+    });
 }
 """
 
@@ -233,7 +264,7 @@ def _build_module(backend_name, shim, verbose=False, output='GM',
     dynamic_sizes = compute_dynamic_kernel_sizes(shim)
     define_flags = [f'-D{k}={v}' for k, v in dynamic_sizes.items()]
 
-    from pycalphad.gpu.gpu_codegen import solver_headers_fingerprint
+    from pycalphad.gpu.gpu_codegen import solver_headers_fingerprint, model_expression_digest
     with open(os.path.abspath(__file__), 'rb') as f:
         _self_hash = hashlib.md5(f.read()).hexdigest()
     # Fingerprint the model expressions being compiled: phase/component names
@@ -244,9 +275,11 @@ def _build_module(backend_name, shim, verbose=False, output='GM',
     for ph in sorted(shim.phases):
         model_hasher.update(ph.encode())
         if output == 'GM' and not force_property_module:
-            model_hasher.update(str(shim.models[ph].GM).encode())
+            model_hasher.update(model_expression_digest(shim.models[ph]).encode())
         else:
-            model_hasher.update(str(_property_expr(shim.models[ph], output, param_symbols)).encode())
+            model_hasher.update(model_expression_digest(
+                shim.models[ph], (output, tuple(map(str, param_symbols))),
+                lambda m=shim.models[ph]: _property_expr(m, output, param_symbols)).encode())
     key_input = "|".join([
         "calc", backend_name, output,
         "propmod" if force_property_module else "solver-or-prop",
@@ -282,19 +315,19 @@ def _build_module(backend_name, shim, verbose=False, output='GM',
         fn = lib.pycgpu_cpu_grid_eval
         fn.restype = None
         fn.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p,
-                       ctypes.c_longlong, ctypes.c_int]
+                       ctypes.c_longlong, ctypes.c_int, ctypes.c_int]
         gfn = None
         pgfn = None
         if output != 'GM' or force_property_module:
             gfn = lib.pycgpu_cpu_grid_eval_grad
             gfn.restype = None
             gfn.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p,
-                            ctypes.c_longlong, ctypes.c_int, ctypes.c_int]
+                            ctypes.c_longlong, ctypes.c_int, ctypes.c_int, ctypes.c_int]
             if param_symbols:
                 pgfn = lib.pycgpu_cpu_grid_eval_pgrad
                 pgfn.restype = None
                 pgfn.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p,
-                                 ctypes.c_longlong, ctypes.c_int, ctypes.c_int]
+                                 ctypes.c_longlong, ctypes.c_int, ctypes.c_int, ctypes.c_int]
         return ('cpp', fn, gfn, pgfn)
     else:
         if cp is None:
@@ -344,13 +377,16 @@ def get_grid_evaluator(backend_name, components, phases, models,
     # In-process cache must also fingerprint the model expressions (same
     # collision as the disk key: two assessments sharing phase names).
     _param_symbols = list(getattr(phase_record_factory, 'param_symbols', []) or [])
+    from pycalphad.gpu.gpu_codegen import model_expression_digest
     _mh = hashlib.md5()
     for _ph in sorted(shim.phases):
         _mh.update(_ph.encode())
         if output == 'GM' and not force_property_module:
-            _mh.update(str(models[_ph].GM).encode())
+            _mh.update(model_expression_digest(models[_ph]).encode())
         else:
-            _mh.update(str(_property_expr(models[_ph], output, _param_symbols)).encode())
+            _mh.update(model_expression_digest(
+                models[_ph], (output, tuple(map(str, _param_symbols))),
+                lambda m=models[_ph]: _property_expr(m, output, _param_symbols)).encode())
     cache_id = (backend_name, output, bool(force_property_module),
                 tuple(sorted(shim.phases)),
                 tuple(sorted(c.name for c in shim.components)),
@@ -374,10 +410,11 @@ def get_grid_evaluator(backend_name, components, phases, models,
         kind, fn = entry
         grad_fn = pgrad_fn = None
 
-    # The single-threaded C++ path has near-zero per-call overhead and matches
-    # or beats the reference LLVM callables at every measured size, so it is
-    # always used. The CUDA path pays H2D+D2H transfer per call and only wins
-    # on very large point sets. Override with PYCGPU_CALC_MIN_POINTS.
+    # The C++ path has near-zero per-call overhead and matches or beats the
+    # reference LLVM callables at every measured size (large batches are split
+    # across solver_threads()), so it is always used. The CUDA path pays
+    # H2D+D2H transfer per call and only wins on very large point sets.
+    # Override with PYCGPU_CALC_MIN_POINTS.
     default_min = 0 if kind == 'cpp' else 1_000_000
     min_points = int(os.environ.get('PYCGPU_CALC_MIN_POINTS', default_min))
 
@@ -405,7 +442,7 @@ def get_grid_evaluator(backend_name, components, phases, models,
         dof_c = np.ascontiguousarray(dof, dtype=np.float64)
         if kind == 'cpp':
             fn(int(model_idx), dof_c.ctypes.data, out.ctypes.data,
-               n_points, dof_stride)
+               n_points, dof_stride, solver_threads())
         else:
             d_dof = cp.asarray(dof_c)
             d_out = cp.empty(n_points, dtype=cp.float64)
@@ -432,7 +469,7 @@ def get_grid_evaluator(backend_name, components, phases, models,
         assert out.shape == (n_points, dof_stride), (out.shape, dof.shape)
         if kind == 'cpp':
             grad_fn(int(model_idx), dof_c.ctypes.data, out.ctypes.data,
-                    n_points, dof_stride, dof_stride)
+                    n_points, dof_stride, dof_stride, solver_threads())
         else:
             d_dof = cp.asarray(dof_c)
             d_out = cp.empty((n_points, dof_stride), dtype=cp.float64)
@@ -457,7 +494,7 @@ def get_grid_evaluator(backend_name, components, phases, models,
         assert out.shape == (n_points, n_params), (out.shape, dof.shape)
         if kind == 'cpp':
             pgrad_fn(int(model_idx), dof_c.ctypes.data, out.ctypes.data,
-                     n_points, dof_stride, n_params)
+                     n_points, dof_stride, n_params, solver_threads())
         else:
             d_dof = cp.asarray(dof_c)
             d_out = cp.empty((n_points, n_params), dtype=cp.float64)

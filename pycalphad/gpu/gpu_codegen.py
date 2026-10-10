@@ -94,6 +94,34 @@ def _get_c_define(define_name, default_val=64):
     return constants.get(define_name, default_val)
 
 
+_expression_digests = {}
+
+
+def model_expression_digest(model, kind='GM', expression=None):
+    """md5 hex digest of str(model.GM) (or of `expression()` for other
+    kinds), memoized per Model object.
+
+    Cache keys of compiled modules fingerprint the model expressions;
+    stringifying them costs milliseconds per phase, which used to be paid on
+    every calculate()/equilibrium() call. Models are not modified after
+    construction, so the digest is computed once per Model instance (held by
+    weak reference, so a recycled id() never matches a different model).
+    """
+    import hashlib
+    import weakref
+    key = id(model)
+    entry = _expression_digests.get(key)
+    if entry is None or entry[0]() is not model:
+        entry = (weakref.ref(model, lambda _ref, key=key: _expression_digests.pop(key, None)), {})
+        _expression_digests[key] = entry
+    digest = entry[1].get(kind)
+    if digest is None:
+        expr = model.GM if expression is None else expression()
+        digest = hashlib.md5(str(expr).encode()).hexdigest()
+        entry[1][kind] = digest
+    return digest
+
+
 def compute_dynamic_kernel_sizes(wks_obj: Workspace) -> Dict[str, int]:
     """
     Compute kernel size parameters from the workspace instead of hard-coded

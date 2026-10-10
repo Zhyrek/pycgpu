@@ -415,11 +415,11 @@ class PointBatchSolver:
         if os.environ.get('PYCGPU_OUTER_ADD', '1') not in ('0', 'off', ''):
             define_flags.append('-DPYCGPU_OUTER_ADD')
 
-        from pycalphad.gpu.gpu_codegen import solver_headers_fingerprint
+        from pycalphad.gpu.gpu_codegen import solver_headers_fingerprint, model_expression_digest
         model_hasher = hashlib.md5()
         for ph in sorted(shim.phases):
             model_hasher.update(ph.encode())
-            model_hasher.update(str(shim.models[ph].GM).encode())
+            model_hasher.update(model_expression_digest(shim.models[ph]).encode())
         key_input = "|".join([
             "pointsolve", ",".join(sorted(shim.phases)),
             ",".join(sorted(c.name for c in shim.components)),
@@ -827,10 +827,11 @@ def get_point_solver(components, phases, models, phase_record_factory,
                      robust=True, backend='cpp', verbose=False):
     """In-process cached PointBatchSolver (compiled artifacts are disk/cupy
     cached; this avoids re-running codegen bookkeeping per equilibrium call)."""
+    from pycalphad.gpu.gpu_codegen import model_expression_digest
     mh = hashlib.md5()
     for ph in sorted(phases):
         mh.update(ph.encode())
-        mh.update(str(models[ph].GM).encode())
+        mh.update(model_expression_digest(models[ph]).encode())
     key = (backend, robust, tuple(sorted(phases)),
            tuple(sorted(getattr(c, 'name', str(c)) for c in components)),
            tuple(str(sv) for sv in phase_record_factory.state_variables),

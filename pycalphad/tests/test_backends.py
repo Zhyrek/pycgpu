@@ -220,6 +220,50 @@ def test_isolated_phase_compiled_chain(load_database):
     np.testing.assert_allclose(final_dof['compiled'], final_dof['reference'], atol=1e-10)
 
 
+@needs_cpp
+@select_database("alzn_mey.tdb")
+def test_mapping_global_min_scan_matches_calculate(load_database):
+    """On a compiled backend, the mapping's global-minimum check samples
+    phases without calculate()'s dataset assembly; every check picks the same
+    candidate composition set with the same driving force as the
+    calculate()-based path."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import pycalphad.gpu.mapping_scan as mapping_scan
+    import pycalphad.mapping.zpf_equilibrium as zpf
+    from pycalphad import binplot
+    dbf = load_database()
+    original = zpf._find_global_min_cs
+    checks = []
+
+    def compare(point, system_info, *args, **kwargs):
+        new = original(point, system_info, *args, **kwargs)
+        scan = mapping_scan.sampled_energies
+        mapping_scan.sampled_energies = lambda *a, **k: None
+        try:
+            old = original(point, system_info, *args, **kwargs)
+        finally:
+            mapping_scan.sampled_energies = scan
+        if new is None or old is None:
+            checks.append(new is None and old is None)
+        else:
+            checks.append(new[0].phase_record.phase_name == old[0].phase_record.phase_name
+                          and np.array_equal(np.asarray(new[0].dof), np.asarray(old[0].dof))
+                          and new[1] == old[1])
+        return new
+
+    zpf._find_global_min_cs = compare
+    try:
+        with pycalphad.backend('cpp'):
+            ax = binplot(dbf, ['AL', 'ZN', 'VA'], list(dbf.phases.keys()),
+                         {v.X('ZN'): (0, 1, 0.05), v.T: (400, 900, 25), v.P: 101325, v.N: 1})
+    finally:
+        zpf._find_global_min_cs = original
+    ax.figure.clf()
+    assert len(checks) > 20
+    assert all(checks)
+
+
 @select_database("alzn_mey.tdb")
 def test_invalid_backend_rejected(load_database):
     dbf = load_database()

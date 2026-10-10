@@ -213,9 +213,12 @@ its tie-line endpoints, so boundary points sit at solver accuracy; grid
 resolution only controls how densely boundaries are sampled.
 
 The default ZPF-line mapping (`binplot`, `ternplot`, isopleth and step
-strategies) follows boundaries one point at a time: its energy sampling
-(`calculate()`) uses the compiled evaluator, while its single-point solves
-use the reference solver (they are small and sequential; see below).
+strategies) follows boundaries one point at a time. On a compiled backend
+its global-minimum checks sample the phases with the compiled evaluator and
+without `calculate()`'s dataset assembly (and reuse the samples between
+checks at the same temperature), with decisions identical to the
+`calculate()`-based path; a ternary Al-Cr-Ni section maps in 6 s instead of
+14 s. Its single-point solves still use the reference solver.
 
 ## What runs on a compiled backend
 
@@ -225,8 +228,9 @@ use the reference solver (they are small and sequential; see below).
 | `calculate()` | yes | energies and properties at sampled points, multi-threaded |
 | `Workspace.get` / `equilibrium(output=...)`: X, NP, Y, MU, T/P/N, Model properties | yes | whole-grid evaluation, bit-identical to the per-condition path (grids of 50+ conditions) |
 | Jansson derivatives of Model properties w.r.t. T or X | yes | see above |
-| ZPF mapping (`binplot`, `ternplot`, isopleths, step) | partly | sampling compiled, point solves on the reference |
-| `IsolatedPhase`, `DormantPhase`, `T0`, other derivatives | no | per-condition reference solves (warm-started from the previous condition) |
+| ZPF mapping (`binplot`, `ternplot`, isopleths, step) | partly | global-minimum checks compiled; point solves and dormant-phase driving forces on the reference |
+| `IsolatedPhase` properties in `Workspace.get` | yes | the reference's warm-started sequence of solves, replayed on the compiled solver (N/P/T/X conditions) |
+| `DormantPhase`, `T0`, other derivatives | no | per-condition reference solves |
 
 ## Troubleshooting and developer settings
 

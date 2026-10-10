@@ -112,7 +112,12 @@ def _find_global_min_cs(point: Point, system_info: dict, pdens = 500, tol = 1e-5
 
     # Get driving force and find index that maximized driving force
     state_conds = {str(key): point.global_conditions[key] for key in point.global_conditions if map_utils.is_state_variable(key)}
-    samples = calculate(dbf, comps, phases, model=models, phase_records=phase_records, output="GM", to_xarray=False, pdens=pdens, **state_conds)
+    # Compiled backends (pycalphad.set_backend): the same samples, energies and
+    # compositions without calculate()'s dataset assembly (see pycalphad/gpu/mapping_scan.py)
+    from pycalphad.gpu.mapping_scan import sampled_energies, top_candidates
+    compiled = sampled_energies(dbf, comps, phases, models, phase_records, state_conds, pdens)
+    if compiled is None:
+        samples = calculate(dbf, comps, phases, model=models, phase_records=phase_records, output="GM", to_xarray=False, pdens=pdens, **state_conds)
     # Since we index y, phase_ids and dGs, we need to make sure they have 
     # the following shape (where N = number of samples, C = number of components, 
     # DOF = internal degrees of freedom):
@@ -126,13 +131,16 @@ def _find_global_min_cs(point: Point, system_info: dict, pdens = 500, tol = 1e-5
     # a) Unaries, where C = 1, so squeezing x will give a shape of (N,) and mu will give a scalar
     # b) Single stoichiometric phase where DOF = 1, so squeezing y will give (N,)
     #       Sampling a single stoichiometric phase may also give N = 1 as well
-    gm = np.atleast_1d(np.squeeze(samples.GM))
-    # Reshape x to 2D array of (N,C)
-    x = np.reshape(samples.X, (gm.shape[0], -1))
-    # Reshape y to 2D array of (N,DOF)
-    y = np.reshape(samples.Y, (gm.shape[0], -1))
+    if compiled is None:
+        gm = np.atleast_1d(np.squeeze(samples.GM))
+        # Reshape x to 2D array of (N,C)
+        x = np.reshape(samples.X, (gm.shape[0], -1))
+        # Reshape y to 2D array of (N,DOF)
+        y = np.reshape(samples.Y, (gm.shape[0], -1))
 
-    phase_ids = np.atleast_1d(np.squeeze(samples.Phase))
+        phase_ids = np.atleast_1d(np.squeeze(samples.Phase))
+    else:
+        gm, x, y, phase_ids = compiled
     mu = np.atleast_1d(np.squeeze(point.chemical_potentials))
     dGs = np.dot(x, mu) - gm
 
@@ -142,7 +150,10 @@ def _find_global_min_cs(point: Point, system_info: dict, pdens = 500, tol = 1e-5
     # 3. For each phase, get the first index it shows up
     #    The index will correspond to the sorted_indices list, so we have to get the unsorted index
     #    From there
-    sorted_indices = np.argsort(dGs)[::-1]
+    if compiled is None:
+        sorted_indices = np.argsort(dGs)[::-1]
+    else:
+        sorted_indices = top_candidates(dGs, num_candidates, phase_ids, y)
     sorted_phases = phase_ids[sorted_indices][:np.amin([num_candidates, len(sorted_indices)])]
     unique_phases = np.unique(sorted_phases)
     phase_indices = [np.argmax(sorted_phases == p) for p in unique_phases]

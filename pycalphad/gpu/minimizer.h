@@ -32,7 +32,7 @@ struct DevicePhaseData;
 __device__ void compute_phase_matrix(double* phase_matrix_out, const double* hess_in,
                                     const double* cons_jac_tmp_in,
                                     const CompositionSet& compset_ref, int num_statevars_val,
-                                    const double* phase_dof_site_fracs,
+                                    const double* chemical_potentials,
                                     const double* mass_jac, int mass_jac_cols,
                                     int num_components);
 __device__ void lstsq(double* A, int nrows, int ncols, double* b, double tolerance,
@@ -137,7 +137,15 @@ typedef struct SystemSpecification {
     int fixed_stable_compset_indices[MAX_PHASES];
     int num_fixed_stable_compsets;
     int max_num_free_stable_phases;
-    double ALLOWED_MASS_RESIDUAL;
+    // Composition convergence (reference SystemSpecification): components
+    // whose mole fractions the prescribed conditions determine uniquely, with
+    // those values, and the prescribed rows involving undetermined components
+    // (checked as row residuals). Computed on the host (gpu_systemspec_flat).
+    int num_determined_components;
+    int determined_component_indices[MAX_COMPONENTS];
+    double determined_component_mole_fractions[MAX_COMPONENTS];
+    int num_undetermined_condition_rows;
+    int undetermined_condition_row_indices[MAX_FIXED_MOLE_FRACTION_CONDITIONS];
     // Runtime fit-parameter values (copied into every compset's trailing dof
     // slots at initialization; per-condition storage enables per-walker
     // parameter vectors for batched MCMC ensembles).
@@ -206,10 +214,8 @@ typedef struct SystemSpecification {
 
         max_num_free_stable_phases = num_components + num_free_statevars - num_fixed_stable_compsets;
 
-        // Match CPU behavior exactly: always use 1e-8
-        // The CPU code has complex logic but ultimately sets:
-        // self.ALLOWED_MASS_RESIDUAL = 1e-8
-        ALLOWED_MASS_RESIDUAL = 1e-8;
+        num_determined_components = 0;
+        num_undetermined_condition_rows = 0;
     }
     SystemSpecification(){}
 } SystemSpecification;
@@ -364,7 +370,6 @@ typedef struct SystemState {
     int lockstep_needs_add;  // gpu-fast: a suppressed phase-add occurred
     int metastable_phase_iterations[MAX_PHASES];
     int times_compset_removed[MAX_PHASES];
-    double mass_residual;
     double phase_amt[MAX_PHASES];
     double chemical_potentials[MAX_COMPONENTS];
     int condition_idx;  // Condition index (used by the PYCGPU_TRACE_* output)
@@ -428,7 +433,6 @@ typedef struct SystemState {
             _driving_forces_arr[i] = 0.0;
             _phase_energies_per_mole_atoms_arr[i] = 0.0;
         }
-        mass_residual = 1e10;
 
         for (int i = 0; i < MAX_COMPONENTS; ++i) {
             chemical_potentials[i] = 0.0;
@@ -645,17 +649,6 @@ typedef struct SystemState {
             for (int comp_idx = 0; comp_idx < spec->num_components; ++comp_idx) {
                  mole_fractions[comp_idx] = (spec->num_components > 0) ? 1.0/spec->num_components : 0.0; // Or just 0.0
             }
-        }
-        
-        mass_residual = 0.0;
-        for (int cond_idx = 0; cond_idx < spec->num_prescribed_mole_fraction_conditions; ++cond_idx) {
-            double current_sum = 0.0;
-            for (int comp_idx = 0; comp_idx < spec->num_prescribed_mole_fraction_coefficients_cols; ++comp_idx) {
-                 current_sum += spec->prescribed_mole_fraction_coefficients[cond_idx][comp_idx] * mole_fractions[comp_idx];
-            }
-            double residual_contrib = fabs(current_sum - spec->prescribed_mole_fraction_rhs[cond_idx]);
-            
-            mass_residual += residual_contrib;
         }
         
         for (int idx = 0; idx < num_compsets; ++idx) {
@@ -932,7 +925,7 @@ typedef struct SystemState {
             // Site fractions start at spec->num_statevars in workspace DOF
             compute_phase_matrix(csst->phase_matrix, csst->hess, csst->cons_jac_tmp,
                                  *compset, spec->num_statevars,
-                                 &compset->dof[spec->num_statevars],
+                                 chemical_potentials,
                                  csst->mass_jac, csst->mass_jac_cols,
                                  spec->num_components);
 
@@ -1114,7 +1107,7 @@ __device__ bool identify_candidate_phase_to_add(
 __device__ void compute_phase_matrix(double* phase_matrix_out, const double* hess_in,
                                     const double* cons_jac_tmp_in,
                                     const CompositionSet& compset_ref, int num_statevars_val,
-                                    const double* phase_dof_site_fracs,
+                                    const double* chemical_potentials,
                                     const double* mass_jac, int mass_jac_cols,
                                     int num_components) {
     // LHS of Eq. 41, Sundman 2015 (reference compute_phase_matrix,
@@ -1144,6 +1137,27 @@ __device__ void compute_phase_matrix(double* phase_matrix_out, const double* hes
                 hess_in[(num_statevars_val + i) * hess_total_dim + (num_statevars_val + j)];
         }
     }
+
+#ifdef PYCGPU_FORMULAMOLE_HESS
+    // Ionic liquids: P and Q make the moles non-linear in the site fractions,
+    // so the dM/dy term of Eq. 37 is linearized too, which brings in the
+    // chemical potentials of the previous iteration (reference
+    // compute_phase_matrix). Zero, and not generated, for other models.
+    if (pr->formulamole_hess != nullptr) {
+        double mass_hess[MAX_COMPONENTS * MAX_DOF_PER_PHASE * MAX_DOF_PER_PHASE];
+        pr->formulamole_hess(mass_hess, compset_ref.dof);
+        for (int comp_idx = 0; comp_idx < num_components; ++comp_idx) {
+            for (int i = 0; i < phase_dof_val; i++) {
+                for (int j = 0; j < phase_dof_val; j++) {
+                    phase_matrix_out[i * current_phase_matrix_dim + j] -= chemical_potentials[comp_idx] *
+                        mass_hess[(comp_idx * phase_dof_val + i) * phase_dof_val + j];
+                }
+            }
+        }
+    }
+#else
+    (void)chemical_potentials;
+#endif
 
     // Border with the internal-constraint Jacobian (symmetric blocks)
     for (int i = 0; i < num_internal_cons_val; i++) {
@@ -1473,13 +1487,6 @@ __device__ void write_row_fixed_mole_amount(double* out_row, double* out_rhs,
 }
 
 
-// It is crucial that the C PhaseRecord struct and its associated function pointers
-// (e.g., for formulamole_obj, formulamole_grad) are implemented in a way that
-// is consistent with how they are called (e.g., if they operate per-component or fill arrays for all components).
-// Note: this compute_phase_matrix does not use chemical potentials, unlike
-// the pyx counterpart's delta_y calculation.
-
-// Re-inserting and checking fill_equilibrium_system for sanity with the new context:
 __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibrium_matrix_cols,
                                       double* equilibrium_rhs,
                                       SystemSpecification* spec, SystemState* state) {
@@ -1701,22 +1708,44 @@ __device__ void fill_equilibrium_system(double* equilibrium_matrix, int equilibr
 
 __device__ bool check_convergence(SystemSpecification* spec, SystemState* state) {
     double ALLOWED_DELTA_Y = 5e-09;
-    double ALLOWED_DELTA_PHASE_AMT = 1e-10;
+    double ALLOWED_DELTA_PHASE_AMT = 1e-8;
     double ALLOWED_DELTA_STATEVAR = 1e-5;
-    
+    double MASS_RESIDUAL_RTOL = 1e-6;
+    double MASS_RESIDUAL_ATOL = 1e-11;
+
+    bool mass_residuals_converged = true;
+    // Determined components are checked against their unique prescribed values
+    for (int i = 0; i < spec->num_determined_components; ++i) {
+        int comp_idx = spec->determined_component_indices[i];
+        double target = spec->determined_component_mole_fractions[i];
+        mass_residuals_converged = mass_residuals_converged && (
+            fabs(state->mole_fractions[comp_idx] - target) < MASS_RESIDUAL_RTOL * fabs(target) + MASS_RESIDUAL_ATOL);
+    }
+    // Prescribed rows involving undetermined components are checked as row
+    // residuals, relative to the magnitudes of the terms in the linear combination
+    for (int i = 0; i < spec->num_undetermined_condition_rows; ++i) {
+        int row_idx = spec->undetermined_condition_row_indices[i];
+        double residual = -spec->prescribed_mole_fraction_rhs[row_idx];
+        double scale = 0.0;
+        for (int comp_idx = 0; comp_idx < spec->num_components; ++comp_idx) {
+            residual += spec->prescribed_mole_fraction_coefficients[row_idx][comp_idx] * state->mole_fractions[comp_idx];
+            scale += fabs(spec->prescribed_mole_fraction_coefficients[row_idx][comp_idx] * state->mole_fractions[comp_idx]);
+        }
+        mass_residuals_converged = mass_residuals_converged && (
+            fabs(residual) < MASS_RESIDUAL_RTOL * scale + MASS_RESIDUAL_ATOL);
+    }
+
     bool solution_is_feasible =
         (state->largest_phase_amt_change < ALLOWED_DELTA_PHASE_AMT) &&
         (state->largest_y_change < ALLOWED_DELTA_Y) &&
         (state->largest_statevar_change < ALLOWED_DELTA_STATEVAR) &&
-        (state->mass_residual <
-         spec->ALLOWED_MASS_RESIDUAL
-        );
+        mass_residuals_converged;
 
     #ifdef PYCGPU_TRACE_LOOP
     if (state->condition_idx == 0) {
-        printf("TRACECONV iter=%d damt=%.3e dy=%.3e dsv=%.3e mres=%.3e quiet=%d feas=%d\n",
+        printf("TRACECONV iter=%d damt=%.3e dy=%.3e dsv=%.3e mass=%d quiet=%d feas=%d\n",
                state->iteration, state->largest_phase_amt_change, state->largest_y_change,
-               state->largest_statevar_change, state->mass_residual,
+               state->largest_statevar_change, (int)mass_residuals_converged,
                state->iterations_since_last_phase_change, (int)solution_is_feasible);
     }
     #endif
@@ -1761,11 +1790,12 @@ __device__ void advance_state(SystemSpecification* spec, SystemState* state, con
             if (fabs(delta_NP) > MIN_PHASE_AMOUNT) {
                 phase_amt_step_size_limiter = fmin(phase_amt_step_size_limiter,
                     (MIN_PHASE_AMOUNT - state->phase_amt[compset_original_idx]) / delta_NP);
-            } else if (delta_NP < 0) {
-                 phase_amt_step_size_limiter = 0.0;
             }
         }
     }
+    // Enforce a non-negative step in case floating point precision near
+    // MIN_PHASE_AMOUNT makes the limited step negative
+    phase_amt_step_size_limiter = fmax(phase_amt_step_size_limiter, 0.0);
 
     state->largest_phase_amt_change = 0.0;
     
@@ -1896,16 +1926,12 @@ __device__ void advance_state(SystemSpecification* spec, SystemState* state, con
             double change_this_y = fabs(compset->dof[spec->num_statevars + i] - old_val);
             if (change_this_y > max_dy_this_cs) max_dy_this_cs = change_this_y;
         }
-        // CPU parity (minimizer.pyx:956): largest_y_change is reset INSIDE the
-        // per-compset loop, so check_convergence sees only the LAST compset's
-        // largest site-fraction step — a max over all compsets is NOT the
-        // reference semantics. This matters: a removed compset whose internal
-        // Newton oscillates (AlCuFe BCC_B2 ordering gap) otherwise blocks
-        // convergence for ~50 iterations, after which change_phases samples its
-        // bouncing dof at a spurious positive driving force, re-adds it, and
-        // the full-step re-solve destroys the converged solution (+249 J/mol
-        // with a matching phase set, or a lost second phase).
-        state->largest_y_change = max_dy_this_cs;
+        // Only stable or fixed phases contribute to largest_y_change (reference
+        // advance_state): a removed composition set whose internal Newton
+        // oscillates must not block convergence.
+        if ((state->phase_amt[idx] > 0 || compset->fixed) && max_dy_this_cs > state->largest_y_change) {
+            state->largest_y_change = max_dy_this_cs;
+        }
         #ifdef PYCGPU_TRACE_LOOP
         if (state->condition_idx == 0 && max_dy_this_cs > 1e-6) {
             printf("TRACEDY iter=%d cs=%d amt=%.3e maxdy=%.3e limiter=%.3e y=", state->iteration,

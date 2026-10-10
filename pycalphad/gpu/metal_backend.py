@@ -399,6 +399,7 @@ _ARRAY_FNS = (('PYCGPU_FN_FORMULAGRAD', 'formulagrad'), ('PYCGPU_FN_FORMULAHESS'
               ('PYCGPU_FN_INTERNAL_CONS_JAC', 'internal_cons_jac'),
               ('PYCGPU_FN_MASS_OBJ', 'mass_obj'), ('PYCGPU_FN_FORMULAMOLE_OBJ', 'formulamole_obj'),
               ('PYCGPU_FN_FORMULAMOLE_GRAD', 'formulamole_grad'),
+              ('PYCGPU_FN_FORMULAMOLE_HESS', 'formulamole_hess'),
               ('PYCGPU_FN_FORMULAPARAMGRAD', 'formulaparamgrad'),
               ('PYCGPU_FN_FORMULAPARAMMIXED', 'formulaparammixed'))
 
@@ -417,6 +418,7 @@ def _phase_record_table(init_calls):
             has_hess=m.group(3) != 'nullptr',
             has_fused='.formulafused' in call,
             has_param_derivs='.formulaparamgrad' in call,
+            has_formulamole_hess='.formulamole_hess' in call,
             ns=int(m.group(4)), pd=int(m.group(5)), ne=int(m.group(6)),
             nic=int(m.group(7)), nve=int(m.group(8))))
     records.sort(key=lambda r: r['idx'])
@@ -450,6 +452,8 @@ def _dispatch_source(records):
                 continue  # unused: the fused function supplies both
             if name.startswith('formulaparam') and not r['has_param_derivs']:
                 continue
+            if name == 'formulamole_hess' and not r['has_formulamole_hess']:
+                continue
             array.append(f"        case {i} * 16 + {const}: {p}{name}(out, x); return;")
         if r['has_fused']:
             fused.append(f"        case {i}: {p}fused(out_eg, out_hess, x); return;")
@@ -457,6 +461,9 @@ def _dispatch_source(records):
             f"    records[{i}].init_model({i}, {str(r['has_hess']).lower()}, "
             f"{str(r['has_fused']).lower()}, {str(r['has_param_derivs']).lower()}, "
             f"{r['ns']}, {r['pd']}, {r['ne']}, {r['nic']}, {r['nve']});")
+        if r['has_formulamole_hess']:
+            init.append(f"    records[{i}].formulamole_hess = "
+                        f"pycgpu_array_func_t{{PYCGPU_FN_FORMULAMOLE_HESS, {i}}};")
     nl = '\n'
     return f"""
 PYC_NOINLINE double pycgpu_dispatch_scalar(int fn, int model, const double* x) {{
@@ -527,6 +534,9 @@ def thread_stack_estimate(sizes, extra_doubles=0):
     from pycalphad.gpu.work_arrays import work_array_strides
     doubles = sum(stride for name, stride in work_array_strides(sizes) if name != 'system_states')
     doubles += int(sizes['SYSTEM_STATE_SIZE']) / 1.3 + extra_doubles
+    if sizes.get('PYCGPU_FORMULAMOLE_HESS'):
+        # compute_phase_matrix's moles-Hessian buffer (ionic liquids)
+        doubles += int(sizes['MAX_COMPONENTS']) * int(sizes['MAX_DOF_PER_PHASE']) ** 2
     return int(12 * doubles)
 
 

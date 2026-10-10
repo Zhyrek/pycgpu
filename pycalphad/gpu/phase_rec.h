@@ -12,7 +12,7 @@ enum {
     PYCGPU_FN_OBJ = 0, PYCGPU_FN_FORMULAOBJ, PYCGPU_FN_FORMULAGRAD, PYCGPU_FN_FORMULAHESS,
     PYCGPU_FN_INTERNAL_CONS_FUNC, PYCGPU_FN_INTERNAL_CONS_JAC, PYCGPU_FN_MASS_OBJ,
     PYCGPU_FN_FORMULAMOLE_OBJ, PYCGPU_FN_FORMULAMOLE_GRAD, PYCGPU_FN_FORMULAPARAMGRAD,
-    PYCGPU_FN_FORMULAPARAMMIXED
+    PYCGPU_FN_FORMULAPARAMMIXED, PYCGPU_FN_FORMULAMOLE_HESS
 };
 double pycgpu_dispatch_scalar(int fn, int model, const double* x);
 void pycgpu_dispatch_array(int fn, int model, double* out, const double* x);
@@ -54,6 +54,7 @@ typedef struct PhaseRecord {
     pycgpu_array_func_t mass_obj;
     pycgpu_array_func_t formulamole_obj;
     pycgpu_array_func_t formulamole_grad;
+    pycgpu_array_func_t formulamole_hess;
     pycgpu_array_func_t formulaparamgrad;
     pycgpu_array_func_t formulaparammixed;
     pycgpu_fused_func_t formulafused;
@@ -74,6 +75,7 @@ typedef struct PhaseRecord {
         mass_obj = pycgpu_array_func_t{PYCGPU_FN_MASS_OBJ, m};
         formulamole_obj = pycgpu_array_func_t{PYCGPU_FN_FORMULAMOLE_OBJ, m};
         formulamole_grad = pycgpu_array_func_t{PYCGPU_FN_FORMULAMOLE_GRAD, m};
+        formulamole_hess = pycgpu_array_func_t{PYCGPU_FN_FORMULAMOLE_HESS, -1};
         formulaparamgrad = pycgpu_array_func_t{PYCGPU_FN_FORMULAPARAMGRAD, has_param_derivs ? m : -1};
         formulaparammixed = pycgpu_array_func_t{PYCGPU_FN_FORMULAPARAMMIXED, has_param_derivs ? m : -1};
         formulafused = pycgpu_fused_func_t{has_fused ? m : -1};
@@ -108,6 +110,11 @@ typedef struct PhaseRecord {
     pycgpu_array_func_t mass_obj;
     pycgpu_array_func_t formulamole_obj;
     pycgpu_array_func_t formulamole_grad;
+    /* Site-fraction Hessians of the moles per formula unit,
+     * out[(comp * phase_dof + i) * phase_dof + j]; set by an emitted
+     * assignment after init() for phases whose moles are non-linear in the
+     * site fractions (two-sublattice ionic liquids), nullptr otherwise. */
+    pycgpu_array_func_t formulamole_hess;
     /* Jansson parameter derivatives (set by emitted assignments after init()
      * when fit parameters are present and requested; nullptr otherwise). */
     pycgpu_array_func_t formulaparamgrad;   /* out[p] = dG/dp            */
@@ -132,6 +139,7 @@ typedef struct PhaseRecord {
         mass_obj = mon;
         formulamole_obj = fmon;
         formulamole_grad = fmgn;
+        formulamole_hess = nullptr;
         formulaparamgrad = nullptr;
         formulaparammixed = nullptr;
         formulafused = nullptr;
@@ -154,6 +162,7 @@ typedef struct PhaseRecord {
         mass_obj = nullptr;
         formulamole_obj = nullptr;
         formulamole_grad = nullptr;
+        formulamole_hess = nullptr;
         formulaparamgrad = nullptr;
         formulaparammixed = nullptr;
         formulafused = nullptr;

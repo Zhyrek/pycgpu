@@ -180,8 +180,9 @@ def create_system_specifications_array(wks_obj, num_conditions, dynamic_sizes, p
         return apply_safe_padding(spec_doubles, verbose=verbose)
 
     # FAST PATH: the flat spec is condition-invariant except for
-    #   initial_chemical_potentials (per-condition starting MU from the hull) and
-    #   prescribed_mole_fraction_rhs (per-condition X values).
+    #   initial_chemical_potentials (per-condition starting MU from the hull),
+    #   prescribed_mole_fraction_rhs (per-condition X values) and the
+    #   composition convergence targets derived from them.
     # Build condition 0 through the original machinery, tile it, and overwrite
     # those two field groups vectorized. The per-condition Python loop cost ~5s
     # at 10k conditions (pint conversions + object churn per condition).
@@ -246,6 +247,16 @@ def create_system_specifications_array(wks_obj, num_conditions, dynamic_sizes, p
                     vals = np.full(num_conditions, float(varr.flat[0]))
                 specs_array[:, off_rhs + constraint_count] = _xp.asarray(vals)
                 constraint_count += 1
+
+        # Composition convergence data (reference SystemSpecification) for
+        # each condition's targets; the coefficient matrix is condition-invariant.
+        from pycalphad.gpu.gpu_systemspec_flat import write_mole_fraction_convergence_data
+        num_components = int(spec0[1])
+        num_rows = int(spec0[off_rhs + MC])  # num_prescribed_mole_fraction_conditions
+        coefficients = np.asarray(spec0[3 + MC:3 + MC + MC * MC]).reshape(MC, MC)[:num_rows, :num_components]
+        rhs = specs_array[:, off_rhs:off_rhs + num_rows]
+        rhs = rhs if isinstance(rhs, np.ndarray) else rhs.get()
+        write_mole_fraction_convergence_data(specs_array, coefficients, rhs, dynamic_sizes)
 
         # initial_chemical_potentials: FREE chempots take per-condition starting
         # values from properties.MU (C-order flatten matches the condition index);

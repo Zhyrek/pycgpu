@@ -167,7 +167,12 @@ __device__ void pycgpu_solve_condition(
         for (int i = 0; i < MAX_PHASES; ++i) spec.fixed_stable_compset_indices[i] = (int)spec_row[k++];
         spec.num_fixed_stable_compsets = (int)spec_row[k++];
         spec.max_num_free_stable_phases = (int)spec_row[k++];
-        spec.ALLOWED_MASS_RESIDUAL = spec_row[k++];
+        spec.num_determined_components = (int)spec_row[k++];
+        for (int i = 0; i < MAX_COMPONENTS; ++i) spec.determined_component_indices[i] = (int)spec_row[k++];
+        for (int i = 0; i < MAX_COMPONENTS; ++i) spec.determined_component_mole_fractions[i] = spec_row[k++];
+        spec.num_undetermined_condition_rows = (int)spec_row[k++];
+        for (int i = 0; i < MAX_FIXED_MOLE_FRACTION_CONDITIONS; ++i)
+            spec.undetermined_condition_row_indices[i] = (int)spec_row[k++];
         spec.num_phase_local_conditions_total = (int)spec_row[k++];
         for (int i = 0; i < MAX_PHASE_LOCAL_CONDITIONS; ++i) {
             spec.plc_model[i] = (int)spec_row[k++];

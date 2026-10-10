@@ -3,6 +3,94 @@
 import numpy as np
 
 
+def mole_fraction_convergence_data(coefficients, rhs):
+    """Composition convergence data of the reference SystemSpecification
+    (pycalphad/core/minimizer.pyx), for one coefficient matrix and many
+    right-hand sides.
+
+    The prescribed mole fraction conditions, together with the normalization
+    condition, may uniquely determine the mole fractions of some components;
+    check_convergence tests those against their unique values and checks the
+    prescribed rows involving any other component as row residuals.
+
+    Parameters
+    ----------
+    coefficients : (num_conditions, num_components) array
+    rhs : (n, num_conditions) array, one row per condition point
+
+    Returns
+    -------
+    determined_component_indices : (k,) int array
+    undetermined_condition_row_indices : (m,) int array
+    determined_component_mole_fractions : (n, k) array
+    """
+    coefficients = np.asarray(coefficients, dtype=np.float64)
+    num_conditions, num_components = coefficients.shape
+    rhs = np.asarray(rhs, dtype=np.float64)
+    if rhs.ndim != 2 or rhs.shape[1] != num_conditions:
+        raise ValueError(f"rhs must have shape (n, {num_conditions}), got {rhs.shape}")
+    condition_matrix = np.empty((num_conditions + 1, num_components))
+    condition_matrix[:num_conditions, :] = coefficients
+    condition_matrix[num_conditions, :] = 1.0
+    condition_rhs = np.ones((rhs.shape[0], num_conditions + 1))
+    condition_rhs[:, :num_conditions] = rhs
+    u, singular_values, vt = np.linalg.svd(condition_matrix)
+    rank = int(np.sum(singular_values > max(condition_matrix.shape) * np.finfo(np.float64).eps * singular_values[0]))
+    # Minimum-norm least-squares solution of the conditions; unique for determined components
+    target_mole_fractions = ((condition_rhs @ u[:, :rank]) / singular_values[:rank]) @ vt[:rank]
+    # A component is determined iff no null space direction of the conditions can change it
+    determined_components = ~np.any(np.abs(vt[rank:]) > 1e-10, axis=0)
+    determined = np.nonzero(determined_components)[0]
+    undetermined_coefficients = coefficients[:, ~determined_components]
+    undetermined_rows = np.nonzero(np.any(np.abs(undetermined_coefficients) > 1e-14, axis=1))[0]
+    return determined, undetermined_rows, target_mole_fractions[:, determined]
+
+
+def spec_layout(dynamic_sizes):
+    """Offsets (in doubles) of the flat SystemSpecification fields that are
+    written per condition, and the length of the core section. Mirrors the
+    sequential unpack in solve_condition.h."""
+    MC = int(dynamic_sizes["MAX_COMPONENTS"])
+    MSV = int(dynamic_sizes["MAX_STATEVARS"])
+    MP = int(dynamic_sizes["MAX_PHASES"])
+    MFIX = MC  # MAX_FIXED_MOLE_FRACTION_CONDITIONS
+    MPAR = int(dynamic_sizes.get("MAX_PARAMS", 0))
+    MPLC = int(dynamic_sizes.get("MAX_PHASE_LOCAL_CONDITIONS", 0))
+    layout = {}
+    idx = 3
+    layout['initial_chemical_potentials'] = idx; idx += MC
+    layout['prescribed_mole_fraction_coefficients'] = idx; idx += MFIX * MC
+    layout['prescribed_mole_fraction_rhs'] = idx; idx += MFIX
+    idx += 2 + (MC + 1) + (MSV + 1) + (MC + 1) + (MSV + 1) + (MP + 1) + 1
+    layout['num_determined_components'] = idx; idx += 1
+    layout['determined_component_indices'] = idx; idx += MC
+    layout['determined_component_mole_fractions'] = idx; idx += MC
+    layout['num_undetermined_condition_rows'] = idx; idx += 1
+    layout['undetermined_condition_row_indices'] = idx; idx += MFIX
+    idx += 1 + 4 * MPLC
+    layout['fit_params'] = idx; idx += MPAR
+    layout['num_params'] = idx; idx += 1
+    layout['core_len'] = idx
+    return layout
+
+
+def write_mole_fraction_convergence_data(rows, coefficients, rhs, dynamic_sizes):
+    """Fill the composition convergence fields of flat spec `rows` ((n, stride)
+    array, NumPy or CuPy) for conditions sharing one coefficient matrix."""
+    L = spec_layout(dynamic_sizes)
+    determined, undetermined_rows, targets = mole_fraction_convergence_data(coefficients, rhs)
+    xp = np if isinstance(rows, np.ndarray) else __import__('cupy')
+    k, m = determined.size, undetermined_rows.size
+    rows[:, L['num_determined_components']] = k
+    start = L['determined_component_indices']
+    rows[:, start:start + k] = xp.asarray(determined, dtype=np.float64)
+    start = L['determined_component_mole_fractions']
+    rows[:, start:start + k] = xp.asarray(targets)
+    rows[:, L['num_undetermined_condition_rows']] = m
+    start = L['undetermined_condition_row_indices']
+    rows[:, start:start + m] = xp.asarray(undetermined_rows, dtype=np.float64)
+
+
 def create_flat_system_specification(global_spec_scalars, global_spec_arrays, dynamic_sizes):
     """
     Create a SystemSpecification as a flat double array.
@@ -39,7 +127,8 @@ def create_flat_system_specification(global_spec_scalars, global_spec_arrays, dy
         (MAX_STATEVARS + 1) +  # fixed_statevar_indices + num_fixed_statevars
         (MAX_PHASES + 1) +  # fixed_stable_compset_indices + num_fixed_stable_compsets
         1 +  # max_num_free_stable_phases
-        1 +  # ALLOWED_MASS_RESIDUAL
+        (1 + 2 * MAX_COMPONENTS) +  # determined components: count, indices, mole fractions
+        (1 + MAX_FIXED_MOLE_FRACTION_CONDITIONS) +  # undetermined condition rows: count, indices
         (1 + 4 * MAX_PHASE_LOCAL_CONDITIONS) +  # phase-local conditions block
         (MAX_PARAMS + 1)  # fit_params[MAX_PARAMS] + num_params
     )
@@ -165,9 +254,20 @@ def create_flat_system_specification(global_spec_scalars, global_spec_arrays, dy
     spec_doubles[idx] = float(global_spec_scalars[10])
     idx += 1
     
-    # ALLOWED_MASS_RESIDUAL
-    spec_doubles[idx] = global_spec_scalars[11]
+    # Composition convergence data (see mole_fraction_convergence_data)
+    determined = np.asarray(global_spec_arrays['determined_component_indices'], dtype=np.int64)
+    targets = np.asarray(global_spec_arrays['determined_component_mole_fractions'], dtype=np.float64)
+    undetermined_rows = np.asarray(global_spec_arrays['undetermined_condition_row_indices'], dtype=np.int64)
+    spec_doubles[idx] = float(determined.size)
     idx += 1
+    spec_doubles[idx:idx + determined.size] = determined
+    idx += MAX_COMPONENTS
+    spec_doubles[idx:idx + targets.size] = targets
+    idx += MAX_COMPONENTS
+    spec_doubles[idx] = float(undetermined_rows.size)
+    idx += 1
+    spec_doubles[idx:idx + undetermined_rows.size] = undetermined_rows
+    idx += MAX_FIXED_MOLE_FRACTION_CONDITIONS
 
     # Phase-local conditions: count then (model_idx, type, target, value)
     # per slot. Attached at compset creation to compsets of the matching

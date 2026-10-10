@@ -628,7 +628,6 @@ __device__ void solve_equilibrium_at_condition(
     // TODO: Add output scaling instead of changing solver algorithm
 
     // Initialize other critical SystemState arrays
-    current_sys_state.mass_residual = 0.0;
     current_sys_state.largest_chemical_potential_difference = 0.0;
     current_sys_state.delta_ms_rows = 0;
     current_sys_state.delta_ms_cols = 0;
@@ -1144,7 +1143,6 @@ __device__ void solve_equilibrium_at_condition(
             // beforehand (solver.py:309). Deletion is emulated by blocking their
             // re-addition in change_phases (candidate requires times_compset_removed < 4).
             current_sys_state.iterations_since_last_phase_change = 0;
-            current_sys_state.mass_residual = 1e10;
             current_sys_state.num_free_stable_compsets = 0;
             for (int i = 0; i < current_sys_state.num_compsets; ++i) {
                 current_sys_state.metastable_phase_iterations[i] = 0;

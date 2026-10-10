@@ -197,6 +197,13 @@ __device__ static double pycgpu_hyperplane(
     // very first fraction test breaks out, garbage would be copied into the
     // outputs there. Zero-init so that pathological path is deterministic.
     for (int i = 0; i < MAX_COMPONENTS; ++i) candidate_potentials[i] = 0.0;
+    // All chemical potentials in component order: the fixed ones now, the
+    // free ones after each solve (reference all_potentials/candidate_potentials).
+    double all_potentials[MAX_COMPONENTS];
+    for (int i = 0; i < MAX_COMPONENTS; ++i) all_potentials[i] = 0.0;
+    for (int ici = 0; ici < num_fixed_chempots; ++ici) {
+        all_potentials[fixed_chempot_indices[ici]] = chemical_potentials[fixed_chempot_indices[ici]];
+    }
 
     int fixed_index = 0;
     for (int i = 0; i < num_components; ++i) {
@@ -270,11 +277,13 @@ __device__ static double pycgpu_hyperplane(
         pycgpu_hp_solve(f_candidate_tieline, simplex_size, candidate_potentials);
         if (candidate_potentials[0] == -1e19) break;
 
-        // Streamed driving-force argmin: per-point accumulation order matches
-        // the reference's column-wise loops exactly (energies first, then the
-        // free-chempot terms in ici order, then the fixed terms in ici
-        // order), so every df value — and the strict-< argmin over ascending
-        // i — is bit-identical to the stored-array version.
+        for (int ici = 0; ici < simplex_size; ++ici) {
+            all_potentials[free_chempot_indices[ici]] = candidate_potentials[ici];
+        }
+        // Driving-force argmin, accumulated per point in component order as
+        // the reference does (energy first, then every component's term), so
+        // each df value and the strict-< argmin over ascending i are
+        // bit-identical to it.
         for (int i = 0; i < simplex_size; ++i) best_guess_simplex[i] = candidate_simplex[i];
         for (int i = 0; i < simplex_size; ++i) {
             for (int j = 0; j < simplex_size; ++j) {
@@ -285,14 +294,8 @@ __device__ static double pycgpu_hyperplane(
         int min_df = -1;
         for (int i = 0; i < num_points; ++i) {
             double df = energies[i];
-            for (int ici = 0; ici < simplex_size; ++ici) {
-                df -= candidate_potentials[ici]
-                    * compositions[i * num_components + free_chempot_indices[ici]];
-            }
-            for (int ici = 0; ici < num_fixed_chempots; ++ici) {
-                int chempot_idx = fixed_chempot_indices[ici];
-                df -= chemical_potentials[chempot_idx]
-                    * compositions[i * num_components + chempot_idx];
+            for (int comp_idx = 0; comp_idx < num_components; ++comp_idx) {
+                df -= all_potentials[comp_idx] * compositions[i * num_components + comp_idx];
             }
             if (df < lowest_df) { lowest_df = df; min_df = i; }
         }

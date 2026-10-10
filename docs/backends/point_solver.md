@@ -25,9 +25,11 @@ unwanted points. A true point list is required.
   template built by `build_spec_row0` — one template per constraint count.
 - **point_hull / device_point_hull**: starting points from a shared
   `calculate()` grid via the compiled lower-convex-hull
-  (`gpu/hyperplane.h`), a port of `hyperplane.pyx` verified bit-identical
-  (GM, chemical potentials, simplex fractions and indices) on ~2,200 mixed
-  binary/ternary/phase-restricted/fixed-chempot cases.
+  (`gpu/hyperplane.h`), a port of `hyperplane.pyx` that selects the same
+  simplices and agrees to rounding (GM, chemical potentials, simplex
+  fractions); it is bit-identical only where the reference's LAPACK rounds
+  like the netlib transliteration (on macOS with Accelerate/OpenBLAS the
+  linear solves differ in the last bits).
 - **PointBatchSolver.solve**: one batched kernel/driver launch over all
   points; returns flat per-point results (GM, MU, NP, X, Y, phase ids,
   converged flag). Work-array memory is bounded by chunked launches

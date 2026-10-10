@@ -187,6 +187,13 @@ def compute_dynamic_kernel_sizes(wks_obj: Workspace) -> Dict[str, int]:
     state_doubles = P * (csst_doubles + compset_doubles + 8) + 8 * C + 4 * S + 128
     computed_sizes["SYSTEM_STATE_SIZE"] = int(state_doubles * 1.3)
 
+    # Phases whose moles are non-linear in the site fractions (two-sublattice
+    # ionic liquids) add a moles-Hessian term to the phase matrix; the solver
+    # compiles that term (and its buffer) in only when some phase needs it.
+    if any(_formulamole_hessian_exprs(wks_obj.models[phase_name], wks_obj) is not None
+           for phase_name in wks_obj.phases):
+        computed_sizes["PYCGPU_FORMULAMOLE_HESS"] = 1
+
     return computed_sizes
 
 
@@ -1534,21 +1541,16 @@ def fix_cse_symbols(source: str) -> str:
 def get_ordered_symbols_for_diff(model_obj: Model, wks_obj: Workspace, verbose: bool = False) -> list:
     """Get ordered symbols for differentiation in the correct order for GPU.
     
-    Returns symbols in the order expected by the GPU code:
-    1. Temperature (T)
-    2. Site fractions for first sublattice (in alphabetical order by species)
-    3. Site fractions for second sublattice (in alphabetical order by species)
-    4. etc.
-    
-    This ensures the gradient output order matches what the GPU minimizer expects.
+    Returns T followed by the site fractions in the order of the phase
+    record's degrees of freedom (Model.site_fractions, sorted by their string
+    form). Gradient and Hessian outputs are indexed in this order, so it must
+    match the DOF vector exactly; sorting by raw species names breaks for
+    charged species, whose escaped names (V_POS2) sort differently (V+2).
     """
     from pycalphad import variables as v
     import symengine as se
-    
-    # Start with temperature - this is the critical ordering requirement
+
     ordered_symbols = []
-    
-    # Find temperature variable in the model's free symbols
     # IMPORTANT: Sort free_symbols to ensure deterministic iteration order
     temp_found = False
     for sym in sorted(model_obj.ast.free_symbols, key=lambda s: str(s)):
@@ -1556,33 +1558,15 @@ def get_ordered_symbols_for_diff(model_obj: Model, wks_obj: Workspace, verbose: 
             ordered_symbols.append(sym)
             temp_found = True
             break
-    
     # If T wasn't found in free symbols but is in state variables, add it
     if not temp_found:
         for var in model_obj.state_variables:
             if isinstance(var, v.Temperature) or str(var) == 'T':
-                # Create a SymEngine symbol for T
                 ordered_symbols.append(se.Symbol('T'))
                 break
-    
-    # Now add site fractions grouped by sublattice
-    site_fractions = model_obj.site_fractions
-    
-    # Group site fractions by sublattice
-    sublattice_groups = {}
-    for sf in site_fractions:
-        sublattice_idx = sf.sublattice_index
-        if sublattice_idx not in sublattice_groups:
-            sublattice_groups[sublattice_idx] = []
-        sublattice_groups[sublattice_idx].append(sf)
-    
-    # Add site fractions in order by sublattice, then alphabetically by species within each sublattice
-    for sublattice_idx in sorted(sublattice_groups.keys()):
-        # Sort by species name within each sublattice
-        sorted_sfs = sorted(sublattice_groups[sublattice_idx], 
-                           key=lambda sf: sf.species.name)
-        ordered_symbols.extend(sorted_sfs)
-    
+
+    ordered_symbols.extend(model_obj.site_fractions)
+
     if verbose:
         print(f"[CSE GRADIENT] Ordered symbols for {model_obj.phase_name}: {[str(s) for s in ordered_symbols]}")
     
@@ -1872,6 +1856,43 @@ def _nb_formulamole_grad_from_model(model_obj: Model, model_c_idx: int, wks_obj:
     return notebook_source_from_expr(funcs, "formulamole_grad", model_obj, model_c_idx, wks_obj, expr_type="grad", c_output_type="void", validate=validate, verbose=verbose)
 
 
+def _formulamole_hessian_exprs(model_obj: Model, wks_obj: Workspace):
+    """Second derivatives of the moles of each nonvacant component per formula
+    unit with respect to the site fractions, flattened as
+    out[(comp * phase_dof + i) * phase_dof + j], or None when all of them are
+    zero. The moles are linear in the site fractions for every model except
+    the two-sublattice ionic liquid, whose site counts P and Q depend on them."""
+    import symengine
+    site_fractions = [s for s in get_ordered_symbols_for_diff(model_obj, wks_obj) if str(s) != 'T']
+    site_fraction_set = set(site_fractions)
+    zero = symengine.Integer(0)
+    exprs, nonzero = [], False
+    for el in (c.name for c in wks_obj.components if c.name != 'VA'):
+        if el not in model_obj.nonvacant_elements:
+            exprs.extend([zero] * len(site_fractions) ** 2)
+            continue
+        moles = symengine.sympify(model_obj.moles(el, per_formula_unit=True))
+        for yi in site_fractions:
+            first = moles.diff(yi)
+            if not (first.free_symbols & site_fraction_set):
+                exprs.extend([zero] * len(site_fractions))
+                continue
+            for yj in site_fractions:
+                second = first.diff(yj)
+                nonzero = nonzero or second != zero
+                exprs.append(second)
+    return exprs if nonzero else None
+
+
+def _nb_formulamole_hess_from_model(model_obj: Model, model_c_idx: int, wks_obj: Workspace, validate: bool = True, verbose: bool = False) -> str:
+    """Site-fraction Hessians of the moles per formula unit (see
+    _formulamole_hessian_exprs); empty when they are all zero."""
+    exprs = _formulamole_hessian_exprs(model_obj, wks_obj)
+    if exprs is None:
+        return ""
+    return notebook_source_from_expr(exprs, "formulamole_hess", model_obj, model_c_idx, wks_obj, expr_type="func", c_output_type="void", validate=validate, verbose=verbose)
+
+
 def _unique_models_for_gpu(wks_obj: Workspace, validate: bool = True):
     """Deduplicated Model list + phase-name-to-index map for the GPU pipeline.
 
@@ -1972,6 +1993,8 @@ def _generate_c_code_for_phase_models(wks_obj: Workspace, include_hess: bool = F
             all_model_device_functions_c_code += _nb_mass_obj_from_model(model_obj, model_c_idx, wks_obj, validate, wks_obj.verbose)
             all_model_device_functions_c_code += _nb_formulamole_obj_from_model(model_obj, model_c_idx, wks_obj, validate, wks_obj.verbose)
             all_model_device_functions_c_code += _nb_formulamole_grad_from_model(model_obj, model_c_idx, wks_obj, validate, wks_obj.verbose)
+            formulamole_hess_c = _nb_formulamole_hess_from_model(model_obj, model_c_idx, wks_obj, validate, wks_obj.verbose)
+            all_model_device_functions_c_code += formulamole_hess_c
             if _jansson_params:
                 all_model_device_functions_c_code += _nb_formulaparamgrad_from_model(model_obj, model_c_idx, wks_obj, validate, wks_obj.verbose)
                 all_model_device_functions_c_code += _nb_formulaparammixed_from_model(model_obj, model_c_idx, wks_obj, validate, wks_obj.verbose)
@@ -2018,6 +2041,8 @@ def _generate_c_code_for_phase_models(wks_obj: Workspace, include_hess: bool = F
             init_call += f"    g_phase_records_array[{model_c_idx}].formulaparammixed = &{func_prefix}formulaparammixed;\n"
         if include_hess and _fused_ok:
             init_call += f"    g_phase_records_array[{model_c_idx}].formulafused = &{func_prefix}fused;\n"
+        if formulamole_hess_c:
+            init_call += f"    g_phase_records_array[{model_c_idx}].formulamole_hess = &{func_prefix}formulamole_hess;\n"
         g_phase_record_array_init_calls_c_code.append(init_call)
 
     return (all_model_device_functions_c_code, g_phase_record_array_init_calls_c_code, 

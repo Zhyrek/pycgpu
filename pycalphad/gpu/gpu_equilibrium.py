@@ -354,14 +354,13 @@ def _prepare_gpu_data(wks_obj: Workspace, unique_py_models: list, py_phase_name_
         
         # Use completely flat arrays for CuPy compatibility - no structured arrays at all
         # Create separate arrays for scalar and vector data
-        global_spec_scalars = np.zeros(12, dtype=np.float64)  # All scalar fields as float64
+        global_spec_scalars = np.zeros(11, dtype=np.float64)  # All scalar fields as float64
         # Index mapping:
         # 0: num_statevars, 1: num_components, 2: prescribed_system_amount
         # 3: num_prescribed_mole_fraction_conditions, 4: num_prescribed_mole_fraction_coefficients_cols
         # 5: num_free_chemical_potentials, 6: num_free_statevars
         # 7: num_fixed_chemical_potentials, 8: num_fixed_statevars
         # 9: num_fixed_stable_compsets, 10: max_num_free_stable_phases
-        # 11: ALLOWED_MASS_RESIDUAL
         
         # Create separate arrays for the complex fields
         global_spec_arrays = {
@@ -994,21 +993,16 @@ def _populate_system_specification(global_spec_np, global_spec_arrays, wks_obj, 
     num_fixed_stable_compsets = global_spec_np[9]
     global_spec_np[10] = num_components + num_free_statevars - num_fixed_stable_compsets  # max_num_free_stable_phases
     
-    # Use dynamic ALLOWED_MASS_RESIDUAL calculation like CPU
-    # CPU minimizer.pyx line 484: max(1e-12, min(1e-8, np.min(np.abs(prescribed_mole_fraction_rhs))/10.0))
-    prescribed_rhs = global_spec_arrays['prescribed_mole_fraction_rhs']
+    # Composition convergence data (reference SystemSpecification.__init__)
+    from pycalphad.gpu.gpu_systemspec_flat import mole_fraction_convergence_data
+    num_components = int(global_spec_np[1])
     constraint_count = int(global_spec_np[3])  # num_prescribed_mole_fraction_conditions
-    
-    if constraint_count > 0:
-        # Get non-zero constraints (up to constraint_count)
-        active_rhs = prescribed_rhs[:constraint_count]
-        min_abs_rhs = np.min(np.abs(active_rhs[active_rhs != 0])) if np.any(active_rhs != 0) else 1e-8
-        dynamic_mass_residual = max(1e-12, min(1e-8, min_abs_rhs / 10.0))
-    else:
-        # No constraints, use default
-        dynamic_mass_residual = 1e-12
-    
-    global_spec_np[11] = dynamic_mass_residual  # ALLOWED_MASS_RESIDUAL
+    coefficients = global_spec_arrays['prescribed_mole_fraction_coefficients'][:constraint_count, :num_components]
+    rhs = global_spec_arrays['prescribed_mole_fraction_rhs'][:constraint_count]
+    determined, undetermined_rows, targets = mole_fraction_convergence_data(coefficients, rhs[None, :])
+    global_spec_arrays['determined_component_indices'] = determined
+    global_spec_arrays['determined_component_mole_fractions'] = targets[0]
+    global_spec_arrays['undetermined_condition_row_indices'] = undetermined_rows
     
 
 

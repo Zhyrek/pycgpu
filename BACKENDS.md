@@ -212,6 +212,22 @@ the compiled backends make cheap. Every multi-phase grid point contributes
 its tie-line endpoints, so boundary points sit at solver accuracy; grid
 resolution only controls how densely boundaries are sampled.
 
+The default ZPF-line mapping (`binplot`, `ternplot`, isopleth and step
+strategies) follows boundaries one point at a time: its energy sampling
+(`calculate()`) uses the compiled evaluator, while its single-point solves
+use the reference solver (they are small and sequential; see below).
+
+## What runs on a compiled backend
+
+| path | compiled | notes |
+|---|---|---|
+| `equilibrium()`, `Workspace` solves | yes | except MQMQA (quasichemical) models and custom `Solver` objects |
+| `calculate()` | yes | energies and properties at sampled points, multi-threaded |
+| `Workspace.get` / `equilibrium(output=...)`: X, NP, Y, MU, T/P/N, Model properties | yes | whole-grid evaluation, bit-identical to the per-condition path (grids of 50+ conditions) |
+| Jansson derivatives of Model properties w.r.t. T or X | yes | see above |
+| ZPF mapping (`binplot`, `ternplot`, isopleths, step) | partly | sampling compiled, point solves on the reference |
+| `IsolatedPhase`, `DormantPhase`, `T0`, other derivatives | no | per-condition reference solves (warm-started from the previous condition) |
+
 ## Troubleshooting and developer settings
 
 * `PYCGPU_TIME=1` prints where accelerated time goes (kernel wall time,

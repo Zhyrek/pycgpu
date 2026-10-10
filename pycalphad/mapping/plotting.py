@@ -34,12 +34,12 @@ def get_label(var: v.StateVariable):
         else:
             return f'Phase Fraction ({var.phase_name})'
     elif isinstance(var, v.X):
-        if var.phase_name is None:
+        if var.phase_name is None or var.phase_name == "*":
             return f'X({var.species.name.capitalize()})'
         else:
             return f'X({var.phase_name}, {var.species.name.capitalize()})'
     elif isinstance(var, v.W):
-        if var.phase_name is None:
+        if var.phase_name is None or var.phase_name == "*":
             return f'W({var.species.name.capitalize()})'
         else:
             return f'W({var.phase_name}, {var.species.name.capitalize()})'
@@ -156,6 +156,8 @@ def plot_tielines(ax, strategy: Union[BinaryStrategy, TernaryStrategy], x: v.Sta
     tieline_color : color
     """
     tieline_data = strategy.get_tieline_data(x, y)
+    if len(tieline_data) == 0:
+        return
     x_all = np.concatenate([st.x for st in tieline_data], axis=1)
     y_all = np.concatenate([st.y for st in tieline_data], axis=1)
     min_x_range = PLOT_TIELINE_AS_NODE_THRESHOLD * np.ptp(x_all)

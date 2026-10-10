@@ -30,6 +30,7 @@ class Solver(SolverBase):
     def __init__(self, verbose=False, remove_metastable=True, **options):
         self.verbose = verbose
         self.remove_metastable = remove_metastable
+        self.options = options
 
 
     def get_system_spec(self, composition_sets, conditions):
@@ -111,7 +112,7 @@ class Solver(SolverBase):
                     denominator_idx = cond.symbols.index(cond.denominator)
                     coefs[denominator_idx] -= value
                 prescribed_mole_fraction_coefficients.append(coefs)
-        prescribed_mole_fraction_coefficients = np.atleast_2d(prescribed_mole_fraction_coefficients)
+        prescribed_mole_fraction_coefficients = np.array(prescribed_mole_fraction_coefficients).reshape(-1, num_components)
         prescribed_mole_fraction_rhs = np.array(prescribed_mole_fraction_rhs)
         prescribed_system_amount = conditions.get('N', 1.0)
         fixed_chemical_potential_indices = np.array([nonvacant_elements.index(str(key)[3:]) for key in conditions.keys() if str(key).startswith('MU_')], dtype=np.int32)
@@ -131,7 +132,9 @@ class Solver(SolverBase):
                                    prescribed_mole_fraction_rhs,
                                    free_chemical_potential_indices, free_statevar_indices,
                                    fixed_chemical_potential_indices, fixed_statevar_indices,
-                                   fixed_stable_compset_indices)
+                                   fixed_stable_compset_indices,
+                                   debugging_output=self.options.get("debugging_output", False)
+                                   )
         return spec
 
     @staticmethod
@@ -165,7 +168,7 @@ class Solver(SolverBase):
         spec = self.get_system_spec(composition_sets, conditions)
         self._fix_state_variables_in_compsets(composition_sets, conditions)
         state = spec.get_new_state(composition_sets)
-        converged = spec.run_loop(state, 1000)
+        converged = spec.run_loop(state, self.options.get("max_iterations", 1000))
 
         if self.remove_metastable:
             phase_idx = 0

@@ -162,6 +162,33 @@ def test_workspace_jansson_derivatives_batched(load_database):
     np.testing.assert_allclose(eq['HM.T'].values.squeeze(), reference[0].squeeze(), rtol=1e-6, atol=1e-6)
 
 
+@needs_cpp
+@select_database("alni_dupin_2001.tdb")
+def test_workspace_properties_vectorized(load_database):
+    """On a backend-solved Workspace, common properties are evaluated for the
+    whole grid at once; they are bit-identical to the per-condition evaluation
+    (miscibility-gap copies, wildcards, display units and failed conditions
+    included)."""
+    import pycalphad.gpu.dispatch as dispatch
+    dbf = load_database()
+    conds = {v.N: 1, v.P: 101325, v.T: (700, 1800, 100), v.X('AL'): (0.02, 0.98, 0.08)}
+    props = ['T', 'GM', 'HM', 'MU(AL)', 'X(AL)', 'NP(*)', 'X(*,AL)', 'GM(*)', 'Y(FCC_L12,0,AL)',
+             'NP(FCC_L12#2)', as_property('HM')['kJ/mol']]
+    for max_iters in (21, 1000):  # with and without failed conditions
+        with pycalphad.backend('cpp', max_iters=max_iters):
+            wks = Workspace(dbf, ['AL', 'NI', 'VA'], list(dbf.phases.keys()), conds)
+            vectorized = wks.get_dict(*props)
+            original = dispatch.workspace_properties
+            dispatch.workspace_properties = lambda *args, **kwargs: {}
+            try:
+                reference = wks.get_dict(*props)
+            finally:
+                dispatch.workspace_properties = original
+        assert [str(k) for k in vectorized] == [str(k) for k in reference]
+        for key in reference:
+            assert np.array_equal(np.asarray(vectorized[key]), np.asarray(reference[key]), equal_nan=True), key
+
+
 @select_database("alzn_mey.tdb")
 def test_invalid_backend_rejected(load_database):
     dbf = load_database()

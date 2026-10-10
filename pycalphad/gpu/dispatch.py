@@ -8,9 +8,10 @@ pipeline; otherwise (or on a declared capability limit) the caller runs the
 reference implementation.
 
 :func:`workspace_properties`, called from ``Workspace.get_dict``: for a
-Workspace solved by a compiled backend, evaluates the properties the
-compiled pipeline supports (Jansson derivatives of Model properties) for the
-whole condition grid at once; the caller evaluates the rest per condition.
+Workspace solved by a compiled backend, evaluates the common properties
+(state variables, chemical potentials, X, NP, Y, Model properties; see
+grid_properties) and Jansson derivatives of Model properties for the whole
+condition grid at once; the caller evaluates the rest per condition.
 
 Set ``PYCGPU_COUNT_DISPATCH=<file>`` to append one line per routing
 decision to a file (used to audit test-suite coverage of the backends).
@@ -173,6 +174,11 @@ def _batched_jansson_supported(wks, prop):
     return None
 
 
+# Below this many conditions the per-condition evaluation is as fast as the
+# vectorized one's fixed setup cost.
+_MIN_VECTORIZED_CONDITIONS = int(os.environ.get('PYCGPU_VECTORIZED_MIN_CONDITIONS', 50))
+
+
 def workspace_properties(wks, props, display_units=True):
     """Evaluate the properties in `props` that the compiled backend supports,
     for every condition of `wks` at once.
@@ -185,8 +191,29 @@ def workspace_properties(wks, props, display_units=True):
     from pycalphad.property_framework.units import Q_
     if not getattr(wks, '_solved_by_backend', False) or _current()[0] == 'default':
         return {}
+    from pycalphad.gpu import grid_properties
     out = {}
+    grid_state = None
     for prop in props:
+        if grid_properties.supported(prop) and wks.eq.GM.size >= _MIN_VECTORIZED_CONDITIONS:
+            # (no de-duplication: equal properties with different display
+            # units overwrite each other in order, as in Workspace.get_dict)
+            # state variables, chemical potentials, X, NP, Y and Model
+            # properties: vectorized over the grid, bit-identical to the
+            # per-condition evaluation
+            try:
+                if grid_state is None:
+                    grid_state = grid_properties.GridState(wks)
+                values = grid_properties.evaluate(grid_state, prop)
+                if display_units and str(prop.implementation_units) != str(prop.display_units):
+                    values = Q_(values, prop.implementation_units).to(prop.display_units).magnitude
+            except Exception as err:
+                _audit(f'property_reference: {prop} ({type(err).__name__}: {str(err)[:80]})')
+                _log.debug("%s evaluated per condition (%r)", prop, err)
+                continue
+            _audit(f'property_vectorized: {prop}')
+            out[prop] = values.reshape((-1,) + prop.shape)
+            continue
         if prop in out:
             continue
         reason = _batched_jansson_supported(wks, prop)

@@ -221,7 +221,7 @@ use the reference solver (they are small and sequential; see below).
 
 | path | compiled | notes |
 |---|---|---|
-| `equilibrium()`, `Workspace` solves | yes | except MQMQA (quasichemical) models and custom `Solver` objects |
+| `equilibrium()`, `Workspace` solves | yes | plain `Model` and MQMQA (quasichemical) models; custom `Model` subclasses and custom `Solver` objects use the reference |
 | `calculate()` | yes | energies and properties at sampled points, multi-threaded |
 | `Workspace.get` / `equilibrium(output=...)`: X, NP, Y, MU, T/P/N, Model properties | yes | whole-grid evaluation, bit-identical to the per-condition path (grids of 50+ conditions) |
 | Jansson derivatives of Model properties w.r.t. T or X | yes | see above |

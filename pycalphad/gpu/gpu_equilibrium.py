@@ -1708,14 +1708,14 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
     # DECLARED capability limit: raising the typed error here lets the
     # global-backend dispatch fall back to the reference solver, while
     # genuine runtime failures propagate (see core/equilibrium.py).
-    from pycalphad.model import Model as _PlainModel
+    from pycalphad.gpu.gpu_codegen import compiled_model_supported
     from pycalphad.backend import AcceleratedCapabilityError
     for _ph in wks_obj.phases:
         _m = wks_obj.models[_ph]
-        if type(_m) is not _PlainModel:
+        if not compiled_model_supported(_m):
             raise AcceleratedCapabilityError(
-                f"accelerated backends support plain Model instances only; "
-                f"phase {_ph} uses {type(_m).__name__}")
+                f"accelerated backends do not support {type(_m).__name__} "
+                f"(phase {_ph})")
     
     # Check if GPU should be used - NO FALLBACK, FAIL HARD
     # The C++ backend does not need CUDA or CuPy.

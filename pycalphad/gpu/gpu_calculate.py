@@ -359,13 +359,13 @@ def get_grid_evaluator(backend_name, components, phases, models,
     for a system compiles the kernel (one-time, disk-cached thereafter).
     Raises if the system/output cannot be built (caller falls back to CPU).
     """
-    from pycalphad.model import Model as _PlainModel
+    from pycalphad.gpu.gpu_codegen import compiled_model_supported
     for _ph in phases:
-        if type(models[_ph]) is not _PlainModel:
+        if not compiled_model_supported(models[_ph]):
             from pycalphad.backend import AcceleratedCapabilityError
             raise AcceleratedCapabilityError(
-                f"accelerated calculate() supports plain Model instances only; "
-                f"phase {_ph} uses {type(models[_ph]).__name__}")
+                f"accelerated calculate() does not support {type(models[_ph]).__name__} "
+                f"(phase {_ph})")
     shim = SimpleNamespace(
         components=list(components),
         phases=list(phases),

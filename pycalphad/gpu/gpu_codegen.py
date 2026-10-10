@@ -1782,7 +1782,7 @@ def _nb_formulamole_obj_from_model(model_obj: Model, model_c_idx: int, wks_obj: 
         comp_name = comp.name
         if comp_name == 'VA':
             continue
-        if comp_name in model_obj.nonvacant_elements:
+        if _phase_has_element(model_obj, comp_name):
             funcs.append(model_obj.moles(comp_name, per_formula_unit=True))
         else:
             # Component not in this phase - zero moles
@@ -1853,7 +1853,7 @@ def _nb_formulamole_grad_from_model(model_obj: Model, model_c_idx: int, wks_obj:
     # formulamole_obj above), zero row for components absent from this phase.
     nonvacant_comps = [c.name for c in wks_obj.components if c.name != 'VA']
     for el in nonvacant_comps:
-        if el in model_obj.nonvacant_elements:
+        if _phase_has_element(model_obj, el):
             moles_expr = model_obj.moles(el, per_formula_unit=True)
         else:
             moles_expr = symengine.Float(0.0)
@@ -1896,7 +1896,7 @@ def _formulamole_hessian_exprs(model_obj: Model, wks_obj: Workspace):
     zero = symengine.Integer(0)
     exprs, nonzero = [], False
     for el in (c.name for c in wks_obj.components if c.name != 'VA'):
-        if el not in model_obj.nonvacant_elements:
+        if not _phase_has_element(model_obj, el):
             exprs.extend([zero] * len(site_fractions) ** 2)
             continue
         moles = symengine.sympify(model_obj.moles(el, per_formula_unit=True))
@@ -1921,6 +1921,24 @@ def _nb_formulamole_hess_from_model(model_obj: Model, model_c_idx: int, wks_obj:
     return notebook_source_from_expr(exprs, "formulamole_hess", model_obj, model_c_idx, wks_obj, expr_type="func", c_output_type="void", validate=validate, verbose=verbose)
 
 
+def _phase_has_element(model_obj, element) -> bool:
+    """Whether `element` can occur in the phase. Models without
+    nonvacant_elements (ModelMQMQA) return zero moles for absent elements
+    from moles() themselves, so every element is treated as possible."""
+    nonvacant = getattr(model_obj, 'nonvacant_elements', None)
+    return True if nonvacant is None else element in nonvacant
+
+
+def compiled_model_supported(model) -> bool:
+    """True for Model types whose energies the code generator compiles:
+    the plain Model and the quasichemical ModelMQMQA (both fully symbolic).
+    Other subclasses may add non-symbolic behaviour and use the reference
+    implementation."""
+    from pycalphad.model import Model
+    from pycalphad.models.model_mqmqa import ModelMQMQA
+    return type(model) in (Model, ModelMQMQA)
+
+
 def _unique_models_for_gpu(wks_obj: Workspace, validate: bool = True):
     """Deduplicated Model list + phase-name-to-index map for the GPU pipeline.
 
@@ -1933,20 +1951,17 @@ def _unique_models_for_gpu(wks_obj: Workspace, validate: bool = True):
 
     # Build list of unique models (by phase name)
     # IMPORTANT: Sort phases to ensure deterministic ordering for kernel caching
-    from pycalphad.model import Model as _PlainModel
     from pycalphad.backend import AcceleratedCapabilityError
     for ph_name in sorted(wks_obj.phases):
         if ph_name not in py_phase_name_to_unique_idx_map:
             _mod = wks_obj.models[ph_name]
-            if type(_mod) is not _PlainModel:
-                # Custom Model subclasses (ModelMQMQA, user models) are a
-                # DECLARED capability limit: the codegen only supports the
-                # plain Model's symbolic structure. Declaring it here (before
-                # any code generation or compilation) keeps genuine compile
-                # failures as hard errors.
+            if not compiled_model_supported(_mod):
+                # Other Model subclasses are a DECLARED capability limit.
+                # Declaring it here (before any code generation or
+                # compilation) keeps genuine compile failures as hard errors.
                 raise AcceleratedCapabilityError(
-                    f'accelerated backends support plain Model instances '
-                    f'only; phase {ph_name} uses {type(_mod).__name__}')
+                    f'accelerated backends do not support {type(_mod).__name__} '
+                    f'(phase {ph_name})')
             py_phase_name_to_unique_idx_map[ph_name] = len(unique_py_models)
             unique_py_models.append(_mod)
 

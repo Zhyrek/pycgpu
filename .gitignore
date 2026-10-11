@@ -82,3 +82,6 @@ deploy_gpu.sh
 advanced_strategy/
 NOTES_PYCALPHAD_CORE.md
 .DS_Store
+
+# results fetched by tools/kaggle/launch.py
+kaggle_results/

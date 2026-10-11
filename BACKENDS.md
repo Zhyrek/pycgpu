@@ -253,5 +253,8 @@ agree to rounding.
 * `PYCGPU_CACHE_DIR` moves the kernel cache; deleting it forces recompiles.
 * `tools/metal_debug.py` builds a generated Metal module as host C++ (with
   working `printf`) for debugging the emulated-precision kernels on the CPU.
+* `tools/kaggle/launch.py` runs the CUDA test suite and a CUDA-vs-C++
+  comparison on a free Kaggle GPU (T4 or P100); `tools/kaggle/run_gpu_checks.py`
+  runs the same checks directly on any machine with an NVIDIA or ROCm GPU.
 
 Developer notes on individual components live in `docs/backends/`.

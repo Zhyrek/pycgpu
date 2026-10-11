@@ -23,10 +23,9 @@ def _compile_command(lib_path, src_path, defines):
     Cython CPU build: with contraction enabled, degenerate phase-selection
     decisions can flip (measured on AlCuFe cond 47).
 
-    The backend is SINGLE-THREADED by design (no OpenMP): one pycalphad call
-    uses one core, and users parallelize by running multiple pycalphad calls
-    in their own threads or processes. This also removes the libgomp/libomp
-    runtime dependency (notably simplifying macOS installs).
+    No OpenMP: the driver spreads conditions over std::threads itself
+    (solver_threads()), which avoids the libgomp/libomp runtime dependency
+    (notably simplifying macOS installs).
     """
     system = platform.system()
     extra = os.environ.get('PYCGPU_CPU_EXTRA_CFLAGS', '').split()

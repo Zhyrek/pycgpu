@@ -187,26 +187,47 @@ def _workspace_cur_conds(wks):
             for index in np.ndindex(eq.GM.shape)]
 
 
-def _isolated_phase_properties(wks, props, display_units):
-    """IsolatedPhase properties for the whole grid: one compiled solve chain
-    per IsolatedPhase object, replaying Workspace.get_dict's evaluation order
-    (conditions in order; within a condition, that object's properties in
-    order, one solve each) so every solve starts where the reference would."""
+def _metaproperty_of(prop):
+    """('isolated' | 'dormant', meta-property object) for IsolatedPhase and
+    DormantPhase properties, else None."""
+    for kind in ('isolated', 'dormant'):
+        meta = getattr(prop, kind + '_phase', None)
+        if meta is not None:
+            return kind, meta
+    return None
+
+
+def _metaproperty_chain_properties(wks, props, display_units):
+    """IsolatedPhase and DormantPhase properties for the whole grid: one
+    compiled chain per meta-property object, replaying Workspace.get_dict's
+    evaluation order (conditions in order; within a condition, that object's
+    properties in order, one solve or relaxation each) so every step starts
+    where the reference would."""
     from pycalphad.core.composition_set import CompositionSet
     from pycalphad.property_framework.units import Q_
-    from pycalphad.gpu.metaproperty_chains import chain_supported, isolated_phase_steps
+    from pycalphad.gpu.metaproperty_chains import chain_supported, dormant_phase_steps, isolated_phase_steps
     groups = {}
     for prop in props:
-        meta = getattr(prop, 'isolated_phase', None)
-        if meta is not None:
-            groups.setdefault(id(meta), (meta, []))[1].append(prop)
+        tagged = _metaproperty_of(prop)
+        if tagged is not None:
+            groups.setdefault(id(tagged[1]), (tagged[0], tagged[1], []))[2].append(prop)
     if not groups:
         return {}
     cur_conds = _workspace_cur_conds(wks)
+    # chains of different objects sharing one composition set would interleave
+    compset_users = {}
+    for _, meta, _ in groups.values():
+        compset_users[id(meta._compset)] = compset_users.get(id(meta._compset), 0) + 1
     out = {}
-    for meta, group in groups.values():
+    for kind, meta, group in groups.values():
         compset = meta._compset
         reason = chain_supported(wks, compset)
+        if reason is None and compset_users[id(compset)] > 1:
+            reason = 'composition set shared by several meta-properties'
+        if reason is None and kind == 'dormant':
+            phase = np.asarray(wks.eq.Phase).reshape(len(cur_conds), -1)
+            if not np.all(((phase != '') & (phase != '_FAKE_')).any(axis=1)):
+                reason = 'conditions without composition sets'
         convert = [display_units and str(p.implementation_units) != str(p.display_units) for p in group]
         if reason is None:
             try:
@@ -219,9 +240,15 @@ def _isolated_phase_properties(wks, props, display_units):
             for p in group:
                 _audit(f'property_reference: {p} ({reason})')
             continue
-        start = (np.array(compset.dof), compset.NP)
+        start = (np.array(compset.dof), compset.NP, compset.fixed)
+        step_conditions = [c for c in cur_conds for _ in group]
         try:
-            steps = isolated_phase_steps(wks, compset, [c for c in cur_conds for _ in group])
+            if kind == 'isolated':
+                steps = isolated_phase_steps(wks, compset, step_conditions)
+            else:
+                mu = np.asarray(wks.eq.MU, dtype=np.float64).reshape(len(cur_conds), -1)
+                steps = dormant_phase_steps(wks, compset, step_conditions,
+                                            np.repeat(mu, len(group), axis=0), meta.max_iterations)
             pr = compset.phase_record
             state_variables = [str(sv) for sv in pr.state_variables]
             values = [np.full((len(cur_conds),) + p.shape, np.nan) for p in group]
@@ -229,16 +256,21 @@ def _isolated_phase_properties(wks, props, display_units):
                 by_name = {str(k): float(val) for k, val in conds.items()}
                 statevars = np.array([by_name[sv] for sv in state_variables], dtype=np.float64)
                 for j, p in enumerate(group):
-                    y, amount, mu = steps[c * len(group) + j]
+                    step = steps[c * len(group) + j]
+                    # IsolatedPhase evaluates with the step's chemical
+                    # potentials, DormantPhase with the equilibrium's
+                    chemical_potentials = step[2] if kind == 'isolated' else mu[c]
                     step_compset = CompositionSet(pr)
-                    step_compset.update(y, amount, statevars)
-                    values[j][c, ...] = p.inner_property.compute_property([step_compset], conds, mu)
+                    step_compset.update(step[0], step[1], statevars)
+                    values[j][c, ...] = p.inner_property.compute_property([step_compset], conds,
+                                                                          chemical_potentials)
         except Exception as err:
             nsv = len(compset.phase_record.state_variables)
             compset.update(start[0][nsv:nsv + compset.phase_record.phase_dof], start[1], start[0][:nsv])
+            compset.fixed = start[2]
             for p in group:
                 _audit(f'property_reference: {p} ({type(err).__name__}: {str(err)[:80]})')
-            _log.debug("IsolatedPhase evaluated per condition (%r)", err)
+            _log.debug("%s phase properties evaluated per condition (%r)", kind, err)
             continue
         for p, vals, needed in zip(group, values, convert):
             if needed:
@@ -266,10 +298,10 @@ def workspace_properties(wks, props, display_units=True):
     if not getattr(wks, '_solved_by_backend', False) or _current()[0] == 'default':
         return {}
     from pycalphad.gpu import grid_properties
-    out = _isolated_phase_properties(wks, props, display_units)
+    out = _metaproperty_chain_properties(wks, props, display_units)
     grid_state = None
     for prop in props:
-        if getattr(prop, 'isolated_phase', None) is not None:
+        if _metaproperty_of(prop) is not None:
             continue  # handled above (or left to the per-condition path)
         if grid_properties.supported(prop) and wks.eq.GM.size >= _MIN_VECTORIZED_CONDITIONS:
             # (no de-duplication: equal properties with different display

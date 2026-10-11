@@ -317,6 +317,106 @@ __device__ bool run_loop(
 // --- ACTUAL SOPHISTICATED SOLVER USING GLOBAL MEMORY ---
 // This function implements the full equilibrium solver using global memory arrays
 // to avoid stack overflow while maintaining all the sophisticated solver logic
+// Writes a solved state into the condition's result record. Every
+// composition set is reported (the reference keeps unstable ones too).
+__device__ static void pycgpu_store_result(EquilibriumResultSingle* result,
+                                           const SystemSpecification* spec, SystemState* state,
+                                           const DevicePhaseData* phase_data,
+                                           bool converged, bool hit_iteration_cap) {
+    result->converged = converged;
+    result->hit_iteration_cap = hit_iteration_cap;
+    
+    for (int i = 0; i < spec->num_components && i < MAX_COMPONENTS; ++i) {
+        result->final_chemical_potentials[i] = state->chemical_potentials[i];
+    }
+    
+    // NOTE: phase_amt stays in formula units throughout the solve (matching CPU
+    // SystemState.phase_amt). CPU's final compset.NP equals phase_amt * moles-of-atoms
+    // per formula unit, set by the last recompute() before convergence; no extra
+    // synchronization or renormalization happens on the CPU side.
+
+    // NO FINAL PHASE CONSOLIDATION!
+    // The CPU does NOT perform any phase consolidation after convergence.
+    // The GPU was incorrectly doing extra consolidation that changed the energies.
+
+    double final_gm_calc = 0.0;
+    int stable_phase_count = 0;
+    
+    for (int i = 0; i < state->num_compsets; ++i) {
+        // Include ALL phases to match CPU behavior
+        // CPU does not filter phases by amount in the final result
+        {
+            // Convert G (per formula unit) to GM (per mole of atoms):
+            // moles of atoms per formula unit = sum of phase_compositions (raw formulamoles)
+            double moles_per_formula_unit = 0.0;
+            for (int c = 0; c < spec->num_components; ++c) {
+                moles_per_formula_unit += state->phase_compositions[i * MAX_COMPONENTS + c];
+            }
+            if (moles_per_formula_unit < 1e-12) moles_per_formula_unit = 1.0;  // Avoid division by zero
+
+            // CPU final NP (eqsolver.pyx uses compset.NP) = phase_amt (formula units)
+            // * moles of atoms per formula unit; NOT renormalized by the sum.
+            double phase_mole_fraction = state->phase_amt[i] * moles_per_formula_unit;
+
+            double gm_per_mole_atoms = state->cs_states[i].energy / moles_per_formula_unit;
+            final_gm_calc += phase_mole_fraction * gm_per_mole_atoms;
+            
+            if (stable_phase_count < MAX_PHASES) {
+                result->phase_ids[stable_phase_count] = -1;
+                const PhaseRecord* pr_stable = state->compsets[i].phase_record;
+                if (pr_stable != nullptr) {
+                    for (int pr_glob_idx = 0; pr_glob_idx < phase_data->num_unique_phase_records; ++pr_glob_idx) {
+                        if (pr_stable == &phase_data->phase_records_array[pr_glob_idx]) {
+                            result->phase_ids[stable_phase_count] = pr_glob_idx;
+                            break;
+                        }
+                    }
+                }
+                // Store normalized mole fraction as NP, not raw phase_amt
+                result->NP[stable_phase_count] = phase_mole_fraction;
+                
+                
+                // Store X_phases (mole fractions)
+                double sum_moles_in_phase_formula = 0.0;
+                for (int c = 0; c < spec->num_components; ++c) {
+                    if (c < MAX_COMPONENTS)
+                        sum_moles_in_phase_formula += state->phase_compositions[i * MAX_COMPONENTS + c];
+                }
+                if (fabs(sum_moles_in_phase_formula) < 1e-12) sum_moles_in_phase_formula = 1.0;
+                for (int c = 0; c < spec->num_components; ++c) {
+                    if (stable_phase_count * MAX_COMPONENTS + c < MAX_PHASES * MAX_COMPONENTS && c < MAX_COMPONENTS) {
+                        double x_value = state->phase_compositions[i * MAX_COMPONENTS + c] / sum_moles_in_phase_formula;
+                        result->X_phases[stable_phase_count * MAX_COMPONENTS + c] = x_value;
+                    }
+                }
+                
+                // Store Y_phases (site fractions)
+                if (state->compsets[i].phase_record) {
+                    const PhaseRecord* pr = state->compsets[i].phase_record;
+                    for (int sf = 0; sf < pr->phase_dof; ++sf) {
+                        if (stable_phase_count * MAX_DOF_PER_PHASE + sf < MAX_PHASES * MAX_DOF_PER_PHASE && sf < MAX_DOF_PER_PHASE) {
+                            // Use pr->num_statevars not spec->num_statevars
+                            // The phase model only uses some state variables (e.g., just T)
+                            // while SystemSpecification tracks all (N, P, T)
+                            result->Y_phases[stable_phase_count * MAX_DOF_PER_PHASE + sf] =
+                                state->compsets[i].dof[pr->num_statevars + sf];
+                        }
+                    }
+                }
+                
+                stable_phase_count++;
+            }
+        }
+    }
+    
+    // Store final results from actual solver
+    result->final_system_gm = final_gm_calc;
+    result->num_stable_phases = stable_phase_count;
+    result->converged = converged;
+    
+    
+}
+
 __device__ void solve_equilibrium_at_condition(
     int thread_id,
     const SystemSpecification* global_spec_base,
@@ -438,6 +538,62 @@ __device__ void solve_equilibrium_at_condition(
             current_sys_state.mole_fractions[i] = 0.0;
         }
     }
+
+    // Dormant-phase mode (max_solver_iterations < 0), the compiled
+    // DormantPhase meta-property (pycalphad/property_framework/metaproperties.py):
+    // the starting point's first phase, at its given amount and site
+    // fractions, relaxes under fixed state variables and fixed chemical
+    // potentials (the spec's initial_chemical_potentials) by
+    // -max_solver_iterations steps of advance_state with a zero equilibrium
+    // solution, each followed by recompute. The reference loop also checks
+    // convergence, but that check cannot pass there (it needs ten iterations
+    // without a phase change, and the counter never advances), so it always
+    // runs every step. Only the C++ point solver uses this mode, so GPU
+    // builds leave it out (Metal inlines everything, and a second copy of
+    // the state setup and recompute overwhelms its compiler on large systems).
+#ifdef PYCGPU_HOST_CPP
+    if (max_solver_iterations < 0) {
+        const int num_steps = -max_solver_iterations;
+        const int pr_idx = (int)initial_data_flat[0];
+        if (phase_data == nullptr || pr_idx < 0 || pr_idx >= phase_data->num_unique_phase_records) {
+            result->converged = false;
+            result->hit_iteration_cap = false;
+            result->num_stable_phases = 0;
+            return;
+        }
+        current_spec.num_free_chemical_potentials = 0;
+        current_spec.num_fixed_chemical_potentials = current_spec.num_components;
+        for (int c = 0; c < current_spec.num_components; ++c) current_spec.fixed_chemical_potential_indices[c] = c;
+        current_spec.num_free_statevars = 0;
+        current_spec.num_fixed_statevars = current_spec.num_statevars;
+        for (int sv = 0; sv < current_spec.num_statevars; ++sv) current_spec.fixed_statevar_indices[sv] = sv;
+        current_spec.num_fixed_stable_compsets = 0;
+
+        CompositionSet* cs = &current_sys_state.compsets[0];
+        cs->init(&phase_data->phase_records_array[pr_idx]);
+        for (int sv = 0; sv < current_spec.num_statevars && sv < MAX_STATEVARS; ++sv) {
+            cs->dof[sv] = condition_args->state_variables_values[sv];
+        }
+        for (int sf = 0; sf < cs->phase_record->phase_dof && sf < MAX_DOF_PER_PHASE; ++sf) {
+            cs->dof[current_spec.num_statevars + sf] = initial_data_flat[2 * MAX_PHASES + sf];
+        }
+        for (int pj = 0; pj < current_spec.num_params && pj < MAX_PARAMS; ++pj) {
+            cs->dof[current_spec.num_statevars + cs->phase_record->phase_dof + pj] = current_spec.fit_params[pj];
+        }
+        pycgpu_attach_local_conditions(cs, &current_spec, pr_idx);
+        cs->NP = initial_data_flat[MAX_PHASES];
+        // SystemState(spec, [compset]) with the chemical potentials fixed, then recompute
+        current_sys_state.init(&current_spec, current_sys_state.compsets, 1, work_inv);
+        double zero_soln[1] = {0.0};
+        for (int step = 0; step < num_steps; ++step) {
+            current_sys_state.iteration = step;
+            advance_state(&current_spec, &current_sys_state, zero_soln, 1, 1.0);
+            current_sys_state.recompute(&current_spec, work_inv);
+        }
+        pycgpu_store_result(result, &current_spec, &current_sys_state, phase_data, true, false);
+        return;
+    }
+#endif
 
     // CPU parity (eqsolver.pyx:200-212): a condition whose prescribed mole
     // fractions sum above one is infeasible and is skipped silently (NaN
@@ -1219,98 +1375,8 @@ __device__ void solve_equilibrium_at_condition(
 #endif
 
     // Step 7: Store results
-    result->converged = converged;
-    result->hit_iteration_cap = hit_iteration_cap;
-    
-    for (int i = 0; i < current_spec.num_components && i < MAX_COMPONENTS; ++i) {
-        result->final_chemical_potentials[i] = current_sys_state.chemical_potentials[i];
-    }
-    
-    // NOTE: phase_amt stays in formula units throughout the solve (matching CPU
-    // SystemState.phase_amt). CPU's final compset.NP equals phase_amt * moles-of-atoms
-    // per formula unit, set by the last recompute() before convergence; no extra
-    // synchronization or renormalization happens on the CPU side.
-
-    // NO FINAL PHASE CONSOLIDATION!
-    // The CPU does NOT perform any phase consolidation after convergence.
-    // The GPU was incorrectly doing extra consolidation that changed the energies.
-
-    double final_gm_calc = 0.0;
-    int stable_phase_count = 0;
-    
-    for (int i = 0; i < current_sys_state.num_compsets; ++i) {
-        // Include ALL phases to match CPU behavior
-        // CPU does not filter phases by amount in the final result
-        {
-            // Convert G (per formula unit) to GM (per mole of atoms):
-            // moles of atoms per formula unit = sum of phase_compositions (raw formulamoles)
-            double moles_per_formula_unit = 0.0;
-            for (int c = 0; c < current_spec.num_components; ++c) {
-                moles_per_formula_unit += current_sys_state.phase_compositions[i * MAX_COMPONENTS + c];
-            }
-            if (moles_per_formula_unit < 1e-12) moles_per_formula_unit = 1.0;  // Avoid division by zero
-
-            // CPU final NP (eqsolver.pyx uses compset.NP) = phase_amt (formula units)
-            // * moles of atoms per formula unit; NOT renormalized by the sum.
-            double phase_mole_fraction = current_sys_state.phase_amt[i] * moles_per_formula_unit;
-
-            double gm_per_mole_atoms = current_sys_state.cs_states[i].energy / moles_per_formula_unit;
-            final_gm_calc += phase_mole_fraction * gm_per_mole_atoms;
-            
-            if (stable_phase_count < MAX_PHASES) {
-                result->phase_ids[stable_phase_count] = -1;
-                const PhaseRecord* pr_stable = current_sys_state.compsets[i].phase_record;
-                if (pr_stable != nullptr) {
-                    for (int pr_glob_idx = 0; pr_glob_idx < phase_data->num_unique_phase_records; ++pr_glob_idx) {
-                        if (pr_stable == &phase_data->phase_records_array[pr_glob_idx]) {
-                            result->phase_ids[stable_phase_count] = pr_glob_idx;
-                            break;
-                        }
-                    }
-                }
-                // Store normalized mole fraction as NP, not raw phase_amt
-                result->NP[stable_phase_count] = phase_mole_fraction;
-                
-                
-                // Store X_phases (mole fractions)
-                double sum_moles_in_phase_formula = 0.0;
-                for (int c = 0; c < current_spec.num_components; ++c) {
-                    if (c < MAX_COMPONENTS)
-                        sum_moles_in_phase_formula += current_sys_state.phase_compositions[i * MAX_COMPONENTS + c];
-                }
-                if (fabs(sum_moles_in_phase_formula) < 1e-12) sum_moles_in_phase_formula = 1.0;
-                for (int c = 0; c < current_spec.num_components; ++c) {
-                    if (stable_phase_count * MAX_COMPONENTS + c < MAX_PHASES * MAX_COMPONENTS && c < MAX_COMPONENTS) {
-                        double x_value = current_sys_state.phase_compositions[i * MAX_COMPONENTS + c] / sum_moles_in_phase_formula;
-                        result->X_phases[stable_phase_count * MAX_COMPONENTS + c] = x_value;
-                    }
-                }
-                
-                // Store Y_phases (site fractions)
-                if (current_sys_state.compsets[i].phase_record) {
-                    const PhaseRecord* pr = current_sys_state.compsets[i].phase_record;
-                    for (int sf = 0; sf < pr->phase_dof; ++sf) {
-                        if (stable_phase_count * MAX_DOF_PER_PHASE + sf < MAX_PHASES * MAX_DOF_PER_PHASE && sf < MAX_DOF_PER_PHASE) {
-                            // Use pr->num_statevars not current_spec.num_statevars
-                            // The phase model only uses some state variables (e.g., just T)
-                            // while SystemSpecification tracks all (N, P, T)
-                            result->Y_phases[stable_phase_count * MAX_DOF_PER_PHASE + sf] =
-                                current_sys_state.compsets[i].dof[pr->num_statevars + sf];
-                        }
-                    }
-                }
-                
-                stable_phase_count++;
-            }
-        }
-    }
-    
-    // Store final results from actual solver
-    result->final_system_gm = final_gm_calc;
-    result->num_stable_phases = stable_phase_count;
-    result->converged = converged;
-    
-    
+    pycgpu_store_result(result, &current_spec, &current_sys_state, phase_data,
+                        converged, hit_iteration_cap);
     // No cleanup needed - spec_buffer is on stack
 }
 

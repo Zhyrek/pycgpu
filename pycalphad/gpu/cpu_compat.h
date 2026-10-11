@@ -6,6 +6,9 @@
 // They stay thread_local NOT for internal parallelism (the backend is
 // single-threaded by design) but so that concurrent pycalphad calls from
 // multiple USER threads (ctypes releases the GIL) cannot race on them.
+// Marks the C++ build (code only the host solver uses, e.g. dormant mode).
+#define PYCGPU_HOST_CPP 1
+
 #define __device__
 #define __global__
 #define __host__

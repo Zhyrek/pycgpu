@@ -6,7 +6,7 @@ import numpy as np
 from pycalphad import calculate, variables as v
 from pycalphad.core.solver import Solver
 from pycalphad.core.composition_set import CompositionSet
-from pycalphad.property_framework.metaproperties import DormantPhase
+from pycalphad.property_framework.metaproperties import DormantPhase, DrivingForce
 from pycalphad.core.constants import COMP_DIFFERENCE_TOL
 from pycalphad.property_framework.computed_property import JanssonDerivative
 
@@ -158,8 +158,7 @@ def _find_global_min_cs(point: Point, system_info: dict, pdens = 500, tol = 1e-5
     unique_phases = np.unique(sorted_phases)
     phase_indices = [np.argmax(sorted_phases == p) for p in unique_phases]
 
-    cs = None
-    dG = 0
+    test_compsets = []
     for phi in phase_indices:
         index = sorted_indices[phi]
         test_cs = CompositionSet(phase_records[str(phase_ids[index])])
@@ -169,8 +168,21 @@ def _find_global_min_cs(point: Point, system_info: dict, pdens = 500, tol = 1e-5
         # is read only. Creating a new array for the site fractions seems to fix this issue
         site_fracs = np.array(y[index][:test_cs.phase_record.phase_dof], dtype=np.float64)
         test_cs.update(site_fracs, 1.0, map_utils.get_statevars_array(point.global_conditions, test_cs.phase_record.state_variables))
-        dormant_phase = DormantPhase(test_cs, None)
-        test_dg = point.get_property(dormant_phase.driving_force)
+        test_compsets.append(test_cs)
+    # Compiled backends relax all candidates at once, as DormantPhase would
+    # one by one (pycalphad/gpu/metaproperty_chains.py)
+    relaxed = compiled is not None and _relax_dormant_candidates(system_info, point, test_compsets)
+
+    cs = None
+    dG = 0
+    for phi, test_cs in zip(phase_indices, test_compsets):
+        index = sorted_indices[phi]
+        if relaxed:
+            test_dg = np.squeeze(DrivingForce(test_cs.phase_record.phase_name).compute_property(
+                [test_cs], point.global_conditions, point.chemical_potentials))
+        else:
+            dormant_phase = DormantPhase(test_cs, None)
+            test_dg = point.get_property(dormant_phase.driving_force)
         _log.debug(f"Testing phase {phase_ids[index]} with dG={dGs[index]} -> {test_dg} for global min.")
         if test_dg > dG:
             dG = test_dg
@@ -182,6 +194,24 @@ def _find_global_min_cs(point: Point, system_info: dict, pdens = 500, tol = 1e-5
     else:
         return cs, dG
     
+def _relax_dormant_candidates(system_info, point, compsets):
+    """DormantPhase's relaxation of every candidate composition set at the
+    point's state variables and chemical potentials, on the compiled solver.
+    False (nothing changed) where the reference path must be used."""
+    if len(point.stable_composition_sets) == 0:
+        return False
+    from pycalphad.gpu.metaproperty_chains import relax_dormant_compsets
+    phase_records = system_info["phase_records"]
+    num_sv = len(phase_records.state_variables)
+    try:
+        return relax_dormant_compsets(phase_records, compsets,
+                                      np.array(point.stable_composition_sets[0].dof[:num_sv]),
+                                      np.asarray(point.chemical_potentials, dtype=np.float64),
+                                      DormantPhase.max_iterations)
+    except Exception as err:
+        _log.debug(f"Compiled dormant relaxation unavailable ({err!r})")
+        return False
+
 def find_global_min_point(point: Point, system_info: dict, pdens = 500, tol = 1e-5, num_candidates = 1):
     """
     Checks global min on current point and attempts to find a new point 

@@ -217,20 +217,30 @@ strategies) follows boundaries one point at a time. On a compiled backend
 its global-minimum checks sample the phases with the compiled evaluator and
 without `calculate()`'s dataset assembly (and reuse the samples between
 checks at the same temperature), with decisions identical to the
-`calculate()`-based path; a ternary Al-Cr-Ni section maps in 6 s instead of
-14 s. Its single-point solves still use the reference solver.
+`calculate()`-based path, and relax the candidate composition sets
+(`DormantPhase`) all at once on the compiled solver, matching
+`DormantPhase` to rounding; a ternary Al-Cr-Ni section maps in 4 s instead
+of 12 s. Its single-point solves still use the reference solver.
 
 ## What runs on a compiled backend
 
 | path | compiled | notes |
 |---|---|---|
-| `equilibrium()`, `Workspace` solves | yes | plain `Model` and MQMQA (quasichemical) models; custom `Model` subclasses and custom `Solver` objects use the reference |
+| `equilibrium()`, `Workspace` solves | yes | plain `Model` and MQMQA (quasichemical) models (MQMQA on the C++ solver under `metal`: its functions crash the Metal shader compiler); custom `Model` subclasses and custom `Solver` objects use the reference |
 | `calculate()` | yes | energies and properties at sampled points, multi-threaded |
 | `Workspace.get` / `equilibrium(output=...)`: X, NP, Y, MU, T/P/N, Model properties | yes | whole-grid evaluation, bit-identical to the per-condition path (grids of 50+ conditions) |
 | Jansson derivatives of Model properties w.r.t. T or X | yes | see above |
-| ZPF mapping (`binplot`, `ternplot`, isopleths, step) | partly | global-minimum checks compiled; point solves and dormant-phase driving forces on the reference |
-| `IsolatedPhase` properties in `Workspace.get` | yes | the reference's warm-started sequence of solves, replayed on the compiled solver (N/P/T/X conditions) |
-| `DormantPhase`, `T0`, other derivatives | no | per-condition reference solves |
+| ZPF mapping (`binplot`, `ternplot`, isopleths, step) | partly | global-minimum checks (sampling and dormant-phase driving forces) compiled; point solves on the reference |
+| `IsolatedPhase` and `DormantPhase` properties in `Workspace.get` | yes | the reference's sequence of solves or relaxations, each starting where the previous one ended, replayed on the compiled solver (N/P/T/X conditions) |
+| `T0`, other derivatives | no | per-condition reference solves |
+
+`DormantPhase` relaxes its phase by a fixed 50 Newton steps without a
+convergence test. Close to an order-disorder transition (an ordered phase
+near the point where it disorders) those steps can amplify rounding
+differences: there the reference's own result changes when its starting
+site fractions are perturbed by 1e-15, so the compiled and reference values
+can differ by as much as the reference differs from itself. Elsewhere they
+agree to rounding.
 
 ## Troubleshooting and developer settings
 

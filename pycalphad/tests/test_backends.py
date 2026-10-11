@@ -253,15 +253,101 @@ def test_mapping_global_min_scan_matches_calculate(load_database):
         return new
 
     zpf._find_global_min_cs = compare
+    relax = zpf._relax_dormant_candidates
+    zpf._relax_dormant_candidates = lambda *a, **k: False  # (tested separately)
     try:
         with pycalphad.backend('cpp'):
             ax = binplot(dbf, ['AL', 'ZN', 'VA'], list(dbf.phases.keys()),
                          {v.X('ZN'): (0, 1, 0.05), v.T: (400, 900, 25), v.P: 101325, v.N: 1})
     finally:
         zpf._find_global_min_cs = original
+        zpf._relax_dormant_candidates = relax
     ax.figure.clf()
     assert len(checks) > 20
     assert all(checks)
+
+
+@needs_cpp
+@select_database("alcocrni.tdb")
+def test_mapping_dormant_relaxation_matches_reference(load_database):
+    """On a compiled backend, the mapping's global-minimum check relaxes its
+    candidate composition sets (DormantPhase) on the compiled solver, all at
+    once; every check finds the same candidate, with the same relaxed site
+    fractions and driving force as DormantPhase, to rounding."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import pycalphad.mapping.zpf_equilibrium as zpf
+    from pycalphad import ternplot
+    dbf = load_database()
+    original = zpf._find_global_min_cs
+    relax = zpf._relax_dormant_candidates
+    checks, used = [], []
+
+    def compare(point, system_info, *args, **kwargs):
+        def spy(*a, **k):
+            used.append(relax(*a, **k))
+            return used[-1]
+        zpf._relax_dormant_candidates = spy
+        try:
+            new = original(point, system_info, *args, **kwargs)
+            zpf._relax_dormant_candidates = lambda *a, **k: False
+            old = original(point, system_info, *args, **kwargs)
+        finally:
+            zpf._relax_dormant_candidates = relax
+        if new is None or old is None:
+            checks.append(new is None and old is None)
+        else:
+            checks.append(new[0].phase_record.phase_name == old[0].phase_record.phase_name
+                          and np.allclose(np.asarray(new[0].dof), np.asarray(old[0].dof), rtol=0, atol=1e-10)
+                          and abs(float(new[1]) - float(old[1])) < 1e-6)
+        return new
+
+    zpf._find_global_min_cs = compare
+    try:
+        with pycalphad.backend('cpp'):
+            ax = ternplot(dbf, ['AL', 'CR', 'NI', 'VA'], list(dbf.phases.keys()),
+                          {v.X('AL'): (0, 1, 0.1), v.X('CR'): (0, 1, 0.1), v.T: 1300, v.P: 101325, v.N: 1})
+    finally:
+        zpf._find_global_min_cs = original
+    ax.figure.clf()
+    assert len(checks) > 20
+    assert all(used)
+    assert all(checks)
+
+
+@needs_cpp
+@select_database("alni_dupin_2001.tdb")
+def test_dormant_phase_compiled_chain(load_database):
+    """DormantPhase properties on a compiled backend replay Workspace.get's
+    sequence of fixed-potential relaxations (conditions in order, then each
+    property sharing the DormantPhase, each starting where the previous one
+    ended) on the compiled solver; values and the final composition set match
+    the reference sequence."""
+    import pycalphad.gpu.dispatch as dispatch
+    from pycalphad.property_framework import DormantPhase
+    dbf = load_database()
+    conds = {v.N: 1, v.P: 101325, v.T: (900, 1700, 100), v.X('AL'): (0.1, 0.6, 0.05)}
+    results, final_dof, audit = {}, {}, []
+    for mode in ('compiled', 'reference'):
+        with pycalphad.backend('cpp'):
+            wks = Workspace(dbf, ['AL', 'NI', 'VA'], list(dbf.phases.keys()), conds)
+            dph = DormantPhase('BCC_B2', wks=wks)
+            props = [dph('GM'), dph('Y(BCC_B2,0,AL)'), dph.driving_force]
+            original = dispatch.workspace_properties
+            if mode == 'reference':
+                dispatch.workspace_properties = lambda *args, **kwargs: {}
+            else:
+                dispatch.workspace_properties = lambda *args, **kwargs: audit.append(original(*args, **kwargs)) or audit[-1]
+            try:
+                results[mode] = [np.asarray(x, dtype=float) for x in wks.get(*props)]
+            finally:
+                dispatch.workspace_properties = original
+            final_dof[mode] = np.array(dph._compset.dof)
+    assert len(audit[0]) == len(props)
+    for compiled, reference in zip(results['compiled'], results['reference']):
+        assert np.array_equal(np.isnan(compiled), np.isnan(reference))
+        np.testing.assert_allclose(compiled, reference, rtol=1e-8, atol=1e-6)
+    np.testing.assert_allclose(final_dof['compiled'], final_dof['reference'], atol=1e-10)
 
 
 @select_database("alzn_mey.tdb")

@@ -401,7 +401,7 @@ typedef struct SystemState {
         if (num_compsets > MAX_PHASES) num_compsets = MAX_PHASES; // Cap at MAX_PHASES
 
         for (int i = 0; i < num_compsets; ++i) {
-            compsets[i] = initial_compsets[i]; // Simple assignment
+            if (&compsets[i] != &initial_compsets[i]) compsets[i] = initial_compsets[i];
             compsets[i].fixed = false;
             if (compsets[i].phase_record != nullptr) { // Ensure phase_record is valid
                  cs_states[i].init(spec, &compsets[i]);

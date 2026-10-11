@@ -2001,7 +2001,13 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                     _extra = (_np * (int(dynamic_sizes['MAX_COMPONENTS']) + int(dynamic_sizes['MAX_STATEVARS'])
                                      + _mp + _mp * _md + 1)
                               + _mp * _md + _md * (_np + 1) + _np + _mp)
-                _msl = equilibrium_module_source(_metal_path, _metal_source, dynamic_sizes, _extra)
+                from pycalphad.models.model_mqmqa import ModelMQMQA
+                if any(isinstance(wks_obj.models[ph], ModelMQMQA) for ph in wks_obj.phases):
+                    # The quasichemical model's functions crash the Metal shader
+                    # compiler (after minutes); these systems use the C++ solver.
+                    _msl = None
+                else:
+                    _msl = equilibrium_module_source(_metal_path, _metal_source, dynamic_sizes, _extra)
                 module = (cpu_lib if _msl is None else
                           HybridSolver(cpu_lib, _msl, str(_metal_path) + '.unsupported'))
             elif _cpu_backend_mode:

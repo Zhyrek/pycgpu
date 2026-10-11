@@ -690,13 +690,23 @@ class HybridSolver:
             self._module = EquilibriumModule(source)
         except MetalResourceError as e:
             logging.getLogger(__name__).info("system too large for the Metal solver (%s)", e)
-            with open(self._marker, 'w') as f:
-                f.write(str(e))
+            self._remember_unsupported(str(e))
         except Exception as e:
+            # Remembered too, so later processes do not repeat a compile that
+            # can take minutes (e.g. when the compiler service gives up);
+            # deleting the kernel cache retries it.
+            self._remember_unsupported(f"{type(e).__name__}: {e}")
             warnings.warn(f"Metal kernel compilation failed; this system runs on the C++ "
                           f"solver ({type(e).__name__}: {str(e)[:300]})")
         finally:
             self._ready.set()
+
+    def _remember_unsupported(self, reason):
+        try:
+            with open(self._marker, 'w') as f:
+                f.write(reason)
+        except OSError:
+            pass
 
     def gpu_module(self, wait=False):
         """The compiled GPU module, or None if it is unavailable or (with

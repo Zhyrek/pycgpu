@@ -98,7 +98,9 @@ for name, (tdb, comps, conds) in cases.items():
                               'conditions': int(eq.GM.size), 'nan_GM': int(np.isnan(eq.GM.values).sum())}
         except Exception as e:
             import traceback
-            entry[backend] = {'error': ''.join(traceback.format_exception(e))[-6000:]}
+            text = ''.join(traceback.format_exception(e))
+            # (keep both ends: the root cause comes first in a chained traceback)
+            entry[backend] = {'error': text if len(text) <= 12000 else text[:6000] + '\n[...]\n' + text[-6000:]}
     ref = outputs.get('cpp')
     for backend in ('cuda', 'cuda-fast'):
         eq = outputs.get(backend)

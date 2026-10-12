@@ -199,6 +199,9 @@ def _generate_property_source(shim, output):
 #if defined(__CUDACC_RTC__) || defined(__HIPCC_RTC__)
 #define DBL_MAX 1.7976931348623157e+308
 #define DBL_EPSILON 2.2204460492503131e-16
+#ifndef NAN  // quiet NaN (generated model code emits NAN)
+#define NAN __longlong_as_double(0x7ff8000000000000LL)
+#endif
 #ifndef INFINITY
 #define INFINITY (1.0/0.0)
 #endif

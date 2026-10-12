@@ -9,6 +9,9 @@
 #define DBL_MIN 2.2250738585072014e-308
 #define DBL_EPSILON 2.2204460492503131e-16
 #define FLT_MAX 3.402823466e+38f
+#ifndef NAN  // quiet NaN (generated model code emits NAN)
+#define NAN __longlong_as_double(0x7ff8000000000000LL)
+#endif
 #ifndef INFINITY
 #define INFINITY (1.0/0.0)
 #endif

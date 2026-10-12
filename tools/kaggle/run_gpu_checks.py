@@ -20,6 +20,7 @@ import time
 
 REPO = 'https://github.com/Zhyrek/pycgpu.git'
 BRANCH = 'gpu-port-sync'  # launch.py rewrites this line for other branches
+KAGGLE_ARGS = []  # command-line options for Kaggle runs (set by launch.py)
 ON_KAGGLE = os.path.isdir('/kaggle/working')
 
 
@@ -140,7 +141,7 @@ def main():
     parser.add_argument('--suite-timeout', type=int, default=5400, help='seconds per test-suite run')
     parser.add_argument('--quick', action='store_true', help='small comparison grids')
     parser.add_argument('--skip-suite', action='store_true')
-    args = parser.parse_args([] if ON_KAGGLE else None)
+    args = parser.parse_args(KAGGLE_ARGS if ON_KAGGLE else None)
     os.makedirs(args.out, exist_ok=True)
     summary = {'branch': BRANCH}
     environment(args.out)

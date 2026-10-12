@@ -1,12 +1,12 @@
 """Run tools/kaggle/run_gpu_checks.py on a Kaggle GPU and fetch its results.
 
-Needs the Kaggle CLI (pip install kaggle) and an API token in
-~/.kaggle/kaggle.json (kaggle.com -> Settings -> API -> Create New Token),
-on an account with a verified phone number (required for GPUs and internet
-access). Runs count against the account's free weekly GPU quota; nothing is
-billed.
+Needs the Kaggle CLI (pip install kaggle) and an API token from
+kaggle.com -> Settings -> API, saved as ~/.kaggle/access_token (older
+tokens: ~/.kaggle/kaggle.json), on an account with a verified phone number
+(required for GPUs and internet access). Runs count against the account's
+free weekly GPU quota; nothing is billed.
 
-    python tools/kaggle/launch.py push --gpu t4 [--branch NAME] [--timeout 10800]
+    python tools/kaggle/launch.py push --gpu t4 [--branch NAME] [--timeout 10800] [--quick] [--skip-suite]
     python tools/kaggle/launch.py status --gpu t4
     python tools/kaggle/launch.py fetch --gpu t4 [--dest DIR]
     python tools/kaggle/launch.py quota
@@ -37,11 +37,17 @@ def kaggle(*args, capture=False):
 
 
 def username():
-    token = os.path.expanduser(os.path.join(os.environ.get('KAGGLE_CONFIG_DIR', '~/.kaggle'), 'kaggle.json'))
-    if not os.path.exists(token):
-        sys.exit(f"no Kaggle API token at {token} (kaggle.com -> Settings -> API -> Create New Token)")
-    with open(token) as f:
-        return json.load(f)['username']
+    """The account's username: from a legacy kaggle.json, else as the CLI
+    reports it (`kaggle config view` prints settings, never the token)."""
+    legacy = os.path.expanduser(os.path.join(os.environ.get('KAGGLE_CONFIG_DIR', '~/.kaggle'), 'kaggle.json'))
+    if os.path.exists(legacy):
+        with open(legacy) as f:
+            return json.load(f)['username']
+    match = re.search(r'^- username: (\S+)', kaggle('config', 'view', capture=True), flags=re.M)
+    if match is None or match.group(1) == 'None':
+        sys.exit("the Kaggle CLI is not authenticated (kaggle.com -> Settings -> API -> Generate New Token, "
+                 "saved as ~/.kaggle/access_token)")
+    return match.group(1)
 
 
 def kernel_id(gpu):
@@ -53,6 +59,9 @@ def push(args):
         with open(os.path.join(HERE, 'run_gpu_checks.py')) as f:
             source = f.read()
         source, n = re.subn(r"^BRANCH = .*$", f"BRANCH = {args.branch!r}", source, count=1, flags=re.M)
+        assert n == 1
+        job_args = (['--quick'] if args.quick else []) + (['--skip-suite'] if args.skip_suite else [])
+        source, n = re.subn(r"^KAGGLE_ARGS = .*$", f"KAGGLE_ARGS = {job_args!r}", source, count=1, flags=re.M)
         assert n == 1
         with open(os.path.join(folder, 'run_gpu_checks.py'), 'w') as f:
             f.write(source)
@@ -79,6 +88,8 @@ def main():
     p.add_argument('--gpu', choices=ACCELERATORS, required=True)
     p.add_argument('--branch', default='gpu-port-sync')
     p.add_argument('--timeout', type=int, default=3 * 3600, help='maximum run time in seconds')
+    p.add_argument('--quick', action='store_true', help='small comparison grids')
+    p.add_argument('--skip-suite', action='store_true', help='skip the test suites')
     for name, help_text in (('status', 'show the run status'), ('fetch', 'download the run outputs')):
         p = sub.add_parser(name, help=help_text)
         p.add_argument('--gpu', choices=ACCELERATORS, required=True)

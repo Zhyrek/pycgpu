@@ -40,7 +40,8 @@ def run(cmd, log_path, timeout=None, cwd=None):
 
 def environment(out):
     lines = [f'python {sys.version}']
-    for cmd in (['nvidia-smi'], ['nvcc', '--version'], ['rocm-smi', '--showproductname'], ['g++', '--version']):
+    for cmd in (['nvidia-smi'], ['nvcc', '--version'], ['rocm-smi', '--showproductname'], ['g++', '--version'],
+                [sys.executable, '-c', 'import cupy; cupy.show_config()']):
         if shutil.which(cmd[0]):
             lines.append(subprocess.run(cmd, capture_output=True, text=True).stdout)
     with open(os.path.join(out, 'env.txt'), 'w') as f:
@@ -96,7 +97,8 @@ for name, (tdb, comps, conds) in cases.items():
             entry[backend] = {'first_call_s': round(first, 2), 'warm_call_s': round(second, 2),
                               'conditions': int(eq.GM.size), 'nan_GM': int(np.isnan(eq.GM.values).sum())}
         except Exception as e:
-            entry[backend] = {'error': f'{type(e).__name__}: {str(e)[:500]}'}
+            import traceback
+            entry[backend] = {'error': ''.join(traceback.format_exception(e))[-6000:]}
     ref = outputs.get('cpp')
     for backend in ('cuda', 'cuda-fast'):
         eq = outputs.get(backend)

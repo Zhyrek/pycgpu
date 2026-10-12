@@ -8,15 +8,15 @@ import os
 def cuda_raw_module(code, options, verbose=False):
     """CuPy RawModule with compiler selection for the pip-only CUDA story.
 
-    PYCGPU_CUDA_COMPILER: 'nvcc' (default when nvcc is on PATH; the
+    PYCGPU_CUDA_COMPILER: 'nvcc' (default when CuPy can find nvcc; the
     validated toolchain), 'nvrtc' (runtime compilation via the library the
     CuPy wheel ships — no CUDA toolkit install needed), or 'auto'. When
-    nvcc is absent, NVRTC is used automatically instead of failing. NVRTC
-    rejects nvcc-style optimization flags, so only -std/-D options are
-    forwarded to it; the kernel sources carry an RTC-compat block for the
-    missing host C headers.
+    CuPy finds no nvcc, NVRTC is used automatically instead of failing; the
+    check asks CuPy, which can miss an nvcc that is on PATH (e.g. when it
+    finds no CUDA root). NVRTC rejects nvcc-style optimization flags, so
+    only -std/-D/--fmad options are forwarded to it; the kernel sources
+    carry an RTC-compat block for the missing host C headers.
     """
-    import shutil as _shutil
     import cupy as _cp
     choice = os.environ.get('PYCGPU_CUDA_COMPILER', 'auto').lower()
     if choice not in ('nvcc', 'nvrtc', 'auto'):
@@ -26,14 +26,26 @@ def cuda_raw_module(code, options, verbose=False):
     _is_hip = bool(getattr(_cp.cuda.runtime, 'is_hip', False))
     _offline = 'hipcc' if _is_hip else 'nvcc'
     if choice == 'auto':
-        choice = 'nvcc' if _shutil.which(_offline) else 'nvrtc'
+        choice = 'nvcc' if _cupy_offline_compiler(_cp, _is_hip) else 'nvrtc'
         if choice == 'nvrtc' and verbose:
             print(f"[GPU] {_offline} not found on PATH; compiling with "
                   f"{'hipRTC' if _is_hip else 'NVRTC'}")
     if choice == 'nvcc':
         return _cp.RawModule(code=code, options=tuple(options), backend='nvcc')
-    rtc_options = tuple(o for o in options if o.startswith(('-std', '-D')))
+    rtc_options = tuple(o for o in options if o.startswith(('-std', '-D', '--fmad')))
     return _cp.RawModule(code=code, options=rtc_options, backend='nvrtc')
+
+
+def _cupy_offline_compiler(cp, is_hip):
+    """Whether CuPy itself finds the offline compiler (nvcc, or hipcc on ROCm)."""
+    finder = getattr(cp.cuda, 'get_hipcc_path' if is_hip else 'get_nvcc_path', None)
+    if finder is None:  # older CuPy
+        import shutil
+        return shutil.which('hipcc' if is_hip else 'nvcc') is not None
+    try:
+        return finder() is not None
+    except Exception:
+        return False
 
 
 def ensure_device_stack_limit(nbytes=65536, verbose=False):

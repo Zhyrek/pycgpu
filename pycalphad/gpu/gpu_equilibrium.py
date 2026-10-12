@@ -29,36 +29,6 @@ except Exception as e:
     _import_log.debug("CuPy import failed (%r); only the c++ backend can run", e)
 
 
-def _detect_gpu_backend():
-    """Detect whether CuPy is using CUDA (nvcc) or ROCm/HIP (hipcc).
-
-    Returns 'nvcc' for NVIDIA CUDA or 'hipcc' for AMD ROCm/HIP.
-    """
-    if cp is None:
-        return 'nvcc'  # Default fallback
-    try:
-        # CuPy on ROCm/HIP sets this attribute
-        if hasattr(cp, 'cuda') and hasattr(cp.cuda, 'runtime'):
-            runtime_version = cp.cuda.runtime.runtimeGetVersion()
-            # ROCm runtime versions are typically very large numbers (e.g., 50000000+)
-            # CUDA runtime versions are smaller (e.g., 11000, 12000)
-            if runtime_version > 20000000:
-                return 'hipcc'
-    except Exception:
-        pass
-    try:
-        # Alternative detection: check if hipcc is available
-        if hasattr(cp.cuda.compiler, '_get_hipcc_path'):
-            return 'hipcc'
-    except (AttributeError, Exception):
-        pass
-    try:
-        # Check environment variable set by ROCm
-        if os.getenv('ROCM_PATH') or os.getenv('HIP_PATH'):
-            return 'hipcc'
-    except Exception:
-        pass
-    return 'nvcc'
 import hashlib
 from collections import OrderedDict
 from datetime import datetime
@@ -2030,14 +2000,13 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                 compile_options = tuple(['-std=c++11', opt_level] + fmad + define_flags)
                 if os.environ.get('PYCGPU_TIME'):
                     print(f"[GPU TIME] compile options: {' '.join(compile_options)}")
-                module = cp.RawModule(code=full_kernel_source, options=compile_options, backend=_detect_gpu_backend())
+                from pycalphad.gpu.kernel_manager import cuda_raw_module
+                module = cuda_raw_module(full_kernel_source, compile_options, verbose=verbose)
                 module_faithful = None
                 if _gpu_fast_mode:
                     _opts_faithful = tuple(o for o in compile_options
                                            if o != '-DPYCGPU_LOCKSTEP')
-                    module_faithful = cp.RawModule(code=full_kernel_source,
-                                                   options=_opts_faithful,
-                                                   backend=_detect_gpu_backend())
+                    module_faithful = cuda_raw_module(full_kernel_source, _opts_faithful, verbose=verbose)
 
         except Exception as e:
             raise

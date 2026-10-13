@@ -7,6 +7,7 @@ tokens: ~/.kaggle/kaggle.json), on an account with a verified phone number
 free weekly GPU quota; nothing is billed.
 
     python tools/kaggle/launch.py push --gpu t4 [--branch NAME] [--timeout 10800] [--quick] [--skip-suite]
+        [--skip-compare] [--suites cuda,cpp] [--suite-timeout 5400]
     python tools/kaggle/launch.py status --gpu t4
     python tools/kaggle/launch.py fetch --gpu t4 [--dest DIR]
     python tools/kaggle/launch.py quota
@@ -60,7 +61,9 @@ def push(args):
             source = f.read()
         source, n = re.subn(r"^BRANCH = .*$", f"BRANCH = {args.branch!r}", source, count=1, flags=re.M)
         assert n == 1
-        job_args = (['--quick'] if args.quick else []) + (['--skip-suite'] if args.skip_suite else [])
+        job_args = (['--quick'] if args.quick else []) + (['--skip-suite'] if args.skip_suite else []) + \
+                   (['--skip-compare'] if args.skip_compare else []) + \
+                   ['--suites', args.suites, '--suite-timeout', str(args.suite_timeout)]
         source, n = re.subn(r"^KAGGLE_ARGS = .*$", f"KAGGLE_ARGS = {job_args!r}", source, count=1, flags=re.M)
         assert n == 1
         with open(os.path.join(folder, 'run_gpu_checks.py'), 'w') as f:
@@ -90,6 +93,9 @@ def main():
     p.add_argument('--timeout', type=int, default=3 * 3600, help='maximum run time in seconds')
     p.add_argument('--quick', action='store_true', help='small comparison grids')
     p.add_argument('--skip-suite', action='store_true', help='skip the test suites')
+    p.add_argument('--skip-compare', action='store_true', help='skip the CUDA vs C++ comparison grids')
+    p.add_argument('--suites', default='cuda,cpp', help='comma-separated backends to run the test suite on')
+    p.add_argument('--suite-timeout', type=int, default=5400, help='seconds per test-suite run')
     for name, help_text in (('status', 'show the run status'), ('fetch', 'download the run outputs')):
         p = sub.add_parser(name, help=help_text)
         p.add_argument('--gpu', choices=ACCELERATORS, required=True)

@@ -70,12 +70,16 @@ def test_suite(out, repo_dir, backend, timeout):
     log = os.path.join(out, f'pytest_{backend}.txt')
     # Kaggle's pyparsing is newer than pycalphad's lockfile and deprecates `oneOf`, which the
     # TDB grammar uses; pycalphad's pytest settings turn that warning into a collection error.
-    rc, seconds = run([sys.executable, '-m', 'pytest', 'pycalphad/tests', f'--backend={backend}', '-q', '-rfEs',
+    # -v logs each test's outcome as it finishes, so a run cut short by the timeout still names its failures
+    rc, seconds = run([sys.executable, '-m', 'pytest', 'pycalphad/tests', f'--backend={backend}', '-v', '-rfEs',
                        '-p', 'no:cacheprovider', '--durations=15',
                        '-W', 'ignore::pyparsing.warnings.PyparsingDeprecationWarning'], log, timeout=timeout, cwd=repo_dir)
     with open(log) as f:
-        tail = [line.strip() for line in f.read().splitlines() if line.strip()][-1:]
-    return {'exit': rc, 'seconds': seconds, 'result': tail[0] if tail else ''}
+        lines = [line.strip() for line in f.read().splitlines() if line.strip()]
+    failed = sorted({line.split(' ')[0] for line in lines if line.startswith('pycalphad/tests/')
+                     and (' FAILED' in line or ' ERROR' in line)})
+    return {'exit': rc, 'seconds': seconds, 'result': lines[-1] if lines else '', 'failed': failed,
+            'tests_finished': sum(line.startswith('pycalphad/tests/') and '::' in line and '%]' in line for line in lines)}
 
 
 COMPARE = r'''
@@ -162,16 +166,19 @@ def main():
     parser.add_argument('--suite-timeout', type=int, default=5400, help='seconds per test-suite run')
     parser.add_argument('--quick', action='store_true', help='small comparison grids')
     parser.add_argument('--skip-suite', action='store_true')
+    parser.add_argument('--suites', default='cuda,cpp', help='comma-separated backends to run the test suite on')
+    parser.add_argument('--skip-compare', action='store_true', help='skip the CUDA vs C++ comparison grids')
     args = parser.parse_args(KAGGLE_ARGS if ON_KAGGLE else None)
     os.makedirs(args.out, exist_ok=True)
     summary = {'branch': BRANCH, 'gpu': environment(args.out)}
     summary['install'] = install(args.out, args.repo_dir)
     commit = subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True, cwd=args.repo_dir)
     summary['commit'] = commit.stdout.strip()
-    summary['compare'] = compare(args.out, args.quick)
+    if not args.skip_compare:
+        summary['compare'] = compare(args.out, args.quick)
     if not args.skip_suite:
         summary['suite'] = {backend: test_suite(args.out, args.repo_dir, backend, args.suite_timeout)
-                            for backend in ('cuda', 'cpp')}
+                            for backend in args.suites.split(',')}
     with open(os.path.join(args.out, 'summary.json'), 'w') as f:
         json.dump(summary, f, indent=1)
     print(json.dumps(summary, indent=1))

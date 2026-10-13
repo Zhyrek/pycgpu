@@ -3012,8 +3012,10 @@ def calculate_equilibrium_gpu(wks_obj: Workspace, to_xarray=True, validate_code=
                                          original_properties=properties, dynamic_sizes=dynamic_sizes)
 
     # SEGMENT 32: Final result formatting
+    # Same attributes as the reference solver (netCDF cannot store booleans)
+    from pycalphad import __version__ as pycalphad_version
+    final_dataset.attrs['engine'] = 'pycalphad %s' % pycalphad_version
     final_dataset.attrs['created'] = datetime.now().isoformat()
-    final_dataset.attrs['gpu_calculated'] = True
 
     if to_xarray:
         return final_dataset.get_dataset()

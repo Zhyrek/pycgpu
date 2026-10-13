@@ -125,6 +125,8 @@ def test_batched_jansson_derivatives_match_reference(load_database):
                 v.X('ZN'): np.asarray(wks.get(JanssonDerivative('HM', v.X('ZN')))).ravel()}
     for denominator, ref in refs.items():
         for name in ('cpp', 'metal', 'cpu'):  # all of these run the compiled C++ epilogue
+            if _AVAILABLE.get(name) is not None:
+                continue
             res = np.asarray(jansson_derivative(dbf, comps, phases, CONDS, 'HM', denominator,
                                                 backend=name)['values']).ravel()
             assert np.array_equal(np.isnan(res), np.isnan(ref))

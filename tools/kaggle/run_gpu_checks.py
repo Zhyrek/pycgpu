@@ -46,6 +46,9 @@ def environment(out):
             lines.append(subprocess.run(cmd, capture_output=True, text=True).stdout)
     with open(os.path.join(out, 'env.txt'), 'w') as f:
         f.write('\n'.join(lines))
+    if shutil.which('nvidia-smi'):
+        return subprocess.run(['nvidia-smi', '--query-gpu=name', '--format=csv,noheader'], capture_output=True, text=True).stdout.split('\n')[0].strip()
+    return None
 
 
 def install(out, repo_dir):
@@ -64,8 +67,11 @@ def install(out, repo_dir):
 
 def test_suite(out, repo_dir, backend, timeout):
     log = os.path.join(out, f'pytest_{backend}.txt')
+    # Kaggle's pyparsing is newer than pycalphad's lockfile and deprecates `oneOf`, which the
+    # TDB grammar uses; pycalphad's pytest settings turn that warning into a collection error.
     rc, seconds = run([sys.executable, '-m', 'pytest', 'pycalphad/tests', f'--backend={backend}', '-q', '-rfEs',
-                       '-p', 'no:cacheprovider', '--durations=15'], log, timeout=timeout, cwd=repo_dir)
+                       '-p', 'no:cacheprovider', '--durations=15',
+                       '-W', 'ignore::pyparsing.warnings.PyparsingDeprecationWarning'], log, timeout=timeout, cwd=repo_dir)
     with open(log) as f:
         tail = [line.strip() for line in f.read().splitlines() if line.strip()][-1:]
     return {'exit': rc, 'seconds': seconds, 'result': tail[0] if tail else ''}
@@ -111,6 +117,16 @@ for name, (tdb, comps, conds) in cases.items():
         phases_cmp = np.sort(np.where(eq.Phase.values == '', '~', eq.Phase.values), axis=-1)
         phases_ref = np.sort(np.where(ref.Phase.values == '', '~', ref.Phase.values), axis=-1)
         same = (phases_cmp == phases_ref).all(axis=-1)
+        gm_off = np.zeros(gm.shape, dtype=bool)
+        gm_off[both] = np.abs(gm - gm_ref)[both] > 1e-2
+        details = []
+        coords = {k: np.asarray(ref.coords[k]) for k in ref.GM.dims}
+        for idx in list(zip(*np.nonzero(~same | gm_off)))[:20]:
+            point = {k: float(coords[k][i]) for k, i in zip(ref.GM.dims, idx)}
+            details.append({'conditions': point,
+                            'cpp': {'GM': float(gm_ref[idx]), 'phases': [p for p in ref.Phase.values[idx] if p], 'NP': [float(x) for x in ref.NP.values[idx] if x == x]},
+                            backend: {'GM': float(gm[idx]), 'phases': [p for p in eq.Phase.values[idx] if p], 'NP': [float(x) for x in eq.NP.values[idx] if x == x]}})
+        entry[backend]['mismatches'] = details
         entry[backend].update({
             'max_abs_dGM_vs_cpp': float(np.abs(gm - gm_ref)[both].max()) if both.any() else None,
             'conditions_with_different_phase_set': int((~same).sum()),
@@ -147,8 +163,7 @@ def main():
     parser.add_argument('--skip-suite', action='store_true')
     args = parser.parse_args(KAGGLE_ARGS if ON_KAGGLE else None)
     os.makedirs(args.out, exist_ok=True)
-    summary = {'branch': BRANCH}
-    environment(args.out)
+    summary = {'branch': BRANCH, 'gpu': environment(args.out)}
     summary['install'] = install(args.out, args.repo_dir)
     commit = subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True, cwd=args.repo_dir)
     summary['commit'] = commit.stdout.strip()

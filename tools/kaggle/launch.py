@@ -105,6 +105,12 @@ def main():
         dest = args.dest or os.path.join('kaggle_results', args.gpu)
         os.makedirs(dest, exist_ok=True)
         kaggle('kernels', 'output', kernel_id(args.gpu), '-p', dest)
+        summary = os.path.join(dest, 'summary.json')
+        if os.path.exists(summary):
+            with open(summary) as f:
+                used = json.load(f).get('gpu')
+            wanted = {'t4': 'T4', 'p100': 'P100'}[args.gpu]
+            print(f"GPU used: {used}" + ('' if used and wanted in used else f"  (WARNING: requested {wanted})"))
     else:
         kaggle('quota')
 

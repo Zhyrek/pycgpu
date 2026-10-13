@@ -55,7 +55,8 @@ def install(out, repo_dir):
     log = os.path.join(out, 'install.log')
     steps = {}
     if not os.path.isdir(repo_dir):
-        steps['clone'] = run(['git', 'clone', '--depth', '1', '-b', BRANCH, REPO, repo_dir], log)
+        # full history: a shallow clone makes the version lookup warn, which the test settings turn into an error
+        steps['clone'] = run(['git', 'clone', '-b', BRANCH, REPO, repo_dir], log)
     try:
         import cupy  # noqa: F401  (Kaggle images may already ship one)
     except ImportError:

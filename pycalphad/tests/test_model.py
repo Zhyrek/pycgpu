@@ -342,3 +342,37 @@ def test_inconsistent_charge_balance_constraint_is_kept():
     mod = Model(dbf, ["LA", "O", "VA"], "IMPOSSIBLE")
     constraints = mod.get_internal_constraints()
     assert len(constraints) == len(mod.constituents) + 1
+
+
+def test_function_temperature_ranges_do_not_change_term_order():
+    """FUNCTIONs that differ only in temperature ranges that extrapolation removes build
+    expressions with the same term order. SymEngine stores the terms of a sum in an order
+    that equality ignores, but compiled code adds them in that order, and compiled functions
+    are shared between equal expressions."""
+    TDB = """
+     ELEMENT VA   VACUUM                    0.0000E+00  0.0000E+00  0.0000E+00!
+     ELEMENT AL   FCC_A1                    2.6982E+01  4.5773E+03  2.8322E+01!
+     ELEMENT NI   FCC_A1                    5.8690E+01  4.7870E+03  2.9796E+01!
+     FUNCTION GHSERAL 298.15 -7976.15+137.093038*T-24.3671976*T*LN(T)
+         -.001884662*T**2-8.77664E-07*T**3+74092*T**(-1); 700.00 Y
+         -11276.24+223.048446*T-38.5844296*T*LN(T)+.018531982*T**2
+         -5.764227E-06*T**3+74092*T**(-1); 933.47 Y
+         -11278.378+188.684153*T-31.748192*T*LN(T)-1.230524E+28*T**(-9); {upper} N !
+     FUNCTION GBCCAL 298.15 10083-4.813*T+GHSERAL; {upper} N !
+     FUNCTION GHSERNI 298.15 -5179.159+117.854*T-22.096*T*LN(T)-.0048407*T**2; 3000 N !
+     TYPE_DEFINITION % SEQ *!
+     PHASE AL3NI2 % 3 3 2 1 !
+     CONSTITUENT AL3NI2 :AL : AL,NI : NI,VA : !
+     PARAMETER G(AL3NI2,AL:AL:NI;0) 298.15 6*GBCCAL+GHSERNI-39465.978+7.89525*T; 6000 N !
+     PARAMETER G(AL3NI2,AL:NI:NI;0) 298.15 3*GBCCAL+3*GHSERNI-427191.9+79.21725*T; 6000 N !
+     PARAMETER G(AL3NI2,AL:AL:VA;0) 298.15 5*GBCCAL+30000-3*T; 6000 N !
+     PARAMETER G(AL3NI2,AL:NI:VA;0) 298.15 3*GBCCAL+2*GHSERNI-357725.92+68.322*T; 6000 N !
+    """
+    def stored_order(expr):
+        if not expr.args:
+            return str(expr)
+        return type(expr).__name__, tuple(stored_order(arg) for arg in expr.args)
+    gm_6000, gm_10000 = (Model(Database(TDB.format(upper=upper)), ['AL', 'NI', 'VA'], 'AL3NI2').GM
+                         for upper in ('6000', '10000'))
+    assert gm_6000 == gm_10000
+    assert stored_order(gm_6000) == stored_order(gm_10000)

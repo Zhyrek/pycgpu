@@ -153,6 +153,11 @@ class classproperty(object):
     def __get__(self, obj, owner):
         return self.f(owner)
 
+# FUNCTION values with their temperature ranges settled, see Model._unwrap_symbol
+_UNWRAPPED_SYMBOLS = {}
+_MAX_UNWRAPPED_SYMBOLS = 100000
+
+
 class Model(object):
     """
     Models use an abstract representation of the function
@@ -314,6 +319,9 @@ class Model(object):
         else:
             self._parameters_arg = None
 
+        # Settle each symbol's own temperature ranges before it is substituted anywhere, so that
+        # equal FUNCTIONs written with different ranges substitute identically (see symbol_replace)
+        symbols = {key: self._unwrap_symbol(value) for key, value in symbols.items()}
         self._symbols = {wrap_symbol(key): value for key, value in symbols.items()}
 
         self.models = OrderedDict()
@@ -364,6 +372,23 @@ class Model(object):
                 exprcondpairs.append((0, True))
                 replace_dict[atom] = Piecewise(*exprcondpairs)
         return graph.xreplace(replace_dict)
+
+    @classmethod
+    def _unwrap_symbol(cls, value):
+        # Memoized by object identity: a Database keeps the same FUNCTION objects between calls
+        key = (id(value), cls)
+        hit = _UNWRAPPED_SYMBOLS.get(key)
+        if hit is not None and hit[0] is value:
+            return hit[1]
+        try:
+            out = cls.unwrap_piecewise(value)
+        except AttributeError:
+            # Plain numbers have nothing to unwrap
+            out = value
+        if len(_UNWRAPPED_SYMBOLS) >= _MAX_UNWRAPPED_SYMBOLS:
+            _UNWRAPPED_SYMBOLS.clear()
+        _UNWRAPPED_SYMBOLS[key] = (value, out)
+        return out
 
     @classmethod
     def symbol_replace(cls, obj, symbols):

@@ -62,6 +62,55 @@ def _get_local_constraint_equations(model, phase_local_conditions):
     return phase_local_constraints
 
 @lru_cache(maxsize=1024)
+def _sample_unconstrained_constitution(sublattice_dof, vacancy_indices, sampler, fixed_grid, pdens):
+    """
+    Sample a constitution space with only site fraction balance constraints (see _sample_phase_constitution).
+
+    Parameters
+    ----------
+    sublattice_dof : tuple of int
+        Number of constituents in each sublattice
+    vacancy_indices : tuple of tuple of int, or None
+        Indices of pure vacancy constituents in each sublattice
+    sampler : Callable
+        Callable returning an ArrayLike of points
+    fixed_grid : bool
+        If True, sample pdens points between each pair of endmembers
+    pdens : int
+        Number of points to sample in each sampled dimension
+
+    Returns
+    -------
+    ndarray of points
+    """
+    sublattice_dof = list(sublattice_dof)
+    if vacancy_indices is not None:
+        vacancy_indices = [list(x) for x in vacancy_indices]
+    # Add all endmembers to guarantee their presence
+    points = endmember_matrix(sublattice_dof, vacancy_indices=vacancy_indices)
+    if fixed_grid is True:
+        # Sample along the edges of the endmembers
+        # These constitution space edges are often the equilibrium points!
+        em_pairs = list(itertools.combinations(points, 2))[:MAX_ENDMEMBER_PAIRS]
+        if len(em_pairs) > 0:
+            lingrid = np.linspace(0, 1, int(min(pdens, MAX_EXTRA_POINTS/len(em_pairs))))
+            extra_points = [first_em * lingrid[np.newaxis].T +
+                            second_em * lingrid[::-1][np.newaxis].T
+                            for first_em, second_em in em_pairs]
+            points = np.concatenate(list(itertools.chain([points], extra_points)))
+    # Sample composition space for more points
+    if sum(sublattice_dof) > len(sublattice_dof):
+        points = np.concatenate((points, sampler(sublattice_dof, pdof=pdens)))
+
+    # Filter out nan's that may have slipped in if we sampled too high a vacancy concentration
+    # Issues with this appear to be platform-dependent
+    points = points[~np.isnan(points).any(axis=-1)]
+    # Ensure that points has the correct dimensions and dtype
+    points = np.atleast_2d(np.asarray(points, dtype=np.float64))
+    return points
+
+
+@lru_cache(maxsize=1024)
 def _sample_phase_constitution(model, sampler, fixed_grid, pdens, phase_local_conditions):
     """
     Sample the internal degrees of freedom of a phase.
@@ -89,8 +138,6 @@ def _sample_phase_constitution(model, sampler, fixed_grid, pdens, phase_local_co
     if len(vacancy_indices) != len(model.constituents):
         vacancy_indices = None
     sublattice_dof = [len(subl) for subl in model.constituents]
-    # Add all endmembers to guarantee their presence
-    points = endmember_matrix(sublattice_dof, vacancy_indices=vacancy_indices)
     site_ratios = model.site_ratios
     constant_site_ratios = True
     # The only implementation with variable site ratios is the two-sublattice ionic liquid.
@@ -113,6 +160,15 @@ def _sample_phase_constitution(model, sampler, fixed_grid, pdens, phase_local_co
     # since the default sampler handles that case with an efficient method.
     linearly_constrained_space = charge_constrained_space or (len(phase_local_conditions.keys()) > 0)
 
+    if not linearly_constrained_space:
+        # This only depends on the shape of the constitution, so it can be shared between models (which hash by
+        # identity). Copied so that each model still gets its own array, as before.
+        frozen_vacancy_indices = None if vacancy_indices is None else tuple(tuple(x) for x in vacancy_indices)
+        return _sample_unconstrained_constitution(tuple(sublattice_dof), frozen_vacancy_indices,
+                                                  sampler, fixed_grid, pdens).copy()
+
+    # Add all endmembers to guarantee their presence
+    points = endmember_matrix(sublattice_dof, vacancy_indices=vacancy_indices)
     if charge_constrained_space:
         endmembers = points
         Q = np.dot(endmembers, species_charge)

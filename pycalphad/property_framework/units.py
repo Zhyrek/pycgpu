@@ -114,5 +114,8 @@ def to_display_units(value: npt.ArrayLike, comp_sets: Sequence[CompositionSet], 
     """
     implementation_units = ureg.Unit(getattr(prop, 'implementation_units', ''))
     display_units = ureg.Unit(getattr(prop, 'display_units', ''))
+    if implementation_units == display_units:
+        # Nothing to convert (pint returns the same magnitude), so skip building the conversion context
+        return Q_(value, implementation_units).magnitude
     context = unit_conversion_context(_composition_sets_for_unit_conversion(comp_sets, prop), prop)
     return Q_(value, implementation_units).to(display_units, context).magnitude

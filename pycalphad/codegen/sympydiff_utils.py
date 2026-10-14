@@ -28,7 +28,7 @@ functions or PhaseRecords. The following issues track this behavior:
 
 """
 from pycalphad.core.cache import cacheit
-from pycalphad.core.utils import wrap_symbol
+from pycalphad.core.utils import wrap_symbol, atoms_of_type
 from symengine import ComplexDouble, sympify, lambdify, I, zoo, oo, have_llvm
 from collections import namedtuple
 
@@ -122,11 +122,11 @@ def build_functions(symengine_graph, variables, parameters=None, wrt=None,
     # cases where we have legitimate, non-negligble complex numbers (e.g. negative
     # bases for non-integer exponents). Although we have been doing this all
     # along internally inside `lambdify`.
-    # We have to do this graph.atoms() method to get complex numbers because
+    # We have to find the complex numbers (as graph.atoms() would) because
     # just calling xreplace(I, 0.0) doesn't work in SymEngine for some deeply
     # nested `I`.
     # We assume that differentiating does create new complex numbers.
-    graph = graph.xreplace({x: x.xreplace({I: 0.0}) for x in graph.atoms(ComplexDouble)})
+    graph = graph.xreplace({x: x.xreplace({I: 0.0}) for x in atoms_of_type(graph, ComplexDouble)})
     func = lambdify(inp, [graph], **_get_lambidfy_options(func_options))
     if include_grad or include_hess:
         grad_graphs = list(graph.diff(w).xreplace({zoo: oo}) for w in wrt)

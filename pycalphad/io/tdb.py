@@ -160,18 +160,24 @@ class TCCommand(CaselessKeyword): #pylint: disable=R0903
         # if no end character found, just match the whole thing
         if loc == -1:
             loc = len(instring)
-        try:
-            res = expand_keyword([self.match], instring[start:loc])
+        res = _expand_command(self.match, instring[start:loc])
+        if res is not None:
             if len(res) > 1:
                 self.errmsg = '{0!r} is ambiguous: matches {1}' \
-                    .format(instring[start:loc], res)
+                    .format(instring[start:loc], list(res))
                 raise ParseException(instring, loc, self.errmsg, self)
             # res[0] is the unambiguous expanded keyword
             # in principle, res[0] == self.match
             return loc, res[0]
-        except ValueError:
-            pass
         raise ParseException(instring, loc, self.errmsg, self)
+
+@functools.lru_cache(maxsize=4096)
+def _expand_command(keyword, candidate):
+    "``expand_keyword([keyword], candidate)`` as a tuple, or None if it does not match. Parsing tries the same few thousand pairs many times."
+    try:
+        return tuple(expand_keyword([keyword], candidate))
+    except ValueError:
+        return None
 
 def _tdb_grammar(): #pylint: disable=R0914
     """

@@ -29,6 +29,9 @@ cdef double Y_FLOOR = MIN_SITE_FRACTION
 cdef double R_GAS = 8.3145
 
 
+import threading
+_COMPILE_LOCK = threading.Lock()
+
 cdef class CPhase:
     """One phase: compiled energy and formula-mole functions, sublattice structure, linear equality constraints beyond
     the sublattice balances (charge balance, phase-local conditions), and work buffers for pricing.
@@ -134,8 +137,13 @@ cdef class CPhase:
 
     def _load_derivatives(self):
         cdef FastFunctionFactory ff = (<PhaseRecord>self.phase_record).function_factory
-        cdef FastFunction fg = <FastFunction>ff.get_grad(string(b'G'))
-        cdef FastFunction fh = <FastFunction>ff.get_hess(string(b'G'))
+        cdef FastFunction fg, fh
+        # one compilation at a time: the factory's look-up and compile is not safe against another thread doing the
+        # same (worker threads pricing copies of one phase reach this together), and LLVM compilations must not run
+        # concurrently
+        with _COMPILE_LOCK:
+            fg = <FastFunction>ff.get_grad(string(b'G'))
+            fh = <FastFunction>ff.get_hess(string(b'G'))
         self.keep.extend([fg, fh])
         self.p_grad = <fn_t>fg.f_ptr; self.d_grad = fg.func_data
         self.p_hess = <fn_t>fh.f_ptr; self.d_hess = fh.func_data
@@ -813,7 +821,7 @@ cdef class Solver:
     cdef int[::1] Pph, Pnext, head, basis, ipiv, fixed
     cdef long[::1] Pcode
     cdef public double RT
-    cdef double[::1] mu, dual, xB, LU, tmp, cB, ybuf, xbuf, ybest, xbest, ystart, colbuf
+    cdef double[::1] mu, dual, xB, LU, tmp, cB, ybuf, xbuf, ybest, xbest, ystart, colbuf, ycert
     cdef public long lp_iters, priced, skipped, npolish, npolish_try
     cdef public bint use_polish, last_polished
     cdef public int polish_fail
@@ -860,7 +868,7 @@ cdef class Solver:
         self.tmp = np.zeros(C); self.cB = np.zeros(C); self.ipiv = np.zeros(C, dtype=np.int32)
         self.colbuf = np.zeros(C)
         self.ybuf = np.zeros(self.Dmax); self.xbuf = np.zeros(C); self.ybest = np.zeros(self.Dmax)
-        self.xbest = np.zeros(C); self.ystart = np.zeros(self.Dmax)
+        self.xbest = np.zeros(C); self.ystart = np.zeros(self.Dmax); self.ycert = np.zeros(self.Dmax)
         self.R = np.eye(C); self.b = np.zeros(C); self.mf = np.zeros(C); self.fixed = np.zeros(C, dtype=np.int32)
         self.Rbuf = np.zeros((C, C)); self.bbuf = np.zeros(C); self.mfbuf = np.zeros(C); self.fixedbuf = np.zeros(C, dtype=np.int32)
         self.reset_points()
@@ -873,6 +881,36 @@ cdef class Solver:
         self.npts = 0
         self.head = np.full(self.nph, -1, dtype=np.int32)
         self.basis = np.array([-(1 + k) for k in range(self.C)], dtype=np.int32)   # (first K entries used)
+        self.RT = (<CPhase>self.phases[0]).RT
+        for P in self.phases:
+            (<CPhase>P).has_last = False
+
+    def points_phase(self, int p):
+        """Diagnostics: the phase index of stored point p."""
+        return self.Pph[p]
+
+    def lp_state(self):
+        """Diagnostics: the LP basis (points, or -(1 + k) for artificial columns), their amounts, the chemical
+        potentials (J/mol) and the reduced costs (RT units) of the basis variables."""
+        basis = np.asarray(self.basis[:self.K]).copy(); xB = np.asarray(self.xB[:self.K]).copy()
+        rc = []
+        for var in basis:
+            if var < 0:
+                rc.append(1e3 - self.dual[-(1 + var)])
+            else:
+                rc.append(self.PG[var] / self.RT - float(np.dot(np.asarray(self.mu), np.asarray(self.Px[var]))))
+        return basis, xB, np.asarray(self.mu) * self.RT, np.array(rc)
+
+    def refresh_points(self):
+        """Re-evaluate the stored points' energies after a change of the state variables (their site fractions and
+        compositions stay), keeping them and the LP basis as a warm start; the skip rule's state is cleared."""
+        cdef int p
+        cdef void* pp
+        with nogil:
+            for p in range(self.npts):
+                pp = self.pptr[self.Pph[p]]
+                (<CPhase>pp).eval0(&self.Py[p, 0])
+                self.PG[p] = (<CPhase>pp).out1[0] if isfinite((<CPhase>pp).out1[0]) else 1e10   # (never chosen)
         self.RT = (<CPhase>self.phases[0]).RT
         for P in self.phases:
             (<CPhase>P).has_last = False
@@ -1005,18 +1043,20 @@ cdef class Solver:
         """Revised primal simplex (artificial identity columns at cost 1e3), warm-started from the previous basis.
         Leaves the chemical potentials (RT units) in self.mu: R^T duals + the fixed ones. Returns 0 on success."""
         cdef int K = self.K, C = self.C, it, i, k, j, q, leave, info, nrhs = 1, n = self.K
-        cdef double best, t, tmin, s
+        cdef double best, t, tmin, s, piv
         cdef char N = b'N', T = b'T'
-        cdef bint bland = False, reset = False
+        cdef bint bland = False
+        cdef int resets = 0
         for it in range(20000):
             self.lp_iters += 1
             for k in range(K):
                 self.column(self.basis[k], &self.LU[k * K])
             dgetrf(&n, &n, &self.LU[0], &n, &self.ipiv[0], &info)
             if info != 0:
-                if reset: return 1
+                # (a singular basis: restart from the artificial one, a few times at most)
+                if resets >= 3: return 1
                 for k in range(K): self.basis[k] = -(1 + k)
-                reset = True
+                resets += 1; bland = False
                 continue
             for i in range(K): self.xB[i] = self.b[i]
             dgetrs(&N, &n, &nrhs, &self.LU[0], &n, &self.ipiv[0], &self.xB[0], &n, &info)
@@ -1025,9 +1065,9 @@ cdef class Solver:
                 if self.xB[i] < -1e-9: j = 1
             if j:
                 # the warm basis is infeasible for these conditions: restart from the artificial basis
-                if reset: return 2
+                if resets >= 3: return 2
                 for k in range(K): self.basis[k] = -(1 + k)
-                reset = True
+                resets += 1; bland = False
                 continue
             for k in range(K): self.cB[k] = self.cost(self.basis[k])
             memcpy(&self.dual[0], &self.cB[0], K * sizeof(double))
@@ -1036,19 +1076,25 @@ cdef class Solver:
                 s = self.mf[i]
                 for k in range(K): s += self.R[k, i] * self.dual[k]
                 self.mu[i] = s
-            # entering column: most negative reduced cost (first negative, Bland's rule, after many iterations)
+            # entering column: most negative reduced cost (first negative, Bland's rule, after many iterations);
+            # reduced costs within rounding of zero (relative to the costs' size) do not count
             if it > 50 * K + 100: bland = True
-            q = 0; best = -1e-12; leave = -2
+            s = 1.0
+            for k in range(K):
+                if fabs(self.cB[k]) > s: s = fabs(self.cB[k])
+            # (basic variables are skipped: in an ill-conditioned basis their reduced costs are not exactly zero, and
+            # one could re-enter in place of itself indefinitely)
+            q = 0; best = -1e-10 * s; leave = -2
             for k in range(K):
                 s = 1e3 - self.dual[k]
-                if s < best:
+                if s < best and not self.is_basic(-(1 + k)):
                     best = s; q = -(1 + k); leave = -1
                     if bland: break
             if leave == -2 or not bland:
                 for j in range(self.npts):
                     s = self.PG[j] / self.RT
                     for i in range(C): s -= self.mu[i] * self.Px[j, i]
-                    if s < best:
+                    if s < best and not self.is_basic(j):
                         best = s; q = j; leave = -1
                         if bland: break
             if leave == -2:
@@ -1057,24 +1103,39 @@ cdef class Solver:
                 return 0
             self.column(q, &self.tmp[0])
             dgetrs(&N, &n, &nrhs, &self.LU[0], &n, &self.ipiv[0], &self.tmp[0], &n, &info)
+            # pivots must not be small relative to the column, else the next basis is (nearly) singular
+            piv = 1e-11
+            for i in range(K):
+                if 1e-9 * fabs(self.tmp[i]) > piv: piv = 1e-9 * fabs(self.tmp[i])
             leave = -1; tmin = INFINITY
             for i in range(K):
-                if self.tmp[i] > 1e-11:
+                if self.tmp[i] > piv:
                     t = (self.xB[i] if self.xB[i] > 0 else 0.0) / self.tmp[i]
                     if t < tmin:
                         tmin = t; leave = i
             if leave < 0:
                 return 3
             if bland:
-                # Bland's rule also for the leaving variable: among the (near-)ties, the smallest variable index
-                # (artificial columns first), else degenerate pivots can cycle
+                # Bland's rule also for the leaving variable: among the (near-)ties, the first variable in the order
+                # in which entering ones are scanned (artificial columns 0..K-1, then points), else degenerate
+                # pivots can cycle
                 for i in range(K):
-                    if self.tmp[i] > 1e-11:
+                    if self.tmp[i] > piv:
                         t = (self.xB[i] if self.xB[i] > 0 else 0.0) / self.tmp[i]
-                        if t <= tmin + 1e-12 * (1.0 + tmin) and self.basis[i] < self.basis[leave]:
+                        if t <= tmin + 1e-12 * (1.0 + tmin) and self.bland_rank(self.basis[i]) < self.bland_rank(self.basis[leave]):
                             leave = i
             self.basis[leave] = q
         return 4
+
+    cdef inline bint is_basic(self, int var) noexcept nogil:
+        cdef int k
+        for k in range(self.K):
+            if self.basis[k] == var: return True
+        return False
+
+    cdef inline int bland_rank(self, int var) noexcept nogil:
+        """Position of an LP variable (artificial column -(1 + k), or a point) in the entering scan's order."""
+        return -(1 + var) if var < 0 else self.K + var
 
     cdef int _polish_start(self) noexcept nogil:
         """The current LP solution's points as the polish's starting state (pol_*, mu). Returns their number, or -1
@@ -1269,6 +1330,7 @@ cdef class Solver:
                 self.seed_added = True
         if tpd < best_tpd[0]:
             best_tpd[0] = tpd
+            memcpy(&self.ybest[0], &self.ybuf[0], (<CPhase>self.pptr[ph]).D * sizeof(double))
 
     cdef void _price_from_points(self, int ph, int k, int rounds, int ncodes, long* codes, int* code_pt,
                                  double* code_tpd, double* mu, double* best_tpd, int* all_conv) noexcept nogil:
@@ -1360,7 +1422,10 @@ cdef class Solver:
                         continue
                     self.try_start(ph, &self.seedY[si, 0], mu, &best_tpd, &all_conv, True)
             if polished and best_tpd < -self.tol:
-                self.cert_kind = 1; self.cert_phase = ph; self.cert_tpd = best_tpd
+                if self.cert_kind == 0 or best_tpd < self.cert_tpd:
+                    # (the most negative minimum, for _polish_augment)
+                    memcpy(&self.ycert[0], &self.ybest[0], (<CPhase>pp).D * sizeof(double))
+                    self.cert_kind = 1; self.cert_phase = ph; self.cert_tpd = best_tpd
                 # certification failed (the point may already be a column the LP cannot use yet): continue with the
                 # LP's own potentials
                 added = True; no_polish[0] = True
@@ -1376,6 +1441,7 @@ cdef class Solver:
                 for i in range(C): t -= mu[i] * self.Px[p, i]
                 if t < -self.tol:
                     self.cert_kind = 2; self.cert_phase = self.Pph[p]; self.cert_tpd = t
+                    memcpy(&self.ycert[0], &self.Py[p, 0], (<CPhase>self.pptr[self.Pph[p]]).D * sizeof(double))
                     added = True; no_polish[0] = True
                     break
         if self.seed_added and not added:
@@ -1469,9 +1535,19 @@ cdef class Solver:
             self.fixedbuf[i] = fixed[i]
         self.R = self.Rbuf; self.b = self.bbuf; self.mf = self.mfbuf; self.fixed = self.fixedbuf
 
+    cdef bint _polish_augment(self) noexcept nogil:
+        """Newton from the last polished state plus the point that failed its certification (ycert, of cert_phase)
+        at zero amount; returns whether it converged."""
+        cdef int na = self.pol_na, Dm = self.Dmax
+        if na <= 0 or na + 1 > self.K:
+            return False
+        self.pol_ph[na] = self.cert_phase; self.pol_n[na] = 0.0
+        memcpy(&self.pol_y[na * Dm], &self.ycert[0], (<CPhase>self.pptr[self.cert_phase]).D * sizeof(double))
+        return self._polish_core(na + 1, 40, True) == 1
+
     cdef int _solve_c(self, bint use_seeds, int max_rounds, bint* polished_out, int* rounds_out) noexcept nogil:
         """The column-generation rounds (see solve()); returns the status."""
-        cdef int rounds = 0, st = 0
+        cdef int rounds = 0, st = 0, aug, C = self.C
         cdef double obj = 0.0
         cdef bint added, polished = False, no_polish = False
         for rounds in range(1, max_rounds + 1):
@@ -1487,8 +1563,22 @@ cdef class Solver:
                 polished = False
             no_polish = False
             added = self._pricing_round(rounds, use_seeds and rounds == 1, polished, &no_polish)
+            # a minimum below the polished tangent plane: Newton again with it as a further composition set (from
+            # zero amount). The LP alone can stall here: when the polished set is a single point at the overall
+            # composition, the LP is degenerate and can keep choosing other dual solutions under which the new
+            # point does not help, without the neighbouring points the true phase set needs.
+            aug = 0
+            while added and polished and (self.cert_kind == 1 or self.cert_kind == 2) and aug < C:
+                aug += 1
+                if not self._polish_augment():
+                    polished = False
+                    break
+                no_polish = False
+                added = self._pricing_round(rounds, False, True, &no_polish)
             if not added:
                 break
+        if st == 0 and added:
+            st = 6   # the round limit without a certified result
         polished_out[0] = polished; rounds_out[0] = rounds
         self.last_polished = polished
         return st

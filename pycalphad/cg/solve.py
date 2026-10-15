@@ -487,6 +487,9 @@ MIN_CONDITIONS_PER_THREAD = 8
 # Conditions per contiguous part of a sequence handed to a thread, at least
 MIN_CONDITIONS_PER_PART = 4
 PARTS_PER_THREAD = int(_os.environ.get("PYCALPHAD_CG_PARTS", 2))
+# Sequences at successive temperatures continue from the previous one's points (re-evaluated) instead of being
+# seeded afresh, while within this many kelvin of the temperature of their last seeding
+RESEED_DT = float(_os.environ.get("PYCALPHAD_CG_RESEED_DT", 100.0))
 
 
 def _thread_count(n_conditions):
@@ -506,27 +509,45 @@ class _Worker:
         self.solver.set_gauge(gauge)
         self.guess = {}   # trial mole fractions for fixed-potential components, carried between points
         self.state_key = None
+        self.seed_key = None   # (state_key without T, T) at the last seeding
 
-    def prepare(self, phases, point, sv_values, params, elements, snapshot, rng):
+    def prepare(self, phases, point, sv_values, params, elements, snapshot, rng, carry=False, t_index=None):
         """State variables and phase-local conditions for a group of conditions (unless already set); the point
-        store from `snapshot`, or reset and seeded (returns the seeds to price in the first solve)."""
+        store from `snapshot`, or with `carry` the current one (re-evaluated) if it was seeded at the same state up
+        to a temperature within RESEED_DT, or reset and seeded (returns the seeds to price in the first solve)."""
         key = (tuple(sv_values), tuple(params),
                tuple((k, float(val)) for k, val in point.items() if getattr(k, 'phase_name', None) is not None))
+        if key == self.state_key and carry and snapshot is None:
+            return None
         if key != self.state_key:
+            same_local = self.state_key is not None and key[2] == self.state_key[2]
             for ph, core in zip(phases, self.cores):
-                E, e, pinned = _local_constraints(ph, point, elements)
                 core.set_state(sv_values, params)
-                core.set_local_constraints(E, e)
-                core.set_pinned(pinned)
+                if not same_local:
+                    E, e, pinned = _local_constraints(ph, point, elements)
+                    core.set_local_constraints(E, e)
+                    core.set_pinned(pinned)
             self.state_key = key
         if snapshot is not None:
             self.solver.reset_points()
             self.solver.import_points(snapshot)
+            self.seed_key = None
             return None
-        return self.reseed(phases, point, elements, rng)
+        if carry and t_index is not None and self.seed_key is not None and self.solver.npts > 0:
+            rest, T0 = self.seed_key
+            if rest == self._without_t(key, t_index) and abs(sv_values[t_index] - T0) <= RESEED_DT:
+                self.solver.refresh_points()
+                return None
+        return self.reseed(phases, point, elements, rng, t_index)
 
-    def reseed(self, phases, point, elements, rng):
+    @staticmethod
+    def _without_t(key, t_index):
+        return (tuple(x for i, x in enumerate(key[0]) if i != t_index),) + key[1:]
+
+    def reseed(self, phases, point, elements, rng, t_index=None):
         self.solver.reset_points()
+        self.seed_key = None if t_index is None else (self._without_t(self.state_key, t_index),
+                                                       self.state_key[0][t_index])
         z0 = _nominal_composition(point, elements)
         seeds = []
         for i, ph in enumerate(phases):
@@ -603,11 +624,12 @@ def solve_workspace(wks):
             X[idx + (a,)] = Xs[a]
             Y[idx + (a, slice(0, len(Ys[a])))] = Ys[a]
 
-    def run(worker, sv_values, items, snapshot):
-        """Solve `items` in order on `worker`, starting from `snapshot` or freshly seeded. Returns the point store
-        after the first condition (for starting other workers from it)."""
+    def run(worker, sv_values, items, snapshot, carry=False):
+        """Solve `items` in order on `worker`, starting from `snapshot`, from the worker's current points (`carry`,
+        see _Worker.prepare) or freshly seeded. Returns the point store after the first condition (for starting
+        other workers from it)."""
         rng = np.random.default_rng(0)
-        seeds = worker.prepare(phases, items[0][1], sv_values, params, elements, snapshot, rng)
+        seeds = worker.prepare(phases, items[0][1], sv_values, params, elements, snapshot, rng, carry, t_index)
         rows = [_condition_rows(point, elements, molar_masses) for _, point in items]
         plain = all(not r[3].any() for r in rows) and not any(
             _is_global_x(k) and float(val) < TRACE_COMPOSITION for _, point in items for k, val in point.items())
@@ -623,7 +645,7 @@ def solve_workspace(wks):
                     write(idx, (0, list(phs[t, :k]), [Ys[t, a, :phases[phs[t, a]].D] for a in range(k)],
                                 [Xs[t, a] for a in range(k)], list(amt[t, :k]), list(Gs[t, :k]), mus[t], 0))
                 else:
-                    seeds = worker.reseed(phases, point, elements, rng)
+                    seeds = worker.reseed(phases, point, elements, rng, t_index)
                     out = _solve_point(worker.solver, point, elements, molar_masses, seeds, worker.guess)
                     if out[0] == 0:
                         write(idx, out)
@@ -634,7 +656,7 @@ def solve_workspace(wks):
             seeds = None
             if out[0] != 0:
                 # retry from scratch (fresh seeds at this composition)
-                seeds = worker.reseed(phases, point, elements, rng)
+                seeds = worker.reseed(phases, point, elements, rng, t_index)
                 out = _solve_point(worker.solver, point, elements, molar_masses, seeds, worker.guess)
                 seeds = None
             if out[0] == 0:
@@ -643,12 +665,13 @@ def solve_workspace(wks):
                 after_first = worker.solver.export_points()
         return after_first
 
+    t_index = next((i for i, sv in enumerate(state_variables) if str(sv) == 'T'), None)
     n_conditions = sum(len(g[2]) for g in groups)
     nthreads = _thread_count(n_conditions)
     workers = [_Worker(i, phases, C, gauge) for i in range(nthreads)]
     if nthreads == 1:
-        for key, sv_values, items in groups:
-            run(workers[0], sv_values, items, None)
+        for g, (key, sv_values, items) in enumerate(groups):
+            run(workers[0], sv_values, items, None, carry=g > 0)
     else:
         idle = queue.Queue()
         for w in workers:
@@ -661,10 +684,22 @@ def solve_workspace(wks):
             finally:
                 idle.put(w)
 
+        def chain(part):
+            """Sequences in order on one worker, each continuing from the previous one's points."""
+            w = idle.get()
+            try:
+                for g, (key, sv_values, items) in enumerate(part):
+                    run(w, sv_values, items, None, carry=g > 0)
+            finally:
+                idle.put(w)
+
         with ThreadPoolExecutor(nthreads) as pool:
             if len(groups) >= nthreads:
-                # whole sequences in parallel (e.g. one per temperature)
-                for f in [pool.submit(task, sv_values, items, None) for key, sv_values, items in groups]:
+                # whole sequences in parallel (e.g. one per temperature), in contiguous chains that continue from one
+                # sequence to the next; one chain per thread, as each starts with a full seeding
+                nparts = min(nthreads, len(groups))
+                bounds = np.linspace(0, len(groups), nparts + 1).astype(int)
+                for f in [pool.submit(chain, groups[bounds[i]:bounds[i + 1]]) for i in range(nparts)]:
                     f.result()
             else:
                 # one sequence at a time: seed with its first condition, then contiguous parts in parallel, each

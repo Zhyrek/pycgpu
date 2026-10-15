@@ -62,7 +62,16 @@ class _Phase:
             m_max = sum(asum[blk].max() for blk in self.blocks)
             self.core.set_bounds(MIN_FILLED_FRACTION * m_max)
         self.m_lo = self.core.m_lo
+        self.clones = []   # copies of core for worker threads (own buffers, shared compiled functions)
         self.stoichiometric = all(len(b) == 1 for b in self.blocks)
+
+    def core_for(self, worker):
+        """The phase's core object for worker thread `worker` (0: the original)."""
+        if worker == 0:
+            return self.core
+        while len(self.clones) < worker:
+            self.clones.append(self.core.clone())
+        return self.clones[worker - 1]
 
     def _norm(self, y):
         y = np.maximum(y, 1e-14)
@@ -425,10 +434,67 @@ def _solve_point(solver, point, elements, molar_masses, seeds, guess):
     return solver.solve(seeds)
 
 
+# Conditions per worker thread below which threads are not worth starting
+MIN_CONDITIONS_PER_THREAD = 8
+# Conditions per contiguous part of a sequence handed to a thread, at least
+MIN_CONDITIONS_PER_PART = 4
+PARTS_PER_THREAD = int(_os.environ.get("PYCALPHAD_CG_PARTS", 2))
+
+
+def _thread_count(n_conditions):
+    import os
+    from pycalphad.backend import _current
+    requested = os.environ.get('PYCALPHAD_CG_THREADS') or _current()[1].threads or os.cpu_count() or 1
+    return max(1, min(int(requested), n_conditions // MIN_CONDITIONS_PER_THREAD))
+
+
+class _Worker:
+    """A solver over its own copies of the phases (one per thread)."""
+    def __init__(self, index, phases, C, gauge):
+        from pycalphad.cg._core import Solver
+        self.index = index
+        self.cores = [ph.core_for(index) for ph in phases]
+        self.solver = Solver(self.cores, C)
+        self.solver.set_gauge(gauge)
+        self.guess = {}   # trial mole fractions for fixed-potential components, carried between points
+        self.state_key = None
+
+    def prepare(self, phases, point, sv_values, params, elements, snapshot, rng):
+        """State variables and phase-local conditions for a group of conditions (unless already set); the point
+        store from `snapshot`, or reset and seeded (returns the seeds to price in the first solve)."""
+        key = (tuple(sv_values), tuple(params),
+               tuple((k, float(val)) for k, val in point.items() if getattr(k, 'phase_name', None) is not None))
+        if key != self.state_key:
+            for ph, core in zip(phases, self.cores):
+                E, e, pinned = _local_constraints(ph, point, elements)
+                core.set_state(sv_values, params)
+                core.set_local_constraints(E, e)
+                core.set_pinned(pinned)
+            self.state_key = key
+        if snapshot is not None:
+            self.solver.reset_points()
+            self.solver.import_points(snapshot)
+            return None
+        return self.reseed(phases, point, elements, rng)
+
+    def reseed(self, phases, point, elements, rng):
+        self.solver.reset_points()
+        z0 = _nominal_composition(point, elements)
+        seeds = []
+        for i, ph in enumerate(phases):
+            S = np.array(ph.seeds(z0, elements, rng)).reshape(-1, ph.D)
+            self.solver.add_points(i, S)
+            seeds.append(S)
+        return seeds
+
+
 def solve_workspace(wks):
-    """The equilibrium dataset (reference layout) for a Workspace, computed by column generation."""
+    """The equilibrium dataset (reference layout) for a Workspace, computed by column generation. Conditions are
+    solved in sequences that share state variables (warm-started); sequences, or contiguous parts of one, run on
+    worker threads (pricing and the LP release the GIL)."""
+    import queue
+    from concurrent.futures import ThreadPoolExecutor
     from pycalphad import __version__ as pycalphad_version
-    from pycalphad.cg._core import Solver
     from pycalphad.property_framework.units import as_quantity
     conds = OrderedDict((key, np.atleast_1d(np.asarray(as_quantity(key, value).to(key.implementation_units).magnitude,
                                                        dtype=float)))
@@ -444,8 +510,7 @@ def solve_workspace(wks):
     names = [ph.name for ph in phases]
     params = np.asarray(prf.param_values, dtype=float)
     molar_masses = np.asarray(prf.molar_masses, dtype=float)
-    solver = Solver([ph.core for ph in phases], C)
-    solver.set_gauge(_gauge_directions(phases, C))
+    gauge = _gauge_directions(phases, C)
 
     keys = list(conds.keys())
     shape = tuple(len(conds[k]) for k in keys)
@@ -457,61 +522,26 @@ def solve_workspace(wks):
     Phase = np.full(shape + (nvert,), '', dtype='U%d' % max(max(len(n) for n in names), 6))
     points = np.full(shape + (nvert,), -1, dtype=np.int32)
 
+    # sequences of conditions sharing state variables and phase-local conditions, in a warm-starting order
     sv_pos = [i for i, k in enumerate(keys) if k in (v.N, v.P, v.T)]
     other_pos = [i for i in range(len(keys)) if i not in sv_pos]
     order = sorted(itertools.product(*[range(s) for s in shape]),
                    key=lambda idx: tuple(idx[i] for i in sv_pos) + tuple(idx[i] for i in other_pos))
-    rng = np.random.default_rng(0)
-    current_sv = None
-    current_local = None
-    seeds = None
-    guess = {}   # trial mole fractions for fixed-potential components, carried between points
+    groups = []
     for idx in order:
         point = OrderedDict((k, conds[k][i]) for k, i in zip(keys, idx))
         x_sum = sum(float(val) for k, val in point.items() if isinstance(k, v.MoleFraction) and k.phase_name is None)
         if x_sum > 1:
-            # Sum of independent component mole fractions greater than one: skipped, as by the reference
-            Phase[idx] = ''
-            continue
+            continue   # sum of independent mole fractions greater than one: left empty, as by the reference
         sv_values = np.array([float(point.get(sv, 1.0)) for sv in state_variables])
         local = tuple((k, float(val)) for k, val in point.items() if getattr(k, 'phase_name', None) is not None)
-        if local != current_local:
-            # phase-local conditions constrain those phases' points: points stored under other values are invalid
-            current_local = local
-            for ph in phases:
-                E, e, pinned = _local_constraints(ph, point, elements)
-                ph.core.set_local_constraints(E, e)
-                ph.core.set_pinned(pinned)
-            current_sv = None
-        if current_sv is None or not np.array_equal(sv_values, current_sv):
-            current_sv = sv_values
-            for ph in phases:
-                ph.core.set_state(sv_values, params)
-            solver.reset_points()
-            z0 = _nominal_composition(point, elements)
-            seeds = []
-            for i, ph in enumerate(phases):
-                S = np.array(ph.seeds(z0, elements, rng)).reshape(-1, ph.D)
-                solver.add_points(i, S)
-                seeds.append(S)
-        out = _solve_point(solver, point, elements, molar_masses, seeds, guess)
-        seeds = None
-        if out[0] != 0:
-            # retry from scratch (fresh seeds at this composition)
-            solver.reset_points()
-            z0 = _nominal_composition(point, elements)
-            seeds = []
-            for i, ph in enumerate(phases):
-                S = np.array(ph.seeds(z0, elements, rng)).reshape(-1, ph.D)
-                solver.add_points(i, S)
-                seeds.append(S)
-            out = _solve_point(solver, point, elements, molar_masses, seeds, guess)
-            seeds = None
-        if out[0] != 0:
-            continue
+        key = (tuple(sv_values), local)
+        if not groups or groups[-1][0] != key:
+            groups.append((key, sv_values, []))
+        groups[-1][2].append((idx, point))
+
+    def write(idx, out):
         status, phs, Ys, Xs, ns, Gs, mu, rounds = out
-        if _DEBUG:
-            print('cg point', idx, 'rounds', rounds, 'polished', solver.npolish, '/', solver.npolish_try, 'priced', solver.priced, 'npts', solver.npts)
         phs, Ys, Xs, ns, Gs = _consolidate((list(phs), list(Ys), list(Xs), list(ns), list(Gs)))
         # vertex order as the reference's (its hull lists grid points, which are grouped by sorted phase name)
         perm = sorted(range(len(phs)), key=lambda a: (names[phs[a]], tuple(-Xs[a])))
@@ -524,6 +554,84 @@ def solve_workspace(wks):
             NP[idx + (a,)] = ns[a]
             X[idx + (a,)] = Xs[a]
             Y[idx + (a, slice(0, len(Ys[a])))] = Ys[a]
+
+    def run(worker, sv_values, items, snapshot):
+        """Solve `items` in order on `worker`, starting from `snapshot` or freshly seeded. Returns the point store
+        after the first condition (for starting other workers from it)."""
+        rng = np.random.default_rng(0)
+        seeds = worker.prepare(phases, items[0][1], sv_values, params, elements, snapshot, rng)
+        rows = [_condition_rows(point, elements, molar_masses) for _, point in items]
+        plain = all(not r[3].any() for r in rows) and not any(
+            _is_global_x(k) and float(val) < TRACE_COMPOSITION for _, point in items for k, val in point.items())
+        if plain and len(items) > 1:
+            # ordinary conditions: the whole sequence in C without the GIL; failures are retried below
+            st, na, phs, amt, Xs, Ys, Gs, mus = worker.solver.solve_sequence(
+                np.array([r[0] for r in rows]), np.array([r[1] for r in rows]), np.array([r[2] for r in rows]),
+                np.array([r[3] for r in rows]), seeds)
+            after_first = None
+            for t, (idx, point) in enumerate(items):
+                if st[t] == 0:
+                    k = na[t]
+                    write(idx, (0, list(phs[t, :k]), [Ys[t, a, :phases[phs[t, a]].D] for a in range(k)],
+                                [Xs[t, a] for a in range(k)], list(amt[t, :k]), list(Gs[t, :k]), mus[t], 0))
+                else:
+                    seeds = worker.reseed(phases, point, elements, rng)
+                    out = _solve_point(worker.solver, point, elements, molar_masses, seeds, worker.guess)
+                    if out[0] == 0:
+                        write(idx, out)
+            return worker.solver.export_points()
+        after_first = None
+        for n, (idx, point) in enumerate(items):
+            out = _solve_point(worker.solver, point, elements, molar_masses, seeds, worker.guess)
+            seeds = None
+            if out[0] != 0:
+                # retry from scratch (fresh seeds at this composition)
+                seeds = worker.reseed(phases, point, elements, rng)
+                out = _solve_point(worker.solver, point, elements, molar_masses, seeds, worker.guess)
+                seeds = None
+            if out[0] == 0:
+                write(idx, out)
+            if n == 0:
+                after_first = worker.solver.export_points()
+        return after_first
+
+    n_conditions = sum(len(g[2]) for g in groups)
+    nthreads = _thread_count(n_conditions)
+    workers = [_Worker(i, phases, C, gauge) for i in range(nthreads)]
+    if nthreads == 1:
+        for key, sv_values, items in groups:
+            run(workers[0], sv_values, items, None)
+    else:
+        idle = queue.Queue()
+        for w in workers:
+            idle.put(w)
+
+        def task(sv_values, items, snapshot):
+            w = idle.get()
+            try:
+                return run(w, sv_values, items, snapshot)
+            finally:
+                idle.put(w)
+
+        with ThreadPoolExecutor(nthreads) as pool:
+            if len(groups) >= nthreads:
+                # whole sequences in parallel (e.g. one per temperature)
+                for f in [pool.submit(task, sv_values, items, None) for key, sv_values, items in groups]:
+                    f.result()
+            else:
+                # one sequence at a time: seed with its first condition, then contiguous parts in parallel, each
+                # starting from the seeded point store
+                for key, sv_values, items in groups:
+                    snapshot = pool.submit(task, sv_values, items[:1], None).result()
+                    rest = items[1:]
+                    # several parts per thread, taken in turn, so faster cores (e.g. performance vs efficiency cores)
+                    # take more of them
+                    nparts = min(PARTS_PER_THREAD * nthreads, max(1, len(rest) // MIN_CONDITIONS_PER_PART))
+                    bounds = np.linspace(0, len(rest), nparts + 1).astype(int)
+                    futures = [pool.submit(task, sv_values, rest[bounds[i]:bounds[i + 1]], snapshot)
+                               for i in range(nparts) if bounds[i + 1] > bounds[i]]
+                    for f in futures:
+                        f.result()
 
     coords = OrderedDict((str(k), conds[k]) for k in keys)
     coords['vertex'] = np.arange(nvert)

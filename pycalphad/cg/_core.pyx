@@ -46,7 +46,7 @@ cdef class CPhase:
     cdef double[::1] nu, mu_cur           # mu^T A (linear phases); the chemical potentials being priced (RT units)
     cdef double[:, ::1] E                 # constraints E y = e (rows: the PhaseRecord's beyond the site balances,
     cdef double[::1] e, lam, hres         #   then phase-local conditions); multipliers; residuals
-    cdef object keep
+    cdef object keep, ctor_args
     cdef fn_t p_G, p_grad, p_hess
     cdef void* d_G
     cdef void* d_grad
@@ -75,6 +75,8 @@ cdef class CPhase:
         cdef FastFunctionFactory ff = pr.function_factory
         cdef FastFunction f
         cdef int i
+        self.ctor_args = (pr, temperature_index, np.array(sublattice_of, dtype=np.int32), np.array(elem_of, dtype=np.int32),
+                          np.array(A, dtype=float), linear, np.array(E, dtype=float), np.array(e, dtype=float))
         self.phase_record = pr
         self.name = pr.phase_name
         self.D = pr.phase_dof; self.C = A.shape[0]
@@ -145,6 +147,13 @@ cdef class CPhase:
 
     def __dealloc__(self):
         free(self.p_m); free(self.p_mg); free(self.p_mh); free(self.d_m); free(self.d_mg); free(self.d_mh)
+
+    def clone(self):
+        """The same phase with its own work buffers and state (for another thread); the compiled functions are
+        shared."""
+        P = CPhase(*self.ctor_args)
+        P.set_bounds(self.m_lo)
+        return P
 
     def set_constraints(self, E, e):
         """Linear equality constraints E y = e beyond the site-fraction balances."""
@@ -799,6 +808,13 @@ cdef class Solver:
     cdef public bint use_polish, last_polished
     cdef public int polish_fail
     cdef public object finish_reason, cert_log, gauge
+    cdef public int cert_kind, cert_phase
+    cdef public double cert_tpd
+    cdef void** pptr                     # the phases, for calls without the GIL
+    cdef double[:, ::1] seedY, Rbuf
+    cdef double[::1] bbuf, mfbuf
+    cdef int[::1] fixedbuf
+    cdef int[::1] seed_off
     cdef int ngauge
     cdef double[:, ::1] gauge_mv
     cdef double[::1] pol_y, pol_x, pol_S, pol_J, pol_F, pol_mu, pol_n, pol_G, pol_t, pol_RS, pol_J2, pol_F2, pol_sv, pol_work
@@ -809,8 +825,12 @@ cdef class Solver:
     cdef public int max_late
 
     def __init__(self, phases, int C, double skip_margin=1.0, double prune=1.0, double tol=1e-6,
-                 double prune_late=0.25, int max_late=3, double seed_prune=2.0):
+                 double prune_late=0.25, int max_late=3, double seed_prune=INFINITY):
         self.phases = list(phases); self.nph = len(phases); self.C = C; self.K = C
+        self.pptr = <void**>malloc(self.nph * sizeof(void*))
+        for i, ph in enumerate(self.phases): self.pptr[i] = <void*>ph
+        self.seedY = np.zeros((1, 1)); self.seed_off = np.zeros(self.nph + 1, dtype=np.int32)
+        self.cert_kind = 0; self.cert_phase = -1; self.cert_tpd = 0.0
         self.Dmax = max(p.D for p in phases)
         self.skip_margin = skip_margin; self.prune = prune; self.tol = tol
         self.prune_late = prune_late; self.max_late = max_late; self.seed_prune = seed_prune
@@ -832,13 +852,17 @@ cdef class Solver:
         self.ybuf = np.zeros(self.Dmax); self.xbuf = np.zeros(C); self.ybest = np.zeros(self.Dmax)
         self.xbest = np.zeros(C); self.ystart = np.zeros(self.Dmax)
         self.R = np.eye(C); self.b = np.zeros(C); self.mf = np.zeros(C); self.fixed = np.zeros(C, dtype=np.int32)
+        self.Rbuf = np.zeros((C, C)); self.bbuf = np.zeros(C); self.mfbuf = np.zeros(C); self.fixedbuf = np.zeros(C, dtype=np.int32)
         self.reset_points()
+
+    def __dealloc__(self):
+        free(self.pptr)
 
     def reset_points(self):
         """Forget all points (e.g. after a change of the state variables)."""
         self.npts = 0
         self.head = np.full(self.nph, -1, dtype=np.int32)
-        self.basis = np.array([-(1 + k) for k in range(self.C)], dtype=np.int32)
+        self.basis = np.array([-(1 + k) for k in range(self.C)], dtype=np.int32)   # (first K entries used)
         self.RT = (<CPhase>self.phases[0]).RT
         for P in self.phases:
             (<CPhase>P).has_last = False
@@ -857,11 +881,37 @@ cdef class Solver:
         RR /= scale[:, None]; bb /= scale
         if K != self.K:
             self.K = K
-            self.basis = np.array([-(1 + k) for k in range(K)], dtype=np.int32)
+            self.basis = np.array([-(1 + k) for k in range(self.C)], dtype=np.int32)
         self.R = RR; self.b = bb
         self.RT = (<CPhase>self.phases[0]).RT
         self.mf = np.asarray(mu_fixed, dtype=float) / self.RT
         self.fixed = np.asarray(fixed, dtype=np.int32)
+
+    def export_points(self):
+        """The point store and LP basis (to start other solvers over clones of the same phases from it)."""
+        cdef int n = self.npts
+        return {'n': n, 'Py': np.asarray(self.Py[:n]).copy(), 'Px': np.asarray(self.Px[:n]).copy(),
+                'PG': np.asarray(self.PG[:n]).copy(), 'Pph': np.asarray(self.Pph[:n]).copy(),
+                'Pnext': np.asarray(self.Pnext[:n]).copy(), 'Pcode': np.asarray(self.Pcode[:n]).copy(),
+                'head': np.asarray(self.head).copy(), 'basis': np.asarray(self.basis).copy(), 'K': self.K,
+                'skip': [((<CPhase>P).has_last, (<CPhase>P).last_tpd, np.asarray((<CPhase>P).last_mu).copy())
+                         for P in self.phases]}
+
+    def import_points(self, d):
+        """Replace the point store (and the LP basis, for the same number of condition rows) by an exported one."""
+        cdef int n = d['n']
+        while self.cap < n:
+            self._grow()
+        np.asarray(self.Py)[:n] = d['Py']; np.asarray(self.Px)[:n] = d['Px']; np.asarray(self.PG)[:n] = d['PG']
+        np.asarray(self.Pph)[:n] = d['Pph']; np.asarray(self.Pnext)[:n] = d['Pnext']; np.asarray(self.Pcode)[:n] = d['Pcode']
+        self.npts = n
+        self.head = np.array(d['head'], dtype=np.int32)
+        if d['K'] == self.K:
+            self.basis = np.array(d['basis'], dtype=np.int32)
+        # the skip rule's state (valid at other potentials too: it bounds the change by max|delta mu|)
+        for P, (has_last, last_tpd, last_mu) in zip(self.phases, d['skip']):
+            (<CPhase>P).has_last = has_last; (<CPhase>P).last_tpd = last_tpd
+            np.asarray((<CPhase>P).last_mu)[:] = last_mu
 
     def points(self, int ph):
         """Stored points of phase ph: (y, x, GM) arrays."""
@@ -882,9 +932,9 @@ cdef class Solver:
         self.Pcode = g(self.Pcode, (cap,), 0, np.int64)
         self.cap = cap
 
-    cdef int add_point(self, int ph, double* y, double* x, double G) except -2:
-        cdef CPhase P = <CPhase>self.phases[ph]
-        cdef int j, i, p
+    cdef int add_point(self, int ph, double* y, double* x, double G) noexcept nogil:
+        cdef void* pp = self.pptr[ph]
+        cdef int j, i, p, D = (<CPhase>pp).D
         cdef double m
         if not isfinite(G):
             return -1
@@ -893,17 +943,18 @@ cdef class Solver:
         p = self.head[ph]
         while p >= 0:
             m = 0.0
-            for j in range(P.D):
+            for j in range(D):
                 if fabs(self.Py[p, j] - y[j]) > m: m = fabs(self.Py[p, j] - y[j])
             if m < 1e-7:
                 return -1
             p = self.Pnext[p]
         if self.npts >= self.cap:
-            self._grow()
+            with gil:
+                self._grow()
         p = self.npts
-        for j in range(P.D): self.Py[p, j] = y[j]
+        for j in range(D): self.Py[p, j] = y[j]
         for i in range(self.C): self.Px[p, i] = x[i]
-        self.PG[p] = G; self.Pph[p] = ph; self.Pcode[p] = P.pattern(y)
+        self.PG[p] = G; self.Pph[p] = ph; self.Pcode[p] = (<CPhase>pp).pattern(y)
         self.Pnext[p] = self.head[ph]; self.head[ph] = p
         self.npts += 1
         return p
@@ -1015,11 +1066,10 @@ cdef class Solver:
             self.basis[leave] = q
         return 4
 
-    cdef int _polish_start(self) except -2:
+    cdef int _polish_start(self) noexcept nogil:
         """The current LP solution's points as the polish's starting state (pol_*, mu). Returns their number, or -1
         if an artificial column is still in use."""
         cdef int C = self.C, K = self.K, Dm = self.Dmax, k, p, j, c, na = 0
-        cdef CPhase P
         for c in range(C): self.pol_mu[c] = self.mu[c]
         for k in range(K):
             if self.xB[k] > 1e-14:   # (basis columns at zero amount make the system singular)
@@ -1027,19 +1077,18 @@ cdef class Solver:
                 if p < 0:
                     if self.xB[k] > 1e-9: return -1
                     continue   # (an artificial column at a negligible amount: a redundant row)
-                P = <CPhase>self.phases[self.Pph[p]]
                 self.pol_ph[na] = self.Pph[p]; self.pol_n[na] = self.xB[k]
-                for j in range(P.D): self.pol_y[na * Dm + j] = self.Py[p, j]
+                for j in range((<CPhase>self.pptr[self.Pph[p]]).D): self.pol_y[na * Dm + j] = self.Py[p, j]
                 na += 1
         return na
 
-    cdef int polish(self, int max_it=40) except -1:
+    cdef int polish(self, int max_it=40) noexcept nogil:
         cdef int na = self._polish_start()
         if na <= 0:
             return 0
         return self._polish_core(na, max_it, False)
 
-    cdef int _polish_core(self, int na, int max_it, bint allow_drop) except -1:
+    cdef int _polish_core(self, int na, int max_it, bint allow_drop) noexcept nogil:
         """Newton on the equilibrium conditions from the starting state in pol_* (see _polish_start). Unknowns: mu and
         the amounts n. Equations: TPD_a(mu) = 0 (each point at its local TPD minimum), the condition rows
         sum_a n_a R x_a(mu) = b, and the fixed potentials. By the envelope theorem dTPD_a/dmu = -x_a; dx_a/dmu comes
@@ -1047,7 +1096,7 @@ cdef class Solver:
         self.mu; returns 1 if it converged, 0 if it gave up. With allow_drop, a point whose amount reaches zero is
         dropped (the step is cut there), as when a condition changes continuously."""
         cdef int C = self.C, K = self.K, Dm = self.Dmax, k, p, a, bb, c, i, j, it, w, N, info, nrhs = 1, row, adrop
-        cdef CPhase P
+        cdef void* pp
         cdef double G = 0.0, t = 0.0, res, last_res = INFINITY, sc, s, alpha, rcond
         cdef int rank, lw
         cdef bint merged
@@ -1069,23 +1118,23 @@ cdef class Solver:
                 na -= 1
         for it in range(max_it):
             for a in range(na):
-                P = <CPhase>self.phases[self.pol_ph[a]]
-                if not P.price(&self.pol_mu[0], &py[a * Dm], &self.ybuf[0], &px[a * C], &G, &t):
+                pp = self.pptr[self.pol_ph[a]]
+                if not (<CPhase>pp).price(&self.pol_mu[0], &py[a * Dm], &self.ybuf[0], &px[a * C], &G, &t):
                     self.polish_fail = 1; return 0
                 if not isfinite(G): return 0
-                memcpy(&py[a * Dm], &self.ybuf[0], P.D * sizeof(double))
+                memcpy(&py[a * Dm], &self.ybuf[0], (<CPhase>pp).D * sizeof(double))
                 self.pol_G[a] = G; self.pol_t[a] = t
-                if P.sens(&pS[a * C * C]) < 0:
+                if (<CPhase>pp).sens(&pS[a * C * C]) < 0:
                     self.polish_fail = 2; return 0
             # merge composition sets that met
             w = 0
             for a in range(na):
                 merged = False
-                P = <CPhase>self.phases[self.pol_ph[a]]
+                pp = self.pptr[self.pol_ph[a]]
                 for bb in range(w):
                     if self.pol_ph[bb] == self.pol_ph[a]:
                         s = 0.0
-                        for j in range(P.D):
+                        for j in range((<CPhase>pp).D):
                             if fabs(py[bb * Dm + j] - py[a * Dm + j]) > s: s = fabs(py[bb * Dm + j] - py[a * Dm + j])
                         if s < 1e-6:
                             self.pol_n[bb] += self.pol_n[a]; merged = True; break
@@ -1194,10 +1243,10 @@ cdef class Solver:
         self.npolish += 1
         return 1
 
-    cdef void try_start(self, CPhase P, int ph, double* y0, double* mu, double* best_tpd, int* all_conv, bint keep) except *:
+    cdef void try_start(self, int ph, double* y0, double* mu, double* best_tpd, int* all_conv, bint keep) noexcept nogil:
         cdef double G = 0.0, tpd = 0.0
         cdef int conv
-        conv = P.price(mu, y0, &self.ybuf[0], &self.xbuf[0], &G, &tpd)
+        conv = (<CPhase>self.pptr[ph]).price(mu, y0, &self.ybuf[0], &self.xbuf[0], &G, &tpd)
         if not conv:
             all_conv[0] = 0
         if not isfinite(G):
@@ -1211,13 +1260,13 @@ cdef class Solver:
         if tpd < best_tpd[0]:
             best_tpd[0] = tpd
 
-    cdef void _price_from_points(self, CPhase P, int ph, int k, int rounds, int ncodes, long* codes, int* code_pt,
-                                 double* code_tpd, double* mu, double* best_tpd, int* all_conv) except *:
+    cdef void _price_from_points(self, int ph, int k, int rounds, int ncodes, long* codes, int* code_pt,
+                                 double* code_tpd, double* mu, double* best_tpd, int* all_conv) noexcept nogil:
         """Starts from stored points: the best one (k), the phase's points in the LP solution, the best of the other
         ordering patterns, and in the first round a disordered start at k's composition."""
         cdef int si, sj, p
         cdef double t
-        self.try_start(P, ph, &self.Py[k, 0], mu, best_tpd, all_conv, False)
+        self.try_start(ph, &self.Py[k, 0], mu, best_tpd, all_conv, False)
         for si in range(ncodes):
             for sj in range(si + 1, ncodes):
                 if code_tpd[sj] < code_tpd[si]:
@@ -1226,39 +1275,31 @@ cdef class Solver:
         for si in range(self.K):
             p = self.basis[si]
             if p >= 0 and p != k and self.Pph[p] == ph and self.xB[si] > 1e-12:
-                self.try_start(P, ph, &self.Py[p, 0], mu, best_tpd, all_conv, False)
+                self.try_start(ph, &self.Py[p, 0], mu, best_tpd, all_conv, False)
         for si in range(min(ncodes, 6 if rounds == 1 else self.max_late)):
             if code_pt[si] != k and self.Pcode[code_pt[si]] != self.Pcode[k]:
-                self.try_start(P, ph, &self.Py[code_pt[si], 0], mu, best_tpd, all_conv, False)
+                self.try_start(ph, &self.Py[code_pt[si], 0], mu, best_tpd, all_conv, False)
         if rounds == 1:
-            P.composition_start(&self.Px[k, 0], &self.ystart[0])
-            self.try_start(P, ph, &self.ystart[0], mu, best_tpd, all_conv, False)
+            (<CPhase>self.pptr[ph]).composition_start(&self.Px[k, 0], &self.ystart[0])
+            self.try_start(ph, &self.ystart[0], mu, best_tpd, all_conv, False)
 
-    cdef bint _pricing_round(self, int rounds, object seeds, bint polished, bint* no_polish) except -1:
-        """Price every phase at self.mu; returns whether anything new below the tangent plane was found."""
+    cdef bint _pricing_round(self, int rounds, bint use_seeds, bint polished, bint* no_polish) noexcept nogil:
+        """Price every phase at self.mu (with the packed seeds if use_seeds); returns whether anything new below the
+        tangent plane was found."""
         cdef int C = self.C, K = self.K, ph, p, k, i, si, sj, ncodes, all_conv
         cdef double best_tpd, maxdmu, t
-        cdef CPhase P
+        cdef void* pp
         cdef bint added = False
-        cdef double[:, ::1] S
         cdef long codes[64]
         cdef int code_pt[64]
         cdef double code_tpd[64]
         cdef double* mu = &self.mu[0]
         self.seed_added = False
+        self.cert_kind = 0
         for ph in range(self.nph):
-            P = <CPhase>self.phases[ph]
-            if P.stoich:
+            pp = self.pptr[ph]
+            if (<CPhase>pp).stoich:
                 continue
-            # a phase's TPD can fall by at most max|delta mu| (mole fractions are in [0, 1] and sum to 1)
-            if P.has_last:
-                maxdmu = 0.0
-                for i in range(C):
-                    t = fabs(mu[i] - P.last_mu[i])
-                    if t > maxdmu: maxdmu = t
-                if P.last_tpd - maxdmu > self.skip_margin:
-                    self.skipped += 1
-                    continue
             # starts: the phase's stored point with the lowest TPD; the best point of each other ordering pattern
             # (dominant species per sublattice) within `prune` of the tangent plane (6 at most) in the first round,
             # within `prune_late` (max_late at most) later; the phase's points in the LP solution; in the first round
@@ -1280,44 +1321,55 @@ cdef class Solver:
                         if ncodes < 64:
                             codes[ncodes] = self.Pcode[p]; code_tpd[ncodes] = t; code_pt[ncodes] = p; ncodes += 1
                 p = self.Pnext[p]
-            if k < 0 and (rounds != 1 or seeds is None):
+            # skip rule: a phase's minimum TPD can fall by at most max|delta mu| (mole fractions are in [0, 1] and sum
+            # to 1); the minimum recorded at the last pricing is only the lowest of the basins priced then, so the
+            # phase's stored points (minima of its other basins, relaxed under earlier conditions) must also be well
+            # above the plane
+            if (<CPhase>pp).has_last and best_tpd > self.skip_margin:
+                maxdmu = 0.0
+                for i in range(C):
+                    t = fabs(mu[i] - (<CPhase>pp).last_mu[i])
+                    if t > maxdmu: maxdmu = t
+                if (<CPhase>pp).last_tpd - maxdmu > self.skip_margin:
+                    self.skipped += 1
+                    continue
+            if k < 0 and not (rounds == 1 and use_seeds):
                 continue
             best_tpd = INFINITY; all_conv = 1
             if k >= 0:
-                self._price_from_points(P, ph, k, rounds, ncodes, codes, code_pt, code_tpd, mu, &best_tpd, &all_conv)
-            if rounds == 1 and seeds is not None:
+                self._price_from_points(ph, k, rounds, ncodes, codes, code_pt, code_tpd, mu, &best_tpd, &all_conv)
+            if rounds == 1 and use_seeds:
                 # (constrained phases have no stored points until their seeds are priced)
-                S = np.ascontiguousarray(seeds[ph], dtype=float)
-                for si in range(S.shape[0]):
+                for si in range(self.seed_off[ph], self.seed_off[ph + 1]):
                     # seeds already far above the tangent plane are not worth a local minimization
-                    P.eval0(&S[si, 0])
-                    for i in range(C): self.xbuf[i] = P.mval[i] / P.Mtot
-                    t = P.out1[0] / self.RT
+                    (<CPhase>pp).eval0(&self.seedY[si, 0])
+                    for i in range(C): self.xbuf[i] = (<CPhase>pp).mval[i] / (<CPhase>pp).Mtot
+                    t = (<CPhase>pp).out1[0] / self.RT
                     for i in range(C): t -= mu[i] * self.xbuf[i]
                     if not t < self.seed_prune:
                         continue
-                    self.try_start(P, ph, &S[si, 0], mu, &best_tpd, &all_conv, True)
+                    self.try_start(ph, &self.seedY[si, 0], mu, &best_tpd, &all_conv, True)
             if polished and best_tpd < -self.tol:
-                self.cert_log = ('phase', P.name, best_tpd)
+                self.cert_kind = 1; self.cert_phase = ph; self.cert_tpd = best_tpd
                 # certification failed (the point may already be a column the LP cannot use yet): continue with the
                 # LP's own potentials
                 added = True; no_polish[0] = True
             if all_conv:  # only a converged minimum may justify skipping this phase later
-                P.has_last = True; P.last_tpd = best_tpd
-                for i in range(C): P.last_mu[i] = mu[i]
+                (<CPhase>pp).has_last = True; (<CPhase>pp).last_tpd = best_tpd
+                for i in range(C): (<CPhase>pp).last_mu[i] = mu[i]
             else:
-                P.has_last = False
+                (<CPhase>pp).has_last = False
         if polished and not added:
             # the stored points (stoichiometric phases among them) were checked by the LP, not at these potentials
             for p in range(self.npts):
                 t = self.PG[p] / self.RT
                 for i in range(C): t -= mu[i] * self.Px[p, i]
                 if t < -self.tol:
-                    self.cert_log = ('stored point', (<CPhase>self.phases[self.Pph[p]]).name, t, np.asarray(self.Px[p]).copy())
+                    self.cert_kind = 2; self.cert_phase = self.Pph[p]; self.cert_tpd = t
                     added = True; no_polish[0] = True
                     break
         if self.seed_added and not added:
-            self.cert_log = ('seed',)
+            self.cert_kind = 3
         return added or self.seed_added
 
     def set_gauge(self, W):
@@ -1329,11 +1381,37 @@ cdef class Solver:
         self.ngauge = self.gauge.shape[0]
         self.gauge_mv = self.gauge if self.ngauge else np.zeros((1, self.C))
 
-    def _gauge_fix(self):
-        if self.gauge is None or self.gauge.shape[0] == 0:
-            return
-        mu = np.asarray(self.mu)
-        mu -= self.gauge.T @ (self.gauge @ mu)
+    cdef void gauge_fix(self) noexcept nogil:
+        cdef int k, i
+        cdef double s
+        for k in range(self.ngauge):
+            s = 0.0
+            for i in range(self.C): s += self.gauge_mv[k, i] * self.mu[i]
+            for i in range(self.C): self.mu[i] -= s * self.gauge_mv[k, i]
+
+    def _pack_seeds(self, seeds):
+        """Seeds (per phase, rows of site fractions) into one array, for pricing without the GIL."""
+        cdef int i, r, j, row = 0
+        cdef double[:, ::1] Si
+        rows = [np.ascontiguousarray(np.asarray(sd, dtype=float).reshape(-1, (<CPhase>self.phases[i]).D))
+                for i, sd in enumerate(seeds)]
+        total = sum(x.shape[0] for x in rows)
+        cdef int[::1] off = np.zeros(self.nph + 1, dtype=np.int32)
+        cdef double[:, ::1] Y = np.zeros((max(total, 1), self.Dmax))
+        for i in range(self.nph):
+            Si = rows[i]
+            for r in range(Si.shape[0]):
+                for j in range(Si.shape[1]): Y[row, j] = Si[r, j]
+                row += 1
+            off[i + 1] = row
+        self.seedY = Y; self.seed_off = off
+
+    def cert_description(self):
+        """What made the last certification fail (diagnostics)."""
+        names = [(<CPhase>p).name for p in self.phases]
+        return {0: None, 1: ('phase', names[self.cert_phase] if self.cert_phase >= 0 else None, self.cert_tpd),
+                2: ('stored point', names[self.cert_phase] if self.cert_phase >= 0 else None, self.cert_tpd),
+                3: ('seed',)}.get(self.cert_kind)
 
     def _polished_result(self, int rounds):
         cdef int a, C = self.C, na = self.pol_na
@@ -1359,30 +1437,117 @@ cdef class Solver:
                 X.append(np.asarray(self.Px[p]).copy()); n.append(self.xB[k]); G.append(self.PG[p])
         return (0, phs, Y, X, n, G, np.asarray(self.mu).copy() * self.RT, rounds)
 
-    def solve(self, seeds=None, int max_rounds=60):
-        """Column generation for the current conditions. seeds: per phase, an array of start configurations to price
-        in the first round (the first conditions at given state variables), or None.
-        Returns (status, phases, Y rows, X rows, amounts, GM rows, mu (J/mol), rounds); status 0 on success."""
-        cdef int rounds = 0, st
+    cdef void _set_conditions_c(self, double* R, double* b, double* mu_fixed, int* fixed, int K) noexcept nogil:
+        """set_conditions without the GIL (into the solver's own buffers)."""
+        cdef int k, i
+        cdef double sc, m
+        if K != self.K:
+            self.K = K
+            for k in range(self.C): self.basis[k] = -(1 + k)
+        for k in range(K):
+            sc = 1.0
+            if b[k] < 0: sc = -1.0
+            m = fabs(b[k])
+            if m <= 0:
+                for i in range(self.C):
+                    if fabs(R[k * self.C + i]) > m: m = fabs(R[k * self.C + i])
+                if m <= 0: m = 1.0
+            for i in range(self.C): self.Rbuf[k, i] = sc * R[k * self.C + i] / m
+            self.bbuf[k] = sc * b[k] / m
+        for i in range(self.C):
+            self.mfbuf[i] = mu_fixed[i] / self.RT
+            self.fixedbuf[i] = fixed[i]
+        self.R = self.Rbuf; self.b = self.bbuf; self.mf = self.mfbuf; self.fixed = self.fixedbuf
+
+    cdef int _solve_c(self, bint use_seeds, int max_rounds, bint* polished_out, int* rounds_out) noexcept nogil:
+        """The column-generation rounds (see solve()); returns the status."""
+        cdef int rounds = 0, st = 0
         cdef double obj = 0.0
         cdef bint added, polished = False, no_polish = False
-        self.RT = (<CPhase>self.phases[0]).RT
         for rounds in range(1, max_rounds + 1):
             st = self.lp_solve(&obj)
             if st != 0:
-                return (st, None, None, None, None, None, None, rounds)
-            self._gauge_fix()
+                break
+            self.gauge_fix()
             if self.use_polish and not no_polish:
                 # finish the current phase set by Newton; the pricing below then certifies it (or finds more)
                 self.npolish_try += 1
-                polished = self.polish()
+                polished = self.polish() == 1
             else:
                 polished = False
             no_polish = False
-            added = self._pricing_round(rounds, seeds if rounds == 1 else None, polished, &no_polish)
+            added = self._pricing_round(rounds, use_seeds and rounds == 1, polished, &no_polish)
             if not added:
                 break
+        polished_out[0] = polished; rounds_out[0] = rounds
         self.last_polished = polished
+        return st
+
+    def solve_sequence(self, R, b, mu_fixed, fixed, seeds=None, int max_rounds=60):
+        """Solve a sequence of conditions (rows R[t] (K x C), b[t], fixed potentials mu_fixed[t] (J/mol) for the
+        components flagged in fixed[t]) in order, warm-started, in one stretch without the GIL; seeds as in solve(),
+        for the first. Returns arrays: status, number of points, and per point their phase indices, amounts,
+        compositions, site fractions (padded), GM, and the chemical potentials (J/mol)."""
+        cdef double[:, :, ::1] Rv = np.ascontiguousarray(R, dtype=float)
+        cdef double[:, ::1] bv = np.ascontiguousarray(b, dtype=float)
+        cdef double[:, ::1] mfv = np.ascontiguousarray(mu_fixed, dtype=float)
+        cdef int[:, ::1] fxv = np.ascontiguousarray(fixed, dtype=np.int32)
+        cdef int n = Rv.shape[0], K = Rv.shape[1], C = self.C, Dm = self.Dmax, t, a, k, p, i, j, st, na, rounds
+        cdef bint polished, use_seeds = seeds is not None
+        status = np.zeros(n, dtype=np.int32); nout = np.zeros(n, dtype=np.int32)
+        phs = np.full((n, C), -1, dtype=np.int32); amt = np.zeros((n, C)); X = np.zeros((n, C, C))
+        Y = np.full((n, C, Dm), np.nan); G = np.zeros((n, C)); mu = np.zeros((n, C))
+        cdef int[::1] status_v = status, nout_v = nout
+        cdef int[:, ::1] phs_v = phs
+        cdef double[:, ::1] amt_v = amt, G_v = G, mu_v = mu
+        cdef double[:, :, ::1] X_v = X, Y_v = Y
+        self.RT = (<CPhase>self.phases[0]).RT
+        if use_seeds:
+            self._pack_seeds(seeds)
+        with nogil:
+            for t in range(n):
+                self._set_conditions_c(&Rv[t, 0, 0], &bv[t, 0], &mfv[t, 0], &fxv[t, 0], K)
+                st = self._solve_c(use_seeds and t == 0, max_rounds, &polished, &rounds)
+                na = 0
+                if st == 0 and polished:
+                    for a in range(self.pol_na):
+                        phs_v[t, na] = self.pol_ph[a]; amt_v[t, na] = self.pol_n[a]; G_v[t, na] = self.pol_G[a]
+                        for i in range(C): X_v[t, na, i] = self.pol_x[a * C + i]
+                        for j in range((<CPhase>self.pptr[self.pol_ph[a]]).D): Y_v[t, na, j] = self.pol_y[a * Dm + j]
+                        na += 1
+                elif st == 0:
+                    for k in range(self.K):
+                        if self.xB[k] > 1e-300:
+                            p = self.basis[k]
+                            if p < 0:
+                                if self.xB[k] > 1e-9:
+                                    st = 5
+                                    break
+                                continue
+                            phs_v[t, na] = self.Pph[p]; amt_v[t, na] = self.xB[k]; G_v[t, na] = self.PG[p]
+                            for i in range(C): X_v[t, na, i] = self.Px[p, i]
+                            for j in range((<CPhase>self.pptr[self.Pph[p]]).D): Y_v[t, na, j] = self.Py[p, j]
+                            na += 1
+                status_v[t] = st; nout_v[t] = na
+                for i in range(C): mu_v[t, i] = self.mu[i] * self.RT
+        return status, nout, phs, amt, X, Y, G, mu
+
+    def solve(self, seeds=None, int max_rounds=60):
+        """Column generation for the current conditions. seeds: per phase, an array of start configurations to price
+        in the first round (the first conditions at given state variables), or None.
+        Returns (status, phases, Y rows, X rows, amounts, GM rows, mu (J/mol), rounds); status 0 on success. The
+        rounds run without the GIL, so solvers over separate phase objects can run in parallel threads."""
+        cdef int rounds = 0, st = 0
+        cdef bint polished = False, use_seeds = seeds is not None
+        self.RT = (<CPhase>self.phases[0]).RT
+        if use_seeds:
+            self._pack_seeds(seeds)
+        with nogil:
+            st = self._solve_c(use_seeds, max_rounds, &polished, &rounds)
+        if st != 0:
+            return (st, None, None, None, None, None, None, rounds)
+        self.last_polished = polished
+        self.cert_log = self.cert_description()
         if polished:
             return self._polished_result(rounds)
         return self._lp_result(rounds)
@@ -1399,7 +1564,8 @@ cdef class Solver:
         """After a converged polish: one pricing round at its potentials. Returns the result, or None if anything
         below the tangent plane was found."""
         cdef bint no_polish = False
-        if self._pricing_round(2, None, True, &no_polish):
+        if self._pricing_round(2, False, True, &no_polish):
+            self.cert_log = self.cert_description()
             return None
         return self._polished_result(0)
 
@@ -1443,9 +1609,9 @@ cdef class Solver:
                     self.finish_reason = ('polish', self.polish_fail, len(choice))
                     continue
                 no_polish = False
-                added = self._pricing_round(2, None, True, &no_polish)
+                added = self._pricing_round(2, False, True, &no_polish)
                 if added:
-                    self.finish_reason = ('certify', self.cert_log)
+                    self.finish_reason = ('certify', self.cert_description())
                     continue
                 return self._polished_result(0)
             return None

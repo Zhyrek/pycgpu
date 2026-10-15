@@ -783,6 +783,16 @@ cdef class CPhase:
         for k in range(n): self.eval2(&yy[0])
         return t0, t1, (time.perf_counter() - t) / n
 
+    def energy_many(self, Y):
+        """Energy per formula unit at each row of site fractions (no derivatives)."""
+        cdef double[:, ::1] YY = np.ascontiguousarray(Y, dtype=float)
+        cdef double[::1] out = np.zeros(YY.shape[0])
+        cdef int r
+        for r in range(YY.shape[0]):
+            self.eval0(&YY[r, 0])
+            out[r] = self.G_fu
+        return np.asarray(out)
+
     def py_price(self, mu_J, y0):
         """Pricing from Python (mu in J/mol): (tpd J/mol, y, x, GM, converged)."""
         cdef double[::1] mu = np.asarray(mu_J, dtype=float) / self.RT

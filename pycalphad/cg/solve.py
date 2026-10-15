@@ -25,9 +25,13 @@ class CGCapabilityError(AcceleratedCapabilityError):
 MIN_FILLED_FRACTION = 0.25
 # Ordered start configurations per phase (end members mixed with the overall composition), at most
 MAX_ORDERED_SEEDS = 16
-# End-member pair midpoints per phase, at most (as pycalphad's sampling of end-member pairs: a miscibility gap or a
-# strongly non-ideal multicomponent solution can have minima only along such edges), and random interior points
+# End-member pairs per phase, at most, whose midpoints and lines (see _Phase._line_seeds) give start configurations
+# (as pycalphad's sampling of end-member pairs: a miscibility gap or a strongly non-ideal multicomponent solution can
+# have minima only along such edges); and random interior points
 MAX_PAIR_SEEDS = 64
+# Points per end-member pair line scanned for start configurations (see _Phase._line_seeds)
+LINE_POINTS = 101
+LINE_CACHE_SIZE = 100000
 import os as _os
 _DEBUG = bool(_os.environ.get('PYCALPHAD_CG_DEBUG'))
 RANDOM_SEEDS = 8
@@ -62,6 +66,7 @@ class _Phase:
             m_max = sum(asum[blk].max() for blk in self.blocks)
             self.core.set_bounds(MIN_FILLED_FRACTION * m_max)
         self.m_lo = self.core.m_lo
+        self._line_cache = {}   # (state, end member, end member) -> starts on that line (see seeds)
         self.clones = []   # copies of core for worker threads (own buffers, shared compiled functions)
         self.stoichiometric = all(len(b) == 1 for b in self.blocks)
 
@@ -72,6 +77,34 @@ class _Phase:
         while len(self.clones) < worker:
             self.clones.append(self.core.clone())
         return self.clones[worker - 1]
+
+    def _line_seeds(self, ya, yb, core):
+        """Start configurations on the line between two end members, from a fine sample of the line and its lower
+        convex hull of energy per formula unit. Along the line the formula moles are linear, so the driving force
+        per formula unit is that energy minus a linear function, and only hull points can be its minimum for some
+        chemical potentials (independent of the potentials). Where the energy is convex every sample is on the hull
+        and a local minimization from anywhere nearby finds the minimum; separate basins show as hull edges that
+        bridge non-convex stretches, so the starts are the hull points at the ends of such bridges. A basin
+        narrower than the sample spacing can still be missed."""
+        t = np.linspace(0.0, 1.0, LINE_POINTS)
+        Y = np.maximum((1 - t)[:, None] * ya + t[:, None] * yb, 1e-14)
+        for b in self.blocks:
+            Y[:, b] /= Y[:, b].sum(axis=1, keepdims=True)
+        if self.linear:
+            G = core.energy_many(Y)
+        else:
+            G = np.array([core.evaluate(y)[0] for y in Y])   # (per mole of atoms: a fallback)
+        keep = []
+        for k in range(len(t)):   # lower hull of (t, G), monotone chain
+            while len(keep) >= 2 and ((t[keep[-1]] - t[keep[-2]]) * (G[k] - G[keep[-2]])
+                                      - (G[keep[-1]] - G[keep[-2]]) * (t[k] - t[keep[-2]])) <= 0:
+                keep.pop()
+            keep.append(k)
+        ends = set()
+        for a, b in zip(keep[:-1], keep[1:]):
+            if b - a > 1:
+                ends.update((a, b))
+        return [Y[k] for k in sorted(ends) if 0 < k < len(t) - 1]
 
     def _norm(self, y):
         y = np.maximum(y, 1e-14)
@@ -90,9 +123,14 @@ class _Phase:
                     y[j] = 1.0
         return self._norm(y)
 
-    def seeds(self, z, elements, rng):
-        """Start configurations: the composition z, z enriched in each element, and ordered end members (sampled
-        when there are many) mixed with z."""
+    def seeds(self, z, elements, rng, core=None, state=None):
+        """Start configurations: the composition z, z enriched in each element, end members (sampled when there are
+        many), alone and mixed with z, the midpoints of pairs of them and further points on those lines (see
+        _line_seeds), and random
+        interior points. `core` is the CPhase whose state variables are set (default: the phase's own), and `state`
+        a hashable key of that state, under which the line starts are cached."""
+        if core is None:
+            core = self.core
         C = len(elements)
         out = [self.composition_start(z, elements)]
         for k in range(C):
@@ -106,13 +144,23 @@ class _Phase:
             for si, b in enumerate(self.blocks):
                 y[b[em[si]]] = 1.0
             end_members.append(self._norm(y))
+            out.append(end_members[-1])
             out.append(self._norm(0.5 * end_members[-1] + 0.5 * out[0]))
         if not self.stoichiometric:
             pairs = list(itertools.combinations(range(len(end_members)), 2))
             if len(pairs) > MAX_PAIR_SEEDS:
                 pairs = [pairs[i] for i in rng.choice(len(pairs), MAX_PAIR_SEEDS, replace=False)]
             for i, j in pairs:
+                key = None if state is None else (state, ems[i], ems[j])
+                line = self._line_cache.get(key) if key is not None else None
+                if line is None:
+                    line = self._line_seeds(end_members[i], end_members[j], core)
+                    if key is not None:
+                        if len(self._line_cache) > LINE_CACHE_SIZE:
+                            self._line_cache.clear()
+                        self._line_cache[key] = line
                 out.append(self._norm(0.5 * end_members[i] + 0.5 * end_members[j]))
+                out.extend(line)
             for _ in range(RANDOM_SEEDS):
                 y = np.empty(self.D)
                 for b in self.blocks:
@@ -482,7 +530,7 @@ class _Worker:
         z0 = _nominal_composition(point, elements)
         seeds = []
         for i, ph in enumerate(phases):
-            S = np.array(ph.seeds(z0, elements, rng)).reshape(-1, ph.D)
+            S = np.array(ph.seeds(z0, elements, rng, self.cores[i], self.state_key)).reshape(-1, ph.D)
             self.solver.add_points(i, S)
             seeds.append(S)
         return seeds

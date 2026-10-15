@@ -235,7 +235,7 @@ def global_min_candidate(point, system_info, tol=1e-5):
         ph.core.set_local_constraints(np.zeros((0, ph.D)), np.zeros(0))
         ph.core.set_pinned(np.zeros(ph.D, dtype=np.int32))
         starts = [np.array(cs.dof[ns:], dtype=float) for cs in stable if cs.phase_record.phase_name == ph.name]
-        starts += ph.seeds(z, elements, rng)
+        starts += ph.seeds(z, elements, rng, state=(tuple(sv), tuple(params), ()))
         for y0 in starts:
             tpd, y, x, G, conv = ph.core.py_price(mu, y0)
             if not np.isfinite(G):

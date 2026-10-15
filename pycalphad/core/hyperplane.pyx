@@ -120,27 +120,27 @@ cdef void simplex_fractions(double[:,::1] compositions,
                              int[::1] trial_simplex,
                              double[:,::1] fixed_lincomb_molefrac_coefs,
                              double[::1] fixed_lincomb_molefrac_rhs,
-                             double* out_fractions) except *:
+                             double* out_fractions,
+                             size_t[::1] free_chempot_indices,
+                             double[::1] target_point,
+                             double* f_coord_matrix,
+                             int* int_tmp) except *:
+    # free_chempot_indices and the work buffers (target_point: compositions.shape[1] entries; f_coord_matrix:
+    # simplex_size**2; int_tmp: simplex_size) are provided by the caller, which reuses them between calls.
+    # Each is fully overwritten here before it is read.
     cdef int simplex_size = trial_simplex.shape[0]
     # Note that compositions.shape[1] = simplex_size + fixed_chempot_indices.shape[0], by construction
     cdef int i, j
-    cdef double* f_coord_matrix = <double*>malloc(simplex_size * simplex_size * sizeof(double))
-    cdef double* target_point = <double*>malloc(compositions.shape[1] * sizeof(double))
-    cdef int* int_tmp = <int*>malloc(simplex_size * sizeof(int))
-    cdef size_t[::1] free_chempot_indices = np.array(list(set(range(compositions.shape[1])) - set(fixed_chempot_indices)), dtype=np.uintp)
     # Get target point for calculation
     intersecting_point(compositions, fixed_chempot_indices, trial_simplex,
                        fixed_lincomb_molefrac_coefs, fixed_lincomb_molefrac_rhs,
-                       <double[:compositions.shape[1]]>target_point)
+                       target_point)
     # Fill coordinate matrix
     for j in range(simplex_size):
         for i in range(simplex_size):
             f_coord_matrix[j + simplex_size*i] = compositions[trial_simplex[i], free_chempot_indices[j]]
         out_fractions[j] = target_point[free_chempot_indices[j]]
     solve(f_coord_matrix, simplex_size, &out_fractions[0], int_tmp)
-    free(f_coord_matrix)
-    free(target_point)
-    free(int_tmp)
 
 @cython.boundscheck(False)
 cpdef double hyperplane(double[:,::1] compositions,
@@ -242,6 +242,14 @@ cpdef double hyperplane(double[:,::1] compositions,
         for j in range(simplex_size):
             trial_simplices[i*simplex_size + j] = best_guess_simplex[j]
     cdef double* f_candidate_tieline = <double*>malloc(simplex_size * simplex_size * sizeof(double))
+    # Work buffers for simplex_fractions, allocated once per call instead of once per trial simplex
+    cdef size_t[::1] free_chempot_index_array = np.array(list(set(range(num_components)) - set(fixed_chempot_indices)), dtype=np.uintp)
+    cdef double[::1] target_point = np.empty(num_components)
+    cdef double* f_coord_matrix = <double*>malloc(simplex_size * simplex_size * sizeof(double))
+    cdef int* fractions_int_tmp = <int*>malloc(simplex_size * sizeof(int))
+    cdef int[:, ::1] trial_simplex_rows
+    if simplex_size > 0:
+        trial_simplex_rows = <int[:simplex_size, :simplex_size]>trial_simplices
 
 
     while iterations < max_iterations:
@@ -250,8 +258,9 @@ cpdef double hyperplane(double[:,::1] compositions,
         for trial_idx in range(simplex_size):
             for simplex_idx in range(simplex_size):
                 fractions[trial_idx*simplex_size + simplex_idx] = 0
-            simplex_fractions(compositions, fixed_chempot_indices, <int[:simplex_size]>&trial_simplices[trial_idx*simplex_size],
-                              fixed_lincomb_molefrac_coefs, fixed_lincomb_molefrac_rhs, &fractions[trial_idx*simplex_size])
+            simplex_fractions(compositions, fixed_chempot_indices, trial_simplex_rows[trial_idx],
+                              fixed_lincomb_molefrac_coefs, fixed_lincomb_molefrac_rhs, &fractions[trial_idx*simplex_size],
+                              free_chempot_index_array, target_point, f_coord_matrix, fractions_int_tmp)
             smallest_fractions[trial_idx] = _min(&fractions[trial_idx*simplex_size], simplex_size)
         # Choose simplex with the largest smallest-fraction
         saved_trial = argmax(smallest_fractions, simplex_size)
@@ -324,5 +333,7 @@ cpdef double hyperplane(double[:,::1] compositions,
     free(trial_simplices)
     free(fractions)
     free(f_candidate_tieline)
+    free(f_coord_matrix)
+    free(fractions_int_tmp)
 
     return out_energy

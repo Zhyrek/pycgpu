@@ -109,6 +109,7 @@ cache-keys = [
 [tool.setuptools]
 # Do not include pycalphad._dev here as it should not be distributed
 packages = [
+    "pycalphad.cg",
     "pycalphad.codegen",
     "pycalphad.core",
     "pycalphad.gpu",

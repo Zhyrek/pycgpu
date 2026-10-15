@@ -21,6 +21,7 @@ CYTHON_EXTENSION_MODULES = [
     Extension('pycalphad.core.phase_rec', sources=['pycalphad/core/phase_rec.pyx'], define_macros=CYTHON_DEFINE_MACROS),
     Extension('pycalphad.core.composition_set', sources=['pycalphad/core/composition_set.pyx'], define_macros=CYTHON_DEFINE_MACROS),
     Extension('pycalphad.core.minimizer', sources=['pycalphad/core/minimizer.pyx'], define_macros=CYTHON_DEFINE_MACROS),
+    Extension('pycalphad.cg._core', sources=['pycalphad/cg/_core.pyx'], define_macros=CYTHON_DEFINE_MACROS),
 ]
 
 # https://cython.readthedocs.io/en/latest/src/tutorial/appendix.html

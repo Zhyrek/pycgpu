@@ -15,6 +15,20 @@ import pycalphad.mapping.utils as map_utils
 
 _log = logging.getLogger(__name__)
 
+def _cg_selected():
+    from pycalphad.backend import _current
+    return _current()[0] == 'cg'
+
+
+def _local_solver():
+    """The solver for local equilibria on given composition sets: the column-generation backend's Newton solver
+    when that backend is selected, else pycalphad's."""
+    if _cg_selected():
+        from pycalphad.cg.local import CGSolver
+        return CGSolver(remove_metastable=True)
+    return Solver(remove_metastable=True)
+
+
 def update_equilibrium_with_new_conditions(point: Point, new_conditions: dict[v.StateVariable, str], free_var: v.StateVariable = None):
     """
     Update the point with a new set of conditions.
@@ -56,7 +70,7 @@ def update_equilibrium_with_new_conditions(point: Point, new_conditions: dict[v.
     # Keep track of original composition sets (these will be updated with the solver, but the original list will remain even if a phase becomes unstable)
     orig_cs = [cs for cs in comp_sets]
     try:
-        solver = Solver(remove_metastable=True)
+        solver = _local_solver()
         results = solver.solve(comp_sets, new_conditions)
         if not results.converged:
             return None
@@ -104,6 +118,10 @@ def _find_global_min_cs(point: Point, system_info: dict, pdens = 500, tol = 1e-5
 
     None : if no composition set was found below the current chemical potential hyperplane
     """
+    if _cg_selected():
+        # column generation: local driving-force minimizations per phase, no energy grid
+        from pycalphad.cg.local import global_min_candidate
+        return global_min_candidate(point, system_info, tol)
     dbf = system_info["dbf"]
     comps = system_info["comps"]
     phases = system_info["phases"]
@@ -305,7 +323,7 @@ def _detect_degenerate_phase(point: Point, new_cs: CompositionSet):
         conds = {key: key.compute_property([ref_cs_copy], point.global_conditions, point.chemical_potentials) for key in point.global_conditions}
         _log.info(f"Testing free equilibrium with {ref_cs_copy}, {new_cs_copy}")
         try:
-            solver = Solver(remove_metastable=True)
+            solver = _local_solver()
             results = solver.solve([ref_cs_copy, new_cs_copy], conds)
             if not results.converged:
                 return False
@@ -384,7 +402,7 @@ def create_node_from_different_points(new_point: Point, orig_cs: list[Compositio
 
     # Solve equilibrium with fixed CS
     try:
-        solver = Solver(remove_metastable=True)
+        solver = _local_solver()
         results = solver.solve(solution_cs, new_conditions)
         if not results.converged:
             return None

@@ -23,6 +23,11 @@ Backends
     The generated solver on an Apple-silicon GPU. Apple GPUs have no FP64
     hardware, so the kernels run in emulated double precision; conditions
     the GPU pass does not settle quickly are finished by the C++ solver.
+``'cg'`` (alias ``'column-generation'``)
+    Column generation: a linear program over phase points with the
+    conditions as rows, and per-phase minimization of the driving force
+    (tangent-plane distance) to add points, finished by Newton on the
+    chemical potentials and phase amounts. No energy grid; single thread.
 ``'gpu'``
     The GPU backend for this machine: ``'cuda'`` when CuPy finds a device,
     otherwise ``'metal'`` on Apple silicon.
@@ -118,10 +123,11 @@ _ALIASES = {
     'cpp': 'cpp', 'c++': 'cpp', 'openmp': 'cpp',
     'cuda': 'cuda', 'cuda-fast': 'cuda-fast', 'gpu-fast': 'cuda-fast',
     'metal': 'metal', 'mps': 'metal',
+    'cg': 'cg', 'column-generation': 'cg',
     'gpu': 'gpu', 'auto': 'auto',
 }
 _DISPLAY = {'default': 'default', 'cpp': 'cpp', 'cuda': 'cuda', 'cuda-fast': 'cuda-fast',
-            'metal': 'metal'}
+            'metal': 'metal', 'cg': 'cg'}
 
 _global = {'name': None, 'options': BackendOptions()}
 _scoped = contextvars.ContextVar('pycalphad_backend', default=None)
@@ -133,7 +139,7 @@ def _normalize(name):
         return _ALIASES[str(name).strip().lower()]
     except KeyError:
         raise ValueError(f"Unknown backend {name!r}. Valid choices: "
-                         "'auto', 'default', 'cpp', 'gpu', 'cuda', 'metal'.") from None
+                         "'auto', 'default', 'cpp', 'gpu', 'cuda', 'metal', 'cg'.") from None
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +153,11 @@ def _probe(canonical):
     reason = None
     if canonical == 'default':
         pass
+    elif canonical == 'cg':
+        try:
+            import pycalphad.cg._core  # noqa: F401
+        except ImportError as e:
+            reason = f"the column-generation extension is not built ({e})"
     elif canonical == 'cpp':
         if shutil.which('clang++' if platform.system() == 'Darwin' else 'g++') is None \
                 and shutil.which('clang++') is None:
@@ -197,7 +208,7 @@ def _resolve(canonical):
 
 def available_backends():
     """{name: None if usable, else the reason it is not} for every backend."""
-    return {_DISPLAY[c]: _probe(c) for c in ('default', 'cpp', 'cuda', 'metal')}
+    return {_DISPLAY[c]: _probe(c) for c in ('default', 'cpp', 'cuda', 'metal', 'cg')}
 
 
 # ---------------------------------------------------------------------------
@@ -210,8 +221,8 @@ def set_backend(name='auto', **options):
     Parameters
     ----------
     name : str
-        'auto' (default), 'default', 'cpp', 'gpu', 'cuda', 'cuda-fast' or
-        'metal' ('cpu' is an alias of 'default', the reference solver). The 'gpu' and 'auto' selectors are resolved immediately, so
+        'auto' (default), 'default', 'cpp', 'gpu', 'cuda', 'cuda-fast',
+        'metal' or 'cg' ('cpu' is an alias of 'default', the reference solver). The 'gpu' and 'auto' selectors are resolved immediately, so
         a missing toolchain or device is reported here rather than in the
         middle of a calculation.
     **options

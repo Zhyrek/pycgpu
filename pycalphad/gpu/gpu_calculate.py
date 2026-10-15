@@ -527,7 +527,8 @@ def accelerated_evaluator(components, phases, models, phase_records, output, par
     from pycalphad.backend import _current, AcceleratedCapabilityError
     from pycalphad.core.utils import extract_parameters
     backend_name, _ = _current()
-    if backend_name == 'default':
+    if backend_name in ('default', 'cg'):
+        # (the column-generation backend replaces the equilibrium solver only; point evaluation stays reference)
         return None
     # The generated evaluators assume the canonical [N, P, T] state variables
     # and the factory's own fit-parameter symbols.

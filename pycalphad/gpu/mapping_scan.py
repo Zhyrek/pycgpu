@@ -35,7 +35,7 @@ def sampled_energies(dbf, comps, phases, models, phase_records, state_conds, pde
     path should be used (no compiled backend selected, or an unsupported
     case)."""
     from pycalphad.backend import _current
-    if _current()[0] == 'default':
+    if _current()[0] in ('default', 'cg'):
         return None
     from pycalphad import variables as v
     from pycalphad.core.calculate import _sample_phase_constitution

@@ -6,6 +6,7 @@ The suite is meant to run once per backend:
     pytest pycalphad/tests --backend=cpp       # compiled C++ backend
     pytest pycalphad/tests --backend=metal     # Apple-silicon GPU backend
     pytest pycalphad/tests --backend=cuda      # CUDA GPU backend
+    pytest pycalphad/tests --backend=cg        # column generation
 
 The flag sets the global pycalphad backend for the whole session, so every
 test exercises the selected dispatch path. Tests whose assertions are
@@ -23,7 +24,7 @@ def pytest_addoption(parser):
     parser.addoption(
         '--backend', action='store', default=None,
         choices=['default', 'cpu', 'reference', 'auto', 'cpp', 'c++', 'openmp', 'gpu', 'cuda',
-                 'cuda-fast', 'metal'],
+                 'cuda-fast', 'metal', 'cg'],
         help='pycalphad compute backend to run the suite under',
     )
     parser.addoption(

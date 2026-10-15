@@ -111,6 +111,8 @@ def solve_workspace(wks):
         return None
     conds = {key: as_quantity(key, value).to(key.implementation_units).magnitude
              for key, value in wks.conditions.items()}
+    if backend_name == 'cg':
+        return _solve_workspace_cg(wks, conds)
     if wks.calc_opts and set(wks.calc_opts) - {'pdens'}:
         ok, reason = False, 'unsupported calc_opts'
     elif type(wks.solver) is not Solver:
@@ -143,6 +145,36 @@ def solve_workspace(wks):
                 "PYCGPU_FALLBACK=1 to fall back automatically on such errors.") from err
         _log.debug("reference solver used (capability limit: %r)", err)
         return None
+
+
+def _solve_workspace_cg(wks, conds):
+    """The column-generation backend. Post-processing (properties, derivatives) stays on the reference code paths,
+    which evaluate them from the equilibrium state, so `_solved_by_backend` is left False."""
+    from pycalphad.backend import AcceleratedCapabilityError
+    from pycalphad.codegen.phase_record_factory import PhaseRecordFactory
+    from pycalphad.core.solver import Solver
+    if wks.calc_opts and set(wks.calc_opts) - {'pdens'}:
+        ok, reason = False, 'unsupported calc_opts'
+    elif type(wks.solver) is not Solver:
+        ok, reason = False, 'non-default solver'
+    elif type(wks.phase_record_factory) is not PhaseRecordFactory:
+        ok, reason = False, 'non-standard phase records'
+    else:
+        ok, reason = problem_supported(conds, wks.parameters.unwrap(), dbf=wks.database,
+                                       comps=[str(c) for c in wks.components],
+                                       phases=list(wks.phases))
+    if not ok:
+        _audit(f'cg_gate_fallback: {reason}')
+        return None
+    try:
+        wks.phase_record_factory.update_parameters(wks.parameters.unwrap())
+        from pycalphad.cg import solve_workspace as cg_solve
+        result = cg_solve(wks)
+    except AcceleratedCapabilityError as err:
+        _audit(f'cg_runtime_fallback: {str(err)[:100]}')
+        return None
+    _audit('cg_solved')
+    return result
 
 
 def _batched_jansson_supported(wks, prop):

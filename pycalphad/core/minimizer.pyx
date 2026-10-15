@@ -524,6 +524,11 @@ cdef class CompsetState:
     cdef double[:, ::1] cons_jac_tmp
     cdef double[:, ::1] phase_local_jac_tmp
     cdef double[:, ::1] mass_hess_tmp
+    # Work buffers reused every iteration (see SystemState.recompute and advance_state)
+    cdef double[::1] energy_out
+    cdef double[::1] new_y
+    # The compset's entry of SystemState.dof, held typed so loops do not convert it from the list each time
+    cdef double[::1] dof_view
 
     def __init__(self, SystemSpecification spec, CompositionSet compset):
         self.x = np.zeros(spec.num_statevars + compset.phase_record.phase_dof)
@@ -551,6 +556,8 @@ cdef class CompsetState:
         self.phase_local_jac_tmp = np.zeros((compset.num_phase_local_conditions, spec.num_statevars + compset.phase_record.phase_dof))
         self.mass_hess_tmp = np.zeros((spec.num_statevars + compset.phase_record.phase_dof,
                                        spec.num_statevars + compset.phase_record.phase_dof))
+        self.energy_out = np.zeros(1)
+        self.new_y = np.zeros(spec.num_statevars + compset.phase_record.phase_dof)
 
     def __getstate__(self):
         return (np.array(self.x), self.energy, np.array(self.grad), np.array(self.hess),
@@ -563,6 +570,8 @@ cdef class CompsetState:
          self.masses, self.mass_jac, self.c_G, self.c_statevars,
          self.c_component, self.moles_normalization, self.internal_cons, self.moles_normalization_grad, self.fixed_phase_dof_indices,
          self.ipiv) = state
+        self.energy_out = np.zeros(1)
+        self.new_y = np.zeros(self.x.shape[0])
 
 
 cdef class SystemState:
@@ -578,6 +587,8 @@ cdef class SystemState:
             compset.fixed = True
         self.cs_states = [CompsetState(spec, compset) for compset in compsets]
         self.dof = [np.array(compset.dof) for compset in compsets]
+        for idx in range(len(compsets)):
+            (<CompsetState>self.cs_states[idx]).dof_view = self.dof[idx]
         self.iteration = 0
         self.iterations_since_last_phase_change = 0
         self.metastable_phase_iterations = np.zeros(len(compsets), dtype=np.int32)
@@ -604,7 +615,7 @@ cdef class SystemState:
         cdef double[:, ::1] masses_tmp = np.zeros((spec.num_components, 1))
         for idx in range(self.phase_amt.shape[0]):
             compset = self.compsets[idx]
-            x = self.dof[idx]
+            x = (<CompsetState>self.cs_states[idx]).dof_view
             phase_comp_sum = 0.0
             for comp_idx in range(spec.num_components):
                 compset.phase_record.formulamole_obj(masses_tmp[comp_idx, :], x, comp_idx)
@@ -627,6 +638,8 @@ cdef class SystemState:
          self.phase_amt, self.chemical_potentials, self.previous_chemical_potentials,
          self.delta_ms, self.phase_compositions, self.largest_chemical_potential_difference, self.largest_statevar_change[0],
          self.largest_phase_amt_change[0], self.largest_y_change[0], self.free_stable_compset_indices, self.system_amount, self.mole_fractions) = state
+        for idx in range(len(self.compsets)):
+            (<CompsetState>self.cs_states[idx]).dof_view = self.dof[idx]
 
     @cython.boundscheck(False)
     cpdef void recompute(self, SystemSpecification spec):
@@ -642,9 +655,9 @@ cdef class SystemState:
         self.system_amount = 0
         # Compute normalized global quantities
         for idx in range(len(self.compsets)):
-            x = self.dof[idx]
             compset = self.compsets[idx]
             csst = self.cs_states[idx]
+            x = csst.dof_view
             csst.masses[:,:] = 0
             for comp_idx in range(num_components):
                 compset.phase_record.formulamole_obj(csst.masses[comp_idx, :], x, comp_idx)
@@ -660,12 +673,12 @@ cdef class SystemState:
             csst = self.cs_states[idx]
             # TODO: Use better dof storage
             # Calculate key phase quantities starting here
-            x = self.dof[idx]
+            x = csst.dof_view
             phase_comp_sum = 0.0
             for comp_idx in range(num_components):
                 phase_comp_sum += self.phase_compositions[idx, comp_idx]
             compset.update(x[spec.num_statevars:], self.phase_amt[idx] * phase_comp_sum, x[:spec.num_statevars])
-            csst.energy = 0
+            csst.energy_out[0] = 0
             csst.mass_jac[:,:] = 0
             # Compute phase matrix (LHS of Eq. 41, Sundman 2015)
             csst.phase_matrix[:,:] = 0
@@ -673,7 +686,8 @@ cdef class SystemState:
             csst.hess[:,:] = 0
             csst.grad[:] = 0
 
-            compset.phase_record.formulaobj(<double[:1]>&csst.energy, x)
+            compset.phase_record.formulaobj(csst.energy_out, x)
+            csst.energy = csst.energy_out[0]
             for comp_idx in range(num_components):
                 compset.phase_record.formulamole_grad(csst.mass_jac[comp_idx, :], x, comp_idx)
             compset.phase_record.formulahess(csst.hess, x)
@@ -724,7 +738,7 @@ cdef class SystemState:
         self._driving_forces[:] = 0
         for idx in range(len(self.compsets)):
             compset = self.compsets[idx]
-            x = self.dof[idx]
+            x = (<CompsetState>self.cs_states[idx]).dof_view
             for comp_idx in range(num_components):
                 compset.phase_record.mass_obj(self._phase_amounts_per_mole_atoms[idx, comp_idx, :], x, comp_idx)
                 self._driving_forces[idx] += self.chemical_potentials[comp_idx] * self._phase_amounts_per_mole_atoms[idx, comp_idx, 0]
@@ -988,14 +1002,15 @@ cpdef advance_state(SystemSpecification spec, SystemState state, double[::1] equ
     for i in range(spec.free_statevar_indices.shape[0]):
         statevar_idx = spec.free_statevar_indices[i]
         state.delta_statevars[statevar_idx] = equilibrium_soln[soln_index_offset + i]
-        if state.dof[0][statevar_idx] == 0:
+        x = (<CompsetState>state.cs_states[0]).dof_view
+        if x[statevar_idx] == 0:
             psc = np.inf
         else:
-            psc = abs(state.delta_statevars[statevar_idx] / state.dof[0][statevar_idx])
+            psc = abs(state.delta_statevars[statevar_idx] / x[statevar_idx])
         state.largest_statevar_change[0] = max(state.largest_statevar_change[0], psc)
     # Update state variables in the `x` array
     for idx in range(len(state.compsets)):
-        x = state.dof[idx]
+        x = (<CompsetState>state.cs_states[idx]).dof_view
         for statevar_idx in range(state.delta_statevars.shape[0]):
             x[statevar_idx] += state.delta_statevars[statevar_idx]
         # We need real state variable bounds support
@@ -1004,8 +1019,8 @@ cpdef advance_state(SystemSpecification spec, SystemState state, double[::1] equ
     state.largest_y_change[0] = 0.0
     for idx in range(len(state.compsets)):
         # TODO: Use better dof storage
-        x = state.dof[idx]
         csst = state.cs_states[idx]
+        x = csst.dof_view
 
         # Construct delta_y from Eq. 43 in Sundman 2015
         csst.delta_y[:] = 0
@@ -1019,7 +1034,8 @@ cpdef advance_state(SystemSpecification spec, SystemState state, double[::1] equ
             for cons_idx in range(csst.internal_cons.shape[0]):
                 csst.delta_y[i] -= csst.full_e_matrix[csst.delta_y.shape[0] + cons_idx, i] * csst.internal_cons[cons_idx]
 
-        new_y = np.array(x)
+        new_y = csst.new_y
+        new_y[:] = x
         minimum_step_size = 1e-20 * step_size
         while step_size >= minimum_step_size:
             exceeded_bounds = False

@@ -336,6 +336,9 @@ def _detect_degenerate_phase(point: Point, new_cs: CompositionSet):
 
         if ref_cs_copy.NP < 1e-3:
             cs.update(new_cs_copy.dof[num_sv:], cs.NP, new_cs_copy.dof[:num_sv])
+            # (the new composition set took the existing one's place entirely, which has been updated to it; if no
+            # node can be made with it, see check_global_min)
+            point._replaced_composition_set = True
             return True
 
     return True

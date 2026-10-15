@@ -111,9 +111,17 @@ def test_check_axis_values(load_database):
     new_node = zchk.check_axis_values(zpf_line, step_result, axis_data, **extra_args)
     assert zpf_line.status == ZPFState.REACHED_LIMIT
 
-    # check_axis_values for change in value above distance threshold
+    # check_axis_values for change in value above distance threshold: a smaller step is attempted first
     axis_data["axis_lims"][v.T] = (300, 1000)
     extra_args["normalize_factor"][v.T] = 0.1
+    zpf_line.status = ZPFState.NOT_FINISHED
+    new_node = zchk.check_axis_values(zpf_line, step_result, axis_data, **extra_args)
+    assert zpf_line.status == ZPFState.ATTEMPT_NEW_STEP
+    assert zpf_line.current_delta == delta_T / 2
+
+    # ... and once the step cannot be reduced further, the zpf line fails
+    zpf_line.status = ZPFState.NOT_FINISHED
+    zpf_line.current_delta = 1
     new_node = zchk.check_axis_values(zpf_line, step_result, axis_data, **extra_args)
     assert zpf_line.status == ZPFState.FAILED
 

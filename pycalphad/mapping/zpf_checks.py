@@ -258,6 +258,15 @@ def check_axis_values(zpf_line: ZPFLine, step_results: tuple[Point, list[Composi
     prev_point_vars = {av: prev_point.get_property(av) for av in axis_vars}
 
     if not _check_axis_values_by_distance(prev_point_vars, new_point_vars, axis_data, **kwargs):
+        # A large jump of the free axis variable can be a discontinuity the step crossed (e.g. a composition set
+        # switching to another basin across a narrow two-phase field): retry with a smaller step first
+        delta_scale = kwargs.get("delta_scale", 0.5)
+        min_delta_ratio = kwargs.get("min_delta_ratio", 0.1)
+        if zpf_line.current_delta * delta_scale / axis_delta[zpf_line.axis_var] >= min_delta_ratio:
+            _log.info(f"Variable more than distance threshold, reducing step size from {zpf_line.current_delta} -> {zpf_line.current_delta*delta_scale}")
+            zpf_line.current_delta *= delta_scale
+            zpf_line.status = ZPFState.ATTEMPT_NEW_STEP
+            return None
         _log.info("Variable more than distance threshold. Failing ZPF line")
         zpf_line.status = ZPFState.FAILED
         return None
@@ -408,6 +417,14 @@ def check_global_min(zpf_line: ZPFLine, step_results: tuple[Point, list[Composit
                     _log.info(f"New node found successfully. {new_node.global_conditions}, {new_node.fixed_phases}, {new_node.free_phases}")
                     return new_node
 
+            if getattr(new_point, '_replaced_composition_set', False) and len(new_point.stable_composition_sets) >= 2:
+                # The candidate was a better state of one of the line's composition sets (another ordering variant
+                # at that composition), which has been updated to it, and no node (an invariant with both states)
+                # exists: the line goes on with the updated composition set
+                _log.info("Composition set updated to a better state; continuing the ZPF line")
+                zpf_line.status = ZPFState.NOT_FINISHED
+                return None
+
             _log.info("New node could not be found. Failing ZPF line")
 
 MAX_NODE_RETRIES = 3
@@ -506,9 +523,11 @@ def check_circular_loop(zpf_line: ZPFLine, step_results: tuple[Point, list[Compo
     if len(zpf_line.points) < 2:
         return None
 
-    x_curr = np.array([step_results[0].get_property(var) for var in axis_data['axis_vars']])
-    x_first = np.array([zpf_line.points[0].get_property(var) for var in axis_data['axis_vars']])
-    x_prev = np.array([zpf_line.points[-1].get_property(var) for var in axis_data['axis_vars']])
+    # (distances in units of each axis variable's step, so that temperature in K does not outweigh mole fractions)
+    scale = np.array([float(axis_data['axis_delta'][var]) for var in axis_data['axis_vars']])
+    x_curr = np.array([step_results[0].get_property(var) for var in axis_data['axis_vars']]) / scale
+    x_first = np.array([zpf_line.points[0].get_property(var) for var in axis_data['axis_vars']]) / scale
+    x_prev = np.array([zpf_line.points[-1].get_property(var) for var in axis_data['axis_vars']]) / scale
     vfirst = x_first - x_curr
     vprev = x_curr - x_prev
     dist_first = np.sqrt(np.sum(vfirst**2))

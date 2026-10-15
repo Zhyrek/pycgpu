@@ -12,16 +12,25 @@ work with composition sets directly (mapping):
 import numpy as np
 
 from pycalphad import variables as v
+from pycalphad.core.constants import COMP_DIFFERENCE_TOL
 from pycalphad.core.solver import SolverBase, SolverResult
 from pycalphad.cg.solve import (_phases_for, _condition_rows, _local_constraints, CGCapabilityError)
 
 __all__ = ['CGSolver', 'global_min_candidate']
 
 R_GAS = 8.3145
+import os as _os
+_DEBUG = bool(_os.environ.get('PYCALPHAD_CG_DEBUG'))
 MAX_ITERATIONS = 60
 # Step limits: chemical potentials (in RT) and temperature (K) per Newton step
 MAX_MU_STEP = 5.0
 MAX_T_STEP = 50.0
+# A composition set whose site fractions change by more than JUMP (and more than JUMP_RATIO times its composition)
+# in one solve changed constitution discontinuously (e.g. ordered -> disordered across a first-order transition): the
+# step crossed a two-phase field it should have resolved, so the solve is reported as not converged and the caller
+# (mapping) takes a smaller step. A continuous change shrinks with the step; a first-order jump does not.
+JUMP = 0.3
+JUMP_RATIO = 10.0
 
 
 def _phase_lookup(compsets):
@@ -74,6 +83,28 @@ def _initial_potentials(compsets, phases, mu_fixed, fixed):
     return np.linalg.lstsq(A, b, rcond=None)[0]
 
 
+def _coincident(sets, ys, active):
+    """Whether two of the active composition sets are of one phase at the same site fractions (within the tolerance
+    mapping uses to tell composition sets apart): such a set of composition sets is no equilibrium with that many
+    sets (e.g. a candidate for a new composition set that the Newton iteration took back onto an existing one)."""
+    for i, a in enumerate(active):
+        for b in active[i + 1:]:
+            if (sets[a].phase_record.phase_name == sets[b].phase_record.phase_name
+                    and np.allclose(ys[a], ys[b], atol=10 * COMP_DIFFERENCE_TOL)):
+                return True
+    return False
+
+
+def _jumped(ys0, ys, xs0, xs, active):
+    """Whether an active composition set changed constitution discontinuously (see JUMP)."""
+    for k, a in enumerate(active):
+        dy = float(np.max(np.abs(ys[a] - ys0[a]))) if len(ys[a]) else 0.0
+        dx = float(np.max(np.abs(np.asarray(xs[k]) - xs0[a])))
+        if dy > JUMP and dy > JUMP_RATIO * dx:
+            return True
+    return False
+
+
 class CGSolver(SolverBase):
     """Newton on the equilibrium conditions for given composition sets (see the module docstring); the interface
     of pycalphad.core.solver.Solver. Composition sets are updated in place; with remove_metastable, free sets whose
@@ -112,11 +143,14 @@ class CGSolver(SolverBase):
             ph.core.set_pinned(pinned)
         sets = list(composition_sets)
         ys = [np.array(cs.dof[ns:], dtype=float) for cs in sets]
+        ys0 = [y.copy() for y in ys]
+        xs0 = [np.array(cs.X, dtype=float) for cs in sets]
         n = np.array([float(cs.NP) for cs in sets])
         is_fixed = [bool(cs.fixed) for cs in sets]
         active = list(range(len(sets)))
         mu = _initial_potentials(sets, phases, mu_fixed, fixed)
         converged = False
+        _why = 'iteration limit'
         last_res = np.inf
         for it in range(self.options.get('max_iterations', MAX_ITERATIONS)):
             for ph in phases.values():
@@ -133,6 +167,7 @@ class CGSolver(SolverBase):
             nunk = C + len(free_cs) + len(free_sv)
             neq = na + K + int(fixed.sum())
             if nunk != neq:
+                _why = f'phase rule: {nunk} unknowns, {neq} equations'
                 break   # Gibbs phase rule not satisfied by these composition sets and conditions
             F = np.zeros(neq); J = np.zeros((neq, nunk))
             X = np.array([r[2] for r in loc])
@@ -156,7 +191,10 @@ class CGSolver(SolverBase):
                                     np.full(int(fixed.sum()), RT)])
             res = np.max(np.abs(F) / scale) if len(F) else 0.0
             if res < 1e-10 or (res < 1e-7 and res > 0.1 * last_res):
-                converged = all(r[0] for r in loc)
+                jumped = _jumped(ys0, ys, xs0, [r[2] for r in loc], active)
+                converged = all(r[0] for r in loc) and not _coincident(sets, ys, active) and not jumped
+                _why = None if converged else ('coincident composition sets' if _coincident(sets, ys, active) else
+                                               'constitution jump' if jumped else 'local minimization not converged')
                 break
             last_res = res
             try:
@@ -201,6 +239,9 @@ class CGSolver(SolverBase):
         for cs in composition_sets[1:]:
             x = np.r_[x, cs.dof[ns:]]
         x = np.r_[x, [cs.NP for cs in composition_sets]]
+        if _DEBUG and not converged:
+            print(f'CGSolver failed ({_why}): {[(c.phase_record.phase_name, np.round(c.X, 4).tolist(), c.NP) for c in sets]}, '
+                  f'conditions {conds}, last residual {last_res:.3g}')
         if self.verbose:
             print(f'CGSolver: converged={converged}, chemical potentials {np.round(mu, 5).tolist()}, {composition_sets}')
         return SolverResult(converged=converged, x=x, chemical_potentials=np.array(mu))

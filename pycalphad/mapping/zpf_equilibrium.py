@@ -70,6 +70,10 @@ def update_equilibrium_with_new_conditions(point: Point, new_conditions: dict[v.
     new_point = Point(new_conditions, np.array(results.chemical_potentials), [cs for cs in comp_sets if cs.fixed], [cs for cs in comp_sets if not cs.fixed])
     return new_point, orig_cs
 
+# Site-fraction distance from every stable composition set of a phase beyond which a sample of that phase is tested
+# as a possible other minimum (see _find_global_min_cs)
+OTHER_MINIMUM_DISTANCE = 0.1
+
 def _find_global_min_cs(point: Point, system_info: dict, pdens = 500, tol = 1e-5, num_candidates = 1):
     """
     Finds potential composition set for global min check
@@ -145,12 +149,26 @@ def _find_global_min_cs(point: Point, system_info: dict, pdens = 500, tol = 1e-5
     sorted_indices = np.argsort(dGs)[::-1]
     sorted_phases = phase_ids[sorted_indices][:np.amin([num_candidates, len(sorted_indices)])]
     unique_phases = np.unique(sorted_phases)
-    phase_indices = [np.argmax(sorted_phases == p) for p in unique_phases]
+    candidate_indices = [sorted_indices[np.argmax(sorted_phases == p)] for p in unique_phases]
+
+    # The best sample of a phase that is already stable often lies next to a stable composition set and relaxes
+    # onto it, which hides another minimum of that phase (a miscibility gap, or another ordered state) with a
+    # positive driving force. So for each stable phase, also test its best sample away from all of its stable
+    # composition sets
+    for phase_name in set(point.stable_phases):
+        stable_dofs = [np.asarray(c.dof[c.phase_record.num_statevars:]) for c in point.stable_composition_sets
+                       if c.phase_record.phase_name == phase_name]
+        phase_dof = len(stable_dofs[0])
+        sample_indices = np.flatnonzero(phase_ids == phase_name)
+        samples_y = y[sample_indices, :phase_dof]
+        distances = np.min([np.max(np.abs(samples_y - d), axis=1) for d in stable_dofs], axis=0)
+        far_indices = sample_indices[distances > OTHER_MINIMUM_DISTANCE]
+        if len(far_indices) > 0:
+            candidate_indices.append(far_indices[np.argmax(dGs[far_indices])])
 
     cs = None
     dG = 0
-    for phi in phase_indices:
-        index = sorted_indices[phi]
+    for index in candidate_indices:
         test_cs = CompositionSet(phase_records[str(phase_ids[index])])
         # Create numpy array for site fractions. There seems to be some models where
         # np.squeeze(points.Y) returns a non-writable array. Not sure why, but when it does,

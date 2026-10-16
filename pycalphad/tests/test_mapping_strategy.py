@@ -828,3 +828,33 @@ def test_global_min_check_ignores_stable_state_in_another_description(load_datab
     assert zeq.find_global_min_point(point, sys_info) is None
     monkeypatch.setattr(zeq, "_find_global_min_cs", lambda *args, **kwargs: (candidate, 50.0))
     assert zeq.find_global_min_point(point, sys_info) is not None
+
+@select_database("alcrni.tdb")
+def test_composition_sets_equal_up_to_ordering_variant(load_database):
+    """
+    An ordered state and the same state with its equivalent sublattices exchanged (an ordering variant) are one
+    composition set; sublattices with different site ratios (L1_2, 3:1) are not exchangeable
+    """
+    from pycalphad.mapping.primitives import _eq_compset
+    dbf = load_database()
+    comps = ["AL", "CR", "NI", "VA"]
+    phases = ["B2", "L12_FCC"]
+    models = instantiate_models(dbf, comps, phases)
+    phase_records = PhaseRecordFactory(dbf, comps, {v.N, v.P, v.T}, models)
+    state_variables = np.array([1, 101325, 1200], dtype=np.float64)
+
+    def comp_set(phase, y):
+        cs = CompositionSet(phase_records[phase])
+        cs.update(np.array(y), 1.0, state_variables)
+        return cs
+
+    # B2: (AL,CR,NI,VA)0.5(AL,CR,NI,VA)0.5
+    ordered = comp_set("B2", [0.7, 0.05, 0.2, 0.05, 0.01, 0.01, 0.97, 0.01])
+    variant = comp_set("B2", [0.01, 0.01, 0.97, 0.01, 0.7, 0.05, 0.2, 0.05])
+    other = comp_set("B2", [0.6, 0.05, 0.3, 0.05, 0.01, 0.01, 0.97, 0.01])
+    assert _eq_compset(ordered, variant)
+    assert not _eq_compset(ordered, other)
+    # L12_FCC: (AL,CR,NI)0.75(AL,CR,NI)0.25
+    l12 = comp_set("L12_FCC", [0.1, 0.1, 0.8, 0.8, 0.1, 0.1])
+    l12_swapped = comp_set("L12_FCC", [0.8, 0.1, 0.1, 0.1, 0.1, 0.8])
+    assert not _eq_compset(l12, l12_swapped)

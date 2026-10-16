@@ -1237,7 +1237,19 @@ cdef class Solver:
         cdef int na = self._polish_start()
         if na <= 0:
             return 0
-        return self._polish_core(na, max_it, False)
+        if self._polish_core(na, max_it, False) == 1:
+            return 1
+        if self.polish_fail != 4:
+            return 0
+        # an amount went negative: the LP basis holds a column the converged state does not need, e.g. one that only
+        # made up for two columns of one phase on either side of its minimum (mixed by the LP, merged by the
+        # polish). Left unpolished, such an LP result has a spurious extra composition set and a trace phase, within
+        # the certification tolerance in energy. Again from the same start, dropping points whose amounts reach
+        # zero; the pricing round that follows certifies the result (or finds what a dropped point was needed for).
+        na = self._polish_start()
+        if na <= 0:
+            return 0
+        return self._polish_core(na, max_it, True)
 
     cdef int _polish_core(self, int na, int max_it, bint allow_drop) noexcept nogil:
         """Newton on the equilibrium conditions from the starting state in pol_* (see _polish_start). Unknowns: mu and

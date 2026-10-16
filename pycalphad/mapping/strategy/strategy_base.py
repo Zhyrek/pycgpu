@@ -386,9 +386,11 @@ class MapStrategy:
         check_functions = [
             zchk.check_valid_point,
             zchk.check_composition_jump,
-            zchk.check_diagram_edge,
             zchk.check_change_in_phases,
             zchk.check_global_min,
+            # (after the global min check: a point on an edge where another phase is stable is a node, not the end
+            # of the line)
+            zchk.check_diagram_edge,
             zchk.check_axis_values,
             zchk.check_curvature,
             zchk.check_similar_phase_composition,

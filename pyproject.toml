@@ -96,6 +96,8 @@ dev = [
 # can try the experimental cupy-rocm wheels. See BACKENDS.md.
 cpp = []
 gpu = ["cupy-cuda12x; sys_platform != 'darwin'"]
+# pycalphad.densegrid (tiled grids streamed to a Zarr store)
+densegrid = ["zarr>=3"]
 
 [tool.uv]
 cache-keys = [
@@ -112,6 +114,7 @@ packages = [
     "pycalphad.cg",
     "pycalphad.codegen",
     "pycalphad.core",
+    "pycalphad.densegrid",
     "pycalphad.gpu",
     "pycalphad.io",
     "pycalphad.mapping.strategy",

@@ -472,9 +472,12 @@ def check_circular_loop(zpf_line: ZPFLine, step_results: tuple[Point, list[Compo
     if len(zpf_line.points) < 2:
         return None
 
-    x_curr = np.array([step_results[0].get_property(var) for var in axis_data['axis_vars']])
-    x_first = np.array([zpf_line.points[0].get_property(var) for var in axis_data['axis_vars']])
-    x_prev = np.array([zpf_line.points[-1].get_property(var) for var in axis_data['axis_vars']])
+    # Potential and composition variables are on different scales, so distances are normalized (by the step size)
+    normalize_factor = kwargs.get("normalize_factor", {av: 1 for av in axis_data['axis_vars']})
+    scale = np.array([normalize_factor[var] for var in axis_data['axis_vars']], dtype=float)
+    x_curr = np.array([step_results[0].get_property(var) for var in axis_data['axis_vars']]) / scale
+    x_first = np.array([zpf_line.points[0].get_property(var) for var in axis_data['axis_vars']]) / scale
+    x_prev = np.array([zpf_line.points[-1].get_property(var) for var in axis_data['axis_vars']]) / scale
     vfirst = x_first - x_curr
     vprev = x_curr - x_prev
     dist_first = np.sqrt(np.sum(vfirst**2))

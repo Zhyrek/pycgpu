@@ -67,6 +67,22 @@ def test_binary_strategy(load_database):
     new_num_nodes = len(strategy.node_queue.nodes)
     assert new_num_nodes == num_nodes + 2
 
+@select_database("alfe.tdb")
+def test_binary_strategy_node_metastable_to_another_candidate(load_database):
+    """
+    Stepping the AL2FE + AL5FE2 line up in temperature, LIQUID is the candidate with the largest driving force near
+    1428 K, but the node AL2FE + AL5FE2 + LIQUID is metastable to AL5FE4. The node has to be rebuilt with AL5FE4;
+    discarding it discards the line, and the AL2FE + AL5FE4 line that starts at the node is never traced.
+    """
+    dbf = load_database()
+    phases = ["AL13FE4", "AL2FE", "AL5FE2", "AL5FE4", "B2_BCC", "FCC_A1", "LIQUID"]
+    strategy = BinaryStrategy(dbf, ["AL", "FE", "VA"], phases, {v.T: (700, 1900, 30), v.X("AL"): (0, 1, 0.02), v.P: 101325})
+    strategy.do_map()
+
+    mapping_sets = [set(zpf_line.stable_phases_with_multiplicity) for zpf_line in strategy.zpf_lines]
+    for dzs in [{"AL2FE", "AL5FE2"}, {"AL2FE", "AL5FE4"}, {"AL2FE", "B2_BCC"}]:
+        assert dzs in mapping_sets
+
 @select_database("crtiv_ghosh.tdb")
 def test_ternary_strategy(load_database):
     dbf = load_database()

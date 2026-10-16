@@ -1,4 +1,5 @@
 from typing import Mapping
+import copy
 import logging
 
 import numpy as np
@@ -390,7 +391,10 @@ def check_global_min(zpf_line: ZPFLine, step_results: tuple[Point, list[Composit
             if do_not_create_node:
                 new_node = None
             else:
+                # (node finding updates the composition sets in place: keep copies of the step point's for a retry)
+                pristine = (copy.deepcopy(new_point.fixed_composition_sets), copy.deepcopy(new_point.free_composition_sets))
                 new_node = zeq.create_node_from_different_points(global_test_point, new_point.stable_composition_sets, axis_vars)
+                new_node = _retry_metastable_node(new_node, new_point, pristine, axis_vars, system_info, pdens, tol, num_candidates)
 
             if new_node is not None:
                 new_node_vars = {av: new_node.get_property(av) for av in axis_vars}
@@ -405,6 +409,36 @@ def check_global_min(zpf_line: ZPFLine, step_results: tuple[Point, list[Composit
                     return new_node
 
             _log.info("New node could not be found. Failing ZPF line")
+
+MAX_NODE_RETRIES = 3
+
+def _retry_metastable_node(new_node, new_point, pristine, axis_vars, system_info, pdens, tol, num_candidates):
+    """
+    The candidate with the largest driving force at a step point is not necessarily the phase that became stable
+    first along the step. A node made with it is then metastable to another candidate, and the strategy would
+    discard the whole ZPF line. Instead, rebuild the node from the step point with that candidate (a few times at most).
+    """
+    for _ in range(MAX_NODE_RETRIES):
+        if new_node is None or system_info is None:
+            return new_node
+        other = zeq._find_global_min_cs(new_node, system_info, pdens, tol, num_candidates)
+        if other is None or not zeq._detect_degenerate_phase(new_node, other[0]):
+            return new_node
+        cs = other[0]
+        num_sv = cs.phase_record.num_statevars
+        fixed, free = copy.deepcopy(pristine[0]), copy.deepcopy(pristine[1])
+        base_point = Point(new_point.global_conditions, new_point.chemical_potentials, fixed, free)
+        candidate = CompositionSet(cs.phase_record)
+        candidate.update(np.array(cs.dof[num_sv:], dtype=np.float64), 1e-6, np.array(base_point.stable_composition_sets[0].dof[:num_sv], dtype=np.float64))
+        if not zeq._detect_degenerate_phase(base_point, candidate):
+            return new_node
+        retry_point = Point(new_point.global_conditions, new_point.chemical_potentials, fixed, free + [candidate])
+        _log.info(f"Node {new_node.stable_phases} is metastable to {cs.phase_record.phase_name}; retrying the node with it")
+        retry_node = zeq.create_node_from_different_points(retry_point, base_point.stable_composition_sets, axis_vars)
+        if retry_node is None:
+            return new_node
+        new_node = retry_node
+    return new_node
 
 def check_similar_phase_composition(zpf_line: ZPFLine, step_results: tuple[Point, list[CompositionSet]], axis_data: Mapping, **kwargs):
     """

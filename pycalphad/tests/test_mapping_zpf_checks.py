@@ -258,3 +258,33 @@ def test_check_global_min(load_database):
     extra_args["do_not_create_node"] = True
     new_node = zchk.check_global_min(zpf_line, step_result, axis_data, **extra_args)
     assert zpf_line.status == ZPFState.FAILED
+class _AxisPoint:
+    """Stand-in for a Point in check_circular_loop, which only reads the axis variables"""
+    def __init__(self, values):
+        self.values = values
+
+    def get_property(self, var):
+        return self.values[var]
+
+def test_check_circular_loop_normalizes_axis_variables():
+    axes = [v.T, v.X("NB")]
+    axis_data, extra_args = _create_default_arguments(axes, [10, 0.02], [(800, 2800), (0, 1)])
+
+    def line_through(points):
+        zpf_line = ZPFLine([], [])
+        zpf_line.points = [_AxisPoint(dict(zip(axes, p))) for p in points]
+        return zpf_line
+
+    # A line over a maximum in temperature (e.g. a liquidus over a congruent melting point) comes back down to the
+    # temperature it started at, far away in composition. In kelvin and mole fraction alike, the first point would be
+    # 1 K away and the previous one 11 K, and the line would end there as a loop
+    zpf_line = line_through([(1000, 0.30), (1050, 0.40), (1012, 0.48)])
+    step_result = (_AxisPoint({v.T: 1001, v.X("NB"): 0.50}), [])
+    zchk.check_circular_loop(zpf_line, step_result, axis_data, **extra_args)
+    assert zpf_line.status == ZPFState.NOT_FINISHED
+
+    # A line that does return to its first point is still ended
+    zpf_line = line_through([(1000, 0.30), (1050, 0.40), (1010, 0.32)])
+    step_result = (_AxisPoint({v.T: 1001, v.X("NB"): 0.301}), [])
+    zchk.check_circular_loop(zpf_line, step_result, axis_data, **extra_args)
+    assert zpf_line.status == ZPFState.REACHED_LIMIT

@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=64", "Cython>=3", "numpy", "scipy", "pycalphad"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pycalphad-cg"
+version = "0.1.0"
+description = "Column-generation equilibrium solver for pycalphad, as a Workspace subclass"
+requires-python = ">=3.10"
+dependencies = ["pycalphad", "numpy", "scipy"]
+
+[tool.setuptools]
+packages = ["pycalphad_cg"]
+
+[tool.setuptools.exclude-package-data]
+pycalphad_cg = ["*.cpp"]

@@ -223,7 +223,7 @@ class BinaryStrategy(MapStrategy):
         Post global min check after finding node to ensure it's not a metastable node
         """
         _log.info("Checking if new node is metastable")
-        cs_result = zeq._find_global_min_cs(new_node, system_info=self.system_info, pdens=self.GLOBAL_MIN_PDENS, tol=self.GLOBAL_MIN_TOL, num_candidates=self.GLOBAL_MIN_NUM_CANDIDATES)
+        cs_result = zeq._find_global_min_cs(new_node, system_info=self.system_info, pdens=self.GLOBAL_MIN_PDENS, tol=self.GLOBAL_MIN_TOL, num_candidates=self.GLOBAL_MIN_NUM_CANDIDATES, known_states=True)
         if cs_result is not None:
             if not zeq._detect_degenerate_phase(new_node, cs_result[0]):
                 cs_result = None

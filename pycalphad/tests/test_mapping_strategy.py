@@ -962,3 +962,20 @@ def test_binary_strategy_traces_zpf_lines_shorter_than_the_smallest_step(load_da
     strat = BinaryStrategy(dbf, comps, phases, {v.T: (300, 1700, 35), v.X('FE'): (0, 1, 0.02), v.P: 101325, v.N: 1})
     strat.do_map()
     assert any(sorted(z.stable_phases) == ['AL5FE2', 'AL5FE4'] for z in strat.zpf_lines)
+
+@select_database("alcocrni.tdb")
+def test_global_min_check_starts_from_known_states(load_database):
+    """
+    At 1233.01 K the AL13CO4 + AL3CO tie triangle has BCC_B2 as its third phase. Its ordered state there
+    (x(Co) = 0.056) is not near any BCC_B2 sample; the best sample relaxes into a state on the Al-Ni edge, so the
+    sampled global min check accepted a metastable triangle with AL3NI2. Starting from the BCC_B2 states found on
+    the map so far finds it
+    """
+    dbf = load_database()
+    comps = ['AL', 'CO', 'NI', 'VA']
+    phases = filter_phases(dbf, unpack_species(dbf, comps))
+    strat = TernaryStrategy(dbf, comps, phases, {v.X('CO'): (0, 1, 0.05), v.X('NI'): (0, 1, 0.05), v.T: 1233.01, v.P: 101325, v.N: 1})
+    strat.do_map()
+    triangles = [sorted(n.stable_phases) for n in strat.node_queue.nodes if len(n.stable_composition_sets) == 3]
+    assert ['AL13CO4', 'AL3CO', 'BCC_B2'] in triangles
+    assert ['AL13CO4', 'AL3CO', 'AL3NI2'] not in triangles

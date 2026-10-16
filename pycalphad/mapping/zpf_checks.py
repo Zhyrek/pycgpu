@@ -613,7 +613,7 @@ def _retry_metastable_node(new_node, new_point, pristine, axis_vars, system_info
     for _ in range(MAX_NODE_RETRIES):
         if new_node is None or system_info is None:
             return new_node
-        other = zeq._find_global_min_cs(new_node, system_info, pdens, tol, num_candidates)
+        other = zeq._find_global_min_cs(new_node, system_info, pdens, tol, num_candidates, known_states=True)
         if other is None or not zeq._detect_degenerate_phase(new_node, other[0]):
             return new_node
         cs = other[0]

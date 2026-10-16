@@ -323,6 +323,11 @@ class TernaryStrategy(MapStrategy):
         Adds all 2-phase and 3-phase regions from step as starting points
         We also do a global min check to make sure these phase regions are truly the phases they say they are
         """
+        # (the step's states are starting points of the global min checks of nodes and starting points, see
+        # zpf_equilibrium.remember_states)
+        for zpf_line in step.zpf_lines:
+            for point in zpf_line.points:
+                zeq.remember_states(self.system_info, point)
         for zpf_line in step.zpf_lines:
             if len(zpf_line.stable_phases) == 2 or len(zpf_line.stable_phases) == 3:
                 num_phases = len(zpf_line.stable_phases)
@@ -346,7 +351,7 @@ class TernaryStrategy(MapStrategy):
                     # which CS to fix when finding an exit
                     free_point = map_utils._generate_point_with_free_cs(new_point)
 
-                    cs_result = zeq._find_global_min_cs(free_point, system_info=self.system_info, pdens=self.GLOBAL_MIN_PDENS, tol=self.GLOBAL_MIN_TOL, num_candidates=self.GLOBAL_MIN_NUM_CANDIDATES)
+                    cs_result = zeq._find_global_min_cs(free_point, system_info=self.system_info, pdens=self.GLOBAL_MIN_PDENS, tol=self.GLOBAL_MIN_TOL, num_candidates=self.GLOBAL_MIN_NUM_CANDIDATES, known_states=True)
                     if cs_result is None:
                         new_node = self._create_node_from_point(free_point, None, None, None)
                         self.node_queue.add_node(new_node)
@@ -495,7 +500,7 @@ class TernaryStrategy(MapStrategy):
         This is the same as _process_new_node in the BinaryStrategy
         """
         _log.info("Checking if new node is metastable")
-        cs_result = zeq._find_global_min_cs(new_node, system_info=self.system_info, pdens=self.GLOBAL_MIN_PDENS, tol=self.GLOBAL_MIN_TOL, num_candidates=self.GLOBAL_MIN_NUM_CANDIDATES)
+        cs_result = zeq._find_global_min_cs(new_node, system_info=self.system_info, pdens=self.GLOBAL_MIN_PDENS, tol=self.GLOBAL_MIN_TOL, num_candidates=self.GLOBAL_MIN_NUM_CANDIDATES, known_states=True)
         if cs_result is not None:
             if not zeq._detect_degenerate_phase(new_node, cs_result[0]):
                 cs_result = None

@@ -453,6 +453,7 @@ class MapStrategy:
         if zpf_line.status in valid_statuses:
             new_point, _ = step_results
             zpf_line.append(new_point)
+            zeq.remember_states(self.system_info, new_point)
             if zpf_line.status == ZPFState.NOT_FINISHED and self._on_existing_line(zpf_line):
                 _log.info(f"ZPF line {zpf_line.fixed_phases}, {zpf_line.free_phases} reached an existing ZPF line with the same phases. Ending ZPF line")
                 zpf_line.status = ZPFState.REACHED_LIMIT

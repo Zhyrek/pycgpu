@@ -408,3 +408,35 @@ def test_check_curvature():
     zpf_line = line_with([(1000, 0.30, 0.60), (1002, 0.30, 0.64)])
     zchk.check_curvature(zpf_line, step(1000, 0.30, 0.68), axis_data, **extra_args)
     assert zpf_line.status == ZPFState.NOT_FINISHED
+
+
+class _InvariantCompsetStandIn:
+    """Stand-in for a CompositionSet in _same_invariant, which reads the phase name, state variables and composition"""
+    def __init__(self, name, X, T=1000.0):
+        self.phase_record = type('PhaseRecordStandIn', (), {'phase_name': name, 'num_statevars': 3})()
+        self.X = np.array(X)
+        self.dof = np.array([1.0, 101325.0, T] + list(X))
+
+class _InvariantStandIn:
+    def __init__(self, sets):
+        self.stable_composition_sets = sets
+
+def test_same_invariant():
+    from pycalphad.mapping.primitives import _same_invariant
+    node = _InvariantStandIn([_InvariantCompsetStandIn('A', [0.1, 0.2, 0.7]), _InvariantCompsetStandIn('B', [0.5, 0.4, 0.1]),
+                              _InvariantCompsetStandIn('B', [0.2, 0.7, 0.1])])
+    # the same invariant, found by another calculation (compositions within the tolerance, in another order)
+    other = _InvariantStandIn([_InvariantCompsetStandIn('B', [0.201, 0.699, 0.1]), _InvariantCompsetStandIn('A', [0.102, 0.199, 0.699]),
+                               _InvariantCompsetStandIn('B', [0.5, 0.401, 0.099])])
+    assert _same_invariant(node, other)
+    # a composition further away, other phases, another temperature, or not an invariant: different nodes
+    far = _InvariantStandIn([_InvariantCompsetStandIn('A', [0.12, 0.2, 0.68]), _InvariantCompsetStandIn('B', [0.5, 0.4, 0.1]),
+                             _InvariantCompsetStandIn('B', [0.2, 0.7, 0.1])])
+    assert not _same_invariant(node, far)
+    renamed = _InvariantStandIn([_InvariantCompsetStandIn('C', [0.1, 0.2, 0.7]), _InvariantCompsetStandIn('B', [0.5, 0.4, 0.1]),
+                                 _InvariantCompsetStandIn('B', [0.2, 0.7, 0.1])])
+    assert not _same_invariant(node, renamed)
+    hotter = _InvariantStandIn([_InvariantCompsetStandIn(cs.phase_record.phase_name, cs.X, T=1010.0) for cs in node.stable_composition_sets])
+    assert not _same_invariant(node, hotter)
+    two = _InvariantStandIn(node.stable_composition_sets[:2])
+    assert not _same_invariant(two, _InvariantStandIn(other.stable_composition_sets[:2]))

@@ -1,6 +1,7 @@
 from typing import Union
 import logging
 import copy
+import itertools
 
 import numpy as np
 
@@ -17,6 +18,16 @@ import pycalphad.mapping.zpf_checks as zchk
 import pycalphad.mapping.utils as map_utils
 
 _log = logging.getLogger(__name__)
+
+# Distance (in units of the axis step sizes) within which a starting point counts as lying on a ZPF line
+STARTING_POINT_TOLERANCE = 0.5
+
+def _distance_to_segment(p, a, b):
+    """Distance from point p to the segment from a to b (any dimension)"""
+    ab = b - a
+    denominator = np.dot(ab, ab)
+    t = 0.0 if denominator == 0 else np.clip(np.dot(p - a, ab) / denominator, 0, 1)
+    return np.linalg.norm(p - (a + t * ab))
 
 class MapStrategy:
     """
@@ -103,6 +114,8 @@ class MapStrategy:
         self.node_queue = NodeQueue()
 
         self._current_node = None
+        # whether the starting points are the strategy's own (generate_automatic_starting_points), not the user's
+        self._automatic_starting_points = False
         self._exits = []
         self._exit_dirs = []
         self._exit_index = 0
@@ -114,6 +127,10 @@ class MapStrategy:
         self.GLOBAL_MIN_PDENS = kwargs.get("GLOBAL_MIN_PDENS", 500)
         self.GLOBAL_MIN_TOL = kwargs.get("GLOBAL_MIN_TOL", 1e-4)
         self.GLOBAL_MIN_NUM_CANDIDATES = kwargs.get("GLOBAL_MIN_NUM_CANDIDATES", 1000)
+        # Shorter test steps for a ZPF line shorter than the smallest step (see _test_direction): each try scales the
+        # step by SHORT_STEP_SCALE, down to SHORT_STEP_MIN_RATIO times the smallest step
+        self.SHORT_STEP_SCALE = kwargs.get("SHORT_STEP_SCALE", 0.25)
+        self.SHORT_STEP_MIN_RATIO = kwargs.get("SHORT_STEP_MIN_RATIO", 0.01)
 
     def _constant_kwargs(self):
         """
@@ -126,6 +143,8 @@ class MapStrategy:
             "GLOBAL_MIN_PDENS": self.GLOBAL_MIN_PDENS,
             "GLOBAL_MIN_TOL": self.GLOBAL_MIN_TOL,
             "GLOBAL_MIN_NUM_CANDIDATES": self.GLOBAL_MIN_NUM_CANDIDATES,
+            "SHORT_STEP_SCALE": self.SHORT_STEP_SCALE,
+            "SHORT_STEP_MIN_RATIO": self.SHORT_STEP_MIN_RATIO,
             }
         return const_kwargs
 
@@ -234,6 +253,8 @@ class MapStrategy:
         """
         if len(self.zpf_lines) > 0 and self.zpf_lines[-1].status == ZPFState.NOT_FINISHED:
             self._continue_zpf_line()
+            if self.zpf_lines and self.zpf_lines[-1].status not in (ZPFState.NOT_FINISHED, ZPFState.FAILED):
+                self._drop_starting_points_on_line(self.zpf_lines[-1])
         elif len(self._exits) > self._exit_index:
             _log.info("No zpf line or last zpf line has finished. Attempting to start zpf line from next exit")
             # This will start a new zpf line that is not finished
@@ -266,11 +287,22 @@ class MapStrategy:
         # do_map once and intends to add a starting point to run do_map again)
         if len(self.node_queue.nodes) == 0 and len(self.zpf_lines) == 0:
             self.generate_automatic_starting_points()
+            self._automatic_starting_points = True
         finished = False
         n = 0
         while (not finished) and (max_iter == -1 or n < max_iter):
             finished = self.iterate()
             n += 1
+            # (with starting points of the user's, only those are mapped)
+            if finished and self._automatic_starting_points and self._add_uncovered_starting_points():
+                finished = False
+
+    def _add_uncovered_starting_points(self):
+        """
+        Called when the mapping has run out of nodes: adds starting points for regions the mapping has not found,
+        returning whether any were added (strategy specific; none by default)
+        """
+        return False
 
     def _continue_zpf_line(self):
         """
@@ -373,9 +405,14 @@ class MapStrategy:
         """
         check_functions = [
             zchk.check_valid_point,
+            zchk.check_composition_jump,
             zchk.check_change_in_phases,
             zchk.check_global_min,
+            # (after the global min check: a point on an edge where another phase is stable is a node, not the end
+            # of the line)
+            zchk.check_diagram_edge,
             zchk.check_axis_values,
+            zchk.check_curvature,
             zchk.check_similar_phase_composition,
             zchk.check_circular_loop,
             ]
@@ -417,10 +454,159 @@ class MapStrategy:
         if zpf_line.status in valid_statuses:
             new_point, _ = step_results
             zpf_line.append(new_point)
+            zeq.remember_states(self.system_info, new_point)
+            node_point = self._reached_known_node(zpf_line) if zpf_line.status == ZPFState.NOT_FINISHED else None
+            if node_point is not None:
+                _log.info(f"ZPF line {zpf_line.fixed_phases}, {zpf_line.free_phases} reached a known node. Ending ZPF line there")
+                zpf_line.points[-1] = node_point
+                zpf_line.status = ZPFState.NEW_NODE_FOUND
+            if zpf_line.status == ZPFState.NOT_FINISHED and self._on_existing_line(zpf_line):
+                _log.info(f"ZPF line {zpf_line.fixed_phases}, {zpf_line.free_phases} reached an existing ZPF line with the same phases. Ending ZPF line")
+                zpf_line.status = ZPFState.REACHED_LIMIT
+                # (a line that is on an existing line from its start adds nothing)
+                if len(zpf_line.points) <= 2 and self.zpf_lines and self.zpf_lines[-1] is zpf_line:
+                    self.zpf_lines.pop()
 
             # If we successfully added a new point, attempt to increase the axis delta if is smaller than the default
             if zpf_line.current_delta < self.axis_delta[zpf_line.axis_var]:
                 zpf_line.current_delta = np.amin([self.axis_delta[zpf_line.axis_var], zpf_line.current_delta / self.DELTA_SCALE])
+
+    def _point_location(self, point: Point, phases: list[str]):
+        """
+        Compositions of the point's composition sets, ordered as `phases` (sets of one phase by composition), and
+        the temperature if it is an axis variable, in units of the axis step sizes; None if the point does not have
+        these phases
+        """
+        if point is None:
+            return None
+        comp_sets = sorted(point.stable_composition_sets, key=lambda cs: (cs.phase_record.phase_name, tuple(cs.X)))
+        if sorted(cs.phase_record.phase_name for cs in comp_sets) != sorted(phases):
+            return None
+        composition_deltas = [self.axis_delta[av] for av in self.axis_vars if isinstance(av, v.X)]
+        location = [np.asarray(cs.X, dtype=float) / min(composition_deltas) for cs in comp_sets] if composition_deltas else []
+        for av in self.axis_vars:
+            if map_utils.is_state_variable(av):
+                location.append(np.atleast_1d(float(point.get_property(av))) / self.axis_delta[av])
+        return np.concatenate(location)
+
+    def _reached_known_node(self, zpf_line: ZPFLine):
+        """
+        A point at a node found already (three or more composition sets, two of them the line's phases) that the last
+        step of the line passed, or None. The global min check that would end the line there can miss the phase that
+        becomes stable (e.g. the second composition set of a miscibility gap, if no sample lies in its basin), and the
+        line then runs on past the node. The node the line starts from does not count (none of its pairs of sets:
+        a line from one exit of a node would otherwise end at another exit of the same node)
+        """
+        if len(self.axis_vars) < 2 or len(zpf_line.points) < 2:
+            return None
+        phases = sorted(zpf_line.stable_phases)
+        last_point = zpf_line.points[-1]
+        last = self._point_location(last_point, phases)
+        prev = self._point_location(zpf_line.points[-2], phases)
+        start = self._point_location(zpf_line.points[0], phases)
+        if last is None or prev is None or start is None:
+            return None
+        for node in self.node_queue.nodes:
+            if len(node.stable_composition_sets) < 3 or node is self._current_node:
+                continue
+            pairs = [(a, b, self._point_location(Point(node.global_conditions, node.chemical_potentials, [], [a, b]), phases))
+                     for a, b in itertools.combinations(node.stable_composition_sets, 2)]
+            if any(loc is not None and np.max(np.abs(loc - start)) < STARTING_POINT_TOLERANCE for _, _, loc in pairs):
+                continue
+            for a, b, location in pairs:
+                if location is None:
+                    continue
+                if _distance_to_segment(location, prev, last) < STARTING_POINT_TOLERANCE:
+                    # the node's two sets, in the place of the line's (fixed or free, matched by phase and composition)
+                    remaining, fixed, free = [a, b], [], []
+                    for cs in last_point.stable_composition_sets:
+                        match = min((c for c in remaining if c.phase_record.phase_name == cs.phase_record.phase_name),
+                                    key=lambda c: np.max(np.abs(np.asarray(c.X) - np.asarray(cs.X))))
+                        remaining.remove(match)
+                        match = copy.deepcopy(match)
+                        (fixed if cs in last_point.fixed_composition_sets else free).append(match)
+                    return Point(node.global_conditions, node.chemical_potentials, fixed, free)
+        return None
+
+    def _on_existing_line(self, zpf_line: ZPFLine):
+        """
+        Whether the last point of the ZPF line lies on another ZPF line with the same phases: the two have met (e.g.
+        a line from a node reaching one traced from a starting point), or the line retraces one from where it starts
+        (e.g. from a node exit at which a line traced from a starting point begins; a line from a congruent point
+        that steps down the other side does not). For a line from a starting point, points within a step of its
+        start are not counted, since the two halves of the line traced from a starting point begin at the same place.
+        Lines that failed are not counted: they can stop short of where this line goes
+        """
+        if len(self.axis_vars) < 2:
+            return False
+        phases = sorted(zpf_line.stable_phases)
+        last = self._point_location(zpf_line.points[-1], phases)
+        start = self._point_location(zpf_line.points[0], phases)
+        if last is None or start is None:
+            return False
+        if self._current_node.exit_hint == ExitHint.POINT_IS_EXIT and np.max(np.abs(last - start)) < 1:
+            return False
+        for other in self.zpf_lines:
+            if other is zpf_line or other.status == ZPFState.FAILED or sorted(other.stable_phases) != phases:
+                continue
+            locations = [self._point_location(point, phases) for point in other.points]
+            if any(loc is None for loc in locations):
+                continue
+            if len(locations) == 1:
+                if np.max(np.abs(last - locations[0])) < STARTING_POINT_TOLERANCE:
+                    return True
+            elif any(_distance_to_segment(last, a, b) < STARTING_POINT_TOLERANCE for a, b in zip(locations[:-1], locations[1:])):
+                return True
+        return False
+
+    def _drop_duplicate_starting_points(self, zpf_line: ZPFLine):
+        """
+        A starting point still in the node queue at the same place as the starting point a ZPF line has just started
+        from, stepping the same way, would trace the same ZPF line again: remove it. (Different starting points can
+        land in the same two-phase region.) Other starting points on a traced line are kept: if that line stops
+        short, their line covers the rest, and where it overlaps the traced line it ends (see _on_existing_line).
+        """
+        if self._current_node.exit_hint != ExitHint.POINT_IS_EXIT or len(self.axis_vars) < 2:
+            return
+        phases = sorted(zpf_line.stable_phases)
+        start = self._point_location(zpf_line.points[0], phases)
+        if start is None:
+            return
+        pending = self.node_queue.nodes[self.node_queue._current_node_index:]
+        kept = []
+        for node in pending:
+            location = self._point_location(node, phases) if node.exit_hint == ExitHint.POINT_IS_EXIT else None
+            if (location is not None and np.max(np.abs(location - start)) < STARTING_POINT_TOLERANCE
+                    and node.axis_direction == self._current_node.axis_direction):
+                _log.info(f"Skipping starting point {node.stable_phases}, {node.global_conditions}: same as the one just used")
+                continue
+            kept.append(node)
+        self.node_queue.nodes[self.node_queue._current_node_index:] = kept
+
+    def _drop_starting_points_on_line(self, zpf_line: ZPFLine):
+        """
+        After a ZPF line ended without failing (at a node or a limit): a starting point still in the node queue that
+        lies on it would trace part of it again, so it is removed. If the line began at a starting point, a starting
+        point at its start is kept (it steps the other way).
+        """
+        if len(self.axis_vars) < 2:
+            return
+        phases = sorted(zpf_line.stable_phases)
+        locations = [self._point_location(point, phases) for point in zpf_line.points]
+        if len(locations) < 2 or any(loc is None for loc in locations):
+            return
+        from_starting_point = self._current_node.exit_hint == ExitHint.POINT_IS_EXIT
+        pending = self.node_queue.nodes[self.node_queue._current_node_index:]
+        kept = []
+        for node in pending:
+            location = self._point_location(node, phases) if node.exit_hint == ExitHint.POINT_IS_EXIT else None
+            if location is not None and any(_distance_to_segment(location, a, b) < STARTING_POINT_TOLERANCE
+                                            for a, b in zip(locations[:-1], locations[1:])):
+                if not (from_starting_point and np.max(np.abs(location - locations[0])) < STARTING_POINT_TOLERANCE):
+                    _log.info(f"Skipping starting point {node.stable_phases}, {node.global_conditions}: on the ZPF line just traced")
+                    continue
+            kept.append(node)
+        self.node_queue.nodes[self.node_queue._current_node_index:] = kept
 
     def _process_new_node(self, zpf_line: ZPFLine, new_node: Node):
         """
@@ -494,6 +680,7 @@ class MapStrategy:
 
         _log.info(f"Starting zpf line with {self.zpf_lines[-1].points[-1].global_conditions}, {self.zpf_lines[-1].points[-1].fixed_phases}, {self.zpf_lines[-1].points[-1].free_phases} and {self.zpf_lines[-1].axis_var}, {self.zpf_lines[-1].current_delta*self.zpf_lines[-1].axis_direction.value}")
         _log.info(f"ZPF starting from node {self._current_node.fixed_phases}, {self._current_node.free_phases}, {self._current_node.global_conditions}")
+        self._drop_duplicate_starting_points(self.zpf_lines[-1])
 
     def _determine_start_direction(self, node: Node, exit_point: Point, proposed_direction: Direction = None):
         """
@@ -538,7 +725,24 @@ class MapStrategy:
                 exit_dirs.append(node.axis_direction)
         return exits, exit_dirs
 
-    def _test_direction(self, point: Point, axis_var: v.StateVariable, direction: Direction):
+    def _first_direction(self, exit_point: Point, candidates: list[tuple[v.StateVariable, Direction]]):
+        """
+        The first (axis variable, direction) in candidates that a ZPF line can be stepped in from exit_point, as
+        (axis variable, direction, delta), or None. Each candidate is tested with the smallest step first; only if all
+        fail, they are tested again with shorter steps (see _test_direction), so that a short line is not taken for a
+        failed direction, and a direction that only works with a shorter step does not win over one that works with
+        the usual step.
+        """
+        for short in (False, True):
+            for axis_var, d in candidates:
+                dir_results = self._test_direction(exit_point, axis_var, d, short=short)
+                if dir_results is not None:
+                    av_delta, other_av_delta = dir_results
+                    _log.info(f"Found direction: {axis_var, d, av_delta} for point {exit_point.fixed_phases}, {exit_point.free_phases}, {exit_point.global_conditions}")
+                    return axis_var, d, av_delta
+        return None
+
+    def _test_direction(self, point: Point, axis_var: v.StateVariable, direction: Direction, short: bool = False):
         """
         Given an axis variable and direction, test that we can step from the point
             If stepping doesn"t work, we continue to reduce the step size until it can (or until the step size is too small)
@@ -559,34 +763,56 @@ class MapStrategy:
         # Set the starting delta to be the minimum (delta * min_delta_ratio). Then if direction is
         # successful, we can scale the delta after successful zpf line iterations
         curr_delta = self.axis_delta[axis_var] * self.MIN_DELTA_RATIO
-        new_conds, hit_axis_limit = self._step_conditions(point, axis_var, curr_delta, self.axis_lims[axis_var], direction)
-        if not hit_axis_limit:
-            step_results = zeq.update_equilibrium_with_new_conditions(point, new_conds, self._other_av(axis_var))
-
-            extra_args = {
-                "system_info": self.system_info,
-                "pdens": self.GLOBAL_MIN_PDENS,
-                "tol": self.GLOBAL_MIN_TOL,
-                "global_num_candidates": self.GLOBAL_MIN_NUM_CANDIDATES,
-            }
-
-            # Check valid equilibrium, global min and change in phases
-            check_functions = [zchk.simple_check_valid_point, zchk.simple_check_change_in_phases, zchk.simple_check_global_min]
-            valid_point = True
-            for checks in check_functions:
-                if not checks(step_results, **extra_args):
-                    valid_point = False
-                    break
-
-            # If valid point, then record the change in the other axis and return both deltas
-            if valid_point:
-                other_av_delta = None
-                new_point, orig_cs = step_results
-                if other_av is not None:
-                    new_other_av_val = new_point.get_property(other_av)
-                    other_av_delta = abs(other_av_val - new_other_av_val)
-                return curr_delta, other_av_delta
+        # A ZPF line can be shorter than the smallest step: between two nodes close together, e.g. near an invariant.
+        # A step along it then fails only because another phase becomes stable within the step. With short=True,
+        # steps shorter than the smallest are tried after such a failure; the node at the line's other end is then
+        # found as the line is stepped
+        min_short_delta = curr_delta * self.SHORT_STEP_MIN_RATIO
+        if short:
+            curr_delta *= self.SHORT_STEP_SCALE
+        while True:
+            failed = self._test_step(point, axis_var, direction, curr_delta, other_av, other_av_val)
+            if not isinstance(failed, str):
+                return failed
+            if not short or failed != "global_min" or curr_delta * self.SHORT_STEP_SCALE < min_short_delta:
+                break
+            curr_delta *= self.SHORT_STEP_SCALE
 
         # If stepping failed, then returned None
         _log.info(f"Stepping point {point.fixed_phases}, {point.free_phases}, {point.global_conditions}, {direction} failed with step size {curr_delta}.")
         return None
+
+    def _test_step(self, point: Point, axis_var: v.StateVariable, direction: Direction, curr_delta: float, other_av, other_av_val):
+        """
+        One test step of _test_direction: (delta, change of the other axis variable) if the step is valid, otherwise
+        the name of the check it failed ("axis_limit", "valid_point", "diagram_edge", "change_in_phases", "global_min")
+        """
+        new_conds, hit_axis_limit = self._step_conditions(point, axis_var, curr_delta, self.axis_lims[axis_var], direction)
+        if hit_axis_limit:
+            return "axis_limit"
+        step_results = zeq.update_equilibrium_with_new_conditions(point, new_conds, self._other_av(axis_var))
+
+        extra_args = {
+            "system_info": self.system_info,
+            "pdens": self.GLOBAL_MIN_PDENS,
+            "tol": self.GLOBAL_MIN_TOL,
+            "global_num_candidates": self.GLOBAL_MIN_NUM_CANDIDATES,
+        }
+
+        # Check valid equilibrium, global min and change in phases
+        check_functions = [("valid_point", zchk.simple_check_valid_point), ("change_in_phases", zchk.simple_check_change_in_phases),
+                           ("global_min", zchk.simple_check_global_min)]
+        if len(self.axis_vars) > 1:
+            # (a step that stays on an edge of the diagram would trace along it, see check_diagram_edge)
+            check_functions.insert(1, ("diagram_edge", zchk.simple_check_diagram_edge))
+        for name, checks in check_functions:
+            if not checks(step_results, **extra_args):
+                return name
+
+        # If valid point, then record the change in the other axis and return both deltas
+        other_av_delta = None
+        new_point, orig_cs = step_results
+        if other_av is not None:
+            new_other_av_val = new_point.get_property(other_av)
+            other_av_delta = abs(other_av_val - new_other_av_val)
+        return curr_delta, other_av_delta

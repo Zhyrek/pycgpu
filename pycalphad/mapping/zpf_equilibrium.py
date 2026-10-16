@@ -1,6 +1,8 @@
 import copy
 import logging
 
+from collections import OrderedDict
+
 import numpy as np
 
 from pycalphad import calculate, variables as v
@@ -70,7 +72,19 @@ def update_equilibrium_with_new_conditions(point: Point, new_conditions: dict[v.
     new_point = Point(new_conditions, np.array(results.chemical_potentials), [cs for cs in comp_sets if cs.fixed], [cs for cs in comp_sets if not cs.fixed])
     return new_point, orig_cs
 
-def _find_global_min_cs(point: Point, system_info: dict, pdens = 500, tol = 1e-5, num_candidates = 1):
+# A global min candidate within SAME_STATE_COMPOSITION (mole fraction) of a stable composition set and with a driving
+# force below SAME_STATE_DRIVING_FORCE (J/mol) is taken to be that set's state (see find_global_min_point)
+SAME_STATE_COMPOSITION = 1e-3
+SAME_STATE_DRIVING_FORCE = 1.0
+
+# Site-fraction distance from every stable composition set of a phase beyond which a sample of that phase is tested
+# as a possible other minimum (see _find_global_min_cs)
+OTHER_MINIMUM_DISTANCE = 0.1
+
+# Number of states whose phase samples are kept by _find_global_min_cs
+SAMPLES_CACHE_SIZE = 4
+
+def _find_global_min_cs(point: Point, system_info: dict, pdens = 500, tol = 1e-5, num_candidates = 1, known_states = False):
     """
     Finds potential composition set for global min check
 
@@ -112,7 +126,19 @@ def _find_global_min_cs(point: Point, system_info: dict, pdens = 500, tol = 1e-5
 
     # Get driving force and find index that maximized driving force
     state_conds = {str(key): point.global_conditions[key] for key in point.global_conditions if map_utils.is_state_variable(key)}
-    samples = calculate(dbf, comps, phases, model=models, phase_records=phase_records, output="GM", to_xarray=False, pdens=pdens, **state_conds)
+    # The samples depend only on the state variables, not on the point's chemical potentials, and the check is
+    # called repeatedly at the same state (every step of an isothermal section, a node and its retries), so the
+    # samples of the last few states are kept with the system information
+    cache = system_info.setdefault("samples_cache", OrderedDict())
+    key = (pdens, tuple(sorted((k, float(np.squeeze(val))) for k, val in state_conds.items())))
+    samples = cache.get(key)
+    if samples is None:
+        samples = calculate(dbf, comps, phases, model=models, phase_records=phase_records, output="GM", to_xarray=False, pdens=pdens, **state_conds)
+        cache[key] = samples
+        if len(cache) > SAMPLES_CACHE_SIZE:
+            cache.popitem(last=False)
+    else:
+        cache.move_to_end(key)
     # Since we index y, phase_ids and dGs, we need to make sure they have 
     # the following shape (where N = number of samples, C = number of components, 
     # DOF = internal degrees of freedom):
@@ -145,22 +171,51 @@ def _find_global_min_cs(point: Point, system_info: dict, pdens = 500, tol = 1e-5
     sorted_indices = np.argsort(dGs)[::-1]
     sorted_phases = phase_ids[sorted_indices][:np.amin([num_candidates, len(sorted_indices)])]
     unique_phases = np.unique(sorted_phases)
-    phase_indices = [np.argmax(sorted_phases == p) for p in unique_phases]
+    candidate_indices = [sorted_indices[np.argmax(sorted_phases == p)] for p in unique_phases]
 
-    cs = None
-    dG = 0
-    for phi in phase_indices:
-        index = sorted_indices[phi]
-        test_cs = CompositionSet(phase_records[str(phase_ids[index])])
+    # The best sample of a phase that is already stable often lies next to a stable composition set and relaxes
+    # onto it, which hides another minimum of that phase (a miscibility gap, or another ordered state) with a
+    # positive driving force. So for each stable phase, also test its best sample away from all of its stable
+    # composition sets
+    for phase_name in set(point.stable_phases):
+        stable_dofs = [np.asarray(c.dof[c.phase_record.num_statevars:]) for c in point.stable_composition_sets
+                       if c.phase_record.phase_name == phase_name]
+        phase_dof = len(stable_dofs[0])
+        sample_indices = np.flatnonzero(phase_ids == phase_name)
+        samples_y = y[sample_indices, :phase_dof]
+        distances = np.min([np.max(np.abs(samples_y - d), axis=1) for d in stable_dofs], axis=0)
+        far_indices = sample_indices[distances > OTHER_MINIMUM_DISTANCE]
+        if len(far_indices) > 0:
+            candidate_indices.append(far_indices[np.argmax(dGs[far_indices])])
+
+    # Starting points of the candidates: the samples above, and with known_states (the checks of a new node or starting
+    # point), for each phase that is not stable at the point, the state of it found on the map so far that is nearest
+    # the point's composition sets (see remember_states). A phase's best sample can relax into another minimum than the one that
+    # has a positive driving force (e.g. an ordered phase whose ordering at that composition no sample has); a known
+    # state of the phase nearby often relaxes into it
+    starts = []
+    for index in candidate_indices:
         # Create numpy array for site fractions. There seems to be some models where
         # np.squeeze(points.Y) returns a non-writable array. Not sure why, but when it does,
         # updating the composition set will fail with a ValueError: buffer source array
         # is read only. Creating a new array for the site fractions seems to fix this issue
-        site_fracs = np.array(y[index][:test_cs.phase_record.phase_dof], dtype=np.float64)
+        phase_dof = phase_records[str(phase_ids[index])].phase_dof
+        starts.append((str(phase_ids[index]), np.array(y[index][:phase_dof], dtype=np.float64)))
+    stable_x = [np.asarray(c.X, dtype=float) for c in point.stable_composition_sets]
+    for phase_name, (known_x, known_y) in (system_info.get("known_states", {}) if known_states else {}).items():
+        if phase_name in point.stable_phases or len(known_x) == 0:
+            continue
+        distance = np.min([np.max(np.abs(np.asarray(known_x) - x), axis=1) for x in stable_x], axis=0)
+        starts.append((phase_name, np.array(known_y[int(np.argmin(distance))], dtype=np.float64)))
+
+    cs = None
+    dG = 0
+    for phase_name, site_fracs in starts:
+        test_cs = CompositionSet(phase_records[phase_name])
         test_cs.update(site_fracs, 1.0, map_utils.get_statevars_array(point.global_conditions, test_cs.phase_record.state_variables))
         dormant_phase = DormantPhase(test_cs, None)
         test_dg = point.get_property(dormant_phase.driving_force)
-        _log.debug(f"Testing phase {phase_ids[index]} with dG={dGs[index]} -> {test_dg} for global min.")
+        _log.debug(f"Testing phase {phase_name} -> {test_dg} for global min.")
         if test_dg > dG:
             dG = test_dg
             cs = test_cs
@@ -171,6 +226,17 @@ def _find_global_min_cs(point: Point, system_info: dict, pdens = 500, tol = 1e-5
     else:
         return cs, dG
     
+def remember_states(system_info: dict, point: Point):
+    """
+    Records the composition sets of a point on the map (by phase: compositions and site fractions) as starting points
+    for the global min check (see _find_global_min_cs)
+    """
+    known = system_info.setdefault("known_states", {})
+    for cs in point.stable_composition_sets:
+        xs, ys = known.setdefault(cs.phase_record.phase_name, ([], []))
+        xs.append(np.asarray(cs.X, dtype=float))
+        ys.append(np.array(cs.dof[cs.phase_record.num_statevars:], dtype=float))
+
 def find_global_min_point(point: Point, system_info: dict, pdens = 500, tol = 1e-5, num_candidates = 1):
     """
     Checks global min on current point and attempts to find a new point 
@@ -211,6 +277,13 @@ def find_global_min_point(point: Point, system_info: dict, pdens = 500, tol = 1e
         return None
     else:
         cs, dG = min_cs_result
+        # A candidate at a stable composition set's composition with a driving force of rounding size is that set's
+        # state, described by another phase (e.g. BCC_VA ordered like a stable B2_BCC); a phase that really becomes
+        # stable gains driving force quickly and is found at the next step
+        if dG < SAME_STATE_DRIVING_FORCE and any(np.max(np.abs(np.asarray(cs.X) - np.asarray(other.X))) < SAME_STATE_COMPOSITION
+                                                for other in point.stable_composition_sets):
+            _log.info(f'Global min candidate {cs.phase_record.phase_name} with dG = {dG} is the state of a stable composition set')
+            return None
         
         _log.info(f'Global min potentially detected. {point.stable_phases} + {cs.phase_record.phase_name} ({cs}) with dG = {dG}')
         if _detect_degenerate_phase(point, cs):
@@ -220,6 +293,10 @@ def find_global_min_point(point: Point, system_info: dict, pdens = 500, tol = 1e
             return new_point
         else:
             _log.info('Global min was falsely detected. No global min found')
+            # (a candidate at another composition that merged with a stable composition set: kept on the point, see
+            # check_global_min)
+            if all(np.max(np.abs(np.asarray(cs.X) - np.asarray(other.X))) > SAME_STATE_COMPOSITION for other in point.stable_composition_sets):
+                point._merged_global_min_candidate = dG
             return None
 
 def _detect_degenerate_phase(point: Point, new_cs: CompositionSet):

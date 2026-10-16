@@ -1,4 +1,5 @@
 from typing import Mapping
+import copy
 import logging
 
 import numpy as np
@@ -7,7 +8,7 @@ from pycalphad import variables as v
 from pycalphad.core.constants import COMP_DIFFERENCE_TOL
 from pycalphad.core.composition_set import CompositionSet
 
-from pycalphad.mapping.primitives import ZPFLine, Point, ZPFState
+from pycalphad.mapping.primitives import ZPFLine, Point, ZPFState, MIN_COMPOSITION
 import pycalphad.mapping.zpf_equilibrium as zeq
 
 _log = logging.getLogger(__name__)
@@ -107,6 +108,131 @@ def simple_check_global_min(step_results: tuple[Point, list[CompositionSet]], **
 
     return global_test_point is None
 
+def _on_diagram_edge(point: Point):
+    """Whether the point has two or more composition sets and every one of them lacks the same component (below
+    2*MIN_COMPOSITION, the composition limit of the starting points): all at a pure component in a binary, on the
+    same edge of the diagram in a ternary"""
+    comp_sets = point.stable_composition_sets
+    if len(comp_sets) < 2:
+        return False
+    X = np.array([cs.X for cs in comp_sets])
+    return bool(np.any(np.all(X < 2*MIN_COMPOSITION, axis=0)))
+
+def simple_check_diagram_edge(step_results: tuple[Point, list[CompositionSet]], **kwargs):
+    """
+    Returns False if the step result is on an edge of the diagram (see check_diagram_edge)
+    """
+    if step_results is None:
+        return False
+    return not _on_diagram_edge(step_results[0])
+
+def check_diagram_edge(zpf_line: ZPFLine, step_results: tuple[Point, list[CompositionSet]], axis_data: Mapping, **kwargs):
+    """
+    Where every composition set lacks the same component, an equilibrium between them lies on an edge of the
+    diagram (at a pure component in a binary, on a binary edge of a ternary), where a two-phase region has no
+    width: at fixed conditions it is a single tie line. A step from there can stay on the edge (e.g. in temperature
+    from a pure component's transformation) and trace a line along the edge of the diagram. A ZPF line ends where it
+    reaches an edge of the diagram.
+
+    Parameters
+    ----------
+    zpf_line : ZPFLine
+        ZPFLine that the point is stepping in
+    step_results : [Point, [CompositionSet]]
+        Results from zpf_equilibrium.update_equilibrium_with_new_conditions
+    axis_data : dict
+        Axis variable data from a map strategy class
+
+    Returns
+    -------
+    None - this check does not produce any new nodes
+    """
+    if step_results is None or len(axis_data["axis_vars"]) < 2:
+        return None
+    if _on_diagram_edge(step_results[0]):
+        _log.info("ZPF line reached an edge of the diagram. Ending ZPF line")
+        zpf_line.status = ZPFState.REACHED_LIMIT
+    return None
+
+# A ZPF line is smooth between nodes: where the trace of a composition set turns by more than CURVATURE_ANGLE
+# (degrees) between consecutive steps, the step is retried smaller, so that tight curves are drawn with enough points.
+# Segments shorter than CURVATURE_MIN_SEGMENT (in axis step sizes) are not considered, nor lines whose composition sets
+# are within CURVATURE_MIN_WIDTH (mole fraction) of each other: near a critical point or where a two-phase region
+# closes into a second-order transition the traces coincide, and the line can have a cusp that smaller steps in the
+# same direction would step past
+CURVATURE_ANGLE = 20.0
+CURVATURE_MIN_SEGMENT = 0.1
+CURVATURE_MIN_WIDTH = 0.01
+
+def _trace_location(point: Point, comp_set: CompositionSet, axis_data: Mapping):
+    """Position of a composition set's trace in units of the axis step sizes: its mole fraction for each composition
+    axis variable, the point's value for each state variable"""
+    elements = [str(el) for el in comp_set.phase_record.nonvacant_elements]
+    location = []
+    for av in axis_data["axis_vars"]:
+        if isinstance(av, v.X):
+            location.append(comp_set.X[elements.index(str(av.species))] / axis_data["axis_delta"][av])
+        else:
+            location.append(float(np.squeeze(point.get_property(av))) / axis_data["axis_delta"][av])
+    return np.array(location)
+
+def check_curvature(zpf_line: ZPFLine, step_results: tuple[Point, list[CompositionSet]], axis_data: Mapping, **kwargs):
+    """
+    Retries the step with a smaller step size where the trace of a composition set turns by more than
+    CURVATURE_ANGLE, so that tight curves are resolved. Composition sets whose composition does not change
+    (stoichiometric phases, which can turn back at a congruent point) are not considered. At the minimum step size
+    the point is accepted.
+
+    2 possible outcomes
+        a) No trace turns more than CURVATURE_ANGLE, or the step size is at its minimum -> pass
+        b) A trace turns more -> don't add point, reduce axis delta and attempt stepping again
+
+    Parameters
+    ----------
+    zpf_line : ZPFLine
+        ZPFLine that the point is stepping in
+    step_results : [Point, [CompositionSet]]
+        Results from zpf_equilibrium.update_equilibrium_with_new_conditions
+    axis_data : dict
+        Axis variable data from a map strategy class
+
+    Returns
+    -------
+    None - this check does not produce any new nodes
+    """
+    if step_results is None or len(zpf_line.points) < 2 or len(axis_data["axis_vars"]) < 2:
+        return None
+    delta_scale = kwargs.get("delta_scale", 0.5)
+    min_delta_ratio = kwargs.get("min_delta_ratio", 0.1)
+    if zpf_line.current_delta * delta_scale / axis_data["axis_delta"][zpf_line.axis_var] < min_delta_ratio:
+        return None
+    new_point, orig_cs = step_results
+    first, second = zpf_line.points[-2], zpf_line.points[-1]
+    # (orig_cs are the last point's composition sets, in the same order, solved at the new conditions)
+    if not (len(first.stable_composition_sets) == len(second.stable_composition_sets) == len(orig_cs)):
+        return None
+    compositions = [np.asarray(cs.X) for cs in orig_cs]
+    if max(np.max(np.abs(a - b)) for a, b in zip(compositions[:-1], compositions[1:])) < CURVATURE_MIN_WIDTH:
+        return None
+    for cs_first, cs_second, cs_new in zip(first.stable_composition_sets, second.stable_composition_sets, orig_cs):
+        if cs_first.phase_record.phase_name != cs_new.phase_record.phase_name:
+            return None
+        if np.max(np.abs(np.asarray(cs_new.X) - np.asarray(cs_first.X))) < 1e-9:
+            continue   # (composition fixed)
+        a = _trace_location(first, cs_first, axis_data)
+        b = _trace_location(second, cs_second, axis_data)
+        c = _trace_location(new_point, cs_new, axis_data)
+        u, w = b - a, c - b
+        if np.linalg.norm(u) < CURVATURE_MIN_SEGMENT or np.linalg.norm(w) < CURVATURE_MIN_SEGMENT:
+            continue
+        angle = np.degrees(np.arccos(np.clip(np.dot(u, w) / (np.linalg.norm(u) * np.linalg.norm(w)), -1, 1)))
+        if angle > CURVATURE_ANGLE:
+            _log.info(f"Trace of {cs_new.phase_record.phase_name} turns {angle:.0f} degrees, reducing step size from {zpf_line.current_delta} -> {zpf_line.current_delta*delta_scale}")
+            zpf_line.current_delta *= delta_scale
+            zpf_line.status = ZPFState.ATTEMPT_NEW_STEP
+            return None
+    return None
+
 def check_valid_point(zpf_line: ZPFLine, step_results: tuple[Point, list[CompositionSet]], axis_data: Mapping, **kwargs):
     """
     3 possible outcomes
@@ -140,6 +266,51 @@ def check_valid_point(zpf_line: ZPFLine, step_results: tuple[Point, list[Composi
 
             zpf_line.status = ZPFState.FAILED
             return None
+        zpf_line.status = ZPFState.ATTEMPT_NEW_STEP
+    return None
+
+# A composition set whose mole fractions change by more than this in one step has (usually) jumped to another
+# solution of the equilibrium, rather than followed the ZPF line
+COMPOSITION_JUMP = 0.1
+
+def check_composition_jump(zpf_line: ZPFLine, step_results: tuple[Point, list[CompositionSet]], axis_data: Mapping, **kwargs):
+    """
+    A step whose equilibrium jumped to another solution (a composition set moving far more than the ZPF line can in
+    one step, e.g. into another minimum of its phase) is retried with a smaller step. Following the line, the change
+    shrinks with the step; a jump does not. At the minimum step size the point is accepted as before.
+
+    2 possible outcomes
+        a) No composition set moved more than COMPOSITION_JUMP, or the step size is at its minimum -> pass
+        b) A composition set jumped -> don't add point, reduce axis delta and attempt stepping again
+
+    Parameters
+    ----------
+    zpf_line : ZPFLine
+        ZPFLine that the point is stepping in
+    step_results : [Point, [CompositionSet]]
+        Results from zpf_equilibrium.update_equilibrium_with_new_conditions
+    axis_data : dict
+        Axis variable data from a map strategy class
+
+    Returns
+    -------
+    None - this check does not produce any new nodes
+    """
+    if step_results is None or len(zpf_line.points) == 0:
+        return None
+    axis_delta = axis_data["axis_delta"]
+    delta_scale = kwargs.get("delta_scale", 0.5)
+    min_delta_ratio = kwargs.get("min_delta_ratio", 0.1)
+
+    # orig_cs are the previous point's composition sets (copied in the same order), solved at the new conditions
+    _, orig_cs = step_results
+    prev_cs = zpf_line.points[-1].stable_composition_sets
+    if len(prev_cs) != len(orig_cs):
+        return None
+    jump = max(np.max(np.abs(np.asarray(new.X) - np.asarray(prev.X))) for new, prev in zip(orig_cs, prev_cs))
+    if jump > COMPOSITION_JUMP and zpf_line.current_delta * delta_scale / axis_delta[zpf_line.axis_var] >= min_delta_ratio:
+        _log.info(f"Composition set moved {jump} in one step, reducing step size from {zpf_line.current_delta} -> {zpf_line.current_delta*delta_scale}")
+        zpf_line.current_delta *= delta_scale
         zpf_line.status = ZPFState.ATTEMPT_NEW_STEP
     return None
 
@@ -382,6 +553,20 @@ def check_global_min(zpf_line: ZPFLine, step_results: tuple[Point, list[Composit
     new_point_vars = {av: new_point.get_property(av) for av in axis_vars}
     if len(zpf_line.points) % global_check_interval == 0:
         global_test_point = zeq.find_global_min_point(new_point, system_info, pdens, tol, num_candidates)
+        if global_test_point is None and getattr(new_point, "_merged_global_min_candidate", None) is not None \
+                and getattr(zpf_line.points[-1], "_merged_global_min_candidate", None) is None:
+            # A candidate with a driving force at another composition merged with a stable composition set when they
+            # were solved together. This happens past the boundary of a two-phase region of one phase (a miscibility
+            # gap), where the stable set is metastable: it starts the solve inside the gap. Where the line has just
+            # reached it, a smaller step reaches the boundary, where the node is found. (Where the previous point
+            # had such a candidate too, it is not the boundary and the line goes on)
+            delta_scale = kwargs.get("delta_scale", 0.5)
+            min_delta_ratio = kwargs.get("min_delta_ratio", 0.1)
+            if zpf_line.current_delta * delta_scale / axis_delta[zpf_line.axis_var] >= min_delta_ratio:
+                _log.info(f"Global min candidate merged with a stable composition set. Reducing step size from {zpf_line.current_delta} -> {zpf_line.current_delta*delta_scale}")
+                zpf_line.current_delta *= delta_scale
+                zpf_line.status = ZPFState.ATTEMPT_NEW_STEP
+                return None
         if global_test_point is not None:
             _log.info(f"Global min detected. {new_point.stable_phases} -> {global_test_point.stable_phases}")
             # By default, assumed the zpf failed. When we successfully find a new node, then we change this
@@ -390,7 +575,10 @@ def check_global_min(zpf_line: ZPFLine, step_results: tuple[Point, list[Composit
             if do_not_create_node:
                 new_node = None
             else:
+                # (node finding updates the composition sets in place: keep copies of the step point's for a retry)
+                pristine = (copy.deepcopy(new_point.fixed_composition_sets), copy.deepcopy(new_point.free_composition_sets))
                 new_node = zeq.create_node_from_different_points(global_test_point, new_point.stable_composition_sets, axis_vars)
+                new_node = _retry_metastable_node(new_node, new_point, pristine, axis_vars, system_info, pdens, tol, num_candidates)
 
             if new_node is not None:
                 new_node_vars = {av: new_node.get_property(av) for av in axis_vars}
@@ -404,7 +592,45 @@ def check_global_min(zpf_line: ZPFLine, step_results: tuple[Point, list[Composit
                     _log.info(f"New node found successfully. {new_node.global_conditions}, {new_node.fixed_phases}, {new_node.free_phases}")
                     return new_node
 
+            # A node computed from a point closer to it usually succeeds: retry with a smaller step before failing
+            delta_scale = kwargs.get("delta_scale", 0.5)
+            min_delta_ratio = kwargs.get("min_delta_ratio", 0.1)
+            if zpf_line.current_delta * delta_scale / axis_delta[zpf_line.axis_var] >= min_delta_ratio:
+                _log.info(f"New node could not be found. Reducing step size from {zpf_line.current_delta} -> {zpf_line.current_delta*delta_scale}")
+                zpf_line.current_delta *= delta_scale
+                zpf_line.status = ZPFState.ATTEMPT_NEW_STEP
+                return None
             _log.info("New node could not be found. Failing ZPF line")
+
+MAX_NODE_RETRIES = 3
+
+def _retry_metastable_node(new_node, new_point, pristine, axis_vars, system_info, pdens, tol, num_candidates):
+    """
+    The candidate with the largest driving force at a step point is not necessarily the phase that became stable
+    first along the step. A node made with it is then metastable to another candidate, and the strategy would
+    discard the whole ZPF line. Instead, rebuild the node from the step point with that candidate (a few times at most).
+    """
+    for _ in range(MAX_NODE_RETRIES):
+        if new_node is None or system_info is None:
+            return new_node
+        other = zeq._find_global_min_cs(new_node, system_info, pdens, tol, num_candidates, known_states=True)
+        if other is None or not zeq._detect_degenerate_phase(new_node, other[0]):
+            return new_node
+        cs = other[0]
+        num_sv = cs.phase_record.num_statevars
+        fixed, free = copy.deepcopy(pristine[0]), copy.deepcopy(pristine[1])
+        base_point = Point(new_point.global_conditions, new_point.chemical_potentials, fixed, free)
+        candidate = CompositionSet(cs.phase_record)
+        candidate.update(np.array(cs.dof[num_sv:], dtype=np.float64), 1e-6, np.array(base_point.stable_composition_sets[0].dof[:num_sv], dtype=np.float64))
+        if not zeq._detect_degenerate_phase(base_point, candidate):
+            return new_node
+        retry_point = Point(new_point.global_conditions, new_point.chemical_potentials, fixed, free + [candidate])
+        _log.info(f"Node {new_node.stable_phases} is metastable to {cs.phase_record.phase_name}; retrying the node with it")
+        retry_node = zeq.create_node_from_different_points(retry_point, base_point.stable_composition_sets, axis_vars)
+        if retry_node is None:
+            return new_node
+        new_node = retry_node
+    return new_node
 
 def check_similar_phase_composition(zpf_line: ZPFLine, step_results: tuple[Point, list[CompositionSet]], axis_data: Mapping, **kwargs):
     """
@@ -472,9 +698,12 @@ def check_circular_loop(zpf_line: ZPFLine, step_results: tuple[Point, list[Compo
     if len(zpf_line.points) < 2:
         return None
 
-    x_curr = np.array([step_results[0].get_property(var) for var in axis_data['axis_vars']])
-    x_first = np.array([zpf_line.points[0].get_property(var) for var in axis_data['axis_vars']])
-    x_prev = np.array([zpf_line.points[-1].get_property(var) for var in axis_data['axis_vars']])
+    # Potential and composition variables are on different scales, so distances are normalized (by the step size)
+    normalize_factor = kwargs.get("normalize_factor", {av: 1 for av in axis_data['axis_vars']})
+    scale = np.array([normalize_factor[var] for var in axis_data['axis_vars']], dtype=float)
+    x_curr = np.array([step_results[0].get_property(var) for var in axis_data['axis_vars']]) / scale
+    x_first = np.array([zpf_line.points[0].get_property(var) for var in axis_data['axis_vars']]) / scale
+    x_prev = np.array([zpf_line.points[-1].get_property(var) for var in axis_data['axis_vars']]) / scale
     vfirst = x_first - x_curr
     vprev = x_curr - x_prev
     dist_first = np.sqrt(np.sum(vfirst**2))

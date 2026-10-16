@@ -252,9 +252,191 @@ def test_check_global_min(load_database):
         assert len(new_node.stable_composition_sets) == 2
         assert np.isclose(new_node.get_property(v.T), 622.456, rtol=1e-3)
 
-    # check_change_in_phases for new phase becoming stable and new node could not be found -> zpf line failed
+    # check_change_in_phases for new phase becoming stable and new node could not be found -> retry with a smaller
+    # step, and at the minimum step size -> zpf line failed
     step_result = zeq.update_equilibrium_with_new_conditions(zpf_line.points[-1], new_conditions)
     # do_not_create_node will skip node creation, effectively simulating a failed equilibrium
     extra_args["do_not_create_node"] = True
+    delta = zpf_line.current_delta
+    new_node = zchk.check_global_min(zpf_line, step_result, axis_data, **extra_args)
+    assert zpf_line.status == ZPFState.ATTEMPT_NEW_STEP
+    assert np.isclose(zpf_line.current_delta, delta * extra_args["delta_scale"])
+
+    zpf_line.status = ZPFState.NOT_FINISHED
+    zpf_line.current_delta = axis_data["axis_delta"][zpf_line.axis_var] * extra_args["min_delta_ratio"]
+    step_result = zeq.update_equilibrium_with_new_conditions(zpf_line.points[-1], new_conditions)
     new_node = zchk.check_global_min(zpf_line, step_result, axis_data, **extra_args)
     assert zpf_line.status == ZPFState.FAILED
+class _AxisPoint:
+    """Stand-in for a Point in check_circular_loop, which only reads the axis variables"""
+    def __init__(self, values):
+        self.values = values
+
+    def get_property(self, var):
+        return self.values[var]
+
+def test_check_circular_loop_normalizes_axis_variables():
+    axes = [v.T, v.X("NB")]
+    axis_data, extra_args = _create_default_arguments(axes, [10, 0.02], [(800, 2800), (0, 1)])
+
+    def line_through(points):
+        zpf_line = ZPFLine([], [])
+        zpf_line.points = [_AxisPoint(dict(zip(axes, p))) for p in points]
+        return zpf_line
+
+    # A line over a maximum in temperature (e.g. a liquidus over a congruent melting point) comes back down to the
+    # temperature it started at, far away in composition. In kelvin and mole fraction alike, the first point would be
+    # 1 K away and the previous one 11 K, and the line would end there as a loop
+    zpf_line = line_through([(1000, 0.30), (1050, 0.40), (1012, 0.48)])
+    step_result = (_AxisPoint({v.T: 1001, v.X("NB"): 0.50}), [])
+    zchk.check_circular_loop(zpf_line, step_result, axis_data, **extra_args)
+    assert zpf_line.status == ZPFState.NOT_FINISHED
+
+    # A line that does return to its first point is still ended
+    zpf_line = line_through([(1000, 0.30), (1050, 0.40), (1010, 0.32)])
+    step_result = (_AxisPoint({v.T: 1001, v.X("NB"): 0.301}), [])
+    zchk.check_circular_loop(zpf_line, step_result, axis_data, **extra_args)
+    assert zpf_line.status == ZPFState.REACHED_LIMIT
+
+class _CompsetStandIn:
+    """Stand-in for a CompositionSet in check_composition_jump, which only reads the mole fractions"""
+    def __init__(self, X):
+        self.X = np.array(X)
+
+class _PointStandIn:
+    def __init__(self, compsets):
+        self.stable_composition_sets = compsets
+
+def test_check_composition_jump():
+    axes = [v.X("CR"), v.X("NI")]
+    axis_data, extra_args = _create_default_arguments(axes, [0.05, 0.05], [(0, 1), (0, 1)])
+    previous = [_CompsetStandIn([0.497, 0.016, 0.487]), _CompsetStandIn([0.082, 0.916, 0.002])]
+
+    def line_at(delta):
+        zpf_line = ZPFLine([], [])
+        zpf_line.points = [_PointStandIn(previous)]
+        zpf_line.axis_var = v.X("CR")
+        zpf_line.current_delta = delta
+        return zpf_line
+
+    # Following the line: the composition sets move by about the step size
+    followed = [_CompsetStandIn([0.471, 0.027, 0.502]), _CompsetStandIn([0.029, 0.966, 0.005])]
+    zpf_line = line_at(0.05)
+    zchk.check_composition_jump(zpf_line, (None, followed), axis_data, **extra_args)
+    assert zpf_line.status == ZPFState.NOT_FINISHED
+    assert zpf_line.current_delta == 0.05
+
+    # The equilibrium jumped to another solution (the first set lost all its Al): retry with a smaller step
+    jumped = [_CompsetStandIn([0.0, 0.18, 0.82]), _CompsetStandIn([0.0, 0.991, 0.009])]
+    zpf_line = line_at(0.05)
+    zchk.check_composition_jump(zpf_line, (None, jumped), axis_data, **extra_args)
+    assert zpf_line.status == ZPFState.ATTEMPT_NEW_STEP
+    assert np.isclose(zpf_line.current_delta, 0.025)
+
+    # At the minimum step size the point is accepted
+    zpf_line = line_at(0.005)
+    zchk.check_composition_jump(zpf_line, (None, jumped), axis_data, **extra_args)
+    assert zpf_line.status == ZPFState.NOT_FINISHED
+
+class _EdgeCompsetStandIn:
+    """Stand-in for a CompositionSet in check_diagram_edge, which only reads the mole fractions"""
+    def __init__(self, X):
+        self.X = np.array(X)
+
+def test_check_diagram_edge():
+    axis_data, extra_args = _create_default_arguments([v.X("B"), v.X("C")], [0.05, 0.05], [(0, 1), (0, 1)])
+    def run(compsets):
+        zpf_line = ZPFLine([], [])
+        zchk.check_diagram_edge(zpf_line, (_PointStandIn(compsets), []), axis_data, **extra_args)
+        return zpf_line.status
+    # both composition sets on the A-B edge of a ternary (no C): the line ends
+    assert run([_EdgeCompsetStandIn([0.8, 0.2, 1e-10]), _EdgeCompsetStandIn([0.6, 0.4, 1e-12])]) == ZPFState.REACHED_LIMIT
+    # one of them off the edge: the line goes on
+    assert run([_EdgeCompsetStandIn([0.8, 0.2, 1e-10]), _EdgeCompsetStandIn([0.6, 0.39, 0.01])]) == ZPFState.NOT_FINISHED
+    # a phase without C and one at the opposite corner (e.g. a metal and an oxide): the line goes on
+    assert run([_EdgeCompsetStandIn([0.7, 0.3, 0.0]), _EdgeCompsetStandIn([0.0, 0.4, 0.6])]) == ZPFState.NOT_FINISHED
+
+class _PhaseRecordStandIn:
+    def __init__(self, phase_name):
+        self.phase_name = phase_name
+        self.nonvacant_elements = ["A", "B"]
+
+class _TracedCompsetStandIn:
+    """Stand-in for a CompositionSet in check_curvature, which reads the phase and the mole fractions"""
+    def __init__(self, phase_name, x_b):
+        self.phase_record = _PhaseRecordStandIn(phase_name)
+        self.X = np.array([1 - x_b, x_b])
+
+class _TracedPointStandIn:
+    def __init__(self, T, compsets):
+        self.T = T
+        self.stable_composition_sets = compsets
+
+    def get_property(self, var):
+        return self.T
+
+def test_check_curvature():
+    axis_data, extra_args = _create_default_arguments([v.T, v.X("B")], [10, 0.02], [(300, 2000), (0, 1)])
+
+    def line_with(points, delta=0.02):
+        zpf_line = ZPFLine([], [])
+        zpf_line.points = [_TracedPointStandIn(T, [_TracedCompsetStandIn("ALPHA", a), _TracedCompsetStandIn("BETA", b)]) for T, a, b in points]
+        zpf_line.axis_var = v.X("B")
+        zpf_line.current_delta = delta
+        return zpf_line
+
+    def step(T, a, b):
+        return (_TracedPointStandIn(T, []), [_TracedCompsetStandIn("ALPHA", a), _TracedCompsetStandIn("BETA", b)])
+
+    # (in units of the axis steps, 10 K and 0.02: the ALPHA trace steps by (1, 1))
+    history = [(1000, 0.30, 0.60), (1010, 0.32, 0.61)]
+    # continuing straight: pass
+    zpf_line = line_with(history)
+    zchk.check_curvature(zpf_line, step(1020, 0.34, 0.62), axis_data, **extra_args)
+    assert zpf_line.status == ZPFState.NOT_FINISHED
+    # turning by 90 degrees: retry with a smaller step
+    zpf_line = line_with(history)
+    zchk.check_curvature(zpf_line, step(1000, 0.34, 0.62), axis_data, **extra_args)
+    assert zpf_line.status == ZPFState.ATTEMPT_NEW_STEP
+    assert np.isclose(zpf_line.current_delta, 0.01)
+    # at the minimum step size the point is accepted
+    zpf_line = line_with(history, delta=0.002)
+    zchk.check_curvature(zpf_line, step(1000, 0.34, 0.62), axis_data, **extra_args)
+    assert zpf_line.status == ZPFState.NOT_FINISHED
+    # the trace of a composition set of fixed composition (a compound) may turn back: here ALPHA's turns by 180
+    # degrees (2 K up, 2 K down) while BETA's turns by 11 degrees
+    zpf_line = line_with([(1000, 0.30, 0.60), (1002, 0.30, 0.64)])
+    zchk.check_curvature(zpf_line, step(1000, 0.30, 0.68), axis_data, **extra_args)
+    assert zpf_line.status == ZPFState.NOT_FINISHED
+
+
+class _InvariantCompsetStandIn:
+    """Stand-in for a CompositionSet in _same_invariant, which reads the phase name, state variables and composition"""
+    def __init__(self, name, X, T=1000.0):
+        self.phase_record = type('PhaseRecordStandIn', (), {'phase_name': name, 'num_statevars': 3})()
+        self.X = np.array(X)
+        self.dof = np.array([1.0, 101325.0, T] + list(X))
+
+class _InvariantStandIn:
+    def __init__(self, sets):
+        self.stable_composition_sets = sets
+
+def test_same_invariant():
+    from pycalphad.mapping.primitives import _same_invariant
+    node = _InvariantStandIn([_InvariantCompsetStandIn('A', [0.1, 0.2, 0.7]), _InvariantCompsetStandIn('B', [0.5, 0.4, 0.1]),
+                              _InvariantCompsetStandIn('B', [0.2, 0.7, 0.1])])
+    # the same invariant, found by another calculation (compositions within the tolerance, in another order)
+    other = _InvariantStandIn([_InvariantCompsetStandIn('B', [0.201, 0.699, 0.1]), _InvariantCompsetStandIn('A', [0.102, 0.199, 0.699]),
+                               _InvariantCompsetStandIn('B', [0.5, 0.401, 0.099])])
+    assert _same_invariant(node, other)
+    # a composition further away, other phases, another temperature, or not an invariant: different nodes
+    far = _InvariantStandIn([_InvariantCompsetStandIn('A', [0.12, 0.2, 0.68]), _InvariantCompsetStandIn('B', [0.5, 0.4, 0.1]),
+                             _InvariantCompsetStandIn('B', [0.2, 0.7, 0.1])])
+    assert not _same_invariant(node, far)
+    renamed = _InvariantStandIn([_InvariantCompsetStandIn('C', [0.1, 0.2, 0.7]), _InvariantCompsetStandIn('B', [0.5, 0.4, 0.1]),
+                                 _InvariantCompsetStandIn('B', [0.2, 0.7, 0.1])])
+    assert not _same_invariant(node, renamed)
+    hotter = _InvariantStandIn([_InvariantCompsetStandIn(cs.phase_record.phase_name, cs.X, T=1010.0) for cs in node.stable_composition_sets])
+    assert not _same_invariant(node, hotter)
+    two = _InvariantStandIn(node.stable_composition_sets[:2])
+    assert not _same_invariant(two, _InvariantStandIn(other.stable_composition_sets[:2]))

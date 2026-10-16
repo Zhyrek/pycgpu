@@ -212,12 +212,9 @@ class BinaryStrategy(MapStrategy):
         # Sort exit point to fix composition set that varies the least and set axis variable with av1 where d(av1)/d(av2) > d(av2)/d(av1)
         norm = {av: self.normalize_factor(av) for av in self.axis_vars}
         exit_point, axis_var = _sort_point(exit_point, self.axis_vars, norm)
-        for d in directions:
-            dir_results = self._test_direction(exit_point, axis_var, d)
-            if dir_results is not None:
-                av_delta, other_av_delta = dir_results
-                _log.info(f"Found direction: {axis_var, d, av_delta} for point {exit_point.fixed_phases}, {exit_point.free_phases}, {exit_point.global_conditions}")
-                return exit_point, axis_var, d, av_delta
+        found = self._first_direction(exit_point, [(axis_var, d) for d in directions])
+        if found is not None:
+            return (exit_point,) + found
 
         return None
     
@@ -226,7 +223,7 @@ class BinaryStrategy(MapStrategy):
         Post global min check after finding node to ensure it's not a metastable node
         """
         _log.info("Checking if new node is metastable")
-        cs_result = zeq._find_global_min_cs(new_node, system_info=self.system_info, pdens=self.GLOBAL_MIN_PDENS, tol=self.GLOBAL_MIN_TOL, num_candidates=self.GLOBAL_MIN_NUM_CANDIDATES)
+        cs_result = zeq._find_global_min_cs(new_node, system_info=self.system_info, pdens=self.GLOBAL_MIN_PDENS, tol=self.GLOBAL_MIN_TOL, num_candidates=self.GLOBAL_MIN_NUM_CANDIDATES, known_states=True)
         if cs_result is not None:
             if not zeq._detect_degenerate_phase(new_node, cs_result[0]):
                 cs_result = None

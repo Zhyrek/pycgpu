@@ -1,4 +1,5 @@
 import copy
+import itertools
 from dataclasses import dataclass
 from enum import Enum
 from typing import List, Mapping
@@ -28,11 +29,50 @@ class ExitHint(Enum):
     NORMAL = 0
     POINT_IS_EXIT = 1
 
+_SUBLATTICE_PERMUTATIONS = {}
+
+def _sublattice_permutations(phase_record):
+    """
+    Permutations of a phase's site fractions that exchange sublattices with the same constituents and site ratio
+    (e.g. the two sublattices of B2, or the four of an FCC or BCC with four sublattices, but not those of L1_2,
+    3:1): the site fractions of the ordering variants of one state. Excludes the identity. Cached per sublattice
+    structure
+    """
+    try:
+        site_ratios = tuple(float(r) for r in phase_record.phase_record_factory.models[phase_record.phase_name].site_ratios)
+    except (TypeError, RuntimeError):
+        return []   # (site ratios that depend on the constitution, e.g. an ionic liquid: no exchangeable sublattices)
+    variables = tuple((variable.sublattice_index, str(variable.species)) for variable in phase_record.variables)
+    key = (variables, site_ratios)
+    if key not in _SUBLATTICE_PERMUTATIONS:
+        sublattices = {}
+        for index, (sublattice, species) in enumerate(variables):
+            sublattices.setdefault(sublattice, []).append((species, index))
+        groups = {}
+        for sublattice, entries in sublattices.items():
+            if len(entries) > 1:
+                entries = sorted(entries)
+                groups.setdefault((site_ratios[sublattice], tuple(sp for sp, _ in entries)), []).append([i for _, i in entries])
+        groups = [members for members in groups.values() if len(members) > 1]
+        permutations = []
+        for orders in itertools.product(*[itertools.permutations(range(len(members))) for members in groups]):
+            perm = list(range(len(variables)))
+            for members, order in zip(groups, orders):
+                for target, source in zip(members, order):
+                    for i, j in zip(target, members[source]):
+                        perm[i] = j
+            if perm != list(range(len(variables))):
+                permutations.append(np.array(perm))
+        _SUBLATTICE_PERMUTATIONS[key] = permutations
+    return _SUBLATTICE_PERMUTATIONS[key]
+
 def _eq_compset(compset: CompositionSet, other: CompositionSet):
     """
-    2 tests
+    3 tests
         If compset and other point are the same object (same memory)
         If compset and other has the same phase name and DOF (within tolerance)
+        If compset and other are ordering variants of one state: the same phase, state variables and site fractions
+        after exchanging sublattices with the same constituents
     """
     # Composition set equality
     if compset is other:
@@ -41,7 +81,39 @@ def _eq_compset(compset: CompositionSet, other: CompositionSet):
         return False
     if np.allclose(compset.dof, other.dof, atol=CS_EQ_TOL):
         return True
+    num_sv = compset.phase_record.num_statevars
+    if np.allclose(compset.dof[:num_sv], other.dof[:num_sv], atol=CS_EQ_TOL):
+        site_fractions, other_site_fractions = np.asarray(compset.dof[num_sv:]), np.asarray(other.dof[num_sv:])
+        for perm in _sublattice_permutations(compset.phase_record):
+            if np.allclose(site_fractions[perm], other_site_fractions, atol=CS_EQ_TOL):
+                return True
     return False
+
+# Invariant nodes (three or more composition sets) with the same phases and every phase composition within
+# NODE_COMPOSITION_TOL (and state variables within NODE_STATEVAR_TOL) are the same node: an invariant's phase
+# compositions are fixed, so such nodes differ only by the convergence of the calculations that found them, and
+# treating them as different would map the same lines from each of them again
+NODE_COMPOSITION_TOL = 5e-3
+NODE_STATEVAR_TOL = 0.5
+
+def _same_invariant(node: "Point", other: "Point"):
+    sets, other_sets = node.stable_composition_sets, other.stable_composition_sets
+    if len(sets) < 3 or len(sets) != len(other_sets):
+        return False
+    if sorted(cs.phase_record.phase_name for cs in sets) != sorted(cs.phase_record.phase_name for cs in other_sets):
+        return False
+    num_sv = sets[0].phase_record.num_statevars
+    if not np.allclose(sets[0].dof[:num_sv], other_sets[0].dof[:num_sv], atol=NODE_STATEVAR_TOL, rtol=0):
+        return False
+    remaining = list(other_sets)
+    for cs in sets:
+        for o in remaining:
+            if o.phase_record.phase_name == cs.phase_record.phase_name and np.max(np.abs(np.asarray(cs.X) - np.asarray(o.X))) < NODE_COMPOSITION_TOL:
+                remaining.remove(o)
+                break
+        else:
+            return False
+    return True
 
 def _get_phase_list_with_multiplicity(phases: list[str]):
     """
@@ -464,7 +536,7 @@ class NodeQueue():
             # If node is already in node queue, then add the parent to the list
             # of encountered points in the node
             for other in self.nodes:
-                if other == candidate_node:
+                if other == candidate_node or (not check_parent and _same_invariant(other, candidate_node)):
                     # If checking that the parent is also the same (and from the same direction)
                     if check_parent:
                         if (other.parent == candidate_node.parent) and (other.axis_var == candidate_node.axis_var) and (other.axis_direction == candidate_node.axis_direction):

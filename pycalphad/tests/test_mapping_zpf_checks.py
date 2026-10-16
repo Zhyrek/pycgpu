@@ -288,3 +288,43 @@ def test_check_circular_loop_normalizes_axis_variables():
     step_result = (_AxisPoint({v.T: 1001, v.X("NB"): 0.301}), [])
     zchk.check_circular_loop(zpf_line, step_result, axis_data, **extra_args)
     assert zpf_line.status == ZPFState.REACHED_LIMIT
+
+class _CompsetStandIn:
+    """Stand-in for a CompositionSet in check_composition_jump, which only reads the mole fractions"""
+    def __init__(self, X):
+        self.X = np.array(X)
+
+class _PointStandIn:
+    def __init__(self, compsets):
+        self.stable_composition_sets = compsets
+
+def test_check_composition_jump():
+    axes = [v.X("CR"), v.X("NI")]
+    axis_data, extra_args = _create_default_arguments(axes, [0.05, 0.05], [(0, 1), (0, 1)])
+    previous = [_CompsetStandIn([0.497, 0.016, 0.487]), _CompsetStandIn([0.082, 0.916, 0.002])]
+
+    def line_at(delta):
+        zpf_line = ZPFLine([], [])
+        zpf_line.points = [_PointStandIn(previous)]
+        zpf_line.axis_var = v.X("CR")
+        zpf_line.current_delta = delta
+        return zpf_line
+
+    # Following the line: the composition sets move by about the step size
+    followed = [_CompsetStandIn([0.471, 0.027, 0.502]), _CompsetStandIn([0.029, 0.966, 0.005])]
+    zpf_line = line_at(0.05)
+    zchk.check_composition_jump(zpf_line, (None, followed), axis_data, **extra_args)
+    assert zpf_line.status == ZPFState.NOT_FINISHED
+    assert zpf_line.current_delta == 0.05
+
+    # The equilibrium jumped to another solution (the first set lost all its Al): retry with a smaller step
+    jumped = [_CompsetStandIn([0.0, 0.18, 0.82]), _CompsetStandIn([0.0, 0.991, 0.009])]
+    zpf_line = line_at(0.05)
+    zchk.check_composition_jump(zpf_line, (None, jumped), axis_data, **extra_args)
+    assert zpf_line.status == ZPFState.ATTEMPT_NEW_STEP
+    assert np.isclose(zpf_line.current_delta, 0.025)
+
+    # At the minimum step size the point is accepted
+    zpf_line = line_at(0.005)
+    zchk.check_composition_jump(zpf_line, (None, jumped), axis_data, **extra_args)
+    assert zpf_line.status == ZPFState.NOT_FINISHED

@@ -143,6 +143,51 @@ def check_valid_point(zpf_line: ZPFLine, step_results: tuple[Point, list[Composi
         zpf_line.status = ZPFState.ATTEMPT_NEW_STEP
     return None
 
+# A composition set whose mole fractions change by more than this in one step has (usually) jumped to another
+# solution of the equilibrium, rather than followed the ZPF line
+COMPOSITION_JUMP = 0.1
+
+def check_composition_jump(zpf_line: ZPFLine, step_results: tuple[Point, list[CompositionSet]], axis_data: Mapping, **kwargs):
+    """
+    A step whose equilibrium jumped to another solution (a composition set moving far more than the ZPF line can in
+    one step, e.g. into another minimum of its phase) is retried with a smaller step. Following the line, the change
+    shrinks with the step; a jump does not. At the minimum step size the point is accepted as before.
+
+    2 possible outcomes
+        a) No composition set moved more than COMPOSITION_JUMP, or the step size is at its minimum -> pass
+        b) A composition set jumped -> don't add point, reduce axis delta and attempt stepping again
+
+    Parameters
+    ----------
+    zpf_line : ZPFLine
+        ZPFLine that the point is stepping in
+    step_results : [Point, [CompositionSet]]
+        Results from zpf_equilibrium.update_equilibrium_with_new_conditions
+    axis_data : dict
+        Axis variable data from a map strategy class
+
+    Returns
+    -------
+    None - this check does not produce any new nodes
+    """
+    if step_results is None or len(zpf_line.points) == 0:
+        return None
+    axis_delta = axis_data["axis_delta"]
+    delta_scale = kwargs.get("delta_scale", 0.5)
+    min_delta_ratio = kwargs.get("min_delta_ratio", 0.1)
+
+    # orig_cs are the previous point's composition sets (copied in the same order), solved at the new conditions
+    _, orig_cs = step_results
+    prev_cs = zpf_line.points[-1].stable_composition_sets
+    if len(prev_cs) != len(orig_cs):
+        return None
+    jump = max(np.max(np.abs(np.asarray(new.X) - np.asarray(prev.X))) for new, prev in zip(orig_cs, prev_cs))
+    if jump > COMPOSITION_JUMP and zpf_line.current_delta * delta_scale / axis_delta[zpf_line.axis_var] >= min_delta_ratio:
+        _log.info(f"Composition set moved {jump} in one step, reducing step size from {zpf_line.current_delta} -> {zpf_line.current_delta*delta_scale}")
+        zpf_line.current_delta *= delta_scale
+        zpf_line.status = ZPFState.ATTEMPT_NEW_STEP
+    return None
+
 def _check_axis_values_within_limit(new_point_vars: dict[v.StateVariable, float], axis_data: Mapping):
     """
     Checks that axis values are within the axis limits

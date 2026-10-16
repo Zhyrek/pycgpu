@@ -892,10 +892,11 @@ def test_automatic_starting_points_keep_forced_starting_points(load_database):
         assert False, "No BCC_A2+LIQUID ZPF line mapped inside the La BCC window (1134-1194 K)"
 
 @select_database("AuCu-98Sun-LB.tdb")
-def test_automatic_starting_points_for_every_merged_field(load_database):
+def test_automatic_starting_points_for_every_merged_field(load_database, monkeypatch):
     """
     Fields merged into one same-name step zpf line each get a starting point (Au-rich fcc+Au3Cu at 300 K)
     """
+    import pycalphad.mapping.zpf_checks as zchk
     dbf = load_database()
     # Au-rich half of Au-Cu. The fcc-based phases (fcc, Au3Cu, AuCu, ...) are all FCC_4SL
     conds = {v.P: 101325, v.N: 1, v.T: (300, 540, 20), v.X("CU"): (0, 0.5, 0.05)}
@@ -904,8 +905,12 @@ def test_automatic_starting_points_for_every_merged_field(load_database):
     # 0.05 steps jump over the narrow Au3Cu field (x(CU) = 0.237-0.280) into the fcc+Au3Cu field: the same two
     # composition sets slide from one field into the other, so both fields end up in one step zpf line
     step_conds = {v.P: 101325, v.N: 1, v.T: 300, v.X("CU"): (0.2, 0.52, 0.05)}
-    step = StepStrategy(dbf, ["AU", "CU", "VA"], ["FCC_4SL"], step_conds, models=strategy.models, phase_record_factory=strategy.phase_records)
-    step.do_map()
+    # (check_composition_jump retries the step that slides into the next field, so the step map no longer merges
+    # them; without it, it does, as such a step map can wherever a field is narrower than the step)
+    with monkeypatch.context() as m:
+        m.setattr(zchk, "check_composition_jump", lambda *args, **kwargs: None)
+        step = StepStrategy(dbf, ["AU", "CU", "VA"], ["FCC_4SL"], step_conds, models=strategy.models, phase_record_factory=strategy.phase_records)
+        step.do_map()
     assert any(len(zpf_line.stable_phases) == 2 and np.min(zpf_line.get_var_list(v.X("CU"))) < 0.237
                and np.max(zpf_line.get_var_list(v.X("CU"))) > 0.280 for zpf_line in step.zpf_lines)
 

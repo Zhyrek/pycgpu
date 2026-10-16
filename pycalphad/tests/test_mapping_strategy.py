@@ -730,3 +730,38 @@ def test_strategy_plotting_respects_units(load_database):
     np.testing.assert_allclose(node_zpf_line.get_var_list(_get_phase_specific_variable(None, v.T))[-1], 933.600, atol=1e-3)  # value in Kelvin
     np.testing.assert_allclose(node_zpf_line.get_var_list(_get_phase_specific_variable(None, v.T["celsius"]))[-1], 933.600 - 273.15, atol=1e-3)  # value in Celsius
     np.testing.assert_allclose(node_zpf_line.get_var_list(_get_phase_specific_variable(None, v.T["degC"]))[-1], 933.600 - 273.15, atol=1e-3)  # value in Celsius
+
+@select_database("alcrni.tdb")
+def test_global_min_check_other_minimum_of_stable_phase(load_database):
+    """
+    Two B2 composition sets are stable at this point (Al-Cr-Ni, 1200 K, reached by mapping): a disordered Cr-rich one
+    and an ordered Al-Ni one with x(CR) = 0.07. Another ordered B2 minimum, near x(CR) = 0.02, x(NI) = 0.41, lies about
+    150 J/mol below their tangent plane. The B2 sample with the largest driving force is next to the Cr-rich set and
+    relaxes onto it, so the check has to test the best B2 sample away from the stable sets as well.
+    """
+    dbf = load_database()
+    comps = ["AL", "CR", "NI", "VA"]
+    phases = list(dbf.phases.keys())
+    conds = {v.T: 1200, v.P: 101325, v.N: 1, v.X("CR"): 0.07445, v.X("NI"): 0.35214}
+    models = instantiate_models(dbf, comps, phases)
+    phase_records = PhaseRecordFactory(dbf, comps, {v.N, v.P, v.T}, models)
+    state_variables = np.array([1, 101325, 1200], dtype=np.float64)
+
+    cr_rich = CompositionSet(phase_records["B2"])
+    cr_rich.update(np.array([0.44816, 0.54992, 0.00192, 1e-10, 0.44816, 0.54992, 0.00192, 1e-10]), 0.0, state_variables)
+    al_ni = CompositionSet(phase_records["B2"])
+    al_ni.update(np.array([0.13629, 0.14638, 0.69718, 0.02015, 0.99898, 0.00101, 1e-5, 1e-10]), 1.0, state_variables)
+    point = Point(conds, np.array([-71886.23, -62989.81, -159386.097]), [cr_rich], [al_ni])
+
+    sys_info = {
+        "dbf": dbf,
+        "comps": comps,
+        "phases": phases,
+        "models": models,
+        "phase_records": phase_records,
+    }
+    new_point = find_global_min_point(point, sys_info)
+    assert new_point is not None
+    new_cs = new_point.stable_composition_sets[-1]
+    assert new_cs.phase_record.phase_name == "B2"
+    assert new_cs.X[1] < 0.04 and new_cs.X[2] > 0.38

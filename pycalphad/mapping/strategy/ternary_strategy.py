@@ -273,6 +273,16 @@ class TernaryStrategy(MapStrategy):
                 _log.info(f"Found direction: {axis_var, d, av_delta} for point {exit_point.fixed_phases}, {exit_point.free_phases}, {exit_point.global_conditions}")
                 return exit_point, axis_var, d, av_delta
 
+        # Steps in the axis variable that the line changes most in can fail in both directions, e.g. from an exit
+        # point next to an edge of the diagram (a step towards the edge leaves it), so try the other axis variable
+        other_axis_var = self.axis_vars[1 - self.axis_vars.index(axis_var)]
+        for d in [Direction.POSITIVE, Direction.NEGATIVE]:
+            dir_results = self._test_direction(exit_point, other_axis_var, d)
+            if dir_results is not None:
+                av_delta, other_av_delta = dir_results
+                _log.info(f"Found direction: {other_axis_var, d, av_delta} for point {exit_point.fixed_phases}, {exit_point.free_phases}, {exit_point.global_conditions}")
+                return exit_point, other_axis_var, d, av_delta
+
         self._add_starting_point_at_new_condition(exit_point, normal, Direction.POSITIVE if norm_delta_dot > 0 else Direction.NEGATIVE)
 
         return None

@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 
 from pycalphad import binplot, ternplot, Database, variables as v
 from pycalphad.tests.fixtures import select_database, load_database
-from pycalphad.core.utils import instantiate_models, get_state_variables
+from pycalphad.core.utils import instantiate_models, get_state_variables, filter_phases, unpack_species
 from pycalphad.codegen.phase_record_factory import PhaseRecordFactory
 from pycalphad.core.composition_set import CompositionSet
 from pycalphad.property_framework import as_property
@@ -122,6 +122,25 @@ def test_ternary_strategy(load_database):
     new_num_nodes = len(strategy.node_queue.nodes)
     assert new_num_nodes == num_nodes + 1
 
+
+@select_database("alcocrni.tdb")
+def test_ternary_strategy_exit_near_edge(load_database):
+    """
+    At 1300 K, the BCC_B2 + BCC_B2 line between the two tie triangles leaves the AL8CR5_L + BCC_B2 + BCC_B2 node from
+    an exit point at x(NI) = 0.003, next to the Al-Cr edge. Steps in X(NI), the axis variable the line changes most
+    in there, fail in both directions; the exit has to try X(CR), or the line is not traced from that node and stops
+    short of it (at x(AL) = 0.46 instead of 0.55).
+    """
+    dbf = load_database()
+    comps = ["AL", "CR", "NI", "VA"]
+    phases = filter_phases(dbf, unpack_species(dbf, comps))
+    strategy = TernaryStrategy(dbf, comps, phases, {v.X("CR"): (0, 1, 0.05), v.X("NI"): (0, 1, 0.05), v.T: 1300, v.P: 101325})
+    strategy.do_map()
+
+    x_al = [cs.X[0] for zpf_line in strategy.zpf_lines if zpf_line.stable_phases == ["BCC_B2", "BCC_B2"]
+            for point in zpf_line.points for cs in point.stable_composition_sets]
+    assert len(x_al) > 0
+    assert max(x_al) > 0.5
 
 @select_database("crtiv_ghosh.tdb")
 def test_plot_ternary_without_tielines(load_database):

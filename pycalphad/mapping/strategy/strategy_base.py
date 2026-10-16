@@ -18,6 +18,16 @@ import pycalphad.mapping.utils as map_utils
 
 _log = logging.getLogger(__name__)
 
+# Distance (in units of the axis step sizes) within which a starting point counts as lying on a ZPF line
+STARTING_POINT_TOLERANCE = 0.5
+
+def _distance_to_segment(p, a, b):
+    """Distance from point p to the segment from a to b (any dimension)"""
+    ab = b - a
+    denominator = np.dot(ab, ab)
+    t = 0.0 if denominator == 0 else np.clip(np.dot(p - a, ab) / denominator, 0, 1)
+    return np.linalg.norm(p - (a + t * ab))
+
 class MapStrategy:
     """
     Base strategy class for phase diagram construction.
@@ -234,6 +244,8 @@ class MapStrategy:
         """
         if len(self.zpf_lines) > 0 and self.zpf_lines[-1].status == ZPFState.NOT_FINISHED:
             self._continue_zpf_line()
+            if self.zpf_lines and self.zpf_lines[-1].status not in (ZPFState.NOT_FINISHED, ZPFState.FAILED):
+                self._drop_starting_points_on_line(self.zpf_lines[-1])
         elif len(self._exits) > self._exit_index:
             _log.info("No zpf line or last zpf line has finished. Attempting to start zpf line from next exit")
             # This will start a new zpf line that is not finished
@@ -418,10 +430,114 @@ class MapStrategy:
         if zpf_line.status in valid_statuses:
             new_point, _ = step_results
             zpf_line.append(new_point)
+            if zpf_line.status == ZPFState.NOT_FINISHED and self._on_existing_line(zpf_line):
+                _log.info(f"ZPF line {zpf_line.fixed_phases}, {zpf_line.free_phases} reached an existing ZPF line with the same phases. Ending ZPF line")
+                zpf_line.status = ZPFState.REACHED_LIMIT
+                # (a line that is on an existing line from its start adds nothing)
+                if len(zpf_line.points) <= 2 and self.zpf_lines and self.zpf_lines[-1] is zpf_line:
+                    self.zpf_lines.pop()
 
             # If we successfully added a new point, attempt to increase the axis delta if is smaller than the default
             if zpf_line.current_delta < self.axis_delta[zpf_line.axis_var]:
                 zpf_line.current_delta = np.amin([self.axis_delta[zpf_line.axis_var], zpf_line.current_delta / self.DELTA_SCALE])
+
+    def _point_location(self, point: Point, phases: list[str]):
+        """
+        Compositions of the point's composition sets, ordered as `phases` (sets of one phase by composition), and
+        the temperature if it is an axis variable, in units of the axis step sizes; None if the point does not have
+        these phases
+        """
+        if point is None:
+            return None
+        comp_sets = sorted(point.stable_composition_sets, key=lambda cs: (cs.phase_record.phase_name, tuple(cs.X)))
+        if sorted(cs.phase_record.phase_name for cs in comp_sets) != sorted(phases):
+            return None
+        composition_deltas = [self.axis_delta[av] for av in self.axis_vars if isinstance(av, v.X)]
+        location = [np.asarray(cs.X, dtype=float) / min(composition_deltas) for cs in comp_sets] if composition_deltas else []
+        for av in self.axis_vars:
+            if map_utils.is_state_variable(av):
+                location.append(np.atleast_1d(float(point.get_property(av))) / self.axis_delta[av])
+        return np.concatenate(location)
+
+    def _on_existing_line(self, zpf_line: ZPFLine):
+        """
+        Whether the last point of the ZPF line lies on another ZPF line with the same phases: the two have met (e.g.
+        a line from a node reaching one traced from a starting point), or the line retraces one from where it starts
+        (e.g. from a node exit at which a line traced from a starting point begins; a line from a congruent point
+        that steps down the other side does not). For a line from a starting point, points within a step of its
+        start are not counted, since the two halves of the line traced from a starting point begin at the same place.
+        Lines that failed are not counted: they can stop short of where this line goes
+        """
+        if len(self.axis_vars) < 2:
+            return False
+        phases = sorted(zpf_line.stable_phases)
+        last = self._point_location(zpf_line.points[-1], phases)
+        start = self._point_location(zpf_line.points[0], phases)
+        if last is None or start is None:
+            return False
+        if self._current_node.exit_hint == ExitHint.POINT_IS_EXIT and np.max(np.abs(last - start)) < 1:
+            return False
+        for other in self.zpf_lines:
+            if other is zpf_line or other.status == ZPFState.FAILED or sorted(other.stable_phases) != phases:
+                continue
+            locations = [self._point_location(point, phases) for point in other.points]
+            if any(loc is None for loc in locations):
+                continue
+            if len(locations) == 1:
+                if np.max(np.abs(last - locations[0])) < STARTING_POINT_TOLERANCE:
+                    return True
+            elif any(_distance_to_segment(last, a, b) < STARTING_POINT_TOLERANCE for a, b in zip(locations[:-1], locations[1:])):
+                return True
+        return False
+
+    def _drop_duplicate_starting_points(self, zpf_line: ZPFLine):
+        """
+        A starting point still in the node queue at the same place as the starting point a ZPF line has just started
+        from, stepping the same way, would trace the same ZPF line again: remove it. (Different starting points can
+        land in the same two-phase region.) Other starting points on a traced line are kept: if that line stops
+        short, their line covers the rest, and where it overlaps the traced line it ends (see _on_existing_line).
+        """
+        if self._current_node.exit_hint != ExitHint.POINT_IS_EXIT or len(self.axis_vars) < 2:
+            return
+        phases = sorted(zpf_line.stable_phases)
+        start = self._point_location(zpf_line.points[0], phases)
+        if start is None:
+            return
+        pending = self.node_queue.nodes[self.node_queue._current_node_index:]
+        kept = []
+        for node in pending:
+            location = self._point_location(node, phases) if node.exit_hint == ExitHint.POINT_IS_EXIT else None
+            if (location is not None and np.max(np.abs(location - start)) < STARTING_POINT_TOLERANCE
+                    and node.axis_direction == self._current_node.axis_direction):
+                _log.info(f"Skipping starting point {node.stable_phases}, {node.global_conditions}: same as the one just used")
+                continue
+            kept.append(node)
+        self.node_queue.nodes[self.node_queue._current_node_index:] = kept
+
+    def _drop_starting_points_on_line(self, zpf_line: ZPFLine):
+        """
+        After a ZPF line ended without failing (at a node or a limit): a starting point still in the node queue that
+        lies on it would trace part of it again, so it is removed. If the line began at a starting point, a starting
+        point at its start is kept (it steps the other way).
+        """
+        if len(self.axis_vars) < 2:
+            return
+        phases = sorted(zpf_line.stable_phases)
+        locations = [self._point_location(point, phases) for point in zpf_line.points]
+        if len(locations) < 2 or any(loc is None for loc in locations):
+            return
+        from_starting_point = self._current_node.exit_hint == ExitHint.POINT_IS_EXIT
+        pending = self.node_queue.nodes[self.node_queue._current_node_index:]
+        kept = []
+        for node in pending:
+            location = self._point_location(node, phases) if node.exit_hint == ExitHint.POINT_IS_EXIT else None
+            if location is not None and any(_distance_to_segment(location, a, b) < STARTING_POINT_TOLERANCE
+                                            for a, b in zip(locations[:-1], locations[1:])):
+                if not (from_starting_point and np.max(np.abs(location - locations[0])) < STARTING_POINT_TOLERANCE):
+                    _log.info(f"Skipping starting point {node.stable_phases}, {node.global_conditions}: on the ZPF line just traced")
+                    continue
+            kept.append(node)
+        self.node_queue.nodes[self.node_queue._current_node_index:] = kept
 
     def _process_new_node(self, zpf_line: ZPFLine, new_node: Node):
         """
@@ -495,6 +611,7 @@ class MapStrategy:
 
         _log.info(f"Starting zpf line with {self.zpf_lines[-1].points[-1].global_conditions}, {self.zpf_lines[-1].points[-1].fixed_phases}, {self.zpf_lines[-1].points[-1].free_phases} and {self.zpf_lines[-1].axis_var}, {self.zpf_lines[-1].current_delta*self.zpf_lines[-1].axis_direction.value}")
         _log.info(f"ZPF starting from node {self._current_node.fixed_phases}, {self._current_node.free_phases}, {self._current_node.global_conditions}")
+        self._drop_duplicate_starting_points(self.zpf_lines[-1])
 
     def _determine_start_direction(self, node: Node, exit_point: Point, proposed_direction: Direction = None):
         """

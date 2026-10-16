@@ -2,6 +2,7 @@ import copy
 from importlib.resources import files
 
 import numpy as np
+import pytest
 import matplotlib.pyplot as plt
 
 from pycalphad import binplot, ternplot, Database, variables as v
@@ -858,3 +859,42 @@ def test_composition_sets_equal_up_to_ordering_variant(load_database):
     l12 = comp_set("L12_FCC", [0.1, 0.1, 0.8, 0.8, 0.1, 0.1])
     l12_swapped = comp_set("L12_FCC", [0.8, 0.1, 0.1, 0.1, 0.1, 0.8])
     assert not _eq_compset(l12, l12_swapped)
+
+def _overlapping_zpf_lines(strategy, tol=0.005):
+    """Pairs of ZPF lines with the same phases whose points (compositions of all composition sets and temperature,
+    relative to the temperature range) mostly coincide"""
+    T_lims = strategy.axis_lims[v.T]
+    def locations(zpf_line):
+        rows = []
+        for point in zpf_line.points:
+            comp_sets = sorted(point.stable_composition_sets, key=lambda cs: (cs.phase_record.phase_name, tuple(cs.X)))
+            T = float(np.squeeze(point.global_conditions[v.T]))
+            rows.append(np.concatenate([np.asarray(cs.X) for cs in comp_sets] + [[(T - T_lims[0]) / (T_lims[1] - T_lims[0])]]))
+        return np.array(rows)
+    pairs = []
+    for i in range(len(strategy.zpf_lines)):
+        for j in range(i + 1, len(strategy.zpf_lines)):
+            a, b = strategy.zpf_lines[i], strategy.zpf_lines[j]
+            if sorted(a.stable_phases) != sorted(b.stable_phases) or min(len(a.points), len(b.points)) < 2:
+                continue
+            A, B = locations(a), locations(b)
+            near = [np.min(np.max(np.abs(B - row), axis=1)) < tol for row in A]
+            if np.mean(near) > 0.5:
+                pairs.append((i, j))
+    return pairs
+
+@pytest.mark.parametrize("db, comps, phases, T_lims", [
+    ("pbsn.tdb", ["PB", "SN", "VA"], None, (300, 700)),
+    ("alcrni.tdb", ["CR", "NI", "VA"], ["B2", "L12_FCC", "LIQUID"], (800, 2300)),
+])
+def test_binary_strategy_does_not_trace_zpf_lines_twice(db, comps, phases, T_lims):
+    """
+    Starting points can land in the same two-phase region (several step calculations along the axis limits), and a
+    line traced from one end reaches the starting point at its other end; neither may trace the ZPF line again
+    """
+    dbf = Database(str(files(pycalphad.tests.databases).joinpath(db)))
+    phases = phases or list(dbf.phases.keys())
+    t0, t1 = T_lims
+    strategy = BinaryStrategy(dbf, comps, phases, {v.T: (t0, t1, (t1 - t0) / 40), v.X(comps[1]): (0, 1, 0.02), v.P: 101325})
+    strategy.do_map()
+    assert _overlapping_zpf_lines(strategy) == []

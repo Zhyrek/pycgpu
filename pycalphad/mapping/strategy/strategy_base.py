@@ -373,6 +373,7 @@ class MapStrategy:
         """
         check_functions = [
             zchk.check_valid_point,
+            zchk.check_composition_jump,
             zchk.check_change_in_phases,
             zchk.check_global_min,
             zchk.check_axis_values,

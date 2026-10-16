@@ -163,10 +163,18 @@ def plot_tielines(ax, strategy: Union[BinaryStrategy, TernaryStrategy], x: v.Sta
     min_x_range = PLOT_TIELINE_AS_NODE_THRESHOLD * np.ptp(x_all)
     min_y_range = PLOT_TIELINE_AS_NODE_THRESHOLD * np.ptp(y_all)
     for single_tieline in tieline_data:
-        for single_phase_data in single_tieline.data:
+        second_order = single_tieline.second_order
+        if second_order is None:
+            second_order = np.zeros(len(single_tieline.data[0].x), dtype=bool)
+        for i, single_phase_data in enumerate(single_tieline.data):
             x, y, p = single_phase_data.x, single_phase_data.y, single_phase_data.phase
             if not all((single_phase_data.y == 0) | (single_phase_data.y == np.nan)):
-                ax.plot(single_phase_data.x, single_phase_data.y, color=phase_colors[p], lw=1, solid_capstyle="butt")
+                # Along a second-order transition the composition sets coincide: the line is drawn once, dashed
+                for start, stop, dashed in _line_segments(second_order):
+                    if dashed and i > 0:
+                        continue
+                    ax.plot(x[start:stop], y[start:stop], color=phase_colors[p], lw=1, solid_capstyle="butt",
+                            linestyle='--' if dashed else '-')
             if np.ptp(x) < min_x_range and np.ptp(y) < min_y_range:
                 ax.scatter([np.average(x)], [np.average(y)], color=phase_colors[p], s=8, zorder=3)
 
@@ -177,8 +185,27 @@ def plot_tielines(ax, strategy: Union[BinaryStrategy, TernaryStrategy], x: v.Sta
             # np.asarray([x,y]) is [xy, phases, points]
             # We want to transpose to [points, phases, xy]
             lines = np.transpose(np.asarray([x, y]), axes=(2,1,0))
-            tieline_collection = LineCollection(lines[::tielines,...], zorder=1, linewidths=0.5, capstyle="butt", colors=[tieline_color for _ in range(len(x[0]))])
+            # (a second-order transition has no two-phase region, so no tielines)
+            lines = lines[~second_order]
+            tieline_collection = LineCollection(lines[::tielines,...], zorder=1, linewidths=0.5, capstyle="butt", colors=[tieline_color for _ in range(len(lines))])
             ax.add_collection(tieline_collection)
+
+def _line_segments(second_order):
+    """
+    Splits a line into runs of segments that are drawn the same way: (start, stop, dashed) with points
+    start..stop-1, where a segment is dashed if both of its points are part of a second-order transition
+    """
+    if len(second_order) < 2:
+        return [(0, len(second_order), False)]
+    dashed = second_order[:-1] & second_order[1:]
+    runs = []
+    start = 0
+    for k in range(1, len(dashed)):
+        if dashed[k] != dashed[start]:
+            runs.append((start, k + 1, bool(dashed[start])))
+            start = k
+    runs.append((start, len(dashed) + 1, bool(dashed[start])))
+    return runs
 
 def plot_binary(strategy: BinaryStrategy, x: v.StateVariable = None, y: v.StateVariable = None, ax = None, tielines = 1, label_nodes = False, legend_generator = phase_legend, tieline_color=(0, 1, 0, 1), tie_triangle_color=(1, 0, 0, 1), *args, **kwargs):
     """

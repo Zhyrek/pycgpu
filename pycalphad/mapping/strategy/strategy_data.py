@@ -31,6 +31,9 @@ class StrategyData:
     data: list[SinglePhaseData]
     xlim: list[float] = field(init=False)
     ylim: list[float] = field(init=False)
+    # For ZPF lines (get_tieline_data): per point, whether the line is a second-order (continuous) transition there
+    # rather than the boundary of a two-phase region; None otherwise
+    second_order: np.ndarray = None
 
     def __post_init__(self):
         all_x = np.concatenate([np.atleast_1d(d.x) for d in self.data], axis=0)
@@ -58,6 +61,56 @@ class StrategyData:
         return [d.y for d in self.data]
 
 PhaseRegionData = StrategyData
+
+# A point of a ZPF line with two composition sets is part of a second-order transition if the two are the same
+# state: the same composition (within SECOND_ORDER_COMPOSITION_TOL) and no latent heat, i.e. the same molar entropy
+# (within SECOND_ORDER_ENTROPY_TOL, J/mol/K), at two or more consecutive points. Such a line arises where a database
+# describes the ordered and disordered states as separate phases (e.g. BCC_VA and B2_BCC in Al-Fe): it is where the
+# ordered state sets in continuously, with no two-phase region. (A narrow two-phase region between e.g. a liquid and
+# a solid also has nearly equal compositions, but an entropy difference of the order of 10 J/mol/K.)
+SECOND_ORDER_COMPOSITION_TOL = 1e-3
+SECOND_ORDER_ENTROPY_TOL = 0.1
+
+def _molar_entropy(comp_set):
+    """Molar entropy of a composition set at its site fractions and state variables (central difference in T)"""
+    phase_record = comp_set.phase_record
+    t_index = [str(sv) for sv in phase_record.state_variables].index('T')
+    dof = np.array(comp_set.dof, dtype=np.float64)
+    energies = []
+    for dT in (0.5, -0.5):
+        shifted = dof.copy()
+        shifted[t_index] += dT
+        out = np.zeros(1)
+        phase_record.obj(out, shifted)
+        energies.append(out[0])
+    return -(energies[0] - energies[1])
+
+def second_order_points(zpf_line) -> np.ndarray:
+    """
+    Per point of a ZPF line, whether the line is a second-order transition there (see SECOND_ORDER_COMPOSITION_TOL)
+
+    Parameters
+    ----------
+    zpf_line : ZPFLine
+
+    Returns
+    -------
+    Boolean array with one entry per point
+    """
+    flags = np.zeros(len(zpf_line.points), dtype=bool)
+    for i, point in enumerate(zpf_line.points):
+        comp_sets = point.stable_composition_sets
+        if len(comp_sets) != 2:
+            continue
+        x_first, x_second = np.asarray(comp_sets[0].X), np.asarray(comp_sets[1].X)
+        # (at a pure component, every phase has the same composition)
+        if np.max(x_first) > 1 - SECOND_ORDER_COMPOSITION_TOL:
+            continue
+        flags[i] = (np.max(np.abs(x_first - x_second)) < SECOND_ORDER_COMPOSITION_TOL
+                    and abs(_molar_entropy(comp_sets[0]) - _molar_entropy(comp_sets[1])) < SECOND_ORDER_ENTROPY_TOL)
+    # an isolated point (e.g. a congruent point, where two phases have the same composition) is not a transition line
+    isolated = flags & ~np.concatenate(([False], flags[:-1])) & ~np.concatenate((flags[1:], [False]))
+    return flags & ~isolated
 
 
 # Helper functions to grab data from tieline strategies (BinaryStrategy and TernaryStrategy)
@@ -144,6 +197,8 @@ def get_tieline_data_from_tieline_strategy(strategy, x: v.StateVariable, y: v.St
             x_data = zpf_line.get_var_list(_get_phase_specific_variable(p, x))
             y_data = zpf_line.get_var_list(_get_phase_specific_variable(p, y))
             data.append(SinglePhaseData(p, x_data, y_data))
-        zpf_data.append(StrategyData(data))
+        line_data = StrategyData(data)
+        line_data.second_order = second_order_points(zpf_line)
+        zpf_data.append(line_data)
 
     return zpf_data

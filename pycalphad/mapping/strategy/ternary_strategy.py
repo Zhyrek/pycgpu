@@ -5,7 +5,7 @@ import copy
 
 import numpy as np
 
-from pycalphad import Database, variables as v
+from pycalphad import Database, Workspace, variables as v
 from pycalphad.core.composition_set import CompositionSet
 from pycalphad.property_framework.computed_property import LinearCombination
 
@@ -118,6 +118,17 @@ class TernaryStrategy(MapStrategy):
         # TODO: This assumes pure elements and will likely change with the generalize component support
         unlisted_element = list(set(self.components) - {'VA'} - set([str(av.species) for av in self.axis_vars]))[0]
         self.all_vars = self.axis_vars + [v.X(unlisted_element)]
+        # Coverage check (see _add_uncovered_starting_points): equilibria on a grid of the axis step sizes, and the
+        # distance (mole fraction) within which a sample's phase compositions count as on a ZPF line or tie triangle
+        self.COVERAGE_CHECK = kwargs.get("COVERAGE_CHECK", True)
+        self.COVERAGE_TOL = kwargs.get("COVERAGE_TOL", 0.01)
+        # Starting points are added one at a time; after this many in a row that add no coverage (their ZPF lines
+        # fail at once), no more are added
+        self.COVERAGE_MAX_UNPRODUCTIVE = kwargs.get("COVERAGE_MAX_UNPRODUCTIVE", 5)
+        self._coverage_samples = None
+        self._coverage_seeded = set()
+        self._coverage_last_uncovered = None
+        self._coverage_unproductive = 0
 
     def generate_automatic_starting_points(self):
         """
@@ -152,6 +163,160 @@ class TernaryStrategy(MapStrategy):
         step = StepStrategy(self.dbf, self.components, self.phases, conds, **map_kwargs)
         step.do_map()
         self.add_starting_points_from_step(step)
+
+    def _compute_coverage_samples(self):
+        """
+        Equilibria on a grid of compositions (the axis step sizes, offset by half a step from the limits): for each
+        two- or three-phase result, its conditions and its phase compositions
+        """
+        conds = {key: val for key, val in self.conditions.items() if key not in self.axis_vars}
+        values = {}
+        for av in self.axis_vars:
+            lo, hi = np.amin(self.axis_lims[av]), np.amax(self.axis_lims[av])
+            values[av] = np.arange(lo + self.axis_delta[av] / 2, hi, self.axis_delta[av])
+        conds.update({av: values[av] for av in self.axis_vars})
+        conds.setdefault(v.N, 1)
+        samples = []
+        try:
+            wks = Workspace(self.dbf, self.components, self.phases, conds, models=self.models, phase_record_factory=self.phase_records)
+        except Exception as err:
+            _log.info(f"Coverage check equilibria failed: {err}")
+            return samples
+        GM = np.squeeze(wks.eq.GM); NP = np.squeeze(wks.eq.NP); X = np.squeeze(wks.eq.X)
+        GM = GM.reshape(len(values[self.axis_vars[0]]), len(values[self.axis_vars[1]]))
+        NP = NP.reshape(GM.shape + (-1,)); X = X.reshape(GM.shape + NP.shape[-1:] + (-1,))
+        for i, j in np.ndindex(GM.shape):
+            if not np.isfinite(GM[i, j]):
+                continue
+            stable = np.flatnonzero(NP[i, j] > 1e-6)
+            if len(stable) in (2, 3):
+                point_conds = {key: val for key, val in conds.items() if key not in self.axis_vars}
+                point_conds[self.axis_vars[0]] = float(values[self.axis_vars[0]][i])
+                point_conds[self.axis_vars[1]] = float(values[self.axis_vars[1]][j])
+                samples.append((point_conds, [np.asarray(X[i, j, k], dtype=float) for k in stable]))
+        return samples
+
+    def _is_covered(self, compositions: list[np.ndarray]):
+        """
+        Whether phase compositions of a sample lie on a ZPF line found so far (two phases: on its two traces) or are
+        the corners of a tie triangle found so far (three phases), within COVERAGE_TOL
+        """
+        def dist_to_trace(x, trace):
+            if len(trace) == 1:
+                return np.linalg.norm(x - trace[0])
+            a, b = trace[:-1], trace[1:]
+            d = b - a
+            L = np.einsum('ij,ij->i', d, d)
+            t = np.clip(np.einsum('ij,ij->i', x - a, d) / np.where(L > 0, L, 1), 0, 1)
+            return np.min(np.linalg.norm(x - (a + t[:, None] * d), axis=1))
+        tol = self.COVERAGE_TOL
+        if len(compositions) == 2:
+            for zpf_line in self.zpf_lines:
+                if len(zpf_line.points) == 0 or len(zpf_line.points[0].stable_composition_sets) != 2:
+                    continue
+                traces = [np.array([np.asarray(p.stable_composition_sets[k].X, dtype=float) for p in zpf_line.points]) for k in range(2)]
+                for x0, x1 in (compositions, compositions[::-1]):
+                    if dist_to_trace(x0, traces[0]) < tol and dist_to_trace(x1, traces[1]) < tol:
+                        return True
+        else:
+            for node in self.node_queue.nodes:
+                corners = [np.asarray(cs.X, dtype=float) for cs in node.stable_composition_sets]
+                if len(corners) == 3 and all(min(np.linalg.norm(x - c) for c in corners) < tol for x in compositions):
+                    return True
+        return False
+
+    def _acceptable_starting_point(self, point: Point, conds):
+        """
+        A starting point that is not inside a region found so far (see _inside_map), not two composition sets in one
+        state, and the global minimum (an equilibrium calculation can return a metastable result, which would start
+        metastable ZPF lines)
+        """
+        if self._inside_map(conds):
+            _log.info(f"Starting point {point.stable_phases} is inside a region found already")
+            return False
+        if any(_eq_compset(a, b) for a, b in itertools.combinations(point.stable_composition_sets, 2)):
+            _log.info(f"Starting point {point.stable_phases} has two composition sets in one state")
+            return False
+        # (the global min check of the mapping's steps: find_global_min_point)
+        free_point = map_utils._generate_point_with_free_cs(point)
+        if zeq.find_global_min_point(free_point, self.system_info, self.GLOBAL_MIN_PDENS, self.GLOBAL_MIN_TOL, self.GLOBAL_MIN_NUM_CANDIDATES) is not None:
+            _log.info(f"Starting point {point.stable_phases} is not the global minimum")
+            return False
+        return True
+
+    def _inside_map(self, conds):
+        """
+        Whether the overall composition of conds lies inside a tie triangle or two-phase region found so far (the area
+        swept by a ZPF line's tie lines): there, the mapping has already decided the phases, and a sample with other
+        phases is not a gap but a metastable equilibrium
+        """
+        def xy(cs):
+            X = np.asarray(cs.X, dtype=float)
+            return [X[cs.phase_record.nonvacant_elements.index(str(av.species))] for av in self.axis_vars]
+        p = np.array([float(conds[av]) for av in self.axis_vars])
+        def inside(V):
+            V = np.asarray(V)
+            if np.any(p < V.min(axis=0)) or np.any(p > V.max(axis=0)):
+                return False
+            x, y = p; result = False
+            for i in range(len(V)):
+                (x1, y1), (x2, y2) = V[i], V[(i + 1) % len(V)]
+                if (y1 > y) != (y2 > y) and x < x1 + (y - y1) * (x2 - x1) / (y2 - y1):
+                    result = not result
+            return result
+        for node in self.node_queue.nodes:
+            if len(node.stable_composition_sets) == 3 and inside([xy(cs) for cs in node.stable_composition_sets]):
+                return True
+        for zpf_line in self.zpf_lines:
+            if len(zpf_line.points) < 2 or len(zpf_line.points[0].stable_composition_sets) != 2:
+                continue
+            ties = [[xy(cs) for cs in pt.stable_composition_sets] for pt in zpf_line.points]
+            for (a0, b0), (a1, b1) in zip(ties[:-1], ties[1:]):
+                if inside([a0, b0, b1, a1]):
+                    return True
+        return False
+
+    def _add_uncovered_starting_points(self):
+        """
+        The strategy finds the regions connected to its starting points on the edges of the diagram (and to each
+        other through nodes). A region not connected to them (e.g. a ternary compound surrounded by liquid) or cut off
+        by a failed ZPF line or node is not found. So once the mapping has run out of nodes, the equilibria on a grid
+        of the axis step sizes are compared with what was found, and a two- or three-phase equilibrium that is not on a
+        ZPF line or tie triangle, at a composition outside every region found, is added as a starting point. One is
+        added at a time, since the region it starts usually covers others
+        """
+        if not self.COVERAGE_CHECK or self._coverage_unproductive >= self.COVERAGE_MAX_UNPRODUCTIVE:
+            return False
+        if self._coverage_samples is None:
+            self._coverage_samples = self._compute_coverage_samples()
+        uncovered = [k for k, (conds, compositions) in enumerate(self._coverage_samples) if not self._is_covered(compositions)]
+        if self._coverage_last_uncovered is not None:
+            self._coverage_unproductive = 0 if len(uncovered) < self._coverage_last_uncovered else self._coverage_unproductive + 1
+        self._coverage_last_uncovered = len(uncovered)
+        for k in uncovered:
+            if self._coverage_unproductive >= self.COVERAGE_MAX_UNPRODUCTIVE:
+                _log.info("Coverage check: the last starting points added no coverage. Not adding more")
+                break
+            if k in self._coverage_seeded:
+                continue
+            self._coverage_seeded.add(k)
+            conds, compositions = self._coverage_samples[k]
+            if self._inside_map(conds):
+                continue
+            point = point_from_equilibrium(self.dbf, self.components, self.phases, copy.deepcopy(conds), models=self.models, phase_record_factory=self.phase_records)
+            if point is None or len(point.stable_composition_sets) not in (2, 3):
+                continue
+            if not self._acceptable_starting_point(point, conds):
+                continue
+            _log.info(f"Coverage check: {len(compositions)} phase equilibrium at {conds} is not on the map. Adding starting point")
+            exit_hint, direction, err_reason = self._validate_custom_starting_point(point, None)
+            if exit_hint == ExitHint.NORMAL:
+                self.node_queue.add_node(self._create_node_from_point(point, None, None, None, exit_hint), True)
+            else:
+                for d in (Direction.POSITIVE, Direction.NEGATIVE):
+                    self.node_queue.add_node(self._create_node_from_point(point, None, None, d, ExitHint.POINT_IS_EXIT), True)
+            return True
+        return False
 
     def add_starting_points_from_step(self, step: StepStrategy):
         """
@@ -246,9 +411,9 @@ class TernaryStrategy(MapStrategy):
         free_cs = exit_point.free_composition_sets[0]
         # If node is invariant, then we can get the other cs to know which direction to step away from
         # It's possible that the node is not invariant (ex. as a starting point), in which case, we just set the norm_delta_dot to 1
-        if len(node.stable_composition_sets) == 3:
-            other_cs = [cs for cs in node.stable_composition_sets if not _eq_compset(cs, exit_point.fixed_composition_sets[0]) and not _eq_compset(cs, exit_point.free_composition_sets[0])][0]
-            delta_var = _get_delta_cs_var(exit_point, [free_cs, other_cs], self.axis_vars)
+        other_cs = [cs for cs in node.stable_composition_sets if not _eq_compset(cs, exit_point.fixed_composition_sets[0]) and not _eq_compset(cs, exit_point.free_composition_sets[0])]
+        if len(node.stable_composition_sets) == 3 and len(other_cs) > 0:
+            delta_var = _get_delta_cs_var(exit_point, [free_cs, other_cs[0]], self.axis_vars)
             norm_delta_dot = np.dot(delta_var, normal)
         else:
             norm_delta_dot = 1

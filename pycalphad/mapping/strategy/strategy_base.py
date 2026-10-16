@@ -113,6 +113,8 @@ class MapStrategy:
         self.node_queue = NodeQueue()
 
         self._current_node = None
+        # whether the starting points are the strategy's own (generate_automatic_starting_points), not the user's
+        self._automatic_starting_points = False
         self._exits = []
         self._exit_dirs = []
         self._exit_index = 0
@@ -278,11 +280,22 @@ class MapStrategy:
         # do_map once and intends to add a starting point to run do_map again)
         if len(self.node_queue.nodes) == 0 and len(self.zpf_lines) == 0:
             self.generate_automatic_starting_points()
+            self._automatic_starting_points = True
         finished = False
         n = 0
         while (not finished) and (max_iter == -1 or n < max_iter):
             finished = self.iterate()
             n += 1
+            # (with starting points of the user's, only those are mapped)
+            if finished and self._automatic_starting_points and self._add_uncovered_starting_points():
+                finished = False
+
+    def _add_uncovered_starting_points(self):
+        """
+        Called when the mapping has run out of nodes: adds starting points for regions the mapping has not found,
+        returning whether any were added (strategy specific; none by default)
+        """
+        return False
 
     def _continue_zpf_line(self):
         """

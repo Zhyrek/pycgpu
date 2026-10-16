@@ -927,3 +927,24 @@ def test_ternary_strategy_finds_a_miscibility_gap_a_step_crosses(load_database):
     strat = TernaryStrategy(dbf, comps, phases, {v.X('TI'): (0, 1, 0.05), v.X('V'): (0, 1, 0.05), v.T: 923, v.P: 101325, v.N: 1})
     strat.do_map()
     assert ['BCC_A2', 'BCC_A2', 'LAVES_C15'] in [sorted(n.stable_phases) for n in strat.node_queue.nodes]
+
+@select_database("Al-Cu-Y.tdb")
+def test_ternary_strategy_finds_regions_not_connected_to_the_edges(load_database):
+    """
+    At 1774.65 K the ternary compounds ALCUY and ALCU5Y are surrounded by liquid, and every edge of the diagram is
+    liquid, so no starting point from the edges leads to them. The coverage check (equilibria on a grid compared with
+    the map) adds starting points in them
+    """
+    dbf = load_database()
+    comps = ['AL', 'CU', 'Y', 'VA']
+    phases = filter_phases(dbf, unpack_species(dbf, comps))
+    strat = TernaryStrategy(dbf, comps, phases, {v.X('CU'): (0, 1, 0.05), v.X('Y'): (0, 1, 0.05), v.T: 1774.65, v.P: 101325, v.N: 1})
+    strat.do_map()
+    phase_sets = [sorted(z.stable_phases) for z in strat.zpf_lines]
+    assert ['ALCUY', 'LIQUID'] in phase_sets
+    assert ['ALCU5Y', 'LIQUID'] in phase_sets
+
+    # with the coverage check off, as before
+    strat = TernaryStrategy(dbf, comps, phases, {v.X('CU'): (0, 1, 0.05), v.X('Y'): (0, 1, 0.05), v.T: 1774.65, v.P: 101325, v.N: 1}, COVERAGE_CHECK=False)
+    strat.do_map()
+    assert ['ALCUY', 'LIQUID'] not in [sorted(z.stable_phases) for z in strat.zpf_lines]

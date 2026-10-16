@@ -1,4 +1,5 @@
 import copy
+import itertools
 from dataclasses import dataclass
 from enum import Enum
 from typing import List, Mapping
@@ -28,11 +29,50 @@ class ExitHint(Enum):
     NORMAL = 0
     POINT_IS_EXIT = 1
 
+_SUBLATTICE_PERMUTATIONS = {}
+
+def _sublattice_permutations(phase_record):
+    """
+    Permutations of a phase's site fractions that exchange sublattices with the same constituents and site ratio
+    (e.g. the two sublattices of B2, or the four of an FCC or BCC with four sublattices, but not those of L1_2,
+    3:1): the site fractions of the ordering variants of one state. Excludes the identity. Cached per sublattice
+    structure
+    """
+    try:
+        site_ratios = tuple(float(r) for r in phase_record.phase_record_factory.models[phase_record.phase_name].site_ratios)
+    except (TypeError, RuntimeError):
+        return []   # (site ratios that depend on the constitution, e.g. an ionic liquid: no exchangeable sublattices)
+    variables = tuple((variable.sublattice_index, str(variable.species)) for variable in phase_record.variables)
+    key = (variables, site_ratios)
+    if key not in _SUBLATTICE_PERMUTATIONS:
+        sublattices = {}
+        for index, (sublattice, species) in enumerate(variables):
+            sublattices.setdefault(sublattice, []).append((species, index))
+        groups = {}
+        for sublattice, entries in sublattices.items():
+            if len(entries) > 1:
+                entries = sorted(entries)
+                groups.setdefault((site_ratios[sublattice], tuple(sp for sp, _ in entries)), []).append([i for _, i in entries])
+        groups = [members for members in groups.values() if len(members) > 1]
+        permutations = []
+        for orders in itertools.product(*[itertools.permutations(range(len(members))) for members in groups]):
+            perm = list(range(len(variables)))
+            for members, order in zip(groups, orders):
+                for target, source in zip(members, order):
+                    for i, j in zip(target, members[source]):
+                        perm[i] = j
+            if perm != list(range(len(variables))):
+                permutations.append(np.array(perm))
+        _SUBLATTICE_PERMUTATIONS[key] = permutations
+    return _SUBLATTICE_PERMUTATIONS[key]
+
 def _eq_compset(compset: CompositionSet, other: CompositionSet):
     """
-    2 tests
+    3 tests
         If compset and other point are the same object (same memory)
         If compset and other has the same phase name and DOF (within tolerance)
+        If compset and other are ordering variants of one state: the same phase, state variables and site fractions
+        after exchanging sublattices with the same constituents
     """
     # Composition set equality
     if compset is other:
@@ -41,6 +81,12 @@ def _eq_compset(compset: CompositionSet, other: CompositionSet):
         return False
     if np.allclose(compset.dof, other.dof, atol=CS_EQ_TOL):
         return True
+    num_sv = compset.phase_record.num_statevars
+    if np.allclose(compset.dof[:num_sv], other.dof[:num_sv], atol=CS_EQ_TOL):
+        site_fractions, other_site_fractions = np.asarray(compset.dof[num_sv:]), np.asarray(other.dof[num_sv:])
+        for perm in _sublattice_permutations(compset.phase_record):
+            if np.allclose(site_fractions[perm], other_site_fractions, atol=CS_EQ_TOL):
+                return True
     return False
 
 def _get_phase_list_with_multiplicity(phases: list[str]):

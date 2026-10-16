@@ -390,6 +390,7 @@ class MapStrategy:
             zchk.check_change_in_phases,
             zchk.check_global_min,
             zchk.check_axis_values,
+            zchk.check_curvature,
             zchk.check_similar_phase_composition,
             zchk.check_circular_loop,
             ]

@@ -154,6 +154,85 @@ def check_diagram_edge(zpf_line: ZPFLine, step_results: tuple[Point, list[Compos
         zpf_line.status = ZPFState.REACHED_LIMIT
     return None
 
+# A ZPF line is smooth between nodes: where the trace of a composition set turns by more than CURVATURE_ANGLE
+# (degrees) between consecutive steps, the step is retried smaller, so that tight curves are drawn with enough points.
+# Segments shorter than CURVATURE_MIN_SEGMENT (in axis step sizes) are not considered, nor lines whose composition sets
+# are within CURVATURE_MIN_WIDTH (mole fraction) of each other: near a critical point or where a two-phase region
+# closes into a second-order transition the traces coincide, and the line can have a cusp that smaller steps in the
+# same direction would step past
+CURVATURE_ANGLE = 20.0
+CURVATURE_MIN_SEGMENT = 0.1
+CURVATURE_MIN_WIDTH = 0.01
+
+def _trace_location(point: Point, comp_set: CompositionSet, axis_data: Mapping):
+    """Position of a composition set's trace in units of the axis step sizes: its mole fraction for each composition
+    axis variable, the point's value for each state variable"""
+    elements = [str(el) for el in comp_set.phase_record.nonvacant_elements]
+    location = []
+    for av in axis_data["axis_vars"]:
+        if isinstance(av, v.X):
+            location.append(comp_set.X[elements.index(str(av.species))] / axis_data["axis_delta"][av])
+        else:
+            location.append(float(np.squeeze(point.get_property(av))) / axis_data["axis_delta"][av])
+    return np.array(location)
+
+def check_curvature(zpf_line: ZPFLine, step_results: tuple[Point, list[CompositionSet]], axis_data: Mapping, **kwargs):
+    """
+    Retries the step with a smaller step size where the trace of a composition set turns by more than
+    CURVATURE_ANGLE, so that tight curves are resolved. Composition sets whose composition does not change
+    (stoichiometric phases, which can turn back at a congruent point) are not considered. At the minimum step size
+    the point is accepted.
+
+    2 possible outcomes
+        a) No trace turns more than CURVATURE_ANGLE, or the step size is at its minimum -> pass
+        b) A trace turns more -> don't add point, reduce axis delta and attempt stepping again
+
+    Parameters
+    ----------
+    zpf_line : ZPFLine
+        ZPFLine that the point is stepping in
+    step_results : [Point, [CompositionSet]]
+        Results from zpf_equilibrium.update_equilibrium_with_new_conditions
+    axis_data : dict
+        Axis variable data from a map strategy class
+
+    Returns
+    -------
+    None - this check does not produce any new nodes
+    """
+    if step_results is None or len(zpf_line.points) < 2 or len(axis_data["axis_vars"]) < 2:
+        return None
+    delta_scale = kwargs.get("delta_scale", 0.5)
+    min_delta_ratio = kwargs.get("min_delta_ratio", 0.1)
+    if zpf_line.current_delta * delta_scale / axis_data["axis_delta"][zpf_line.axis_var] < min_delta_ratio:
+        return None
+    new_point, orig_cs = step_results
+    first, second = zpf_line.points[-2], zpf_line.points[-1]
+    # (orig_cs are the last point's composition sets, in the same order, solved at the new conditions)
+    if not (len(first.stable_composition_sets) == len(second.stable_composition_sets) == len(orig_cs)):
+        return None
+    compositions = [np.asarray(cs.X) for cs in orig_cs]
+    if max(np.max(np.abs(a - b)) for a, b in zip(compositions[:-1], compositions[1:])) < CURVATURE_MIN_WIDTH:
+        return None
+    for cs_first, cs_second, cs_new in zip(first.stable_composition_sets, second.stable_composition_sets, orig_cs):
+        if cs_first.phase_record.phase_name != cs_new.phase_record.phase_name:
+            return None
+        if np.max(np.abs(np.asarray(cs_new.X) - np.asarray(cs_first.X))) < 1e-9:
+            continue   # (composition fixed)
+        a = _trace_location(first, cs_first, axis_data)
+        b = _trace_location(second, cs_second, axis_data)
+        c = _trace_location(new_point, cs_new, axis_data)
+        u, w = b - a, c - b
+        if np.linalg.norm(u) < CURVATURE_MIN_SEGMENT or np.linalg.norm(w) < CURVATURE_MIN_SEGMENT:
+            continue
+        angle = np.degrees(np.arccos(np.clip(np.dot(u, w) / (np.linalg.norm(u) * np.linalg.norm(w)), -1, 1)))
+        if angle > CURVATURE_ANGLE:
+            _log.info(f"Trace of {cs_new.phase_record.phase_name} turns {angle:.0f} degrees, reducing step size from {zpf_line.current_delta} -> {zpf_line.current_delta*delta_scale}")
+            zpf_line.current_delta *= delta_scale
+            zpf_line.status = ZPFState.ATTEMPT_NEW_STEP
+            return None
+    return None
+
 def check_valid_point(zpf_line: ZPFLine, step_results: tuple[Point, list[CompositionSet]], axis_data: Mapping, **kwargs):
     """
     3 possible outcomes

@@ -346,3 +346,56 @@ def test_check_diagram_edge():
     assert run([_EdgeCompsetStandIn([0.8, 0.2, 1e-10]), _EdgeCompsetStandIn([0.6, 0.39, 0.01])]) == ZPFState.NOT_FINISHED
     # a phase without C and one at the opposite corner (e.g. a metal and an oxide): the line goes on
     assert run([_EdgeCompsetStandIn([0.7, 0.3, 0.0]), _EdgeCompsetStandIn([0.0, 0.4, 0.6])]) == ZPFState.NOT_FINISHED
+
+class _PhaseRecordStandIn:
+    def __init__(self, phase_name):
+        self.phase_name = phase_name
+        self.nonvacant_elements = ["A", "B"]
+
+class _TracedCompsetStandIn:
+    """Stand-in for a CompositionSet in check_curvature, which reads the phase and the mole fractions"""
+    def __init__(self, phase_name, x_b):
+        self.phase_record = _PhaseRecordStandIn(phase_name)
+        self.X = np.array([1 - x_b, x_b])
+
+class _TracedPointStandIn:
+    def __init__(self, T, compsets):
+        self.T = T
+        self.stable_composition_sets = compsets
+
+    def get_property(self, var):
+        return self.T
+
+def test_check_curvature():
+    axis_data, extra_args = _create_default_arguments([v.T, v.X("B")], [10, 0.02], [(300, 2000), (0, 1)])
+
+    def line_with(points, delta=0.02):
+        zpf_line = ZPFLine([], [])
+        zpf_line.points = [_TracedPointStandIn(T, [_TracedCompsetStandIn("ALPHA", a), _TracedCompsetStandIn("BETA", b)]) for T, a, b in points]
+        zpf_line.axis_var = v.X("B")
+        zpf_line.current_delta = delta
+        return zpf_line
+
+    def step(T, a, b):
+        return (_TracedPointStandIn(T, []), [_TracedCompsetStandIn("ALPHA", a), _TracedCompsetStandIn("BETA", b)])
+
+    # (in units of the axis steps, 10 K and 0.02: the ALPHA trace steps by (1, 1))
+    history = [(1000, 0.30, 0.60), (1010, 0.32, 0.61)]
+    # continuing straight: pass
+    zpf_line = line_with(history)
+    zchk.check_curvature(zpf_line, step(1020, 0.34, 0.62), axis_data, **extra_args)
+    assert zpf_line.status == ZPFState.NOT_FINISHED
+    # turning by 90 degrees: retry with a smaller step
+    zpf_line = line_with(history)
+    zchk.check_curvature(zpf_line, step(1000, 0.34, 0.62), axis_data, **extra_args)
+    assert zpf_line.status == ZPFState.ATTEMPT_NEW_STEP
+    assert np.isclose(zpf_line.current_delta, 0.01)
+    # at the minimum step size the point is accepted
+    zpf_line = line_with(history, delta=0.002)
+    zchk.check_curvature(zpf_line, step(1000, 0.34, 0.62), axis_data, **extra_args)
+    assert zpf_line.status == ZPFState.NOT_FINISHED
+    # the trace of a composition set of fixed composition (a compound) may turn back: here ALPHA's turns by 180
+    # degrees (2 K up, 2 K down) while BETA's turns by 11 degrees
+    zpf_line = line_with([(1000, 0.30, 0.60), (1002, 0.30, 0.64)])
+    zchk.check_curvature(zpf_line, step(1000, 0.30, 0.68), axis_data, **extra_args)
+    assert zpf_line.status == ZPFState.NOT_FINISHED

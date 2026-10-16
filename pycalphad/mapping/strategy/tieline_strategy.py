@@ -21,7 +21,7 @@ import pycalphad.mapping.zpf_equilibrium as zeq
 import pycalphad.mapping.utils as map_utils
 from pycalphad.mapping.strategy.strategy_base import MapStrategy
 from pycalphad.mapping.strategy.step_strategy import StepStrategy
-from pycalphad.mapping.strategy.strategy_data import SinglePhaseData, StrategyData, PhaseRegionData
+from pycalphad.mapping.strategy.strategy_data import SinglePhaseData, StrategyData, PhaseRegionData, second_order_points
 
 _log = logging.getLogger(__name__)
 
@@ -698,7 +698,9 @@ class TielineStrategy(MapStrategy):
                 x_data = zpf_line.get_var_list(_get_phase_specific_variable(p, x))
                 y_data = zpf_line.get_var_list(_get_phase_specific_variable(p, y))
                 data.append(SinglePhaseData(p, x_data, y_data))
-            zpf_data.append(StrategyData(data))
+            line_data = StrategyData(data)
+            line_data.second_order = second_order_points(zpf_line)
+            zpf_data.append(line_data)
 
         return zpf_data
 

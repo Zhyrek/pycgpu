@@ -979,3 +979,26 @@ def test_global_min_check_starts_from_known_states(load_database):
     triangles = [sorted(n.stable_phases) for n in strat.node_queue.nodes if len(n.stable_composition_sets) == 3]
     assert ['AL13CO4', 'AL3CO', 'BCC_B2'] in triangles
     assert ['AL13CO4', 'AL3CO', 'AL3NI2'] not in triangles
+
+@select_database("alcocrni.tdb")
+def test_ternary_strategy_ends_a_line_at_a_known_node(load_database):
+    """
+    At 1334.04 K the BCC_B2 + SIGMA_SGTE line from the BCC_B2 + L12_FCC + SIGMA_SGTE node reaches the BCC_B2 +
+    BCC_B2 + SIGMA_SGTE node (found from the BCC_B2 + BCC_B2 line), where the sampled global min check does not find
+    the second BCC_B2. It ends there instead of running on to the Co-Cr edge
+    """
+    dbf = load_database()
+    comps = ['AL', 'CO', 'CR', 'VA']
+    phases = filter_phases(dbf, unpack_species(dbf, comps))
+    strat = TernaryStrategy(dbf, comps, phases, {v.X('CO'): (0, 1, 0.05), v.X('CR'): (0, 1, 0.05), v.T: 1334.04, v.P: 101325, v.N: 1})
+    strat.do_map()
+    def b2(point):
+        return [np.asarray(cs.X) for cs in point.stable_composition_sets if cs.phase_record.phase_name == 'BCC_B2'][0]
+    # the line's ends: BCC_B2 at x(Co), x(Cr) = 0.488, 0.255 (at the BCC_B2 + L12_FCC + SIGMA_SGTE node) and 0.476,
+    # 0.246 (at the BCC_B2 + BCC_B2 + SIGMA_SGTE node)
+    ends = [sorted([tuple(np.round(b2(z.points[0])[1:], 2)), tuple(np.round(b2(z.points[-1])[1:], 2))])
+            for z in strat.zpf_lines if sorted(z.stable_phases) == ['BCC_B2', 'SIGMA_SGTE']]
+    from_node = [e for e in ends if any(np.allclose(end, [0.488, 0.255], atol=0.01) for end in e)]
+    assert len(from_node) >= 1
+    for e in from_node:
+        assert any(np.allclose(end, [0.476, 0.246], atol=0.01) for end in e)

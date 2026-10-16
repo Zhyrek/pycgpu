@@ -1495,3 +1495,17 @@ def test_composition_sets_equal_up_to_ordering_variant(load_database):
     l12 = comp_set("L12_FCC", [0.1, 0.1, 0.8, 0.8, 0.1, 0.1])
     l12_swapped = comp_set("L12_FCC", [0.8, 0.1, 0.1, 0.1, 0.1, 0.8])
     assert not _eq_compset(l12, l12_swapped)
+
+@select_database("crtiv_ghosh.tdb")
+def test_ternary_strategy_finds_a_miscibility_gap_a_step_crosses(load_database):
+    """
+    At 923 K the LAVES_C15 + BCC_A2 line from the Cr-Ti edge reaches the BCC_A2 miscibility gap with a step that ends
+    inside it, where the second BCC_A2 merges with the stable one when the two are solved together. A smaller step
+    reaches the boundary, where the LAVES_C15 + BCC_A2 + BCC_A2 node is found
+    """
+    dbf = load_database()
+    comps = ['CR', 'TI', 'V', 'VA']
+    phases = filter_phases(dbf, unpack_species(dbf, comps))
+    strat = TielineStrategy(dbf, comps, phases, {v.X('TI'): (0, 1, 0.05), v.X('V'): (0, 1, 0.05), v.T: 923, v.P: 101325, v.N: 1})
+    strat.do_map()
+    assert ['BCC_A2', 'BCC_A2', 'LAVES_C15'] in [sorted(n.stable_phases) for n in strat.node_queue.nodes]

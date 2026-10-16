@@ -898,3 +898,18 @@ def test_binary_strategy_does_not_trace_zpf_lines_twice(db, comps, phases, T_lim
     strategy = BinaryStrategy(dbf, comps, phases, {v.T: (t0, t1, (t1 - t0) / 40), v.X(comps[1]): (0, 1, 0.02), v.P: 101325})
     strategy.do_map()
     assert _overlapping_zpf_lines(strategy) == []
+
+@select_database("CrFeNb_Jacob2016.tdb")
+def test_binary_strategy_does_not_trace_the_edge_of_the_diagram(load_database):
+    """
+    At a pure component every phase has the same composition. Stepping in temperature from a pure component's
+    transformation (FCC_A1 + BCC_A2 at pure Fe) stays at the pure component, and the ZPF line ran along the edge of
+    the diagram. A ZPF line ends where it reaches a pure component
+    """
+    dbf = load_database()
+    comps = ["FE", "NB", "VA"]
+    strategy = BinaryStrategy(dbf, comps, filter_phases(dbf, unpack_species(dbf, comps)), {v.T: (800, 2800, 50), v.X("NB"): (0, 1, 0.02), v.P: 101325})
+    strategy.do_map()
+    for zpf_line in strategy.zpf_lines:
+        at_pure_component = [all(np.max(cs.X) > 1 - 1e-5 for cs in point.stable_composition_sets) for point in zpf_line.points]
+        assert not (len(at_pure_component) > 2 and all(at_pure_component)), zpf_line

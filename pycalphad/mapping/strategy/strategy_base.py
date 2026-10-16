@@ -386,6 +386,7 @@ class MapStrategy:
         check_functions = [
             zchk.check_valid_point,
             zchk.check_composition_jump,
+            zchk.check_diagram_edge,
             zchk.check_change_in_phases,
             zchk.check_global_min,
             zchk.check_axis_values,
@@ -690,6 +691,9 @@ class MapStrategy:
 
             # Check valid equilibrium, global min and change in phases
             check_functions = [zchk.simple_check_valid_point, zchk.simple_check_change_in_phases, zchk.simple_check_global_min]
+            if len(self.axis_vars) > 1:
+                # (a step that stays on an edge of the diagram would trace along it, see check_diagram_edge)
+                check_functions.insert(1, zchk.simple_check_diagram_edge)
             valid_point = True
             for checks in check_functions:
                 if not checks(step_results, **extra_args):

@@ -328,3 +328,21 @@ def test_check_composition_jump():
     zpf_line = line_at(0.005)
     zchk.check_composition_jump(zpf_line, (None, jumped), axis_data, **extra_args)
     assert zpf_line.status == ZPFState.NOT_FINISHED
+
+class _EdgeCompsetStandIn:
+    """Stand-in for a CompositionSet in check_diagram_edge, which only reads the mole fractions"""
+    def __init__(self, X):
+        self.X = np.array(X)
+
+def test_check_diagram_edge():
+    axis_data, extra_args = _create_default_arguments([v.X("B"), v.X("C")], [0.05, 0.05], [(0, 1), (0, 1)])
+    def run(compsets):
+        zpf_line = ZPFLine([], [])
+        zchk.check_diagram_edge(zpf_line, (_PointStandIn(compsets), []), axis_data, **extra_args)
+        return zpf_line.status
+    # both composition sets on the A-B edge of a ternary (no C): the line ends
+    assert run([_EdgeCompsetStandIn([0.8, 0.2, 1e-10]), _EdgeCompsetStandIn([0.6, 0.4, 1e-12])]) == ZPFState.REACHED_LIMIT
+    # one of them off the edge: the line goes on
+    assert run([_EdgeCompsetStandIn([0.8, 0.2, 1e-10]), _EdgeCompsetStandIn([0.6, 0.39, 0.01])]) == ZPFState.NOT_FINISHED
+    # a phase without C and one at the opposite corner (e.g. a metal and an oxide): the line goes on
+    assert run([_EdgeCompsetStandIn([0.7, 0.3, 0.0]), _EdgeCompsetStandIn([0.0, 0.4, 0.6])]) == ZPFState.NOT_FINISHED

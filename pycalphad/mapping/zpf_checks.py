@@ -8,7 +8,7 @@ from pycalphad import variables as v
 from pycalphad.core.constants import COMP_DIFFERENCE_TOL
 from pycalphad.core.composition_set import CompositionSet
 
-from pycalphad.mapping.primitives import ZPFLine, Point, ZPFState
+from pycalphad.mapping.primitives import ZPFLine, Point, ZPFState, MIN_COMPOSITION
 import pycalphad.mapping.zpf_equilibrium as zeq
 
 _log = logging.getLogger(__name__)
@@ -107,6 +107,52 @@ def simple_check_global_min(step_results: tuple[Point, list[CompositionSet]], **
         _log.info(f"Point is not global minimum. Current CS: {new_point.stable_phases}, new CS: {global_test_point.stable_phases}")
 
     return global_test_point is None
+
+def _on_diagram_edge(point: Point):
+    """Whether the point has two or more composition sets and every one of them lacks the same component (below
+    2*MIN_COMPOSITION, the composition limit of the starting points): all at a pure component in a binary, on the
+    same edge of the diagram in a ternary"""
+    comp_sets = point.stable_composition_sets
+    if len(comp_sets) < 2:
+        return False
+    X = np.array([cs.X for cs in comp_sets])
+    return bool(np.any(np.all(X < 2*MIN_COMPOSITION, axis=0)))
+
+def simple_check_diagram_edge(step_results: tuple[Point, list[CompositionSet]], **kwargs):
+    """
+    Returns False if the step result is on an edge of the diagram (see check_diagram_edge)
+    """
+    if step_results is None:
+        return False
+    return not _on_diagram_edge(step_results[0])
+
+def check_diagram_edge(zpf_line: ZPFLine, step_results: tuple[Point, list[CompositionSet]], axis_data: Mapping, **kwargs):
+    """
+    Where every composition set lacks the same component, an equilibrium between them lies on an edge of the
+    diagram (at a pure component in a binary, on a binary edge of a ternary), where a two-phase region has no
+    width: at fixed conditions it is a single tie line. A step from there can stay on the edge (e.g. in temperature
+    from a pure component's transformation) and trace a line along the edge of the diagram. A ZPF line ends where it
+    reaches an edge of the diagram.
+
+    Parameters
+    ----------
+    zpf_line : ZPFLine
+        ZPFLine that the point is stepping in
+    step_results : [Point, [CompositionSet]]
+        Results from zpf_equilibrium.update_equilibrium_with_new_conditions
+    axis_data : dict
+        Axis variable data from a map strategy class
+
+    Returns
+    -------
+    None - this check does not produce any new nodes
+    """
+    if step_results is None or len(axis_data["axis_vars"]) < 2:
+        return None
+    if _on_diagram_edge(step_results[0]):
+        _log.info("ZPF line reached an edge of the diagram. Ending ZPF line")
+        zpf_line.status = ZPFState.REACHED_LIMIT
+    return None
 
 def check_valid_point(zpf_line: ZPFLine, step_results: tuple[Point, list[CompositionSet]], axis_data: Mapping, **kwargs):
     """

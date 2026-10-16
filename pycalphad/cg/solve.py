@@ -589,7 +589,6 @@ def solve_workspace(wks):
     NP = np.full(shape + (nvert,), np.nan); X = np.full(shape + (nvert, C), np.nan)
     Y = np.full(shape + (nvert, maxdof), np.nan)
     Phase = np.full(shape + (nvert,), '', dtype='U%d' % max(max(len(n) for n in names), 6))
-    points = np.full(shape + (nvert,), -1, dtype=np.int32)
 
     # sequences of conditions sharing state variables and phase-local conditions, in a warm-starting order
     sv_pos = [i for i, k in enumerate(keys) if k in (v.N, v.P, v.T)]
@@ -722,5 +721,5 @@ def solve_workspace(wks):
     dims = [str(k) for k in keys]
     data = {'NP': (dims + ['vertex'], NP), 'GM': (dims, GM), 'MU': (dims + ['component'], MU),
             'X': (dims + ['vertex', 'component'], X), 'Y': (dims + ['vertex', 'internal_dof'], Y),
-            'Phase': (dims + ['vertex'], Phase), 'points': (dims + ['vertex'], points)}
+            'Phase': (dims + ['vertex'], Phase)}
     return LightDataset(data, coords=coords, attrs={'engine': 'pycalphad %s' % pycalphad_version})

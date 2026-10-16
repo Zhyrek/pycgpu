@@ -71,7 +71,11 @@ cdef class CPhase:
     cdef public double last_tpd
     cdef double[::1] last_mu
     cdef public bint has_last
-    cdef public long evals1, evals2, nprice, nfail
+    cdef public long evals1, evals2, nprice, nfail, nescape, nsaddle
+    cdef bint last_indef                  # the last factor() found the Hessian indefinite
+    cdef int[::1] sym_a, sym_b            # species pairs (sym_a[k], sym_b[k]) of sublattice pairs with the same species
+    cdef int nsym                         #   (sym_off: where each sublattice pair's species start)
+    cdef int[::1] sym_off
 
     def __init__(self, PhaseRecord pr, int temperature_index, int[::1] sublattice_of, int[::1] elem_of,
                  double[:, ::1] A, bint linear, E, e):
@@ -132,8 +136,20 @@ cdef class CPhase:
         self.lwork = max(1, 64 * D); self.work = np.zeros(self.lwork)
         self.last_mu = np.zeros(C); self.has_last = False; self.last_tpd = 0.0
         self.m_lo = 0.0; self.pen_w = 0.0; self.max_dz = 30.0
-        self.evals1 = 0; self.evals2 = 0; self.nprice = 0; self.nfail = 0
+        self.evals1 = 0; self.evals2 = 0; self.nprice = 0; self.nfail = 0; self.nescape = 0; self.nsaddle = 0
         self._t_index = temperature_index
+        # sublattices with the same species (in the same order): configurations equal on two of them can be
+        # stationary in the ordering direction without being a minimum (see escape_saddle)
+        species = [[str(pr.variables[j].species) for j in self.bidx[self.boff[b]:self.boff[b + 1]]]
+                   for b in range(self.nb)]
+        sa, sb, off = [], [], [0]
+        for b1 in range(self.nb):
+            for b2 in range(b1 + 1, self.nb):
+                if len(species[b1]) > 1 and species[b1] == species[b2]:
+                    sa.extend(self.bidx[self.boff[b1]:self.boff[b1 + 1]]); sb.extend(self.bidx[self.boff[b2]:self.boff[b2 + 1]])
+                    off.append(len(sa))
+        self.sym_a = np.array(sa, dtype=np.int32).reshape(-1); self.sym_b = np.array(sb, dtype=np.int32).reshape(-1)
+        self.sym_off = np.array(off, dtype=np.int32); self.nsym = len(off) - 1
 
     def _load_derivatives(self):
         cdef FastFunctionFactory ff = (<PhaseRecord>self.phase_record).function_factory
@@ -477,6 +493,7 @@ cdef class CPhase:
         cdef double s, aw
         cdef char jobz = b'V', uplo = b'U'
         dpotrf(&uplo, &m, &self.V[0], &m, &info)
+        self.last_indef = info != 0
         if info == 0:
             return 0
         memcpy(&self.V[0], &self.Hs[0], m * m * sizeof(double))
@@ -495,6 +512,61 @@ cdef class CPhase:
         memcpy(&self.V[0], &self.Hy[0], m * m * sizeof(double))
         dpotrf(&uplo, &m, &self.V[0], &m, &info)
         return 0 if info == 0 else -1
+
+    cdef bint symmetric(self) noexcept nogil:
+        """Whether two sublattices with the same species have the same site fractions at the current point."""
+        cdef int k, q
+        for k in range(self.nsym):
+            for q in range(self.sym_off[k], self.sym_off[k + 1]):
+                if fabs(self.y[self.sym_a[q]] - self.y[self.sym_b[q]]) > 1e-7:
+                    break
+            else:
+                return True
+        return False
+
+    cdef int escape_saddle(self, double* f) noexcept nogil:
+        """At a stationary point (unconstrained phases): if the Hessian has a direction of negative curvature, move
+        along it to a lower point and return 1, else 0. A symmetric configuration (e.g. a disordered B2 or L1_2,
+        equal sublattices) is stationary in the ordering directions whether or not it is a minimum, and Newton with
+        the modified Hessian never leaves it; the ordered minimum below it is found from the lower point."""
+        cdef int D = self.D, m, p, info, k, sgn, lw = self.lwork
+        cdef double s, t, ft, best = f[0]
+        cdef char jobz = b'V', uplo = b'U'
+        self.nsaddle += 1
+        m = self.build_hessian()
+        if m == 0:
+            return 0
+        dpotrf(&uplo, &m, &self.V[0], &m, &info)
+        if info == 0:
+            return 0
+        memcpy(&self.V[0], &self.Hs[0], m * m * sizeof(double))
+        dsyev(&jobz, &uplo, &m, &self.V[0], &m, &self.w[0], &self.work[0], &lw, &info)
+        if info != 0 or self.w[0] > -1e-6:
+            return 0
+        # the eigenvector of the most negative eigenvalue, in z; steps up to 0.5 in log site fraction, both ways
+        for p in range(D): self.d[p] = 0.0
+        s = 0.0
+        for p in range(m):
+            self.d[self.free[p]] = self.sc[p] * self.V[p]
+            if fabs(self.d[self.free[p]]) > s: s = fabs(self.d[self.free[p]])
+        if not s > 0:
+            return 0
+        for p in range(D): self.d[p] *= 0.5 / s
+        t = 1.0
+        for k in range(12):
+            for sgn in range(2):
+                for p in range(D): self.zt[p] = self.z[p] + (t if sgn == 0 else -t) * self.d[p]
+                ft = self.fgz(&self.zt[0], &self.yt[0], &self.gzt[0], &self.gyt[0])
+                if isfinite(ft) and ft < best - 1e-12 and self.hnorm() <= 1e-9:
+                    self.nescape += 1
+                    memcpy(&self.z[0], &self.zt[0], D * sizeof(double)); memcpy(&self.y[0], &self.yt[0], D * sizeof(double))
+                    memcpy(&self.gz[0], &self.gzt[0], D * sizeof(double)); memcpy(&self.gy[0], &self.gyt[0], D * sizeof(double))
+                    f[0] = ft
+                    return 1
+            t *= 0.5
+        # (no lower point along it: restore the residuals of the current point)
+        f[0] = self.fgz(&self.z[0], &self.y[0], &self.gz[0], &self.gy[0])
+        return 0
 
     cdef int newton_direction(self, int m) noexcept nogil:
         """Direction in self.d from the factored scaled Hessian (V): unconstrained, or the KKT step with the
@@ -534,7 +606,7 @@ cdef class CPhase:
     cdef int price(self, double* mu, double* y0, double* y_out, double* x_out, double* G_out, double* tpd_out) noexcept nogil:
         """Minimize TPD (mu in RT units) from y0, subject to the constraints. Returns 1 if it reached a stationary
         point, else 0. tpd_out is in RT units; G_out (J/mol of atoms) is NaN outside the admissible domain."""
-        cdef int D = self.D, C = self.C, it, ls, i, j, a, m
+        cdef int D = self.D, C = self.C, it, ls, i, j, a, m, escapes
         cdef double f, ft, gnorm, slope, step, s, rho = 0.0, phi, phit, h0
         cdef bint accepted
         for j in range(D):
@@ -545,8 +617,16 @@ cdef class CPhase:
         self.nprice += 1
         for j in range(self.ne): self.lam[j] = 0.0
         f = self.fgz(&self.z[0], &self.y[0], &self.gz[0], &self.gy[0])
+        escapes = 0
         for it in range(60):
             if self.kkt() < 1e-9:
+                # (only symmetric points are stationary in a direction of negative curvature by construction: elsewhere
+                # Newton with the modified Hessian moves off a saddle; and where the Hessian of the last Newton step
+                # was positive definite, it is so at the stationary point next to it)
+                if (self.ne == 0 and escapes < 3 and self.nsym > 0 and (it == 0 or self.last_indef) and self.symmetric()
+                        and self.escape_saddle(&f)):
+                    escapes += 1
+                    continue
                 break
             m = self.build_hessian()
             if m == 0:
@@ -1197,7 +1277,9 @@ cdef class Solver:
                 self.pol_G[a] = G; self.pol_t[a] = t
                 if (<CPhase>pp).sens(&pS[a * C * C]) < 0:
                     self.polish_fail = 2; return 0
-            # merge composition sets that met
+            # merge composition sets that met, and ordering variants of one state (site fractions permuted among
+            # equivalent sublattices: priced at the same potentials they have the same composition and energy, and
+            # as separate sets they make the system singular)
             w = 0
             for a in range(na):
                 merged = False
@@ -1207,6 +1289,11 @@ cdef class Solver:
                         s = 0.0
                         for j in range((<CPhase>pp).D):
                             if fabs(py[bb * Dm + j] - py[a * Dm + j]) > s: s = fabs(py[bb * Dm + j] - py[a * Dm + j])
+                        if s >= 1e-6 and fabs(self.pol_G[bb] - self.pol_G[a]) < 1e-9 * (1.0 + fabs(self.pol_G[a])):
+                            s = 0.0
+                            for i in range(C):
+                                if fabs(px[bb * C + i] - px[a * C + i]) > s: s = fabs(px[bb * C + i] - px[a * C + i])
+                            s *= 1e3   # (compositions within 1e-9)
                         if s < 1e-6:
                             self.pol_n[bb] += self.pol_n[a]; merged = True; break
                 if not merged:

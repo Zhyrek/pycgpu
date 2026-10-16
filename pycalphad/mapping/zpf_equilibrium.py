@@ -72,6 +72,11 @@ def update_equilibrium_with_new_conditions(point: Point, new_conditions: dict[v.
     new_point = Point(new_conditions, np.array(results.chemical_potentials), [cs for cs in comp_sets if cs.fixed], [cs for cs in comp_sets if not cs.fixed])
     return new_point, orig_cs
 
+# A global min candidate within SAME_STATE_COMPOSITION (mole fraction) of a stable composition set and with a driving
+# force below SAME_STATE_DRIVING_FORCE (J/mol) is taken to be that set's state (see find_global_min_point)
+SAME_STATE_COMPOSITION = 1e-3
+SAME_STATE_DRIVING_FORCE = 1.0
+
 # Site-fraction distance from every stable composition set of a phase beyond which a sample of that phase is tested
 # as a possible other minimum (see _find_global_min_cs)
 OTHER_MINIMUM_DISTANCE = 0.1
@@ -246,6 +251,13 @@ def find_global_min_point(point: Point, system_info: dict, pdens = 500, tol = 1e
         return None
     else:
         cs, dG = min_cs_result
+        # A candidate at a stable composition set's composition with a driving force of rounding size is that set's
+        # state, described by another phase (e.g. BCC_VA ordered like a stable B2_BCC); a phase that really becomes
+        # stable gains driving force quickly and is found at the next step
+        if dG < SAME_STATE_DRIVING_FORCE and any(np.max(np.abs(np.asarray(cs.X) - np.asarray(other.X))) < SAME_STATE_COMPOSITION
+                                                for other in point.stable_composition_sets):
+            _log.info(f'Global min candidate {cs.phase_record.phase_name} with dG = {dG} is the state of a stable composition set')
+            return None
         
         _log.info(f'Global min potentially detected. {point.stable_phases} + {cs.phase_record.phase_name} ({cs}) with dG = {dG}')
         if _detect_degenerate_phase(point, cs):

@@ -800,3 +800,31 @@ def test_global_min_check_other_minimum_of_stable_phase(load_database):
     new_cs = new_point.stable_composition_sets[-1]
     assert new_cs.phase_record.phase_name == "B2"
     assert new_cs.X[1] < 0.04 and new_cs.X[2] > 0.38
+
+@select_database("alcrni.tdb")
+def test_global_min_check_ignores_stable_state_in_another_description(load_database, monkeypatch):
+    """
+    A global min candidate at a stable composition set's composition with a driving force of rounding size is that
+    set's state (e.g. described by another phase of the database), not a new phase; with a real driving force, it is
+    """
+    import pycalphad.mapping.zpf_equilibrium as zeq
+    dbf = load_database()
+    comps = ["AL", "CR", "NI", "VA"]
+    phases = list(dbf.phases.keys())
+    conds = {v.T: 1200, v.P: 101325, v.N: 1, v.X("CR"): 0.07445, v.X("NI"): 0.35214}
+    models = instantiate_models(dbf, comps, phases)
+    phase_records = PhaseRecordFactory(dbf, comps, {v.N, v.P, v.T}, models)
+    state_variables = np.array([1, 101325, 1200], dtype=np.float64)
+    al_ni = CompositionSet(phase_records["B2"])
+    al_ni.update(np.array([0.13629, 0.14638, 0.69718, 0.02015, 0.99898, 0.00101, 1e-5, 1e-10]), 1.0, state_variables)
+    point = Point(conds, np.array([-71886.23, -62989.81, -159386.097]), [], [al_ni])
+    # a disordered BCC_A2 at the same composition as the stable B2 set
+    candidate = CompositionSet(phase_records["BCC_A2"])
+    y = np.array([float(x) for x in al_ni.X] + [1e-10])
+    candidate.update(y, 1.0, state_variables)
+    sys_info = {"dbf": dbf, "comps": comps, "phases": phases, "models": models, "phase_records": phase_records}
+
+    monkeypatch.setattr(zeq, "_find_global_min_cs", lambda *args, **kwargs: (candidate, 0.05))
+    assert zeq.find_global_min_point(point, sys_info) is None
+    monkeypatch.setattr(zeq, "_find_global_min_cs", lambda *args, **kwargs: (candidate, 50.0))
+    assert zeq.find_global_min_point(point, sys_info) is not None

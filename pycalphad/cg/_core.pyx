@@ -902,7 +902,7 @@ cdef class Solver:
     cdef long[::1] Pcode
     cdef public double RT
     cdef double[::1] mu, dual, xB, LU, tmp, cB, ybuf, xbuf, ybest, xbest, ystart, colbuf, ycert
-    cdef public long lp_iters, priced, skipped, npolish, npolish_try
+    cdef public long lp_iters, priced, skipped, npolish, npolish_try, nunpolished
     cdef public bint use_polish, last_polished
     cdef public int polish_fail
     cdef public object finish_reason, cert_log, gauge
@@ -934,7 +934,7 @@ cdef class Solver:
         self.prune_late = prune_late; self.max_late = max_late; self.seed_prune = seed_prune
         self.use_polish = True
         self.gauge = None; self.ngauge = 0; self.gauge_mv = np.zeros((1, C))
-        self.lp_iters = 0; self.priced = 0; self.skipped = 0; self.npolish = 0; self.npolish_try = 0
+        self.lp_iters = 0; self.priced = 0; self.skipped = 0; self.npolish = 0; self.npolish_try = 0; self.nunpolished = 0
         self.pol_y = np.zeros(C * self.Dmax); self.pol_x = np.zeros(C * C); self.pol_S = np.zeros(C * C * C)
         self.pol_J = np.zeros(4 * C * C); self.pol_F = np.zeros(2 * C); self.pol_mu = np.zeros(C)
         self.pol_n = np.zeros(C); self.pol_G = np.zeros(C); self.pol_t = np.zeros(C); self.pol_RS = np.zeros(C * C)
@@ -1644,36 +1644,54 @@ cdef class Solver:
         memcpy(&self.pol_y[na * Dm], &self.ycert[0], (<CPhase>self.pptr[self.cert_phase]).D * sizeof(double))
         return self._polish_core(na + 1, 40, True) == 1
 
+    cdef bint _round_step(self, int rounds, bint use_seeds, bint* no_polish, bint* added_out) noexcept nogil:
+        """One round after the LP: polish (unless the last certification failed), price (certifying a polished
+        state), and Newton again with any minimum found below a polished tangent plane. Returns whether the state
+        is polished; added_out: whether anything new was found (if not, the condition is solved)."""
+        cdef int aug = 0, C = self.C
+        cdef bint polished = False, skipped, added
+        skipped = no_polish[0]
+        if self.use_polish and not no_polish[0]:
+            # finish the current phase set by Newton; the pricing below then certifies it (or finds more)
+            self.npolish_try += 1
+            polished = self.polish() == 1
+        no_polish[0] = False
+        added = self._pricing_round(rounds, use_seeds, polished, no_polish)
+        # a minimum below the polished tangent plane: Newton again with it as a further composition set (from
+        # zero amount). The LP alone can stall here: when the polished set is a single point at the overall
+        # composition, the LP is degenerate and can keep choosing other dual solutions under which the new
+        # point does not help, without the neighbouring points the true phase set needs.
+        while added and polished and (self.cert_kind == 1 or self.cert_kind == 2) and aug < C:
+            aug += 1
+            if not self._polish_augment():
+                polished = False
+                break
+            no_polish[0] = False
+            added = self._pricing_round(rounds, False, True, no_polish)
+        if not added and not polished and skipped and self.use_polish:
+            # nothing new at the LP's potentials, but the polish was skipped this round (after a failed
+            # certification): finish by Newton and certify that, rather than end on the LP's mixture of points
+            # (which can hold spurious composition sets within the tolerance)
+            self.npolish_try += 1
+            if self.polish() == 1:
+                polished = True
+                added = self._pricing_round(rounds, False, True, no_polish)
+                if added:
+                    polished = False
+        added_out[0] = added
+        return polished
+
     cdef int _solve_c(self, bint use_seeds, int max_rounds, bint* polished_out, int* rounds_out) noexcept nogil:
         """The column-generation rounds (see solve()); returns the status."""
-        cdef int rounds = 0, st = 0, aug, C = self.C
+        cdef int rounds = 0, st = 0
         cdef double obj = 0.0
-        cdef bint added, polished = False, no_polish = False
+        cdef bint added = False, polished = False, no_polish = False
         for rounds in range(1, max_rounds + 1):
             st = self.lp_solve(&obj)
             if st != 0:
                 break
             self.gauge_fix()
-            if self.use_polish and not no_polish:
-                # finish the current phase set by Newton; the pricing below then certifies it (or finds more)
-                self.npolish_try += 1
-                polished = self.polish() == 1
-            else:
-                polished = False
-            no_polish = False
-            added = self._pricing_round(rounds, use_seeds and rounds == 1, polished, &no_polish)
-            # a minimum below the polished tangent plane: Newton again with it as a further composition set (from
-            # zero amount). The LP alone can stall here: when the polished set is a single point at the overall
-            # composition, the LP is degenerate and can keep choosing other dual solutions under which the new
-            # point does not help, without the neighbouring points the true phase set needs.
-            aug = 0
-            while added and polished and (self.cert_kind == 1 or self.cert_kind == 2) and aug < C:
-                aug += 1
-                if not self._polish_augment():
-                    polished = False
-                    break
-                no_polish = False
-                added = self._pricing_round(rounds, False, True, &no_polish)
+            polished = self._round_step(rounds, use_seeds and rounds == 1, &no_polish, &added)
             if not added:
                 break
         if st == 0 and added:
@@ -1715,6 +1733,7 @@ cdef class Solver:
                         for j in range((<CPhase>self.pptr[self.pol_ph[a]]).D): Y_v[t, na, j] = self.pol_y[a * Dm + j]
                         na += 1
                 elif st == 0:
+                    self.nunpolished += 1
                     for k in range(self.K):
                         if self.xB[k] > 1e-300:
                             p = self.basis[k]
@@ -1816,3 +1835,250 @@ cdef class Solver:
             return None
         finally:
             self.K = K0; self.R = R0; self.b = b0; self.mf = mf0; self.fixed = fixed0
+
+
+cdef int STAGED = 1 << 29   # LP basis entries >= STAGED name a point staged in the current round (STAGED + its index)
+
+
+cdef class TileSolver(Solver):
+    """Column generation for a tile of conditions in lockstep rounds over one shared point store (the scheme a
+    batched, GPU-style solver would follow). The first condition is solved on its own, with the seeds; then in each
+    round every unfinished condition takes one step of Solver's rounds (LP from its own warm basis, polish, pricing
+    with its own skip state). The points a condition adds during a round are its own until the round ends, as if the
+    conditions of a round ran concurrently; then they join the shared store, duplicates dropped, for the next round.
+    Records the work done per round (stats)."""
+    cdef int[:, ::1] t_basis
+    cdef double[:, ::1] t_mu, t_ltpd
+    cdef double[:, :, ::1] t_lmu
+    cdef unsigned char[:, ::1] t_has
+    cdef unsigned char[::1] t_nopol
+    cdef double[:, ::1] Sy, Sx
+    cdef double[::1] SG
+    cdef int[::1] Sph, Smap, head0
+    cdef int nst, scap
+    cdef public list stats
+
+    def __init__(self, phases, int C, **kw):
+        Solver.__init__(self, phases, C, **kw)
+        self.scap = 256
+        self.Sy = np.zeros((self.scap, self.Dmax)); self.Sx = np.zeros((self.scap, C)); self.SG = np.zeros(self.scap)
+        self.Sph = np.zeros(self.scap, dtype=np.int32); self.Smap = np.zeros(self.scap, dtype=np.int32)
+        self.head0 = np.zeros(self.nph, dtype=np.int32)
+        self.stats = []
+
+    def _grow_staged(self):
+        cap = 2 * self.scap
+        def g(a, shape, dtype):
+            out = np.zeros(shape, dtype=dtype); out[:self.scap] = np.asarray(a); return out
+        self.Sy = g(self.Sy, (cap, self.Dmax), float); self.Sx = g(self.Sx, (cap, self.C), float)
+        self.SG = g(self.SG, (cap,), float); self.Sph = g(self.Sph, (cap,), np.int32)
+        self.Smap = g(self.Smap, (cap,), np.int32)
+        self.scap = cap
+
+    cdef int find_point(self, int ph, double* y) noexcept nogil:
+        """A stored point of phase ph at site fractions y (as add_point's duplicate test), or -1."""
+        cdef int p = self.head[ph], j, D = (<CPhase>self.pptr[ph]).D
+        cdef double m
+        while p >= 0:
+            m = 0.0
+            for j in range(D):
+                if fabs(self.Py[p, j] - y[j]) > m: m = fabs(self.Py[p, j] - y[j])
+            if m < 1e-7:
+                return p
+            p = self.Pnext[p]
+        return -1
+
+    cdef void _load(self, int i) noexcept nogil:
+        cdef int ph, c
+        cdef void* pp
+        for c in range(self.K): self.basis[c] = self.t_basis[i, c]
+        for ph in range(self.nph):
+            pp = self.pptr[ph]
+            (<CPhase>pp).has_last = self.t_has[i, ph]; (<CPhase>pp).last_tpd = self.t_ltpd[i, ph]
+            for c in range(self.C): (<CPhase>pp).last_mu[c] = self.t_lmu[i, ph, c]
+
+    cdef void _save(self, int i) noexcept nogil:
+        cdef int ph, c
+        cdef void* pp
+        for c in range(self.K): self.t_basis[i, c] = self.basis[c]
+        for c in range(self.C): self.t_mu[i, c] = self.mu[c]
+        for ph in range(self.nph):
+            pp = self.pptr[ph]
+            self.t_has[i, ph] = (<CPhase>pp).has_last; self.t_ltpd[i, ph] = (<CPhase>pp).last_tpd
+            for c in range(self.C): self.t_lmu[i, ph, c] = (<CPhase>pp).last_mu[c]
+
+    cdef void _stage(self, int i, int n0) noexcept nogil:
+        """Move the points condition i added (store entries n0..npts-1) to the staging area, and point its basis at
+        them there."""
+        cdef int p, s, k, j
+        for p in range(n0, self.npts):
+            if self.nst >= self.scap:
+                with gil:
+                    self._grow_staged()
+            s = self.nst
+            for j in range(self.Dmax): self.Sy[s, j] = self.Py[p, j]
+            for j in range(self.C): self.Sx[s, j] = self.Px[p, j]
+            self.SG[s] = self.PG[p]; self.Sph[s] = self.Pph[p]
+            for k in range(self.K):
+                if self.t_basis[i, k] == p:
+                    self.t_basis[i, k] = STAGED + s
+            self.nst += 1
+        self.npts = n0
+        for k in range(self.nph): self.head[k] = self.head0[k]
+
+    cdef int _merge(self, int B) noexcept nogil:
+        """The staged points into the shared store (duplicates of stored or earlier staged points dropped); the
+        bases follow. Returns the number of new points."""
+        cdef int s, p, i, k, n0 = self.npts
+        for s in range(self.nst):
+            p = self.find_point(self.Sph[s], &self.Sy[s, 0])
+            if p < 0:
+                p = self.add_point(self.Sph[s], &self.Sy[s, 0], &self.Sx[s, 0], self.SG[s])
+            self.Smap[s] = p
+        for i in range(B):
+            for k in range(self.K):
+                if self.t_basis[i, k] >= STAGED:
+                    p = self.Smap[self.t_basis[i, k] - STAGED]
+                    # (a point add_point refused, e.g. non-finite: the artificial column for that row instead)
+                    self.t_basis[i, k] = p if p >= 0 else -(1 + k)
+        self.nst = 0
+        return self.npts - n0
+
+    cdef void _record(self, int t, int st, bint polished, int[::1] status_v, int[::1] nout_v, int[:, ::1] phs_v,
+                      double[:, ::1] amt_v, double[:, :, ::1] X_v, double[:, :, ::1] Y_v, double[:, ::1] G_v,
+                      double[:, ::1] mu_v) noexcept nogil:
+        """The result of condition t (as solve_sequence writes it)."""
+        cdef int a, i, j, k, p, na = 0, C = self.C, Dm = self.Dmax
+        if st == 0 and polished:
+            for a in range(self.pol_na):
+                phs_v[t, na] = self.pol_ph[a]; amt_v[t, na] = self.pol_n[a]; G_v[t, na] = self.pol_G[a]
+                for i in range(C): X_v[t, na, i] = self.pol_x[a * C + i]
+                for j in range((<CPhase>self.pptr[self.pol_ph[a]]).D): Y_v[t, na, j] = self.pol_y[a * Dm + j]
+                na += 1
+        elif st == 0:
+            self.nunpolished += 1
+            for k in range(self.K):
+                if self.xB[k] > 1e-300:
+                    p = self.basis[k]
+                    if p < 0:
+                        if self.xB[k] > 1e-9:
+                            st = 5
+                            break
+                        continue
+                    phs_v[t, na] = self.Pph[p]; amt_v[t, na] = self.xB[k]; G_v[t, na] = self.PG[p]
+                    for i in range(C): X_v[t, na, i] = self.Px[p, i]
+                    for j in range((<CPhase>self.pptr[self.Pph[p]]).D): Y_v[t, na, j] = self.Py[p, j]
+                    na += 1
+        status_v[t] = st; nout_v[t] = na
+        for i in range(C): mu_v[t, i] = self.mu[i] * self.RT
+
+    def _work(self):
+        return (sum((<CPhase>P).nprice for P in self.phases), sum((<CPhase>P).evals1 for P in self.phases),
+                sum((<CPhase>P).evals2 for P in self.phases), self.lp_iters)
+
+    cdef void _copy_state(self, int src, int dst) noexcept nogil:
+        cdef int k, ph, c
+        for k in range(self.t_basis.shape[1]): self.t_basis[dst, k] = self.t_basis[src, k]
+        for c in range(self.C): self.t_mu[dst, c] = self.t_mu[src, c]
+        for ph in range(self.nph):
+            self.t_has[dst, ph] = self.t_has[src, ph]; self.t_ltpd[dst, ph] = self.t_ltpd[src, ph]
+            for c in range(self.C): self.t_lmu[dst, ph, c] = self.t_lmu[src, ph, c]
+        self.t_nopol[dst] = 0
+
+    def solve_tile(self, R, b, mu_fixed, fixed, seeds=None, int max_rounds=60, stage=None, init_from=None):
+        """Solve the conditions R[t], b[t], mu_fixed[t], fixed[t] (as solve_sequence) in lockstep rounds; returns the
+        same arrays as solve_sequence. Condition 0 is solved first, alone, with the seeds. The others are solved in
+        stages (stage[t] >= 1, in increasing order; default: all in stage 1), each condition starting from the final
+        state (LP basis, potentials, skip state) of condition init_from[t] of an earlier stage (default: 0).
+        self.stats: one dict per round (stage, conditions active, minimizations, energy gradient and Hessian
+        evaluations, LP iterations, points staged and new)."""
+        cdef double[:, :, ::1] Rv = np.ascontiguousarray(R, dtype=float)
+        cdef double[:, ::1] bv = np.ascontiguousarray(b, dtype=float)
+        cdef double[:, ::1] mfv = np.ascontiguousarray(mu_fixed, dtype=float)
+        cdef int[:, ::1] fxv = np.ascontiguousarray(fixed, dtype=np.int32)
+        cdef int B = Rv.shape[0], K = Rv.shape[1], C = self.C, Dm = self.Dmax, t, a, k, st, rounds, n0, nact, m
+        cdef int nstaged, nmem
+        cdef bint polished, added, no_polish, use_seeds = seeds is not None
+        cdef double obj = 0.0
+        stage = np.ones(B, dtype=np.int32) if stage is None else np.asarray(stage, dtype=np.int32)
+        init_from = np.zeros(B, dtype=np.int32) if init_from is None else np.asarray(init_from, dtype=np.int32)
+        if B and (stage[0] != 0 or (stage[1:] < 1).any()):
+            raise ValueError('condition 0 alone is stage 0; the others need stages >= 1')
+        if B and ((stage[init_from[1:]] >= stage[1:]).any()):
+            raise ValueError('a condition must start from one of an earlier stage')
+        status = np.zeros(B, dtype=np.int32); nout = np.zeros(B, dtype=np.int32)
+        phs = np.full((B, C), -1, dtype=np.int32); amt = np.zeros((B, C)); X = np.zeros((B, C, C))
+        Y = np.full((B, C, Dm), np.nan); G = np.zeros((B, C)); mu = np.zeros((B, C))
+        cdef int[::1] status_v = status, nout_v = nout
+        cdef int[:, ::1] phs_v = phs
+        cdef double[:, ::1] amt_v = amt, G_v = G, mu_v = mu
+        cdef double[:, :, ::1] X_v = X, Y_v = Y
+        done = np.zeros(B, dtype=np.uint8)
+        cdef unsigned char[::1] done_v = done
+        cdef int[::1] members_v, init_v = init_from
+        self.stats = []
+        if B == 0:
+            return status, nout, phs, amt, X, Y, G, mu
+        self.RT = (<CPhase>self.phases[0]).RT
+        if use_seeds:
+            self._pack_seeds(seeds)
+        self.t_basis = np.zeros((B, max(K, 1)), dtype=np.int32); self.t_mu = np.zeros((B, C))
+        self.t_has = np.zeros((B, self.nph), dtype=np.uint8); self.t_ltpd = np.zeros((B, self.nph))
+        self.t_lmu = np.zeros((B, self.nph, C)); self.t_nopol = np.zeros(B, dtype=np.uint8)
+        w0 = self._work()
+        with nogil:
+            self._set_conditions_c(&Rv[0, 0, 0], &bv[0, 0], &mfv[0, 0], &fxv[0, 0], K)
+            st = self._solve_c(use_seeds, max_rounds, &polished, &rounds)
+            self._record(0, st, polished, status_v, nout_v, phs_v, amt_v, X_v, Y_v, G_v, mu_v)
+            self._save(0)
+        done_v[0] = 1
+        w1 = self._work()
+        self.stats.append({'stage': 0, 'round': 0, 'active': 1, 'rounds_first': rounds, 'priced': w1[0] - w0[0],
+                           'evals1': w1[1] - w0[1], 'evals2': w1[2] - w0[2], 'lp_iters': w1[3] - w0[3],
+                           'staged': 0, 'new': 0, 'store': self.npts})
+        self.nst = 0
+        for s_ in sorted(set(stage[1:].tolist())):
+            members = np.nonzero(stage == s_)[0].astype(np.int32)
+            members_v = members
+            nmem = members.shape[0]
+            with nogil:
+                for m in range(nmem):
+                    self._copy_state(init_v[members_v[m]], members_v[m])
+            for rounds in range(1, max_rounds + 1):
+                w0 = self._work()
+                nact = 0; nstaged = 0
+                with nogil:
+                    for k in range(self.nph): self.head0[k] = self.head[k]
+                    n0 = self.npts
+                    for m in range(nmem):
+                        t = members_v[m]
+                        if done_v[t]:
+                            continue
+                        nact += 1
+                        self._set_conditions_c(&Rv[t, 0, 0], &bv[t, 0], &mfv[t, 0], &fxv[t, 0], K)
+                        self._load(t)
+                        st = self.lp_solve(&obj)
+                        if st != 0:
+                            self._record(t, st, False, status_v, nout_v, phs_v, amt_v, X_v, Y_v, G_v, mu_v)
+                            done_v[t] = 1
+                            self._save(t); self._stage(t, n0)
+                            continue
+                        self.gauge_fix()
+                        no_polish = self.t_nopol[t]
+                        polished = self._round_step(rounds, False, &no_polish, &added)
+                        self.t_nopol[t] = no_polish
+                        if not added or rounds == max_rounds:
+                            self._record(t, 6 if added else 0, polished, status_v, nout_v, phs_v, amt_v, X_v, Y_v,
+                                         G_v, mu_v)
+                            done_v[t] = 1
+                        self._save(t)
+                        nstaged += self.npts - n0
+                        self._stage(t, n0)
+                    new = self._merge(B)
+                w1 = self._work()
+                self.stats.append({'stage': int(s_), 'round': rounds, 'active': nact, 'priced': w1[0] - w0[0],
+                                   'evals1': w1[1] - w0[1], 'evals2': w1[2] - w0[2], 'lp_iters': w1[3] - w0[3],
+                                   'staged': nstaged, 'new': new, 'store': self.npts})
+                if nact == 0 or done[members].all():
+                    break
+        return status, nout, phs, amt, X, Y, G, mu

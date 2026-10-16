@@ -497,6 +497,49 @@ PARTS_PER_THREAD = int(_os.environ.get("PYCALPHAD_CG_PARTS", 2))
 # Sequences at successive temperatures continue from the previous one's points (re-evaluated) instead of being
 # seeded afresh, while within this many kelvin of the temperature of their last seeding
 RESEED_DT = float(_os.environ.get("PYCALPHAD_CG_RESEED_DT", 100.0))
+# Experimental: solve each sequence of plain conditions in lockstep rounds over one shared point store (TileSolver,
+# the scheme of a batched solver) instead of one condition after the other; the work per round is kept in
+# TILE_STATS (one list per sequence)
+TILE_MODE = bool(int(_os.environ.get("PYCALPHAD_CG_TILE", "0")))
+# Diagnostics: with PYCALPHAD_CG_STATS=1, the work of each sequence of plain conditions is appended to
+# SEQUENCE_STATS (conditions, minimizations, energy gradient and Hessian evaluations, LP iterations, CPU seconds;
+# with TILE_MODE also the rounds)
+COLLECT_STATS = bool(int(_os.environ.get("PYCALPHAD_CG_STATS", "0")))
+SEQUENCE_STATS = []
+# Lockstep stages: the conditions of a sequence on a lattice of stride 2**TILE_LEVELS (in grid steps) first, then
+# each halving of the stride, every condition starting from the nearest one solved in an earlier stage (0: one stage,
+# all starting from the first condition)
+TILE_LEVELS = int(_os.environ.get("PYCALPHAD_CG_TILE_LEVELS", "3"))
+
+
+def _tile_stages(idx, levels):
+    """Stages and starting conditions for a sequence of conditions at grid indices idx (n x dims; the first one is
+    solved alone, stage 0): by the coarsest lattice of stride 2**k (k <= levels) holding the condition."""
+    from scipy.spatial import cKDTree
+    idx = np.asarray(idx, dtype=np.int64).reshape(len(idx), -1)
+    n = len(idx)
+    stage = np.ones(n, dtype=np.int32); init = np.zeros(n, dtype=np.int32)
+    if n <= 1 or levels <= 0:
+        stage[0] = 0
+        return stage, init
+    rel = idx - idx.min(axis=0)
+    tz = np.full(rel.shape, levels, dtype=np.int64)   # trailing zero bits per coordinate, capped (0 counts as many)
+    for k in range(levels):
+        tz = np.where((rel % (1 << (k + 1)) != 0) & (tz == levels), k, tz)
+    stage = (levels - tz.min(axis=1) + 1).astype(np.int32)
+    stage[0] = 0
+    for s in range(1, int(stage.max()) + 1):
+        here, before = np.nonzero(stage == s)[0], np.nonzero(stage < s)[0]
+        if len(here):
+            _, j = cKDTree(idx[before]).query(idx[here])
+            init[here] = before[j]
+    return stage, init
+
+
+def _work(worker):
+    import time
+    return (sum(c.nprice for c in worker.cores), sum(c.evals1 for c in worker.cores),
+            sum(c.evals2 for c in worker.cores), worker.solver.lp_iters, time.thread_time(), worker.solver.nunpolished)
 
 
 def _thread_count(n_conditions):
@@ -509,10 +552,10 @@ def _thread_count(n_conditions):
 class _Worker:
     """A solver over its own copies of the phases (one per thread)."""
     def __init__(self, index, phases, C, gauge):
-        from pycalphad.cg._core import Solver
+        from pycalphad.cg._core import Solver, TileSolver
         self.index = index
         self.cores = [ph.core_for(index) for ph in phases]
-        self.solver = Solver(self.cores, C)
+        self.solver = (TileSolver if TILE_MODE else Solver)(self.cores, C)
         self.solver.set_gauge(gauge)
         self.guess = {}   # trial mole fractions for fixed-potential components, carried between points
         self.state_key = None
@@ -641,9 +684,19 @@ def solve_workspace(wks):
             _is_global_x(k) and float(val) < TRACE_COMPOSITION for _, point in items for k, val in point.items())
         if plain and len(items) > 1:
             # ordinary conditions: the whole sequence in C without the GIL; failures are retried below
-            st, na, phs, amt, Xs, Ys, Gs, mus = worker.solver.solve_sequence(
-                np.array([r[0] for r in rows]), np.array([r[1] for r in rows]), np.array([r[2] for r in rows]),
-                np.array([r[3] for r in rows]), seeds)
+            args = (np.array([r[0] for r in rows]), np.array([r[1] for r in rows]), np.array([r[2] for r in rows]),
+                    np.array([r[3] for r in rows]), seeds)
+            w0 = _work(worker) if COLLECT_STATS else None
+            if TILE_MODE:
+                stage, init = _tile_stages([i for i, _ in items], TILE_LEVELS)
+                st, na, phs, amt, Xs, Ys, Gs, mus = worker.solver.solve_tile(*args, stage=stage, init_from=init)
+            else:
+                st, na, phs, amt, Xs, Ys, Gs, mus = worker.solver.solve_sequence(*args)
+            if COLLECT_STATS:
+                w1 = _work(worker)
+                SEQUENCE_STATS.append(dict(zip(('priced', 'evals1', 'evals2', 'lp_iters', 'cpu', 'unpolished'),
+                                               (b - a for a, b in zip(w0, w1))), n=len(items), tile=TILE_MODE,
+                                           rounds=list(worker.solver.stats) if TILE_MODE else None))
             after_first = None
             for t, (idx, point) in enumerate(items):
                 if st[t] == 0:

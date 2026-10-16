@@ -2,6 +2,7 @@ import copy
 from importlib.resources import files
 
 import numpy as np
+import pytest
 import matplotlib.pyplot as plt
 
 from pycalphad import binplot, ternplot, Database, variables as v
@@ -730,3 +731,69 @@ def test_strategy_plotting_respects_units(load_database):
     np.testing.assert_allclose(node_zpf_line.get_var_list(_get_phase_specific_variable(None, v.T))[-1], 933.600, atol=1e-3)  # value in Kelvin
     np.testing.assert_allclose(node_zpf_line.get_var_list(_get_phase_specific_variable(None, v.T["celsius"]))[-1], 933.600 - 273.15, atol=1e-3)  # value in Celsius
     np.testing.assert_allclose(node_zpf_line.get_var_list(_get_phase_specific_variable(None, v.T["degC"]))[-1], 933.600 - 273.15, atol=1e-3)  # value in Celsius
+
+@pytest.mark.filterwarnings("ignore:The order-disorder model for \"B2_BCC\" has a contribution from the physical property model*:UserWarning")
+@pytest.mark.filterwarnings("ignore:The order-disorder model for \"BCC_VA\" has a contribution from the physical property model*:UserWarning")
+@select_database("Al-Fe_sundman2009.tdb")
+def test_second_order_transition_is_flagged_and_dashed(load_database):
+    """
+    In this database the disordered and ordered BCC are separate phases (BCC_VA and B2_BCC), so mapping traces the
+    A2/B2 transition as a two-phase line. Where it is continuous (same composition and entropy, B2 barely ordered), it
+    is flagged as second order and drawn dashed without tielines; where B2 is ordered, it is the boundary of a
+    two-phase region. A narrow two-phase region between different phases (liquid and BCC at nearly the same
+    composition) is not a transition line
+    """
+    from pycalphad.mapping.strategy.strategy_data import second_order_points, get_tieline_data_from_tieline_strategy
+    from pycalphad.mapping.plotting import plot_tielines
+    dbf = load_database()
+    comps = ["AL", "FE", "VA"]
+    phases = ["B2_BCC", "BCC_VA", "LIQUID"]
+    models = instantiate_models(dbf, comps, phases)
+    phase_records = PhaseRecordFactory(dbf, comps, {v.N, v.P, v.T}, models)
+
+    def comp_set(phase, sublattices, T):
+        """Composition set with the given site fractions per sublattice ({species: fraction}, rest 1e-12)"""
+        pr = phase_records[phase]
+        y = np.array([sublattices[var.sublattice_index].get(str(var.species), 1e-12) if var.sublattice_index < len(sublattices) else 1.0
+                      for var in pr.variables])
+        cs = CompositionSet(pr)
+        cs.update(y, 0.5, np.array([1, 101325, T], dtype=np.float64))
+        return cs
+
+    def point(x_al_b2, order, x_al_a2, T):
+        b2 = comp_set("B2_BCC", [{"AL": x_al_b2 + order / 2, "FE": 1 - x_al_b2 - order / 2},
+                                 {"AL": x_al_b2 - order / 2, "FE": 1 - x_al_b2 + order / 2}], T)
+        a2 = comp_set("BCC_VA", [{"AL": x_al_a2, "FE": 1 - x_al_a2}] * 4, T)
+        return Point({v.T: T, v.P: 101325, v.N: 1, v.X("AL"): x_al_a2}, np.zeros(2), [b2], [a2])
+
+    zpf_line = ZPFLine(["B2_BCC"], ["BCC_VA"])
+    # first-order part (B2 strongly ordered, compositions apart), then the continuous transition
+    zpf_line.points = [point(0.30, 0.5, 0.295, 1000), point(0.27, 0.3, 0.266, 1060), point(0.240, 0.02, 0.2399, 1120),
+                       point(0.253, 0.03, 0.2529, 1180), point(0.266, 0.04, 0.2659, 1240)]
+    assert list(second_order_points(zpf_line)) == [False, False, True, True, True]
+
+    # a single point with equal compositions (e.g. a congruent point) is not a transition line
+    zpf_line_isolated = ZPFLine(["B2_BCC"], ["BCC_VA"])
+    zpf_line_isolated.points = [zpf_line.points[0], zpf_line.points[2], zpf_line.points[1]]
+    assert not any(second_order_points(zpf_line_isolated))
+
+    # liquid and BCC at the same compositions: different entropies, so a (narrow) two-phase region
+    def melting_point(x_al, T):
+        a2 = comp_set("BCC_VA", [{"AL": x_al, "FE": 1 - x_al}] * 4, T)
+        liquid = comp_set("LIQUID", [{"AL": x_al, "FE": 1 - x_al}], T)
+        return Point({v.T: T, v.P: 101325, v.N: 1, v.X("AL"): x_al}, np.zeros(2), [liquid], [a2])
+    zpf_line_melting = ZPFLine(["LIQUID"], ["BCC_VA"])
+    zpf_line_melting.points = [melting_point(0.05, 1800), melting_point(0.06, 1795), melting_point(0.07, 1790)]
+    assert not any(second_order_points(zpf_line_melting))
+
+    # plotting: the second-order part is one dashed line, and it has no tielines
+    class _Strategy:
+        zpf_lines = [zpf_line]
+        def get_tieline_data(self, x, y):
+            return get_tieline_data_from_tieline_strategy(self, x, y)
+    fig, ax = plt.subplots()
+    plot_tielines(ax, _Strategy(), v.X("AL"), v.T, phase_colors={"B2_BCC": "C0", "BCC_VA": "C1"})
+    dashed = [line for line in ax.get_lines() if line.get_linestyle() == "--"]
+    assert len(dashed) == 1 and len(dashed[0].get_xdata()) == 3
+    assert len(ax.collections[0].get_segments()) == 2
+    plt.close(fig)

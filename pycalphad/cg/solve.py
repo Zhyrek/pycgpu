@@ -373,15 +373,22 @@ def _nominal_composition(point, elements):
 
 
 def _consolidate(result):
-    """Merge points of the same phase whose compositions agree within COMP_DIFFERENCE_TOL (one composition set)."""
+    """Merge points of the same phase whose compositions agree within COMP_DIFFERENCE_TOL (one composition set). The
+    merged point is the amount-weighted mean of the two, so the mass balance and GM are unchanged (keeping one
+    point's composition for the summed amount moved GM by up to ~0.3 J/mol: both points lie on the tangent plane,
+    and their energies differ by mu . dX)."""
     phs, Y, X, n, G = result
     keep = []
     for a in range(len(phs)):
         for k in keep:
             if phs[k] == phs[a] and np.max(np.abs(X[k] - X[a])) < COMP_DIFFERENCE_TOL:
-                if n[a] > n[k]:
-                    Y[k], X[k], G[k] = Y[a], X[a], G[a]
-                n[k] += n[a]
+                total = n[k] + n[a]
+                if total > 0:
+                    wk, wa = n[k] / total, n[a] / total
+                    Y[k] = wk * np.asarray(Y[k]) + wa * np.asarray(Y[a])
+                    X[k] = wk * np.asarray(X[k]) + wa * np.asarray(X[a])
+                    G[k] = wk * G[k] + wa * G[a]
+                n[k] = total
                 break
         else:
             keep.append(a)

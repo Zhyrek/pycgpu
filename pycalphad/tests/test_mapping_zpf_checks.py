@@ -252,10 +252,19 @@ def test_check_global_min(load_database):
         assert len(new_node.stable_composition_sets) == 2
         assert np.isclose(new_node.get_property(v.T), 622.456, rtol=1e-3)
 
-    # check_change_in_phases for new phase becoming stable and new node could not be found -> zpf line failed
+    # check_change_in_phases for new phase becoming stable and new node could not be found -> retry with a smaller
+    # step, and at the minimum step size -> zpf line failed
     step_result = zeq.update_equilibrium_with_new_conditions(zpf_line.points[-1], new_conditions)
     # do_not_create_node will skip node creation, effectively simulating a failed equilibrium
     extra_args["do_not_create_node"] = True
+    delta = zpf_line.current_delta
+    new_node = zchk.check_global_min(zpf_line, step_result, axis_data, **extra_args)
+    assert zpf_line.status == ZPFState.ATTEMPT_NEW_STEP
+    assert np.isclose(zpf_line.current_delta, delta * extra_args["delta_scale"])
+
+    zpf_line.status = ZPFState.NOT_FINISHED
+    zpf_line.current_delta = axis_data["axis_delta"][zpf_line.axis_var] * extra_args["min_delta_ratio"]
+    step_result = zeq.update_equilibrium_with_new_conditions(zpf_line.points[-1], new_conditions)
     new_node = zchk.check_global_min(zpf_line, step_result, axis_data, **extra_args)
     assert zpf_line.status == ZPFState.FAILED
 class _AxisPoint:

@@ -578,6 +578,14 @@ def check_global_min(zpf_line: ZPFLine, step_results: tuple[Point, list[Composit
                     _log.info(f"New node found successfully. {new_node.global_conditions}, {new_node.fixed_phases}, {new_node.free_phases}")
                     return new_node
 
+            # A node computed from a point closer to it usually succeeds: retry with a smaller step before failing
+            delta_scale = kwargs.get("delta_scale", 0.5)
+            min_delta_ratio = kwargs.get("min_delta_ratio", 0.1)
+            if zpf_line.current_delta * delta_scale / axis_delta[zpf_line.axis_var] >= min_delta_ratio:
+                _log.info(f"New node could not be found. Reducing step size from {zpf_line.current_delta} -> {zpf_line.current_delta*delta_scale}")
+                zpf_line.current_delta *= delta_scale
+                zpf_line.status = ZPFState.ATTEMPT_NEW_STEP
+                return None
             _log.info("New node could not be found. Failing ZPF line")
 
 MAX_NODE_RETRIES = 3

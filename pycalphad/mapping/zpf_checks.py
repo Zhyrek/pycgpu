@@ -553,6 +553,20 @@ def check_global_min(zpf_line: ZPFLine, step_results: tuple[Point, list[Composit
     new_point_vars = {av: new_point.get_property(av) for av in axis_vars}
     if len(zpf_line.points) % global_check_interval == 0:
         global_test_point = zeq.find_global_min_point(new_point, system_info, pdens, tol, num_candidates)
+        if global_test_point is None and getattr(new_point, "_merged_global_min_candidate", None) is not None \
+                and getattr(zpf_line.points[-1], "_merged_global_min_candidate", None) is None:
+            # A candidate with a driving force at another composition merged with a stable composition set when they
+            # were solved together. This happens past the boundary of a two-phase region of one phase (a miscibility
+            # gap), where the stable set is metastable: it starts the solve inside the gap. Where the line has just
+            # reached it, a smaller step reaches the boundary, where the node is found. (Where the previous point
+            # had such a candidate too, it is not the boundary and the line goes on)
+            delta_scale = kwargs.get("delta_scale", 0.5)
+            min_delta_ratio = kwargs.get("min_delta_ratio", 0.1)
+            if zpf_line.current_delta * delta_scale / axis_delta[zpf_line.axis_var] >= min_delta_ratio:
+                _log.info(f"Global min candidate merged with a stable composition set. Reducing step size from {zpf_line.current_delta} -> {zpf_line.current_delta*delta_scale}")
+                zpf_line.current_delta *= delta_scale
+                zpf_line.status = ZPFState.ATTEMPT_NEW_STEP
+                return None
         if global_test_point is not None:
             _log.info(f"Global min detected. {new_point.stable_phases} -> {global_test_point.stable_phases}")
             # By default, assumed the zpf failed. When we successfully find a new node, then we change this

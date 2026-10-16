@@ -267,6 +267,10 @@ def find_global_min_point(point: Point, system_info: dict, pdens = 500, tol = 1e
             return new_point
         else:
             _log.info('Global min was falsely detected. No global min found')
+            # (a candidate at another composition that merged with a stable composition set: kept on the point, see
+            # check_global_min)
+            if all(np.max(np.abs(np.asarray(cs.X) - np.asarray(other.X))) > SAME_STATE_COMPOSITION for other in point.stable_composition_sets):
+                point._merged_global_min_candidate = dG
             return None
 
 def _detect_degenerate_phase(point: Point, new_cs: CompositionSet):

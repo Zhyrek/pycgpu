@@ -913,3 +913,17 @@ def test_binary_strategy_does_not_trace_the_edge_of_the_diagram(load_database):
     for zpf_line in strategy.zpf_lines:
         at_pure_component = [all(np.max(cs.X) > 1 - 1e-5 for cs in point.stable_composition_sets) for point in zpf_line.points]
         assert not (len(at_pure_component) > 2 and all(at_pure_component)), zpf_line
+
+@select_database("crtiv_ghosh.tdb")
+def test_ternary_strategy_finds_a_miscibility_gap_a_step_crosses(load_database):
+    """
+    At 923 K the LAVES_C15 + BCC_A2 line from the Cr-Ti edge reaches the BCC_A2 miscibility gap with a step that ends
+    inside it, where the second BCC_A2 merges with the stable one when the two are solved together. A smaller step
+    reaches the boundary, where the LAVES_C15 + BCC_A2 + BCC_A2 node is found
+    """
+    dbf = load_database()
+    comps = ['CR', 'TI', 'V', 'VA']
+    phases = filter_phases(dbf, unpack_species(dbf, comps))
+    strat = TernaryStrategy(dbf, comps, phases, {v.X('TI'): (0, 1, 0.05), v.X('V'): (0, 1, 0.05), v.T: 923, v.P: 101325, v.N: 1})
+    strat.do_map()
+    assert ['BCC_A2', 'BCC_A2', 'LAVES_C15'] in [sorted(n.stable_phases) for n in strat.node_queue.nodes]

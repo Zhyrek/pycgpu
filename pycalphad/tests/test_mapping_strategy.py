@@ -68,6 +68,27 @@ def test_binary_strategy(load_database):
     new_num_nodes = len(strategy.node_queue.nodes)
     assert new_num_nodes == num_nodes + 2
 
+@select_database("alfe.tdb")
+def test_binary_strategy_node_metastable_to_another_candidate(load_database):
+    """
+    Stepping the AL2FE + AL5FE2 line up in temperature, LIQUID is the candidate with the largest driving force near
+    1428 K, but the node AL2FE + AL5FE2 + LIQUID is metastable to AL5FE4. The node has to be rebuilt with AL5FE4;
+    otherwise the line ends at the metastable node (failed, at 1405 K) and the AL2FE + AL5FE2 + AL5FE4 node is not
+    found.
+    """
+    dbf = load_database()
+    phases = ["AL13FE4", "AL2FE", "AL5FE2", "AL5FE4", "B2_BCC", "FCC_A1", "LIQUID"]
+    strategy = TielineStrategy(dbf, ["AL", "FE", "VA"], phases, {v.T: (700, 1900, 30), v.X("AL"): (0, 1, 0.02), v.P: 101325})
+    strategy.do_map()
+
+    mapping_sets = [set(zpf_line.stable_phases_with_multiplicity) for zpf_line in strategy.zpf_lines]
+    for dzs in [{"AL2FE", "AL5FE2"}, {"AL2FE", "AL5FE4"}, {"AL2FE", "B2_BCC"}]:
+        assert dzs in mapping_sets
+    assert ["AL2FE", "AL5FE2", "AL5FE4"] in [sorted(node.stable_phases) for node in strategy.node_queue.nodes]
+    for zpf_line in strategy.zpf_lines:
+        if sorted(zpf_line.stable_phases) == ["AL2FE", "AL5FE2"]:
+            assert zpf_line.status != ZPFState.FAILED
+
 @select_database("crtiv_ghosh.tdb")
 def test_ternary_strategy(load_database):
     dbf = load_database()
@@ -861,11 +882,12 @@ def test_circular_loop_check_normalizes_axes():
     assert np.max(x_liq) > 0.95
 
 @select_database("GaLa-11Idb.tdb")
-def test_automatic_starting_points_keep_forced_starting_points(load_database):
+def test_automatic_starting_points_keep_forced_starting_points(load_database, monkeypatch):
     """
     Parentless recovery nodes from the edge step maps are kept, e.g. for the narrow La BCC window (1134-1194 K)
     """
     from pycalphad.mapping.primitives import MIN_COMPOSITION
+    import pycalphad.mapping.zpf_checks as zchk
     dbf = load_database()
     # La side of Ga-La. FCC_A1 is needed for the metastable node that the edge step map lands on
     phases = ["LIQUID", "BCC_A2", "FCC_A1"]
@@ -875,8 +897,13 @@ def test_automatic_starting_points_keep_forced_starting_points(load_database):
     # Its coarse step (dT = 185 K) jumps over the BCC window to a metastable FCC_A1+LIQUID node, and the step map
     # only records the LIQUID+BCC_A2 field by the recovery point that it force-adds (without a parent) below the node
     step_conds = {v.P: 101325, v.N: 1, v.T: (300, 4000, 185), v.X("LA"): 1 - MIN_COMPOSITION}
-    step = StepStrategy(dbf, ["GA", "LA", "VA"], phases, step_conds, models=strategy.models, phase_record_factory=strategy.phase_records)
-    step.do_map()
+    # (the metastable node is rebuilt with BCC_A2 by _retry_metastable_node, and the step map then has the LIQUID +
+    # BCC_A2 node with a parent; without the rebuild, it lands on the metastable node, as a step map can wherever
+    # the phase with the largest driving force is not the one that becomes stable first)
+    with monkeypatch.context() as m:
+        m.setattr(zchk, "_retry_metastable_node", lambda new_node, *args, **kwargs: new_node)
+        step = StepStrategy(dbf, ["GA", "LA", "VA"], phases, step_conds, models=strategy.models, phase_record_factory=strategy.phase_records)
+        step.do_map()
     bcc_liquid_nodes = [node for node in step.node_queue.nodes if sorted(node.stable_phases) == ["BCC_A2", "LIQUID"]]
     assert len(bcc_liquid_nodes) == 1 and bcc_liquid_nodes[0].parent is None
 

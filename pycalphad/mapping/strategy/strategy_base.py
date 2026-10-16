@@ -126,6 +126,10 @@ class MapStrategy:
         self.GLOBAL_MIN_PDENS = kwargs.get("GLOBAL_MIN_PDENS", 500)
         self.GLOBAL_MIN_TOL = kwargs.get("GLOBAL_MIN_TOL", 1e-4)
         self.GLOBAL_MIN_NUM_CANDIDATES = kwargs.get("GLOBAL_MIN_NUM_CANDIDATES", 1000)
+        # Shorter test steps for a ZPF line shorter than the smallest step (see _test_direction): each try scales the
+        # step by SHORT_STEP_SCALE, down to SHORT_STEP_MIN_RATIO times the smallest step
+        self.SHORT_STEP_SCALE = kwargs.get("SHORT_STEP_SCALE", 0.25)
+        self.SHORT_STEP_MIN_RATIO = kwargs.get("SHORT_STEP_MIN_RATIO", 0.01)
 
     def _constant_kwargs(self):
         """
@@ -138,6 +142,8 @@ class MapStrategy:
             "GLOBAL_MIN_PDENS": self.GLOBAL_MIN_PDENS,
             "GLOBAL_MIN_TOL": self.GLOBAL_MIN_TOL,
             "GLOBAL_MIN_NUM_CANDIDATES": self.GLOBAL_MIN_NUM_CANDIDATES,
+            "SHORT_STEP_SCALE": self.SHORT_STEP_SCALE,
+            "SHORT_STEP_MIN_RATIO": self.SHORT_STEP_MIN_RATIO,
             }
         return const_kwargs
 
@@ -673,7 +679,24 @@ class MapStrategy:
                 exit_dirs.append(node.axis_direction)
         return exits, exit_dirs
 
-    def _test_direction(self, point: Point, axis_var: v.StateVariable, direction: Direction):
+    def _first_direction(self, exit_point: Point, candidates: list[tuple[v.StateVariable, Direction]]):
+        """
+        The first (axis variable, direction) in candidates that a ZPF line can be stepped in from exit_point, as
+        (axis variable, direction, delta), or None. Each candidate is tested with the smallest step first; only if all
+        fail, they are tested again with shorter steps (see _test_direction), so that a short line is not taken for a
+        failed direction, and a direction that only works with a shorter step does not win over one that works with
+        the usual step.
+        """
+        for short in (False, True):
+            for axis_var, d in candidates:
+                dir_results = self._test_direction(exit_point, axis_var, d, short=short)
+                if dir_results is not None:
+                    av_delta, other_av_delta = dir_results
+                    _log.info(f"Found direction: {axis_var, d, av_delta} for point {exit_point.fixed_phases}, {exit_point.free_phases}, {exit_point.global_conditions}")
+                    return axis_var, d, av_delta
+        return None
+
+    def _test_direction(self, point: Point, axis_var: v.StateVariable, direction: Direction, short: bool = False):
         """
         Given an axis variable and direction, test that we can step from the point
             If stepping doesn"t work, we continue to reduce the step size until it can (or until the step size is too small)
@@ -694,37 +717,56 @@ class MapStrategy:
         # Set the starting delta to be the minimum (delta * min_delta_ratio). Then if direction is
         # successful, we can scale the delta after successful zpf line iterations
         curr_delta = self.axis_delta[axis_var] * self.MIN_DELTA_RATIO
-        new_conds, hit_axis_limit = self._step_conditions(point, axis_var, curr_delta, self.axis_lims[axis_var], direction)
-        if not hit_axis_limit:
-            step_results = zeq.update_equilibrium_with_new_conditions(point, new_conds, self._other_av(axis_var))
-
-            extra_args = {
-                "system_info": self.system_info,
-                "pdens": self.GLOBAL_MIN_PDENS,
-                "tol": self.GLOBAL_MIN_TOL,
-                "global_num_candidates": self.GLOBAL_MIN_NUM_CANDIDATES,
-            }
-
-            # Check valid equilibrium, global min and change in phases
-            check_functions = [zchk.simple_check_valid_point, zchk.simple_check_change_in_phases, zchk.simple_check_global_min]
-            if len(self.axis_vars) > 1:
-                # (a step that stays on an edge of the diagram would trace along it, see check_diagram_edge)
-                check_functions.insert(1, zchk.simple_check_diagram_edge)
-            valid_point = True
-            for checks in check_functions:
-                if not checks(step_results, **extra_args):
-                    valid_point = False
-                    break
-
-            # If valid point, then record the change in the other axis and return both deltas
-            if valid_point:
-                other_av_delta = None
-                new_point, orig_cs = step_results
-                if other_av is not None:
-                    new_other_av_val = new_point.get_property(other_av)
-                    other_av_delta = abs(other_av_val - new_other_av_val)
-                return curr_delta, other_av_delta
+        # A ZPF line can be shorter than the smallest step: between two nodes close together, e.g. near an invariant.
+        # A step along it then fails only because another phase becomes stable within the step. With short=True,
+        # steps shorter than the smallest are tried after such a failure; the node at the line's other end is then
+        # found as the line is stepped
+        min_short_delta = curr_delta * self.SHORT_STEP_MIN_RATIO
+        if short:
+            curr_delta *= self.SHORT_STEP_SCALE
+        while True:
+            failed = self._test_step(point, axis_var, direction, curr_delta, other_av, other_av_val)
+            if not isinstance(failed, str):
+                return failed
+            if not short or failed != "global_min" or curr_delta * self.SHORT_STEP_SCALE < min_short_delta:
+                break
+            curr_delta *= self.SHORT_STEP_SCALE
 
         # If stepping failed, then returned None
         _log.info(f"Stepping point {point.fixed_phases}, {point.free_phases}, {point.global_conditions}, {direction} failed with step size {curr_delta}.")
         return None
+
+    def _test_step(self, point: Point, axis_var: v.StateVariable, direction: Direction, curr_delta: float, other_av, other_av_val):
+        """
+        One test step of _test_direction: (delta, change of the other axis variable) if the step is valid, otherwise
+        the name of the check it failed ("axis_limit", "valid_point", "diagram_edge", "change_in_phases", "global_min")
+        """
+        new_conds, hit_axis_limit = self._step_conditions(point, axis_var, curr_delta, self.axis_lims[axis_var], direction)
+        if hit_axis_limit:
+            return "axis_limit"
+        step_results = zeq.update_equilibrium_with_new_conditions(point, new_conds, self._other_av(axis_var))
+
+        extra_args = {
+            "system_info": self.system_info,
+            "pdens": self.GLOBAL_MIN_PDENS,
+            "tol": self.GLOBAL_MIN_TOL,
+            "global_num_candidates": self.GLOBAL_MIN_NUM_CANDIDATES,
+        }
+
+        # Check valid equilibrium, global min and change in phases
+        check_functions = [("valid_point", zchk.simple_check_valid_point), ("change_in_phases", zchk.simple_check_change_in_phases),
+                           ("global_min", zchk.simple_check_global_min)]
+        if len(self.axis_vars) > 1:
+            # (a step that stays on an edge of the diagram would trace along it, see check_diagram_edge)
+            check_functions.insert(1, ("diagram_edge", zchk.simple_check_diagram_edge))
+        for name, checks in check_functions:
+            if not checks(step_results, **extra_args):
+                return name
+
+        # If valid point, then record the change in the other axis and return both deltas
+        other_av_delta = None
+        new_point, orig_cs = step_results
+        if other_av is not None:
+            new_other_av_val = new_point.get_property(other_av)
+            other_av_delta = abs(other_av_val - new_other_av_val)
+        return curr_delta, other_av_delta

@@ -948,3 +948,17 @@ def test_ternary_strategy_finds_regions_not_connected_to_the_edges(load_database
     strat = TernaryStrategy(dbf, comps, phases, {v.X('CU'): (0, 1, 0.05), v.X('Y'): (0, 1, 0.05), v.T: 1774.65, v.P: 101325, v.N: 1}, COVERAGE_CHECK=False)
     strat.do_map()
     assert ['ALCUY', 'LIQUID'] not in [sorted(z.stable_phases) for z in strat.zpf_lines]
+
+@select_database("alfe.tdb")
+def test_binary_strategy_traces_zpf_lines_shorter_than_the_smallest_step(load_database):
+    """
+    Between the invariants AL2FE+AL5FE2+AL5FE4 (1428 K) and AL5FE2+AL5FE4+LIQUID (1430 K), the AL5FE2+AL5FE4 region
+    is 2 K tall, less than the smallest step in temperature (35 K * 0.1). The test step from each node then lands in
+    the next region in both directions, so the line was never traced; shorter test steps find it
+    """
+    dbf = load_database()
+    comps = ['AL', 'FE', 'VA']
+    phases = filter_phases(dbf, unpack_species(dbf, comps))
+    strat = BinaryStrategy(dbf, comps, phases, {v.T: (300, 1700, 35), v.X('FE'): (0, 1, 0.02), v.P: 101325, v.N: 1})
+    strat.do_map()
+    assert any(sorted(z.stable_phases) == ['AL5FE2', 'AL5FE4'] for z in strat.zpf_lines)

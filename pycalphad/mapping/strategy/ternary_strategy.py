@@ -431,28 +431,25 @@ class TernaryStrategy(MapStrategy):
         else:
             directions = [proposed_direction]
 
-        for d in directions:
-            dir_results = self._test_direction(exit_point, axis_var, d)
-            if dir_results is not None:
-                av_delta, other_av_delta = dir_results
-                _log.info(f"Found direction: {axis_var, d, av_delta} for point {exit_point.fixed_phases}, {exit_point.free_phases}, {exit_point.global_conditions}")
-                return exit_point, axis_var, d, av_delta
-
         # Steps in the axis variable that the line changes most in can fail in both directions, e.g. from an exit
-        # point next to an edge of the diagram (a step towards the edge leaves it), so try the other axis variable
+        # point next to an edge of the diagram (a step towards the edge leaves it), so the other axis variable is
+        # tried after it
         other_axis_var = self.axis_vars[1 - self.axis_vars.index(axis_var)]
-        for d in [Direction.POSITIVE, Direction.NEGATIVE]:
-            dir_results = self._test_direction(exit_point, other_axis_var, d)
-            if dir_results is not None:
-                av_delta, other_av_delta = dir_results
-                _log.info(f"Found direction: {other_axis_var, d, av_delta} for point {exit_point.fixed_phases}, {exit_point.free_phases}, {exit_point.global_conditions}")
-                return exit_point, other_axis_var, d, av_delta
+        candidates = [(axis_var, d) for d in directions] + [(other_axis_var, d) for d in [Direction.POSITIVE, Direction.NEGATIVE]]
+        found = self._first_direction(exit_point, candidates)
+        if found is not None:
+            # A direction that only works with a step shorter than the smallest is a short ZPF line; the exit is also
+            # handled as one without a direction (a starting point just past it, see below), which finds what lies
+            # beyond the exit if the short line leads elsewhere
+            if found[2] < self.axis_delta[found[0]] * self.MIN_DELTA_RATIO:
+                self._add_starting_point_at_new_condition(exit_point, normal, Direction.POSITIVE if norm_delta_dot > 0 else Direction.NEGATIVE, checked=True)
+            return (exit_point,) + found
 
         self._add_starting_point_at_new_condition(exit_point, normal, Direction.POSITIVE if norm_delta_dot > 0 else Direction.NEGATIVE)
 
         return None
     
-    def _add_starting_point_at_new_condition(self, point: Point, normal: list[float], direction: Direction):
+    def _add_starting_point_at_new_condition(self, point: Point, normal: list[float], direction: Direction, checked: bool = False):
         """
         If we made it here, then no direction has worked. This could be a case where
         the two CS of the exit point are stoichiometric, so there is no ZPF line leading
@@ -469,6 +466,10 @@ class TernaryStrategy(MapStrategy):
 
         _log.info(f"Attemping to add point at {copy_conds}")
         new_point = point_from_equilibrium(self.dbf, self.components, self.phases, copy_conds, models=self.models, phase_record_factory=self.phase_records)
+        # With checked (an exit that also has a short ZPF line), the point is only added outside the regions found so
+        # far and if it is the global minimum, as for the coverage check
+        if new_point is not None and checked and not self._acceptable_starting_point(new_point, copy_conds):
+            return
         if new_point is not None:
             # If new point is an invariant, then we add it as a starting point (point is added as a parent to prevent repeated exit calculations)
             # If new point is 2 phase, then we add it as a starting point the node being the exit

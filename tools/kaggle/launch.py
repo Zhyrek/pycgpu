@@ -13,7 +13,12 @@ free weekly GPU quota; nothing is billed.
     python tools/kaggle/launch.py quota
 
 Each GPU type gets its own private job (<user>/pycgpu-gpu-checks-<gpu>), so
-a T4 and a P100 run can be in flight together.
+a T4 and a P100 run can be in flight together. --script runs another job
+script from this directory instead (its own job, <user>/pycgpu-<script>-<gpu>;
+pass it to status and fetch too), e.g. run_cg_pricing.py, cg's batched
+pricing kernel:
+
+    python tools/kaggle/launch.py push --gpu p100 --script run_cg_pricing.py --branch dense-grid
 """
 import argparse
 import json
@@ -51,27 +56,38 @@ def username():
     return match.group(1)
 
 
-def kernel_id(gpu):
-    return f"{username()}/pycgpu-gpu-checks-{gpu}"
+DEFAULT_SCRIPT = 'run_gpu_checks.py'
+
+
+def job_name(gpu, script=DEFAULT_SCRIPT):
+    stem = 'gpu-checks' if script == DEFAULT_SCRIPT else os.path.splitext(script)[0].replace('run_', '').replace('_', '-')
+    return f"pycgpu-{stem}-{gpu}"
+
+
+def kernel_id(gpu, script=DEFAULT_SCRIPT):
+    return f"{username()}/{job_name(gpu, script)}"
 
 
 def push(args):
     with tempfile.TemporaryDirectory() as folder:
-        with open(os.path.join(HERE, 'run_gpu_checks.py')) as f:
+        with open(os.path.join(HERE, args.script)) as f:
             source = f.read()
         source, n = re.subn(r"^BRANCH = .*$", f"BRANCH = {args.branch!r}", source, count=1, flags=re.M)
         assert n == 1
-        job_args = (['--quick'] if args.quick else []) + (['--skip-suite'] if args.skip_suite else []) + \
-                   (['--skip-compare'] if args.skip_compare else []) + \
-                   ['--suites', args.suites, '--suite-timeout', str(args.suite_timeout)]
+        if args.script == DEFAULT_SCRIPT:
+            job_args = (['--quick'] if args.quick else []) + (['--skip-suite'] if args.skip_suite else []) + \
+                       (['--skip-compare'] if args.skip_compare else []) + \
+                       ['--suites', args.suites, '--suite-timeout', str(args.suite_timeout)]
+        else:
+            job_args = list(args.job_args)
         source, n = re.subn(r"^KAGGLE_ARGS = .*$", f"KAGGLE_ARGS = {job_args!r}", source, count=1, flags=re.M)
         assert n == 1
-        with open(os.path.join(folder, 'run_gpu_checks.py'), 'w') as f:
+        with open(os.path.join(folder, args.script), 'w') as f:
             f.write(source)
         meta = {
-            'id': kernel_id(args.gpu),
-            'title': f'pycgpu-gpu-checks-{args.gpu}',
-            'code_file': 'run_gpu_checks.py',
+            'id': kernel_id(args.gpu, args.script),
+            'title': job_name(args.gpu, args.script),
+            'code_file': args.script,
             'language': 'python',
             'kernel_type': 'script',
             'is_private': True,
@@ -96,9 +112,12 @@ def main():
     p.add_argument('--skip-compare', action='store_true', help='skip the CUDA vs C++ comparison grids')
     p.add_argument('--suites', default='cuda,cpp', help='comma-separated backends to run the test suite on')
     p.add_argument('--suite-timeout', type=int, default=5400, help='seconds per test-suite run')
+    p.add_argument('--script', default=DEFAULT_SCRIPT, help='job script in tools/kaggle (default %(default)s)')
+    p.add_argument('job_args', nargs='*', help='options for a --script job (after --)')
     for name, help_text in (('status', 'show the run status'), ('fetch', 'download the run outputs')):
         p = sub.add_parser(name, help=help_text)
         p.add_argument('--gpu', choices=ACCELERATORS, required=True)
+        p.add_argument('--script', default=DEFAULT_SCRIPT)
         if name == 'fetch':
             p.add_argument('--dest', default=None, help='default: kaggle_results/<gpu>')
     sub.add_parser('quota', help="show the account's remaining weekly GPU quota")
@@ -106,11 +125,12 @@ def main():
     if args.command == 'push':
         push(args)
     elif args.command == 'status':
-        kaggle('kernels', 'status', kernel_id(args.gpu))
+        kaggle('kernels', 'status', kernel_id(args.gpu, args.script))
     elif args.command == 'fetch':
-        dest = args.dest or os.path.join('kaggle_results', args.gpu)
+        dest = args.dest or os.path.join('kaggle_results', args.gpu if args.script == DEFAULT_SCRIPT
+                                         else job_name(args.gpu, args.script))
         os.makedirs(dest, exist_ok=True)
-        kaggle('kernels', 'output', kernel_id(args.gpu), '-p', dest)
+        kaggle('kernels', 'output', kernel_id(args.gpu, args.script), '-p', dest)
         summary = os.path.join(dest, 'summary.json')
         if os.path.exists(summary):
             with open(summary) as f:

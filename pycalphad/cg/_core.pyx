@@ -1901,6 +1901,7 @@ cdef class TileSolver(Solver):
     cdef double pr_RT
     cdef public object pricer_keep
     cdef public long device_jobs
+    cdef public object pricer_cb, cb_error   # a Python batched pricer (e.g. a GPU), and an error it raised
 
     def __init__(self, phases, int C, **kw):
         Solver.__init__(self, phases, C, **kw)
@@ -1914,7 +1915,7 @@ cdef class TileSolver(Solver):
         self.own_s = np.zeros(64, dtype=np.int32)
         self.jcap = 0; self.cpcap = 0; self.nj = 0; self.ncp = 0
         self.job_batches = []
-        self.pricer = NULL; self.device_jobs = 0
+        self.pricer = NULL; self.device_jobs = 0; self.pricer_cb = None; self.cb_error = None
 
     def _grow_staged(self):
         cap = 2 * self.scap
@@ -2268,6 +2269,32 @@ cdef class TileSolver(Solver):
         self.pr_evals = np.zeros(2 * max(self.jcap, 1024), dtype=np.int32)
         self.pricer_keep = keep
 
+    def set_pricer_callback(self, cb, ok):
+        """Price the jobs of the phases flagged in ok by calling cb(jobs, job_phase, job_cond, mu, y0, y, x, G, tpd,
+        conv, evals) once per sub-round: jobs lists the job indices to price; the other arrays are the job tables
+        (indexed by job; mu by condition, RT units), into which cb writes y, x, G, tpd, conv and evals (2 per job).
+        None: price everything here."""
+        self.pricer_cb = cb; self.cb_error = None
+        if cb is None:
+            return
+        self.pricer = NULL
+        self.pricer_ok = np.ascontiguousarray(ok, dtype=np.uint8)
+        self.pr_jobs = np.zeros(max(self.jcap, 1024), dtype=np.int32)
+        self.pr_evals = np.zeros(2 * max(self.jcap, 1024), dtype=np.int32)
+
+    def _call_pricer(self, int n):
+        try:
+            self.pricer_cb(np.asarray(self.pr_jobs)[:n], np.asarray(self.j_phase)[:self.nj],
+                           np.asarray(self.j_cond)[:self.nj], np.asarray(self.t_mu), np.asarray(self.j_y0)[:self.nj],
+                           np.asarray(self.j_y)[:self.nj], np.asarray(self.j_x)[:self.nj],
+                           np.asarray(self.j_G)[:self.nj], np.asarray(self.j_tpd)[:self.nj],
+                           np.asarray(self.j_conv)[:self.nj], np.asarray(self.pr_evals)[:2 * self.nj])
+        except BaseException as e:
+            self.cb_error = e
+            for k in range(n):
+                j = self.pr_jobs[k]
+                self.j_conv[j] = 0; self.j_G[j] = np.nan; self.j_tpd[j] = np.inf
+
     def _grow_pricer_buffers(self):
         self.pr_jobs = np.zeros(self.jcap, dtype=np.int32); self.pr_evals = np.zeros(2 * self.jcap, dtype=np.int32)
 
@@ -2276,7 +2303,10 @@ cdef class TileSolver(Solver):
         (Independent of each other: the part a batched device kernel does, see set_pricer.)"""
         cdef int j, n = 0, k
         cdef void* pp
-        if self.pricer != NULL:
+        cdef bint use_cb = False
+        with gil:
+            use_cb = self.pricer_cb is not None
+        if self.pricer != NULL or use_cb:
             if self.pr_jobs.shape[0] < self.nj:
                 with gil:
                     self._grow_pricer_buffers()
@@ -2288,10 +2318,14 @@ cdef class TileSolver(Solver):
                         &self.t_mu[self.j_cond[j], 0], &self.j_y0[j, 0], &self.j_y[j, 0], &self.j_x[j, 0],
                         &self.j_G[j], &self.j_tpd[j])
             if n > 0:
-                self.pricer(n, &self.pr_jobs[0], &self.j_phase[0], &self.j_cond[0], &self.t_mu[0, 0],
-                            &self.j_y0[0, 0], self.Dmax, &self.j_y[0, 0], &self.j_x[0, 0], &self.j_G[0],
-                            &self.j_tpd[0], &self.j_conv[0], &self.pr_evals[0], &self.pr_di[0], &self.pr_dd[0],
-                            &self.pr_ip[0], &self.pr_dp[0], self.C, self.pr_RT, &self.pr_sv[0])
+                if use_cb:
+                    with gil:
+                        self._call_pricer(n)
+                else:
+                    self.pricer(n, &self.pr_jobs[0], &self.j_phase[0], &self.j_cond[0], &self.t_mu[0, 0],
+                                &self.j_y0[0, 0], self.Dmax, &self.j_y[0, 0], &self.j_x[0, 0], &self.j_G[0],
+                                &self.j_tpd[0], &self.j_conv[0], &self.pr_evals[0], &self.pr_di[0], &self.pr_dd[0],
+                                &self.pr_ip[0], &self.pr_dp[0], self.C, self.pr_RT, &self.pr_sv[0])
                 self.device_jobs += n
                 for k in range(n):
                     j = self.pr_jobs[k]; pp = self.pptr[self.j_phase[j]]
@@ -2572,6 +2606,10 @@ cdef class TileSolver(Solver):
                     batches.append(self.nj)
                     with nogil:
                         self._execute_jobs()
+                    if self.cb_error is not None:
+                        err, self.cb_error = self.cb_error, None
+                        raise err
+                    with nogil:
                         # each condition takes its results
                         for m in range(nmem):
                             t = members_v[m]

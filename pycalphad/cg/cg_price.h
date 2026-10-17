@@ -440,6 +440,41 @@ CG_DEVICE static int cg_price(const CgPhase& P, WT& W, const double* sv, const d
     return cg_kkt(P, W) < 1e-7 ? 1 : 0;
 }
 
+// after cg_price: S = dx/dmu (C x C, row-major, mu in RT units) at the minimum = B H^-1 B^T over the free
+// variables (see CPhase.sens_full, unconstrained). 0, or -1 if the Hessian there is not positive definite
+template <class WT>
+CG_DEVICE static int cg_sens(const CgPhase& P, WT& W, double* S, double* Bm, double* Wm) {
+    const int C = P.C;
+    for (int i = 0; i < C * C; ++i) S[i] = 0.0;
+    for (int j = 0; j < P.D; ++j) W.gl[j] = W.gy[j];
+    int m = cg_build_hessian(P, W);
+    if (m == 0) return 0;
+    if (cg_cholesky(W.V, m) != 0) return -1;
+    double M = W.Mtot, xs[CG_CMAX];
+    for (int i = 0; i < C; ++i) xs[i] = W.mval[i] / M;
+    for (int i = 0; i < C; ++i)
+        for (int p = 0; p < m; ++p) {
+            int k = W.free_[p], b = P.blk[k];
+            double s = 0.0;
+            for (int q = P.boff[b]; q < P.boff[b + 1]; ++q) {
+                int j = P.bidx[q];
+                s += (P.A[i * P.D + j] - xs[i] * P.asum[j]) / M * W.y[j];
+            }
+            Bm[i * m + p] = W.sc[p] * W.y[k] * ((P.A[i * P.D + k] - xs[i] * P.asum[k]) / M - s);
+        }
+    for (int i = 0; i < C; ++i) {   // Wm row i = H^-1 (row i of B)
+        for (int p = 0; p < m; ++p) Wm[i * m + p] = Bm[i * m + p];
+        cg_cholesky_solve(W.V, m, &Wm[i * m]);
+    }
+    for (int i = 0; i < C; ++i)
+        for (int j = 0; j < C; ++j) {
+            double s = 0.0;
+            for (int p = 0; p < m; ++p) s += Bm[i * m + p] * Wm[j * m + p];
+            S[i * C + j] = s;
+        }
+    return 0;
+}
+
 CG_DEVICE static void cg_phase_from_desc(CgPhase& P, int ph, const int* di, const double* dd, const int* ip,
                                          const double* dp, int C, double RT) {
     const int* d = di + ph * CGI_COUNT;

@@ -18,6 +18,7 @@ import numpy as np
 from libc.math cimport exp, log, fabs, sqrt, INFINITY, NAN, isfinite
 from libc.string cimport memcpy
 from libc.stdlib cimport malloc, free
+from posix.time cimport clock_gettime, timespec, CLOCK_MONOTONIC
 from libcpp.string cimport string
 from scipy.linalg.cython_lapack cimport dsyev, dgetrf, dgetrs, dpotrf, dpotrs, dgesv, dgelss
 from pycalphad.core.phase_rec cimport PhaseRecord, FastFunction, FastFunctionFactory
@@ -181,8 +182,8 @@ cdef class CPhase:
 
     def device_description(self):
         """What cg_price.h needs about this phase: sublattice structure, formula moles (linear phases), bounds; and
-        whether that port can price it (linear formula moles, no constraints beyond the sublattice balances, no
-        pinned species)."""
+        whether that port can evaluate it (linear formula moles, no constraints beyond the sublattice balances, no
+        pinned species; stoichiometric phases are never priced, only polished)."""
         return {'D': self.D, 'nb': self.nb, 'boff': np.asarray(self.boff).copy(), 'bidx': np.asarray(self.bidx).copy(),
                 'blk': np.asarray(self.blk).copy(), 'single': np.asarray(self.single).copy(),
                 'pinned': np.asarray(self.pinned).copy(), 'nsym': self.nsym,
@@ -190,7 +191,8 @@ cdef class CPhase:
                 'sym_off': np.asarray(self.sym_off).copy(), 'A': np.asarray(self.A).copy(),
                 'asum': np.asarray(self.asum).copy(), 'm_lo': self.m_lo, 'pen_w': self.pen_w,
                 'max_dz': self.max_dz, 'RT': self.RT,
-                'supported': bool(self.linear and self.ne == 0 and not np.asarray(self.pinned).any() and not self.stoich)}
+                'stoich': bool(self.stoich),
+                'supported': bool(self.linear and self.ne == 0 and not np.asarray(self.pinned).any())}
 
     def set_constraints(self, E, e):
         """Linear equality constraints E y = e beyond the site-fraction balances."""
@@ -934,6 +936,7 @@ cdef class Solver:
     cdef int pol_na
     cdef bint seed_added
     cdef public double skip_margin, prune, tol, prune_late, seed_prune
+    cdef public object lp_before
     cdef public int max_late
 
     def __init__(self, phases, int C, double skip_margin=1.0, double prune=1.0, double tol=1e-6,
@@ -982,6 +985,48 @@ cdef class Solver:
     def points_phase(self, int p):
         """Diagnostics: the phase index of stored point p."""
         return self.Pph[p]
+
+    def py_lp_solve(self):
+        """The LP alone at the current conditions from the current basis (checks): (status, objective, basis, xB,
+        mu (RT units), iterations)."""
+        cdef double obj = 0.0
+        cdef long it0 = self.lp_iters
+        cdef int st
+        with nogil:
+            st = self.lp_solve(&obj)
+        return (st, obj, np.asarray(self.basis[:self.K]).copy(), np.asarray(self.xB[:self.K]).copy(),
+                np.asarray(self.mu).copy(), self.lp_iters - it0)
+
+    def py_polish(self):
+        """LP then polish at the current conditions from the current basis (checks): (LP status, polished,
+        polish_fail, phases, amounts, site fractions, compositions, GM, mu (RT units)); the LP's basis, xB and mu
+        before the polish in lp_before."""
+        cdef double obj = 0.0
+        cdef int st, ok = 0, a
+        with nogil:
+            st = self.lp_solve(&obj)
+            self.gauge_fix()
+        self.lp_before = (np.asarray(self.basis[:self.K]).copy(), np.asarray(self.xB[:self.K]).copy(),
+                          np.asarray(self.mu).copy())
+        self.polish_fail = 0
+        if st == 0:
+            with nogil:
+                ok = self.polish()
+        na = self.pol_na if ok else 0
+        Dm = self.Dmax
+        return (st, bool(ok), self.polish_fail, [self.pol_ph[a] for a in range(na)], [self.pol_n[a] for a in range(na)],
+                [np.asarray(self.pol_y[a * Dm:a * Dm + (<CPhase>self.phases[self.pol_ph[a]]).D]).copy() for a in range(na)],
+                [np.asarray(self.pol_x[a * self.C:(a + 1) * self.C]).copy() for a in range(na)],
+                [self.pol_G[a] for a in range(na)], np.asarray(self.pol_mu).copy())
+
+    def gauge_matrix(self):
+        return np.asarray(self.gauge_mv[:self.ngauge]).copy()
+
+    def store_arrays(self):
+        """The point store's compositions and energies, and the scaled condition rows (checks)."""
+        cdef int n = self.npts
+        return (np.asarray(self.Px[:n]).copy(), np.asarray(self.PG[:n]).copy(), np.asarray(self.R[:self.K]).copy(),
+                np.asarray(self.b[:self.K]).copy(), np.asarray(self.mf).copy())
 
     def lp_state(self):
         """Diagnostics: the LP basis (points, or -(1 + k) for artificial columns), their amounts, the chemical
@@ -1851,6 +1896,12 @@ cdef class Solver:
             self.K = K0; self.R = R0; self.b = b0; self.mf = mf0; self.fixed = fixed0
 
 
+cdef inline double _now() noexcept nogil:
+    cdef timespec ts
+    clock_gettime(CLOCK_MONOTONIC, &ts)
+    return ts.tv_sec + 1e-9 * ts.tv_nsec
+
+
 ctypedef void (*pricer_fn)(int n, const int* jobs, const int* job_phase, const int* job_cond, const double* mu,
                           const double* y0, int ystride, double* y_out, double* x_out, double* G_out, double* tpd_out,
                           int* conv, int* evals, const int* di, const double* dd, const int* ip, const double* dp,
@@ -1902,6 +1953,7 @@ cdef class TileSolver(Solver):
     cdef public object pricer_keep
     cdef public long device_jobs
     cdef public object pricer_cb, cb_error   # a Python batched pricer (e.g. a GPU), and an error it raised
+    cdef public double tm_lp, tm_polish, tm_gen, tm_exec, tm_consume, tm_next, tm_merge   # seconds (batched rounds)
 
     def __init__(self, phases, int C, **kw):
         Solver.__init__(self, phases, C, **kw)
@@ -2509,7 +2561,7 @@ cdef class TileSolver(Solver):
         cdef int B = Rv.shape[0], K = Rv.shape[1], C = self.C, Dm = self.Dmax, t, k, st, rounds, n0, nact, m
         cdef int nstaged, nmem, kind, aug
         cdef bint polished, added, no_polish, skipped, use_seeds = seeds is not None, ok
-        cdef double obj = 0.0
+        cdef double obj = 0.0, tm = 0.0
         # condition steps: MAIN / AUG / FINAL = its jobs await consumption; NEED_AUG / NEED_FINAL = its next jobs
         # are to be generated; IDLE = nothing more this round
         cdef int IDLE = 0, MAIN = 1, AUG = 2, FINAL = 3, NEED_AUG = 4, NEED_FINAL = 5
@@ -2587,7 +2639,9 @@ cdef class TileSolver(Solver):
                         nact += 1
                         self._set_conditions_c(&Rv[t, 0, 0], &bv[t, 0], &mfv[t, 0], &fxv[t, 0], K)
                         self._load(t)
+                        tm = _now()
                         st = self.lp_solve(&obj)
+                        self.tm_lp += _now() - tm
                         if st != 0:
                             self._record(t, st, False, status_v, nout_v, phs_v, amt_v, X_v, Y_v, G_v, mu_v)
                             done_v[t] = 1
@@ -2596,19 +2650,26 @@ cdef class TileSolver(Solver):
                         self.gauge_fix()
                         skipped = self.t_nopol[t]
                         polished = False
+                        tm = _now()
                         if self.use_polish and not self.t_nopol[t]:
                             self.npolish_try += 1
                             polished = self.polish() == 1
                         self.t_nopol[t] = False
+                        self.tm_polish += _now() - tm
+                        tm = _now()
                         self._gen_jobs(t, rounds)
+                        self.tm_gen += _now() - tm
                         self._save_cond(t, polished, skipped, False, 0, MAIN); self._save_own(t, n0)
                 while self.nj > 0:
                     batches.append(self.nj)
+                    tm = _now()
                     with nogil:
                         self._execute_jobs()
+                    self.tm_exec += _now() - tm
                     if self.cb_error is not None:
                         err, self.cb_error = self.cb_error, None
                         raise err
+                    tm = _now()
                     with nogil:
                         # each condition takes its results
                         for m in range(nmem):
@@ -2637,6 +2698,8 @@ cdef class TileSolver(Solver):
                                              Y_v, G_v, mu_v)
                                 done_v[t] = 1
                             self._save_cond(t, polished, skipped, added, aug, kind); self._save_own(t, n0)
+                        self.tm_consume += _now() - tm
+                        tm = _now()
                         # the next jobs: another Newton pass, or the polish of a round that skipped it
                         self.nj = 0; self.ncp = 0
                         for m in range(nmem):
@@ -2673,9 +2736,12 @@ cdef class TileSolver(Solver):
                                 self._record(t, 6, polished, status_v, nout_v, phs_v, amt_v, X_v, Y_v, G_v, mu_v)
                                 done_v[t] = 1
                             self._save_cond(t, polished, skipped, added, aug, kind); self._save_own(t, n0)
+                    self.tm_next += _now() - tm
+                tm = _now()
                 with nogil:
                     nstaged = self.nst
                     new = self._merge_chains(members_v, B)
+                self.tm_merge += _now() - tm
                 w1 = self._work()
                 self.job_batches.append(batches)
                 self.stats.append({'stage': int(s_), 'round': rounds, 'active': nact, 'priced': w1[0] - w0[0],

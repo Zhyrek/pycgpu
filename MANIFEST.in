@@ -4,6 +4,7 @@ include LICENSE.txt
 recursive-include pycalphad *.pyx *.px[di]
 recursive-include pycalphad/gpu *.h *.mm
 include pycalphad/cg/cg_price.h
+include pycalphad/cg/cg_round.h
 
 # This subpckage is only used in development checkouts and should not be
 # included in source distributions

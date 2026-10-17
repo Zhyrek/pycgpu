@@ -128,7 +128,7 @@ def describe(cores, names, index, deriv, elements):
         # the derivative variables end with the site fractions, in the phase record's order
         if nder < D or any('Y(' not in s for s in deriv[name][nder - D:]):
             continue
-        ok[p] = 1
+        ok[p] = 0 if d['stoich'] else 1   # (stoichiometric phases: described for the polish, never priced)
         row = {'D': D, 'nb': d['nb'], 'model': index[name], 'nsym': d['nsym'], 'nder': nder, 'doff': nder - D}
         for key in ('boff', 'bidx', 'blk', 'single', 'pinned', 'sym_a', 'sym_b', 'sym_off'):
             row[key] = len(ip); ip.extend(np.asarray(d[key], dtype=np.int64).ravel().tolist() or [0])
@@ -149,7 +149,7 @@ def _source(model_code, index, names, Dmax, C, ns, nmax, target='host', classes=
         disp.append(f'    case {k}: if (hess) pycgpu_model_{k}_fused(eg, H, x); else {{ '
                     f'eg[0] = pycgpu_model_{k}_formulaobj(x); pycgpu_model_{k}_formulagrad(&eg[1], x); }} return;')
     disp += ['    }', '}']
-    header = (_HERE / 'cg_price.h').read_text()
+    header = (_HERE / 'cg_price.h').read_text() + '\n' + (_HERE / 'cg_round.h').read_text()
     sizes = f'#define CG_DMAX {Dmax}\n#define CG_CMAX {C}\n#define CG_NS {ns}\n#define CG_NMAX {nmax}\n'
     if target == 'cuda':
         return '\n'.join([_RTC_PRELUDE, model_code, '#define CG_DEVICE __device__\n' + sizes, '\n'.join(disp),

@@ -267,6 +267,9 @@ for name in sys.argv[2:]:
         if dev == 'cuda':
             import cupy as cp
             r['device_pool_bytes'] = int(cp.get_default_memory_pool().total_bytes())
+            pr = [p for (d, *_), p in S._PRICERS.items() if d == 'cuda'][-1]
+            r['kernels'] = {k: {a: f.attributes.get(a) for a in ('num_regs', 'local_size_bytes')}
+                            for k, f in pr._device_tile.launch.functions.items()}
         rep[dev or 'host'] = r
     ref_GM, ref_sets, ref_MU = out['host']
     G, sets, MU = out['cuda']
@@ -380,6 +383,7 @@ def main():
                              "kernel cache after 'tile')")
     parser.add_argument('--no-fmad', action='store_true', help='kernels without fused multiply-adds')
     parser.add_argument('--variants', default=None, help="the compile bench's variants (comma-separated)")
+    parser.add_argument('--env', action='append', default=[], help='KEY=VALUE for the benches (repeatable)')
     args = parser.parse_args(KAGGLE_ARGS if ON_KAGGLE else None)
     os.makedirs(args.out, exist_ok=True)
     summary = {'branch': BRANCH, 'gpu': environment(args.out)}
@@ -396,6 +400,8 @@ def main():
         result = os.path.join(args.out, f'cg_{name}.json')
         env = dict(os.environ, PYTHONHASHSEED='0', CG_DEVICES=args.devices,
                    PYCALPHAD_CG_FMAD='0' if args.no_fmad else '1')
+        env.update(kv.split('=', 1) for kv in args.env)
+        summary['env'] = args.env
         if name == 'cache':
             env['CG_COMPILE_VARIANTS'] = 'cupy'
         elif args.variants:

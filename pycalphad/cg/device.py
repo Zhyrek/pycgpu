@@ -34,6 +34,7 @@ _HERE = Path(__file__).parent
 _LIBRARIES = {}   # source hash -> loaded library
 # threads of a block that share a condition's LP (cg_dev_lp): 64, one wavefront on AMD GPUs, two warps on NVIDIA's
 LANES = int(os.environ.get('PYCALPHAD_CG_LANES', 64))
+PRICE_KERNEL = os.environ.get('PYCALPHAD_CG_PRICE_KERNEL', '0') != '0'   # (experiment: see cg_dev_price_jobs)
 
 # phase description layout (cg_price.h: CGI_*, CGD_*)
 _CGI = ['D', 'nb', 'model', 'nsym', 'nder', 'doff', 'boff', 'bidx', 'blk', 'single', 'pinned', 'sym_a', 'sym_b',
@@ -187,7 +188,7 @@ def _source(model_code, index, names, Dmax, C, ns, nmax, target='host', classes=
     disp += ['    }', '}']
     header = (_HERE / 'cg_price.h').read_text() + '\n' + (_HERE / 'cg_round.h').read_text()
     sizes = (f'#define CG_DMAX {Dmax}\n#define CG_CMAX {C}\n#define CG_NS {ns}\n#define CG_NMAX {nmax}\n'
-             f'#define CG_LANES {LANES}\n')
+             f'#define CG_LANES {LANES}\n' + ('#define CG_PRICE_KERNEL\n' if PRICE_KERNEL else ''))
     if target in ('cuda', 'cuda-tile'):
         device = '#define CG_DEVICE __device__\n#define CG_NOINLINE __noinline__\n#define CG_SYNC() __syncthreads()\n'
         parts = [_RTC_PRELUDE, model_code, device + sizes, '\n'.join(disp), header]

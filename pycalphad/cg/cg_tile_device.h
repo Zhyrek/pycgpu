@@ -95,14 +95,6 @@ CG_DEVICE static void cg_dev_jobs(CgTile L, int t, int want, int rounds, int use
     if (!fill) *count = L.nj;
 }
 
-#ifdef CG_PRICE_KERNEL
-// (experiment) the pricing step as a kernel of its own: cg_dev_step needs the registers of its biggest step
-extern "C" __global__ void cg_dev_price_jobs(int n, const CgTile* T, const int* order) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) cg_dev_price(*T, order[i]);
-}
-#endif
-
 // step on items[i] (one thread each):
 // - CG_STEP_PRICE: the pricing job items[i] (the jobs sorted by phase: each warp runs one phase's code)
 // - CG_STEP_POLISH: the rest of a round's start (cg_step_lp_polish) for condition items[i]; want[i]: the LP's status

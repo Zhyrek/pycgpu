@@ -270,11 +270,7 @@ class DeviceTile:
         order = xp.argsort(key).astype(np.int32)   # (each warp runs one phase's code)
         self.launch.sync()
         self.times['sort'] = self.times.get('sort', 0.0) + time.perf_counter() - t0
-        from pycalphad.cg.device import PRICE_KERNEL
-        if PRICE_KERNEL:
-            self._timed('price', 'cg_dev_price_jobs', nj, self.T, order)
-        else:
-            self._step('price', CG_STEP_PRICE, nj, order)
+        self._step('price', CG_STEP_PRICE, nj, order)
 
     def _merge(self, members):
         """The members' own points into the store (cg_tile_merge's result); whether a member's slab was full."""

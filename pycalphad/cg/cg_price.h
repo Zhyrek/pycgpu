@@ -375,7 +375,7 @@ CG_DEVICE static int cg_newton_direction(const CgPhase& P, WT& W, int m) {
 
 // minimize the TPD (mu in RT units) of phase P from y0 (see CPhase.price); returns 1 at a stationary point
 template <class WT>
-CG_DEVICE CG_NOINLINE static int cg_price(const CgPhase& P, WT& W, const double* sv, const double* mu, const double* y0,
+CG_DEVICE static int cg_price(const CgPhase& P, WT& W, const double* sv, const double* mu, const double* y0,
                               double* y_out, double* x_out, double* G_out, double* tpd_out) {
     const int D = P.D, C = P.C;
     W.last_indef = 0; W.evals1 = 0; W.evals2 = 0;

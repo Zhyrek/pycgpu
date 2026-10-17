@@ -309,27 +309,16 @@ def capture(code, options, verbose=False):
     raise Captured(code, options)
 cupy_module = KM.cuda_raw_module
 KM.cuda_raw_module = capture
-price_h = open(os.path.join(os.path.dirname(S.__file__), 'cg_price.h')).read()
-tile_h = open(os.path.join(os.path.dirname(S.__file__), 'cg_tile.h')).read()
 MORE = ('cg_build_hessian', 'cg_eigh', 'cg_escape_saddle', 'cg_evaluate', 'cg_lstsq', 'cg_getrf', 'cg_getrs',
         'cg_consume', 'cg_tile_polish', 'cg_tile_polish_augment', 'cg_polish')
 def variant(src, name):
     """the tile module's source (as_is) with: the CG_NOINLINE routines inlined (inline), more routines out of line
-    (more), the pricing kernel alone (price_only), the tile's kernels alone (tile_only)"""
+    (more)"""
     if name == 'inline':
         src = src.replace('#define CG_NOINLINE __noinline__\n', '#define CG_NOINLINE\n')
     if name == 'more':
         for f in MORE:
             src = re.sub(r'CG_DEVICE static (\w+) %s\(' % f, r'CG_DEVICE __noinline__ static \1 %s(' % f, src)
-    if name == 'price_only':
-        src = src[:src.index(tile_h[:300])]
-    if name == 'tile_only':
-        a = src.index('extern "C" __global__ void cg_price_kernel(')
-        src = src[:a] + src[src.index('\n}\n', a) + 3:]
-    if name == 'price_x2':   # (two kernels reaching the energy code: is it compiled for each?)
-        src = src[:src.index(tile_h[:300])]
-        a = src.index('extern "C" __global__ void cg_price_kernel(')
-        src += src[a:src.index('\n}\n', a) + 3].replace('cg_price_kernel(', 'cg_price_kernel_copy(')
     return src
 import tempfile
 is_hip = bool(getattr(cp.cuda.runtime, 'is_hip', False))
@@ -347,8 +336,7 @@ for name in sys.argv[2:]:
         src, options = e.args
     rep = report[name] = {'source_bytes': len(src), 'options': list(options)}
     # VARIANT or VARIANT+OPTION+...: the source variant, compiled with extra options, in an empty kernel cache
-    default = ('as_is,inline,more,price_only,tile_only,ptx,as_is+-rdc=true' if name.startswith('alcrni') else
-               'as_is,ptx,more,price_only,tile_only')
+    default = 'as_is,ptx,inline' if name.startswith('alcrni') else 'as_is,ptx'
     for var in os.environ.get('CG_COMPILE_VARIANTS', default).split(','):
         t = time.perf_counter()
         try:
@@ -363,7 +351,7 @@ for name in sys.argv[2:]:
                 base, *extra = var.split('+')
                 os.environ['CUPY_CACHE_DIR'] = tempfile.mkdtemp()
                 m = cp.RawModule(code=variant(src, base), options=tuple(options) + tuple(extra), backend=backend)
-                m.get_function('cg_price_kernel' if base == 'price_only' else 'cg_dev_lp')
+                m.get_function('cg_dev_lp')
             out = {'seconds': round(time.perf_counter() - t, 1)}
             if var.startswith('ptx'):
                 out['ptx_bytes'] = out_ptx

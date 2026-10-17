@@ -12,6 +12,13 @@ balances, no pinned species); TileSolver prices the others itself.
 Both also solve whole tiles (solve_tile, when every phase is supported): HostPricer with cg_tile_host.h's driver,
 CudaPricer with pycalphad.cg.device_tile's over cg_tile_device.h's kernels (HostPricer with target 'cuda-on-host':
 the same driver and kernels on the host).
+
+Compiled code is cached on disk, keyed by its source text, so a system compiles once per machine (or once per
+cluster, with the cache on a shared file system): the host libraries in PYCALPHAD_CG_CACHE (default
+~/.cache/pycalphad-cg), the device modules in CuPy's kernel cache (CUPY_CACHE_DIR, default ~/.cupy/kernel_cache;
+a hit loads COST507-10's tile module in 0.1 s instead of compiling it for 10 minutes). The source is the same in
+every process only with PYTHONHASHSEED fixed: for some databases the generated energy code follows the order of
+hashed symbols.
 """
 import ctypes
 import hashlib
@@ -184,7 +191,7 @@ def _source(model_code, index, names, Dmax, C, ns, nmax, target='host', classes=
     if target in ('cuda', 'cuda-tile'):
         device = '#define CG_DEVICE __device__\n#define CG_NOINLINE __noinline__\n#define CG_SYNC() __syncthreads()\n'
         parts = [_RTC_PRELUDE, model_code, device + sizes, '\n'.join(disp), header]
-        parts += [_kernels(classes)] if target == 'cuda' else [_kernels(()), _tile_kernels()]
+        parts += [_kernels(classes)] if target == 'cuda' else [_tile_kernels()]
         return '\n'.join(parts)
     compat = (_HERE.parent / 'gpu' / 'cpu_compat.h').read_text()
     parts = [compat, '#include <cmath>', model_code, '#define CG_DEVICE\n#define __shared__\n' + sizes, '\n'.join(disp),
@@ -279,7 +286,10 @@ class CudaPricer(_Pricer):
     # kernels, one per size class on its own stream, were slower there: its FP64 rate, not memory, is the limit)
     CLASS_KERNELS = bool(int(os.environ.get('PYCALPHAD_CG_CLASS_KERNELS', '0')))
     STACK = int(os.environ.get('PYCALPHAD_CG_STACK', 65536))   # bytes per thread (the work arrays live there)
-    # 0: no fused multiply-adds (rounding as on a host without them; a check)
+    # 0: no fused multiply-adds (rounding as on a host without them; a check). Either way the device's GM differs from
+    # the host driver's by a few 1e-6 J/mol at most (Al-Cr-Ni 40 x 40 on a T4: 5.3e-6 with, 7.6e-6 without), at
+    # single-phase conditions: the polish meets the composition to ~1e-11, which moves GM by MU . dX with |MU| up to
+    # 2e5 J/mol; host builds with and without contraction differ the same way (1.5e-6 J/mol). That is rounding
     FMAD = os.environ.get('PYCALPHAD_CG_FMAD', '1') != '0'
 
     def __init__(self, wks, phases, elements):
@@ -308,10 +318,10 @@ class CudaPricer(_Pricer):
 
     @property
     def kernel(self):
-        """cg_price_kernel: from the tile's module if that is built (it has one), else the pricing module's."""
+        """cg_price_kernel (the tile's module prices with cg_dev_step instead: kernels reaching the energy code
+        each add to the compile time)."""
         if self._kernel is None:
-            m = self._device_tile.launch.module if self._device_tile is not None else self.module
-            self._kernel = m.get_function('cg_price_kernel')
+            self._kernel = self.module.get_function('cg_price_kernel')
         return self._kernel
 
     @property

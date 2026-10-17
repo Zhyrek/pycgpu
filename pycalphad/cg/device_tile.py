@@ -42,7 +42,9 @@ _ARRAYS = (
     ('status', 'int'), ('nout', 'int'), ('phs', 'int'), ('amt', 'double'), ('X', 'double'), ('Y', 'double'),
     ('G', 'double'), ('mu_out', 'double'))
 _STORE = ('Py', 'Px', 'PG', 'Pph', 'Pnext', 'Pcode')
-_JOBS = ('j_cond', 'j_phase', 'j_keep', 'j_conv', 'j_y0', 'j_y', 'j_x', 'j_G', 'j_tpd', 'j_evals')
+_JOBS = ('j_cond', 'j_phase', 'j_keep', 'j_conv', 'j_y0', 'j_y', 'j_x', 'j_G', 'j_tpd')
+# cg_dev_step's steps (cg_tile_device.h)
+CG_STEP_PRICE, CG_STEP_POLISH, CG_STEP_REPOLISH, CG_STEP_JOBS = range(4)
 
 
 def bind_source():
@@ -171,8 +173,7 @@ class DeviceTile:
         if need <= s['jcap']:
             return
         cap = max(need, 2 * s['jcap'])
-        self._grow(_JOBS[:-1], 0, cap)
-        self.a['j_evals'] = self.xp.zeros(2 * cap, dtype=np.int32)
+        self._grow(_JOBS, 0, cap)
         s['jcap'] = cap
         self._bind()
 
@@ -213,8 +214,7 @@ class DeviceTile:
         a['Y'] = xp.full((B, C, Dm), np.nan)
         for f, shape, dt in (('j_cond', 1024, np.int32), ('j_phase', 1024, np.int32), ('j_keep', 1024, np.int32),
                              ('j_conv', 1024, np.int32), ('j_y0', (1024, Dm), float), ('j_y', (1024, Dm), float),
-                             ('j_x', (1024, C), float), ('j_G', 1024, float), ('j_tpd', 1024, float),
-                             ('j_evals', 2048, np.int32)):
+                             ('j_x', (1024, C), float), ('j_G', 1024, float), ('j_tpd', 1024, float)):
             a[f] = z(shape, dtype=dt)
         # the first condition starts from the solver's state
         a['basis'][0] = xp.asarray(t.basis0)
@@ -227,6 +227,14 @@ class DeviceTile:
         self._bind()
 
     # ---- steps
+
+    def _step(self, label, step, n, items, rounds=0, max_rounds=0, use_seeds=0, fill=0, start=None, count=None,
+              want=None):
+        """cg_dev_step on n items (arrays not given: the CgTile's bytes, unused)."""
+        T = self.T
+        self._timed(label, 'cg_dev_step', n, step, T, items, rounds, max_rounds, use_seeds, fill,
+                    T if start is None else start, T if count is None else count, T if want is None else want,
+                    self.work, self.pwork)
 
     def _timed(self, step, name, n, *args):
         t0 = time.perf_counter()
@@ -244,26 +252,25 @@ class DeviceTile:
         """The jobs of the conditions that want them, in ranges in the order of conds: their number."""
         xp, n = self.xp, len(conds)
         count = xp.zeros(n, dtype=np.int32)
-        self._timed('jobs', 'cg_dev_jobs', n, self.T, conds, want, rounds, use_seeds, self.work, 0, count, count)
+        self._step('jobs', CG_STEP_JOBS, n, conds, rounds, use_seeds=use_seeds, fill=0, count=count, want=want)
         c = self._get(count).astype(np.int64)
         total = int(c.sum())
         if total == 0:
             return 0
         self._job_capacity(total)
         start = xp.asarray((np.cumsum(c) - c).astype(np.int32))
-        self._timed('jobs', 'cg_dev_jobs', n, self.T, conds, want, rounds, use_seeds, self.work, 1, start, count)
+        self._step('jobs', CG_STEP_JOBS, n, conds, rounds, use_seeds=use_seeds, fill=1, start=start, count=count,
+                   want=want)
         return total
 
     def _price(self, nj):
-        xp, a, s = self.xp, self.a, self.s
+        xp, a = self.xp, self.a
         t0 = time.perf_counter()
         key = a['j_phase'][:nj].astype(np.int64) * nj + xp.arange(nj, dtype=np.int64)
         order = xp.argsort(key).astype(np.int32)   # (each warp runs one phase's code)
         self.launch.sync()
         self.times['sort'] = self.times.get('sort', 0.0) + time.perf_counter() - t0
-        self._timed('price', 'cg_price_kernel', nj, order, a['j_phase'], a['j_cond'], a['mu'], a['j_y0'], s['Dm'],
-                    a['j_y'], a['j_x'], a['j_G'], a['j_tpd'], a['j_conv'], a['j_evals'], a['di'], a['dd'], a['ip'],
-                    a['dp'], s['C'], float(s['RT']), a['sv'])
+        self._step('price', CG_STEP_PRICE, nj, order)
 
     def _merge(self, members):
         """The members' own points into the store (cg_tile_merge's result); whether a member's slab was full."""
@@ -315,14 +322,13 @@ class DeviceTile:
                     d_act = xp.asarray(act)
                     want = xp.zeros(len(act), dtype=np.int32)
                     self._timed('lp', 'cg_dev_lp', len(act), T, d_act, want)
-                    self._timed('polish', 'cg_dev_lp_polish', len(act), T, d_act, self.work, self.pwork, want)
+                    self._step('polish', CG_STEP_POLISH, len(act), d_act, want=want)
                     nj = self._list_jobs(d_act, want, rounds, int(t.use_seeds and st == 0 and rounds == 1))
                     while nj > 0:
                         subrounds += 1; jobs_total += nj
                         self._price(nj)
                         self._timed('consume', 'cg_dev_consume', len(act), T, d_act, rounds, max_rounds)
-                        self._timed('repolish', 'cg_dev_repolish', len(act), T, d_act, rounds, max_rounds,
-                                    self.work, self.pwork, want)
+                        self._step('repolish', CG_STEP_REPOLISH, len(act), d_act, rounds, max_rounds, want=want)
                         nj = self._list_jobs(d_act, want, rounds, 0)
                 own_full += self._merge(members)
                 if not len(act) or self._get(a['done'])[members].all():

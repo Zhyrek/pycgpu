@@ -1,5 +1,5 @@
 // A tile on a GPU: cg_tile.h's per-condition steps as kernels, one thread per condition of a list (conds), and
-// the round's end in parallel; the pricing between the steps is cg_price_kernel (device.py). The driver
+// the round's end in parallel; the pricing between the steps one thread per job (cg_dev_step). The driver
 // (pycalphad.cg.device_tile) keeps the tile's arrays on the device, binds them into one CgTile there
 // (cg_dev_bind, generated with the driver's field table) and runs the rounds as cg_tile_host.h does. Needs
 // cg_price.h, cg_round.h and cg_tile.h.
@@ -59,17 +59,6 @@ extern "C" __global__ void cg_dev_lp(int n, const CgTile* T, const int* conds, i
     st[i] = s;
 }
 
-// the rest of a round's start (cg_step_lp_polish), one thread per condition; want[i]: the LP's status (cg_dev_lp),
-// then whether condition conds[i] lists pricing jobs now
-extern "C" __global__ void cg_dev_lp_polish(int n, const CgTile* T, const int* conds, CgWork* work,
-                                            CgPolishWork* pwork, int* want) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    CgTile L = *T;
-    int t = conds[i];
-    want[i] = cg_step_lp_polish(L, t, want[i], work[t], pwork[t]);
-}
-
 // the job results (cg_step_consume)
 extern "C" __global__ void cg_dev_consume(int n, const CgTile* T, const int* conds, int rounds, int max_rounds) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -78,33 +67,51 @@ extern "C" __global__ void cg_dev_consume(int n, const CgTile* T, const int* con
     cg_step_consume(L, conds[i], rounds, max_rounds);
 }
 
-// the next step of a sub-round (cg_step_repolish); want as cg_dev_lp
-extern "C" __global__ void cg_dev_repolish(int n, const CgTile* T, const int* conds, int rounds, int max_rounds,
-                                           CgWork* work, CgPolishWork* pwork, int* want) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    CgTile L = *T;
-    int t = conds[i];
-    want[i] = cg_step_repolish(L, t, rounds, max_rounds, work[t], pwork[t]);
+// ---- the steps that evaluate energies, one kernel (cg_dev_step): the device's assembler compiles the energy code
+// (cg_eval and what it calls) again for every kernel that reaches it (COST507-10 on a T4: 220 s for one, 390 s for
+// two), so they share one
+
+enum { CG_STEP_PRICE = 0, CG_STEP_POLISH = 1, CG_STEP_REPOLISH = 2, CG_STEP_JOBS = 3 };
+
+// the pricing job k (cg_price_job, on the tile's job arrays)
+CG_DEVICE static void cg_dev_price(const CgTile& L, int k) {
+    CgWork W;
+    cg_price_job(k, L.j_phase, L.j_cond, L.mu, L.j_y0, L.Dm, L.j_y, L.j_x, L.j_G, L.j_tpd, L.j_conv, nullptr, L.di,
+                 L.dd, L.ip, L.dp, L.C, L.RT, L.sv, W);
 }
 
-// the pricing jobs of the conditions that want them: counted into count[i] (fill 0), or listed in their ranges
-// start[i] .. start[i] + count[i] - 1 (fill 1)
-extern "C" __global__ void cg_dev_jobs(int n, const CgTile* T, const int* conds, const int* want, int rounds,
-                                       int use_seeds, CgWork* work, int fill, const int* start, int* count) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    if (!want[i]) { if (!fill) count[i] = 0; return; }
-    CgTile L = *T;
-    int t = conds[i];
+// condition t's pricing jobs (want: whether it lists any): counted into *count (fill 0), or listed in the range
+// start .. start + *count - 1 (fill 1)
+CG_DEVICE static void cg_dev_jobs(CgTile L, int t, int want, int rounds, int use_seeds, CgWork& W, int fill,
+                                  int start, int* count) {
+    if (!want) { if (!fill) *count = 0; return; }
     L.ncp = t * L.nph;
     if (fill) {
-        L.nj = start[i]; L.jcap = start[i] + count[i];
+        L.nj = start; L.jcap = start + *count;
     } else {
         L.nj = 0; L.j_cond = nullptr;
     }
-    cg_gen_jobs(L, t, rounds, use_seeds, work[t]);
-    if (!fill) count[i] = L.nj;
+    cg_gen_jobs(L, t, rounds, use_seeds, W);
+    if (!fill) *count = L.nj;
+}
+
+// step on items[i] (one thread each):
+// - CG_STEP_PRICE: the pricing job items[i] (the jobs sorted by phase: each warp runs one phase's code)
+// - CG_STEP_POLISH: the rest of a round's start (cg_step_lp_polish) for condition items[i]; want[i]: the LP's status
+//   (cg_dev_lp), then whether the condition lists pricing jobs now
+// - CG_STEP_REPOLISH: the next step of a sub-round (cg_step_repolish); want as for CG_STEP_POLISH
+// - CG_STEP_JOBS: the pricing jobs of the conditions that want them (cg_dev_jobs: count[i], start[i])
+extern "C" __global__ void cg_dev_step(int n, int step, const CgTile* T, const int* items, int rounds, int max_rounds,
+                                       int use_seeds, int fill, const int* start, int* count, int* want, CgWork* work,
+                                       CgPolishWork* pwork) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    if (step == CG_STEP_PRICE) { cg_dev_price(*T, items[i]); return; }
+    CgTile L = *T;
+    int t = items[i];
+    if (step == CG_STEP_POLISH) want[i] = cg_step_lp_polish(L, t, want[i], work[t], pwork[t]);
+    else if (step == CG_STEP_REPOLISH) want[i] = cg_step_repolish(L, t, rounds, max_rounds, work[t], pwork[t]);
+    else cg_dev_jobs(L, t, want[i], rounds, use_seeds, work[t], fill, fill ? start[i] : 0, count + i);
 }
 
 // ---- the end of a round (cg_tile_merge's result, in parallel where it is sequential)

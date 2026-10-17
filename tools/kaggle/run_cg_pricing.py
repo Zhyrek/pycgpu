@@ -8,7 +8,8 @@ to the output directory (/kaggle/working on Kaggle): env.txt, install.log, cg_pr
 With --bench tile (launch.py push ... -- --bench tile): whole tiles in compiled code (PYCALPHAD_CG_TILE=3) by the
 host driver (cg_tile_host.h, one core) and by the device driver (cg_tile_device.h's kernels, DEVICE 'cuda'):
 phase sets and GM against the host driver's, wall time per tile and per kernel step; into cg_tile.json.
-With --bench compile: nvcc's time for the tile's module (and variants of its source), into cg_compile.json.
+With --bench compile: nvcc's time for the tile's module (and variants of its source), into cg_compile.json;
+--bench cache: the module as CuPy builds it in a new process (cg_cache.json). Several, in turn: --bench tile,cache.
 
 Elsewhere (a machine with an NVIDIA or ROCm GPU): python run_cg_pricing.py --out results/ [--repo-dir checkout/]
 [--no-install]
@@ -306,14 +307,16 @@ class Captured(Exception):
     pass
 def capture(code, options, verbose=False):
     raise Captured(code, options)
+cupy_module = KM.cuda_raw_module
 KM.cuda_raw_module = capture
 price_h = open(os.path.join(os.path.dirname(S.__file__), 'cg_price.h')).read()
 NOINLINE = ('cg_price', 'cg_sens', 'cg_polish_core', 'cg_gen_jobs', 'cg_add_point')
 def variant(src, name):
-    """the tile module's source with: generated model functions out of line (model), also the solver's big
-    functions (all), without the model code (no_model), or the model code alone (model_only)"""
-    if name in ('model', 'all'):
-        src = re.sub(r'(?m)^__device__ (\w+) (pycgpu_model_\d+_)', r'__device__ __noinline__ \1 \2', src)
+    """the tile module's source (as_is) with: the generated model functions inlined into cg_eval (inline), also
+    the solver's big functions out of line (all), without the model code (no_model), or the model code alone
+    (model_only)"""
+    if name == 'inline':
+        src = re.sub(r'(?m)^__device__ __noinline__ (\w+) (pycgpu_model_\d+_)', r'__device__ \1 \2', src)
     if name == 'all':
         for f in NOINLINE:
             src = re.sub(r'CG_DEVICE static (\w+) %s\(' % f, r'CG_DEVICE __noinline__ static \1 %s(' % f, src)
@@ -342,7 +345,13 @@ for name in sys.argv[2:]:
     except Captured as e:
         src, options = e.args
     rep = {'source_bytes': len(src), 'options': list(options)}
-    for var in os.environ.get('CG_COMPILE_VARIANTS', 'model,all,no_model,model_only,as_is').split(','):
+    for var in os.environ.get('CG_COMPILE_VARIANTS', 'as_is,all,no_model,model_only,inline').split(','):
+        if var == 'cupy':   # (the module as CudaPricer builds it: from CuPy's kernel cache if it holds it)
+            t = time.perf_counter()
+            cupy_module(src, options).get_function('cg_dev_lp')
+            rep[var] = {'seconds': round(time.perf_counter() - t, 2)}
+            print(name, var, rep[var], flush=True)
+            continue
         vs = variant(src, var)
         path = os.path.join(work, f'{name}_{var}.cu')
         open(path, 'w').write(vs)
@@ -373,9 +382,11 @@ def main():
     parser.add_argument('--cases', default='alcrni_40x40,cost10_8^4')
     parser.add_argument('--timeout', type=int, default=7200)
     parser.add_argument('--devices', default=',host,cuda', help="pricers to compare ('' = Cython)")
-    parser.add_argument('--bench', choices=('pricing', 'tile', 'compile'), default='pricing',
-                        help='the pricing kernel in the Cython tile, whole tiles on the device, or the compile time of '
-                             "the tile's module (variants of its source, by nvcc)")
+    parser.add_argument('--bench', default='pricing',
+                        help="comma-separated, run in turn: 'pricing' (the pricing kernel in the Cython tile), 'tile' "
+                             "(whole tiles on the device), 'compile' (nvcc's time for the tile's module and variants "
+                             "of its source), 'cache' (the tile's module as CuPy builds it, in a new process: from its "
+                             "kernel cache after 'tile')")
     parser.add_argument('--no-fmad', action='store_true', help='kernels without fused multiply-adds')
     args = parser.parse_args(KAGGLE_ARGS if ON_KAGGLE else None)
     os.makedirs(args.out, exist_ok=True)
@@ -384,17 +395,22 @@ def main():
         summary['install'] = install(args.out, args.repo_dir)
     summary['commit'] = subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True,
                                        cwd=args.repo_dir).stdout.strip()
-    bench = os.path.join(args.out, f'cg_{args.bench}_bench.py')
-    with open(bench, 'w') as f:
-        f.write({'pricing': BENCH, 'tile': TILE_BENCH, 'compile': COMPILE_BENCH}[args.bench])
-    result = os.path.join(args.out, f'cg_{args.bench}.json')
-    env = dict(os.environ, PYTHONHASHSEED='0', CG_DEVICES=args.devices, PYCALPHAD_CG_FMAD='0' if args.no_fmad else '1')
     summary['fmad'] = not args.no_fmad
-    summary['bench'] = run([sys.executable, bench, result] + args.cases.split(','), os.path.join(args.out, 'bench.log'),
-                           timeout=args.timeout, cwd=args.out, env=env)
-    if os.path.exists(result):
-        with open(result) as f:
-            summary['results'] = json.load(f)
+    summary['bench'], summary['results'] = {}, {}
+    for name in args.bench.split(','):
+        bench = os.path.join(args.out, f'cg_{name}_bench.py')
+        with open(bench, 'w') as f:
+            f.write({'pricing': BENCH, 'tile': TILE_BENCH, 'compile': COMPILE_BENCH, 'cache': COMPILE_BENCH}[name])
+        result = os.path.join(args.out, f'cg_{name}.json')
+        env = dict(os.environ, PYTHONHASHSEED='0', CG_DEVICES=args.devices,
+                   PYCALPHAD_CG_FMAD='0' if args.no_fmad else '1')
+        if name == 'cache':
+            env['CG_COMPILE_VARIANTS'] = 'cupy'
+        summary['bench'][name] = run([sys.executable, bench, result] + args.cases.split(','),
+                                     os.path.join(args.out, 'bench.log'), timeout=args.timeout, cwd=args.out, env=env)
+        if os.path.exists(result):
+            with open(result) as f:
+                summary['results'][name] = json.load(f)
     with open(os.path.join(args.out, 'summary.json'), 'w') as f:
         json.dump(summary, f, indent=1)
     print(json.dumps(summary, indent=1))

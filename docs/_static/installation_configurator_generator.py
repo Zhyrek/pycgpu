@@ -7,12 +7,14 @@ from typing import List
 
 # Hardcoded content
 ENVIRONMENT_NAME = 'pycalphad-env'
+# Python version for new uv environments (uv downloads it if needed); pycalphad needs Python 3.11 or later
+UV_PYTHON = '3.13'
 # For integration into external tools, like Sphinx:
 HTML_TEMPLATE = """<div id={} hidden><div class="highlight-bash notranslate"><div class="highlight"><pre>{}</pre></div></div></div>"""
 ENTRIES_JOIN_STR = ""  # join between different HTML entries
 
 # Matrix of options
-PACKAGE_MANAGERS = ['pip', 'conda', 'source']
+PACKAGE_MANAGERS = ['uv', 'pip', 'conda', 'source']
 PLATFORMS = ['linux', 'windows']
 ENV_FLAGS = ['noenv', 'env']
 JUPYTER_FLAGS = ['nojupyter', 'jupyter']
@@ -22,10 +24,16 @@ def get_config_install_lines(pkg, plt, env, jup) -> List[str]:
     """Take the configuration and produce a list of lines to install that configuration"""
     install_lines = []
 
+    if pkg == 'uv':
+        # uv always installs into a virtual environment
+        env = 'env'
+
     if env == 'env':
         # Create environment
         if pkg == 'conda':
             install_lines.append(f"conda create -n {ENVIRONMENT_NAME} python")
+        elif pkg == 'uv':
+            install_lines.append(f"uv venv --python {UV_PYTHON} {ENVIRONMENT_NAME}")
         else:
             install_lines.append(f"python -m venv {ENVIRONMENT_NAME}")
 
@@ -42,6 +50,11 @@ def get_config_install_lines(pkg, plt, env, jup) -> List[str]:
     # Should not end with newline
     if pkg == 'conda':
         install_line = "conda install -c conda-forge pycalphad"
+        if jup == "jupyter":
+            install_line += " jupyterlab"
+        install_lines.append(install_line)
+    elif pkg == 'uv':
+        install_line = "uv pip install pycalphad"
         if jup == "jupyter":
             install_line += " jupyterlab"
         install_lines.append(install_line)

@@ -1857,6 +1857,22 @@ cdef class TileSolver(Solver):
     cdef int[::1] Sph, Smap, head0
     cdef int nst, scap
     cdef public list stats
+    # batched rounds (solve_tile_batched): per-condition state kept between the sub-rounds of a round
+    cdef double[:, ::1] t_xB, t_pol_y, t_pol_x, t_pol_n, t_pol_mu, t_pol_G, t_ycert
+    cdef int[:, ::1] t_pol_ph
+    cdef int[::1] t_pol_na, t_cert_kind, t_cert_phase, t_aug, t_kind
+    cdef double[::1] t_cert_tpd
+    cdef unsigned char[::1] t_polished, t_skipped, t_added
+    # a condition's own points of the round (staged): a chain per condition, in insertion order
+    cdef int[::1] Shead, Stail, Snext, Sown, Sidx
+    cdef long[::1] Scode
+    cdef int[::1] own_s       # the staged index of each store entry above the shared ones while a condition is loaded
+    # pricing jobs: (condition, phase, start) and their results; per (condition, phase) the range of its jobs
+    cdef int nj, jcap, ncp, cpcap
+    cdef int[::1] j_cond, j_phase, j_conv, cp_phase, cp_start, cp_end, cp_first, cp_last
+    cdef double[:, ::1] j_y0, j_y, j_x
+    cdef double[::1] j_G, j_tpd
+    cdef public list job_batches
 
     def __init__(self, phases, int C, **kw):
         Solver.__init__(self, phases, C, **kw)
@@ -1865,6 +1881,11 @@ cdef class TileSolver(Solver):
         self.Sph = np.zeros(self.scap, dtype=np.int32); self.Smap = np.zeros(self.scap, dtype=np.int32)
         self.head0 = np.zeros(self.nph, dtype=np.int32)
         self.stats = []
+        self.Scode = np.zeros(self.scap, dtype=np.int64); self.Snext = np.full(self.scap, -1, dtype=np.int32)
+        self.Sown = np.zeros(self.scap, dtype=np.int32); self.Sidx = np.zeros(self.scap, dtype=np.int32)
+        self.own_s = np.zeros(64, dtype=np.int32)
+        self.jcap = 0; self.cpcap = 0; self.nj = 0; self.ncp = 0
+        self.job_batches = []
 
     def _grow_staged(self):
         cap = 2 * self.scap
@@ -1873,6 +1894,8 @@ cdef class TileSolver(Solver):
         self.Sy = g(self.Sy, (cap, self.Dmax), float); self.Sx = g(self.Sx, (cap, self.C), float)
         self.SG = g(self.SG, (cap,), float); self.Sph = g(self.Sph, (cap,), np.int32)
         self.Smap = g(self.Smap, (cap,), np.int32)
+        self.Scode = g(self.Scode, (cap,), np.int64); self.Snext = g(self.Snext, (cap,), np.int32)
+        self.Sown = g(self.Sown, (cap,), np.int32); self.Sidx = g(self.Sidx, (cap,), np.int32)
         self.scap = cap
 
     cdef int find_point(self, int ph, double* y) noexcept nogil:
@@ -2079,6 +2102,476 @@ cdef class TileSolver(Solver):
                 self.stats.append({'stage': int(s_), 'round': rounds, 'active': nact, 'priced': w1[0] - w0[0],
                                    'evals1': w1[1] - w0[1], 'evals2': w1[2] - w0[2], 'lp_iters': w1[3] - w0[3],
                                    'staged': nstaged, 'new': new, 'store': self.npts})
+                if nact == 0 or done[members].all():
+                    break
+        return status, nout, phs, amt, X, Y, G, mu
+
+    # ---- batched rounds: pricing as jobs (generate for every condition, execute all together, consume)
+
+    def _grow_jobs(self):
+        cdef int cap = max(1024, 2 * self.jcap), old = self.jcap
+        def g(view, shape, dtype):
+            out = np.zeros(shape, dtype=dtype)
+            if old:   # (an unset memoryview must not be touched)
+                out[:old] = np.asarray(view)
+            return out
+        if old:
+            self.j_cond = g(self.j_cond, (cap,), np.int32); self.j_phase = g(self.j_phase, (cap,), np.int32)
+            self.j_conv = g(self.j_conv, (cap,), np.int32)
+            self.j_y0 = g(self.j_y0, (cap, self.Dmax), float); self.j_y = g(self.j_y, (cap, self.Dmax), float)
+            self.j_x = g(self.j_x, (cap, self.C), float)
+            self.j_G = g(self.j_G, (cap,), float); self.j_tpd = g(self.j_tpd, (cap,), float)
+        else:
+            self.j_cond = g(None, (cap,), np.int32); self.j_phase = g(None, (cap,), np.int32)
+            self.j_conv = g(None, (cap,), np.int32)
+            self.j_y0 = g(None, (cap, self.Dmax), float); self.j_y = g(None, (cap, self.Dmax), float)
+            self.j_x = g(None, (cap, self.C), float)
+            self.j_G = g(None, (cap,), float); self.j_tpd = g(None, (cap,), float)
+        self.jcap = cap
+
+    def _grow_cp(self):
+        cap, old = max(256, 2 * self.cpcap), self.cpcap
+        def g(view):
+            out = np.zeros(cap, dtype=np.int32)
+            if old:
+                out[:old] = np.asarray(view)
+            return out
+        if old:
+            self.cp_phase = g(self.cp_phase); self.cp_start = g(self.cp_start); self.cp_end = g(self.cp_end)
+        else:
+            self.cp_phase = g(None); self.cp_start = g(None); self.cp_end = g(None)
+        self.cpcap = cap
+
+    def _grow_own(self):
+        out = np.zeros(2 * self.own_s.shape[0], dtype=np.int32); out[:self.own_s.shape[0]] = np.asarray(self.own_s)
+        self.own_s = out
+
+    cdef void _push_job(self, int t, int ph, double* y) noexcept nogil:
+        cdef int i, j, D = (<CPhase>self.pptr[ph]).D
+        if self.nj >= self.jcap:
+            with gil:
+                self._grow_jobs()
+        j = self.nj
+        self.j_cond[j] = t; self.j_phase[j] = ph
+        for i in range(D): self.j_y0[j, i] = y[i]
+        self.nj += 1
+
+    cdef void _gen_jobs(self, int t, int rounds) noexcept nogil:
+        """The pricing jobs of condition t at self.mu: the starts _pricing_round would price, phase by phase
+        (skip rule, stored points, ordering patterns, LP basis points, composition start in a first round)."""
+        cdef int C = self.C, K = self.K, ph, p, k, i, si, sj, ncodes, cp
+        cdef double best_tpd, maxdmu, tt
+        cdef void* pp
+        cdef long codes[64]
+        cdef int code_pt[64]
+        cdef double code_tpd[64]
+        cdef double* mu = &self.mu[0]
+        self.cp_first[t] = self.ncp
+        for ph in range(self.nph):
+            pp = self.pptr[ph]
+            if (<CPhase>pp).stoich:
+                continue
+            k = -1; best_tpd = INFINITY; ncodes = 0
+            p = self.head[ph]
+            while p >= 0:
+                tt = self.PG[p] / self.RT
+                for i in range(C): tt -= mu[i] * self.Px[p, i]
+                if tt < best_tpd:
+                    best_tpd = tt; k = p
+                if tt < (self.prune if rounds == 1 else self.prune_late):
+                    for si in range(ncodes):
+                        if codes[si] == self.Pcode[p]:
+                            if tt < code_tpd[si]:
+                                code_tpd[si] = tt; code_pt[si] = p
+                            break
+                    else:
+                        if ncodes < 64:
+                            codes[ncodes] = self.Pcode[p]; code_tpd[ncodes] = tt; code_pt[ncodes] = p; ncodes += 1
+                p = self.Pnext[p]
+            if (<CPhase>pp).has_last and best_tpd > self.skip_margin:
+                maxdmu = 0.0
+                for i in range(C):
+                    tt = fabs(mu[i] - (<CPhase>pp).last_mu[i])
+                    if tt > maxdmu: maxdmu = tt
+                if (<CPhase>pp).last_tpd - maxdmu > self.skip_margin:
+                    self.skipped += 1
+                    continue
+            if k < 0:
+                continue
+            if self.ncp >= self.cpcap:
+                with gil:
+                    self._grow_cp()
+            cp = self.ncp
+            self.cp_phase[cp] = ph; self.cp_start[cp] = self.nj
+            self._push_job(t, ph, &self.Py[k, 0])
+            for si in range(ncodes):
+                for sj in range(si + 1, ncodes):
+                    if code_tpd[sj] < code_tpd[si]:
+                        tt = code_tpd[si]; code_tpd[si] = code_tpd[sj]; code_tpd[sj] = tt
+                        p = code_pt[si]; code_pt[si] = code_pt[sj]; code_pt[sj] = p
+            for si in range(K):
+                p = self.basis[si]
+                if p >= 0 and p != k and self.Pph[p] == ph and self.xB[si] > 1e-12:
+                    self._push_job(t, ph, &self.Py[p, 0])
+            for si in range(min(ncodes, 6 if rounds == 1 else self.max_late)):
+                if code_pt[si] != k and self.Pcode[code_pt[si]] != self.Pcode[k]:
+                    self._push_job(t, ph, &self.Py[code_pt[si], 0])
+            if rounds == 1:
+                (<CPhase>pp).composition_start(&self.Px[k, 0], &self.ystart[0])
+                self._push_job(t, ph, &self.ystart[0])
+            self.cp_end[cp] = self.nj
+            self.ncp += 1
+        self.cp_last[t] = self.ncp
+        for i in range(C): self.t_mu[t, i] = mu[i]
+
+    cdef void _execute_jobs(self) noexcept nogil:
+        """Every pricing job: a local TPD minimization of its phase from its start at its condition's potentials.
+        (Independent of each other: the part a batched device kernel would do.)"""
+        cdef int j
+        for j in range(self.nj):
+            self.j_conv[j] = (<CPhase>self.pptr[self.j_phase[j]]).price(
+                &self.t_mu[self.j_cond[j], 0], &self.j_y0[j, 0], &self.j_y[j, 0], &self.j_x[j, 0], &self.j_G[j],
+                &self.j_tpd[j])
+
+    cdef bint _consume(self, int t, bint polished, bint* no_polish) noexcept nogil:
+        """Condition t's job results, as _pricing_round treats its minimizations (points below the tangent plane
+        stored, certification of a polished state, skip state); returns whether anything new was found."""
+        cdef int C = self.C, cp, j, ph, all_conv, p, i
+        cdef double best_tpd, tpd, G, tt
+        cdef bint added = False, seed_added = False
+        cdef void* pp
+        cdef double* mu = &self.mu[0]
+        self.cert_kind = 0
+        for cp in range(self.cp_first[t], self.cp_last[t]):
+            ph = self.cp_phase[cp]; pp = self.pptr[ph]
+            best_tpd = INFINITY; all_conv = 1
+            for j in range(self.cp_start[cp], self.cp_end[cp]):
+                if not self.j_conv[j]:
+                    all_conv = 0
+                G = self.j_G[j]; tpd = self.j_tpd[j]
+                if not isfinite(G):
+                    tpd = INFINITY
+                self.priced += 1
+                if tpd < -self.tol:
+                    if self.add_point(ph, &self.j_y[j, 0], &self.j_x[j, 0], G) >= 0:
+                        seed_added = True
+                if tpd < best_tpd:
+                    best_tpd = tpd
+                    memcpy(&self.ybest[0], &self.j_y[j, 0], (<CPhase>pp).D * sizeof(double))
+            if polished and best_tpd < -self.tol:
+                if self.cert_kind == 0 or best_tpd < self.cert_tpd:
+                    memcpy(&self.ycert[0], &self.ybest[0], (<CPhase>pp).D * sizeof(double))
+                    self.cert_kind = 1; self.cert_phase = ph; self.cert_tpd = best_tpd
+                added = True; no_polish[0] = True
+            if all_conv:
+                (<CPhase>pp).has_last = True; (<CPhase>pp).last_tpd = best_tpd
+                for i in range(C): (<CPhase>pp).last_mu[i] = mu[i]
+            else:
+                (<CPhase>pp).has_last = False
+        if polished and not added:
+            for p in range(self.npts):
+                tt = self.PG[p] / self.RT
+                for i in range(C): tt -= mu[i] * self.Px[p, i]
+                if tt < -self.tol:
+                    self.cert_kind = 2; self.cert_phase = self.Pph[p]; self.cert_tpd = tt
+                    memcpy(&self.ycert[0], &self.Py[p, 0], (<CPhase>self.pptr[self.Pph[p]]).D * sizeof(double))
+                    added = True; no_polish[0] = True
+                    break
+        if seed_added and not added:
+            self.cert_kind = 3
+        return added or seed_added
+
+    cdef void _load_own(self, int t, int n0) noexcept nogil:
+        """Condition t's own points of the round back into the store (after the n0 shared ones, in insertion
+        order)."""
+        cdef int s = self.Shead[t], p, j, ph
+        while s >= 0:
+            if self.npts >= self.cap:
+                with gil:
+                    self._grow()
+            if self.npts - n0 >= self.own_s.shape[0]:
+                with gil:
+                    self._grow_own()
+            p = self.npts; ph = self.Sph[s]
+            for j in range(self.Dmax): self.Py[p, j] = self.Sy[s, j]
+            for j in range(self.C): self.Px[p, j] = self.Sx[s, j]
+            self.PG[p] = self.SG[s]; self.Pph[p] = ph; self.Pcode[p] = self.Scode[s]
+            self.Pnext[p] = self.head[ph]; self.head[ph] = p
+            self.npts += 1
+            self.Sidx[s] = p; self.own_s[p - n0] = s
+            s = self.Snext[s]
+
+    cdef void _save_own(self, int t, int n0) noexcept nogil:
+        """Condition t's own points (store entries from n0) to its chain (new ones appended), its saved basis
+        pointing at them there; the store back to the n0 shared points."""
+        cdef int p, s, j, k, b, nloaded = 0
+        s = self.Shead[t]
+        while s >= 0:
+            nloaded += 1; s = self.Snext[s]
+        for p in range(n0 + nloaded, self.npts):
+            if self.nst >= self.scap:
+                with gil:
+                    self._grow_staged()
+            if p - n0 >= self.own_s.shape[0]:
+                with gil:
+                    self._grow_own()
+            s = self.nst; self.nst += 1
+            for j in range(self.Dmax): self.Sy[s, j] = self.Py[p, j]
+            for j in range(self.C): self.Sx[s, j] = self.Px[p, j]
+            self.SG[s] = self.PG[p]; self.Sph[s] = self.Pph[p]; self.Scode[s] = self.Pcode[p]
+            self.Sown[s] = t; self.Snext[s] = -1
+            if self.Stail[t] >= 0:
+                self.Snext[self.Stail[t]] = s
+            else:
+                self.Shead[t] = s
+            self.Stail[t] = s
+            self.own_s[p - n0] = s
+        for k in range(self.K):
+            b = self.t_basis[t, k]
+            if b >= n0 and b < STAGED:
+                self.t_basis[t, k] = STAGED + self.own_s[b - n0]
+        self.npts = n0
+        for k in range(self.nph): self.head[k] = self.head0[k]
+
+    cdef void _save_cond(self, int t, bint polished, bint skipped, bint added, int aug, int kind) noexcept nogil:
+        """Everything about condition t a later sub-round needs (with _save: basis, potentials, skip state)."""
+        cdef int i, C = self.C
+        self._save(t)
+        for i in range(C): self.t_xB[t, i] = self.xB[i]
+        for i in range(C * self.Dmax): self.t_pol_y[t, i] = self.pol_y[i]
+        for i in range(C * C): self.t_pol_x[t, i] = self.pol_x[i]
+        for i in range(C):
+            self.t_pol_n[t, i] = self.pol_n[i]; self.t_pol_mu[t, i] = self.pol_mu[i]; self.t_pol_G[t, i] = self.pol_G[i]
+            self.t_pol_ph[t, i] = self.pol_ph[i]
+        for i in range(self.Dmax): self.t_ycert[t, i] = self.ycert[i]
+        self.t_pol_na[t] = self.pol_na
+        self.t_cert_kind[t] = self.cert_kind; self.t_cert_phase[t] = self.cert_phase; self.t_cert_tpd[t] = self.cert_tpd
+        self.t_polished[t] = polished; self.t_skipped[t] = skipped; self.t_added[t] = added
+        self.t_aug[t] = aug; self.t_kind[t] = kind
+
+    cdef void _load_cond(self, int t, double* R, double* b, double* mf, int* fx, int K) noexcept nogil:
+        """Condition t back as the solver's current one (own points first, then its basis pointing at them)."""
+        cdef int i, k, C = self.C, bb
+        self._set_conditions_c(R, b, mf, fx, K)
+        self._load(t)
+        for k in range(self.K):
+            bb = self.basis[k]
+            if bb >= STAGED:
+                self.basis[k] = self.Sidx[bb - STAGED]
+        for i in range(C): self.mu[i] = self.t_mu[t, i]; self.xB[i] = self.t_xB[t, i]
+        for i in range(C * self.Dmax): self.pol_y[i] = self.t_pol_y[t, i]
+        for i in range(C * C): self.pol_x[i] = self.t_pol_x[t, i]
+        for i in range(C):
+            self.pol_n[i] = self.t_pol_n[t, i]; self.pol_mu[i] = self.t_pol_mu[t, i]; self.pol_G[i] = self.t_pol_G[t, i]
+            self.pol_ph[i] = self.t_pol_ph[t, i]
+        for i in range(self.Dmax): self.ycert[i] = self.t_ycert[t, i]
+        self.pol_na = self.t_pol_na[t]
+        self.cert_kind = self.t_cert_kind[t]; self.cert_phase = self.t_cert_phase[t]; self.cert_tpd = self.t_cert_tpd[t]
+
+    cdef int _merge_chains(self, int[::1] members, int B) noexcept nogil:
+        """The conditions' own points into the shared store, condition by condition in insertion order (duplicates
+        of stored or earlier points dropped); the saved bases follow. Returns the number of new points."""
+        cdef int m, t, s, p, i, k, n0 = self.npts
+        for m in range(members.shape[0]):
+            t = members[m]
+            s = self.Shead[t]
+            while s >= 0:
+                p = self.find_point(self.Sph[s], &self.Sy[s, 0])
+                if p < 0:
+                    p = self.add_point(self.Sph[s], &self.Sy[s, 0], &self.Sx[s, 0], self.SG[s])
+                self.Smap[s] = p
+                s = self.Snext[s]
+            self.Shead[t] = -1; self.Stail[t] = -1
+        for m in range(members.shape[0]):
+            t = members[m]
+            for k in range(self.K):
+                if self.t_basis[t, k] >= STAGED:
+                    p = self.Smap[self.t_basis[t, k] - STAGED]
+                    self.t_basis[t, k] = p if p >= 0 else -(1 + k)
+        self.nst = 0
+        return self.npts - n0
+
+    def solve_tile_batched(self, R, b, mu_fixed, fixed, seeds=None, int max_rounds=60, stage=None, init_from=None):
+        """solve_tile with the pricing of every round done as one batch of jobs per sub-round: each condition does its
+        LP and polish and lists its pricing jobs; all jobs run (_execute_jobs); each condition takes its results. A
+        further Newton pass with a minimum found below a polished tangent plane, or the polish of a round that had
+        skipped it, makes another sub-round of the same round. Same results as solve_tile. self.job_batches: the
+        number of jobs of each sub-round, per round."""
+        cdef double[:, :, ::1] Rv = np.ascontiguousarray(R, dtype=float)
+        cdef double[:, ::1] bv = np.ascontiguousarray(b, dtype=float)
+        cdef double[:, ::1] mfv = np.ascontiguousarray(mu_fixed, dtype=float)
+        cdef int[:, ::1] fxv = np.ascontiguousarray(fixed, dtype=np.int32)
+        cdef int B = Rv.shape[0], K = Rv.shape[1], C = self.C, Dm = self.Dmax, t, k, st, rounds, n0, nact, m
+        cdef int nstaged, nmem, kind, aug
+        cdef bint polished, added, no_polish, skipped, use_seeds = seeds is not None, ok
+        cdef double obj = 0.0
+        # condition steps: MAIN / AUG / FINAL = its jobs await consumption; NEED_AUG / NEED_FINAL = its next jobs
+        # are to be generated; IDLE = nothing more this round
+        cdef int IDLE = 0, MAIN = 1, AUG = 2, FINAL = 3, NEED_AUG = 4, NEED_FINAL = 5
+        stage = np.ones(B, dtype=np.int32) if stage is None else np.asarray(stage, dtype=np.int32)
+        init_from = np.zeros(B, dtype=np.int32) if init_from is None else np.asarray(init_from, dtype=np.int32)
+        if B and (stage[0] != 0 or (stage[1:] < 1).any()):
+            raise ValueError('condition 0 alone is stage 0; the others need stages >= 1')
+        if B and ((stage[init_from[1:]] >= stage[1:]).any()):
+            raise ValueError('a condition must start from one of an earlier stage')
+        status = np.zeros(B, dtype=np.int32); nout = np.zeros(B, dtype=np.int32)
+        phs = np.full((B, C), -1, dtype=np.int32); amt = np.zeros((B, C)); X = np.zeros((B, C, C))
+        Y = np.full((B, C, Dm), np.nan); G = np.zeros((B, C)); mu = np.zeros((B, C))
+        cdef int[::1] status_v = status, nout_v = nout
+        cdef int[:, ::1] phs_v = phs
+        cdef double[:, ::1] amt_v = amt, G_v = G, mu_v = mu
+        cdef double[:, :, ::1] X_v = X, Y_v = Y
+        done = np.zeros(B, dtype=np.uint8)
+        cdef unsigned char[::1] done_v = done
+        cdef int[::1] members_v, init_v = init_from
+        self.stats = []; self.job_batches = []
+        if B == 0:
+            return status, nout, phs, amt, X, Y, G, mu
+        self.RT = (<CPhase>self.phases[0]).RT
+        if use_seeds:
+            self._pack_seeds(seeds)
+        self.t_basis = np.zeros((B, max(K, 1)), dtype=np.int32); self.t_mu = np.zeros((B, C))
+        self.t_has = np.zeros((B, self.nph), dtype=np.uint8); self.t_ltpd = np.zeros((B, self.nph))
+        self.t_lmu = np.zeros((B, self.nph, C)); self.t_nopol = np.zeros(B, dtype=np.uint8)
+        self.t_xB = np.zeros((B, C)); self.t_pol_y = np.zeros((B, C * Dm)); self.t_pol_x = np.zeros((B, C * C))
+        self.t_pol_n = np.zeros((B, C)); self.t_pol_mu = np.zeros((B, C)); self.t_pol_G = np.zeros((B, C))
+        self.t_ycert = np.zeros((B, Dm)); self.t_pol_ph = np.zeros((B, C), dtype=np.int32)
+        self.t_pol_na = np.zeros(B, dtype=np.int32); self.t_cert_kind = np.zeros(B, dtype=np.int32)
+        self.t_cert_phase = np.zeros(B, dtype=np.int32); self.t_cert_tpd = np.zeros(B)
+        self.t_aug = np.zeros(B, dtype=np.int32); self.t_kind = np.zeros(B, dtype=np.int32)
+        self.t_polished = np.zeros(B, dtype=np.uint8); self.t_skipped = np.zeros(B, dtype=np.uint8)
+        self.t_added = np.zeros(B, dtype=np.uint8)
+        self.Shead = np.full(B, -1, dtype=np.int32); self.Stail = np.full(B, -1, dtype=np.int32)
+        self.cp_first = np.zeros(B, dtype=np.int32); self.cp_last = np.zeros(B, dtype=np.int32)
+        if self.jcap == 0:
+            self._grow_jobs()
+        if self.cpcap == 0:
+            self._grow_cp()
+        w0 = self._work()
+        with nogil:
+            self._set_conditions_c(&Rv[0, 0, 0], &bv[0, 0], &mfv[0, 0], &fxv[0, 0], K)
+            st = self._solve_c(use_seeds, max_rounds, &polished, &rounds)
+            self._record(0, st, polished, status_v, nout_v, phs_v, amt_v, X_v, Y_v, G_v, mu_v)
+            self._save(0)
+        done_v[0] = 1
+        w1 = self._work()
+        self.stats.append({'stage': 0, 'round': 0, 'active': 1, 'rounds_first': rounds, 'priced': w1[0] - w0[0],
+                           'evals1': w1[1] - w0[1], 'evals2': w1[2] - w0[2], 'lp_iters': w1[3] - w0[3],
+                           'staged': 0, 'new': 0, 'store': self.npts, 'jobs': []})
+        self.nst = 0
+        for s_ in sorted(set(stage[1:].tolist())):
+            members = np.nonzero(stage == s_)[0].astype(np.int32)
+            members_v = members
+            nmem = members.shape[0]
+            with nogil:
+                for m in range(nmem):
+                    self._copy_state(init_v[members_v[m]], members_v[m])
+            for rounds in range(1, max_rounds + 1):
+                w0 = self._work()
+                batches = []
+                nact = 0
+                with nogil:
+                    for k in range(self.nph): self.head0[k] = self.head[k]
+                    n0 = self.npts
+                    self.nj = 0; self.ncp = 0
+                    # each active condition: LP, polish, its pricing jobs
+                    for m in range(nmem):
+                        t = members_v[m]
+                        if done_v[t]:
+                            continue
+                        nact += 1
+                        self._set_conditions_c(&Rv[t, 0, 0], &bv[t, 0], &mfv[t, 0], &fxv[t, 0], K)
+                        self._load(t)
+                        st = self.lp_solve(&obj)
+                        if st != 0:
+                            self._record(t, st, False, status_v, nout_v, phs_v, amt_v, X_v, Y_v, G_v, mu_v)
+                            done_v[t] = 1
+                            self._save_cond(t, False, False, False, 0, IDLE); self._save_own(t, n0)
+                            continue
+                        self.gauge_fix()
+                        skipped = self.t_nopol[t]
+                        polished = False
+                        if self.use_polish and not self.t_nopol[t]:
+                            self.npolish_try += 1
+                            polished = self.polish() == 1
+                        self.t_nopol[t] = False
+                        self._gen_jobs(t, rounds)
+                        self._save_cond(t, polished, skipped, False, 0, MAIN); self._save_own(t, n0)
+                while self.nj > 0:
+                    batches.append(self.nj)
+                    with nogil:
+                        self._execute_jobs()
+                        # each condition takes its results
+                        for m in range(nmem):
+                            t = members_v[m]
+                            kind = self.t_kind[t]
+                            if kind != MAIN and kind != AUG and kind != FINAL:
+                                continue
+                            self._load_own(t, n0)
+                            self._load_cond(t, &Rv[t, 0, 0], &bv[t, 0], &mfv[t, 0], &fxv[t, 0], K)
+                            polished = self.t_polished[t]; skipped = self.t_skipped[t]; aug = self.t_aug[t]
+                            no_polish = self.t_nopol[t]
+                            added = self._consume(t, polished, &no_polish)
+                            self.t_nopol[t] = no_polish
+                            if kind == FINAL:
+                                if added:
+                                    polished = False
+                                kind = IDLE
+                            elif added and polished and (self.cert_kind == 1 or self.cert_kind == 2) and aug < C:
+                                kind = NEED_AUG
+                            elif not added and not polished and skipped and self.use_polish:
+                                kind = NEED_FINAL
+                            else:
+                                kind = IDLE
+                            if kind == IDLE and (not added or rounds == max_rounds):
+                                self._record(t, 6 if added else 0, polished, status_v, nout_v, phs_v, amt_v, X_v,
+                                             Y_v, G_v, mu_v)
+                                done_v[t] = 1
+                            self._save_cond(t, polished, skipped, added, aug, kind); self._save_own(t, n0)
+                        # the next jobs: another Newton pass, or the polish of a round that skipped it
+                        self.nj = 0; self.ncp = 0
+                        for m in range(nmem):
+                            t = members_v[m]
+                            kind = self.t_kind[t]
+                            if kind != NEED_AUG and kind != NEED_FINAL:
+                                continue
+                            self._load_own(t, n0)
+                            self._load_cond(t, &Rv[t, 0, 0], &bv[t, 0], &mfv[t, 0], &fxv[t, 0], K)
+                            polished = self.t_polished[t]; skipped = self.t_skipped[t]; aug = self.t_aug[t]
+                            added = self.t_added[t]
+                            if kind == NEED_AUG:
+                                aug += 1
+                                if self._polish_augment():
+                                    self.t_nopol[t] = False
+                                    self._gen_jobs(t, rounds)
+                                    kind = AUG
+                                else:
+                                    polished = False
+                                    kind = IDLE   # (added: the condition goes on next round)
+                            else:
+                                self.npolish_try += 1
+                                if self.polish() == 1:
+                                    polished = True
+                                    self._gen_jobs(t, rounds)
+                                    kind = FINAL
+                                else:
+                                    kind = IDLE
+                                    if not added or rounds == max_rounds:
+                                        self._record(t, 6 if added else 0, polished, status_v, nout_v, phs_v,
+                                                     amt_v, X_v, Y_v, G_v, mu_v)
+                                        done_v[t] = 1
+                            if kind == IDLE and added and rounds == max_rounds and not done_v[t]:
+                                self._record(t, 6, polished, status_v, nout_v, phs_v, amt_v, X_v, Y_v, G_v, mu_v)
+                                done_v[t] = 1
+                            self._save_cond(t, polished, skipped, added, aug, kind); self._save_own(t, n0)
+                with nogil:
+                    nstaged = self.nst
+                    new = self._merge_chains(members_v, B)
+                w1 = self._work()
+                self.job_batches.append(batches)
+                self.stats.append({'stage': int(s_), 'round': rounds, 'active': nact, 'priced': w1[0] - w0[0],
+                                   'evals1': w1[1] - w0[1], 'evals2': w1[2] - w0[2], 'lp_iters': w1[3] - w0[3],
+                                   'staged': nstaged, 'new': new, 'store': self.npts, 'jobs': batches})
                 if nact == 0 or done[members].all():
                     break
         return status, nout, phs, amt, X, Y, G, mu

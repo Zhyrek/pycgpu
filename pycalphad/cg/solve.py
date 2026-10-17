@@ -500,7 +500,8 @@ RESEED_DT = float(_os.environ.get("PYCALPHAD_CG_RESEED_DT", 100.0))
 # Experimental: solve each sequence of plain conditions in lockstep rounds over one shared point store (TileSolver,
 # the scheme of a batched solver) instead of one condition after the other; the work per round is kept in
 # TILE_STATS (one list per sequence)
-TILE_MODE = bool(int(_os.environ.get("PYCALPHAD_CG_TILE", "0")))
+# (2: the same with each round's pricing done as batches of independent jobs, TileSolver.solve_tile_batched)
+TILE_MODE = int(_os.environ.get("PYCALPHAD_CG_TILE", "0"))
 # Diagnostics: with PYCALPHAD_CG_STATS=1, the work of each sequence of plain conditions is appended to
 # SEQUENCE_STATS (conditions, minimizations, energy gradient and Hessian evaluations, LP iterations, CPU seconds;
 # with TILE_MODE also the rounds)
@@ -539,7 +540,8 @@ def _tile_stages(idx, levels):
 def _work(worker):
     import time
     return (sum(c.nprice for c in worker.cores), sum(c.evals1 for c in worker.cores),
-            sum(c.evals2 for c in worker.cores), worker.solver.lp_iters, time.thread_time(), worker.solver.nunpolished)
+            sum(c.evals2 for c in worker.cores), worker.solver.lp_iters, time.thread_time(), worker.solver.nunpolished,
+            worker.solver.priced, worker.solver.npolish_try)
 
 
 def _thread_count(n_conditions):
@@ -689,12 +691,14 @@ def solve_workspace(wks):
             w0 = _work(worker) if COLLECT_STATS else None
             if TILE_MODE:
                 stage, init = _tile_stages([i for i, _ in items], TILE_LEVELS)
-                st, na, phs, amt, Xs, Ys, Gs, mus = worker.solver.solve_tile(*args, stage=stage, init_from=init)
+                solve = worker.solver.solve_tile_batched if TILE_MODE == 2 else worker.solver.solve_tile
+                st, na, phs, amt, Xs, Ys, Gs, mus = solve(*args, stage=stage, init_from=init)
             else:
                 st, na, phs, amt, Xs, Ys, Gs, mus = worker.solver.solve_sequence(*args)
             if COLLECT_STATS:
                 w1 = _work(worker)
-                SEQUENCE_STATS.append(dict(zip(('priced', 'evals1', 'evals2', 'lp_iters', 'cpu', 'unpolished'),
+                SEQUENCE_STATS.append(dict(zip(('priced', 'evals1', 'evals2', 'lp_iters', 'cpu', 'unpolished',
+                                                'pricing_starts', 'polishes'),
                                                (b - a for a, b in zip(w0, w1))), n=len(items), tile=TILE_MODE,
                                            rounds=list(worker.solver.stats) if TILE_MODE else None))
             after_first = None

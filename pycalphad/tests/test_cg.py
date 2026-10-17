@@ -56,3 +56,22 @@ def test_lockstep_tile_matches_sequential(monkeypatch, levels):
             out[mode] = (eq.GM.values.ravel(), sets)
     np.testing.assert_allclose(out[True][0], out[False][0], atol=1e-3)
     assert out[True][1] == out[False][1]
+
+
+def test_batched_pricing_is_bit_identical_to_lockstep(monkeypatch):
+    "Pricing as batches of independent jobs per sub-round changes nothing (same arithmetic in the same order)."
+    from pycalphad import Database, equilibrium, variables as v
+    from pycalphad.backend import backend
+    from importlib.resources import files
+    import pycalphad.tests.databases as dbs
+    dbf = Database(str(files(dbs) / 'alcocrni.tdb'))
+    conds = {v.N: 1, v.P: 101325, v.T: 1300, v.X('AL'): list(np.linspace(0.02, 0.5, 40)),
+             v.X('CR'): list(np.linspace(0.02, 0.5, 40))}
+    out = {}
+    with backend('cg', threads=1):
+        for mode in (1, 2):
+            monkeypatch.setattr(solve, 'TILE_MODE', mode)
+            out[mode] = equilibrium(dbf, ['AL', 'CR', 'NI', 'VA'], list(dbf.phases), conds)
+    for k in ('GM', 'MU', 'NP', 'X', 'Y'):
+        np.testing.assert_array_equal(out[1][k].values, out[2][k].values)
+    np.testing.assert_array_equal(out[1].Phase.values, out[2].Phase.values)

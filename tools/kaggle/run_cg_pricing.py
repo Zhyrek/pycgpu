@@ -175,8 +175,16 @@ def replay(order, block, reps=3):
         e_.record(); e_.synchronize()
         ms = cp.cuda.get_elapsed_time(s_, e_); best = ms if best is None else min(best, ms)
     return best / 1e3, d_e.get()
-div = {'jobs': n}
+div = {'jobs': n, 'size_classes': [list(c) for c in cuda.classes]}
 by_phase = np.argsort(b['jp'], kind='stable')
+# the class kernels (as CudaPricer prices): sorted by class and phase, one launch per class; kernel time only
+yy = np.zeros((n, ys)); xx = np.zeros((n, C)); GG = np.zeros(n); tt = np.zeros(n); cc = np.zeros(n, dtype=np.int32); ee = np.zeros(2 * n, dtype=np.int32)
+best = None
+for _ in range(3):
+    k0 = cuda.kernel_seconds
+    cuda.price(np.arange(n, dtype=np.int32), b['jp'], np.arange(n, dtype=np.int32) * 0 + b['jc'], b['mu'], b['y0'], yy, xx, GG, tt, cc, ee)
+    sec = cuda.kernel_seconds - k0; best = sec if best is None else min(best, sec)
+div['class_kernels_sorted_s'] = round(best, 4)
 for block in (32, 64, 128, 256):
     for lab, order in (('condition_order', np.arange(n)), ('sorted_by_phase', by_phase)):
         try:

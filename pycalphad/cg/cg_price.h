@@ -37,19 +37,22 @@ struct CgPhase {
     double m_lo, pen_w, max_dz, RT;
 };
 
-struct CgWork {
-    double y[CG_DMAX], z[CG_DMAX], zt[CG_DMAX], yt[CG_DMAX], gz[CG_DMAX], gzt[CG_DMAX], gy[CG_DMAX],
-        gyt[CG_DMAX], gl[CG_DMAX], d[CG_DMAX], w[CG_DMAX], coef[CG_DMAX], sc[CG_DMAX], bt[CG_DMAX], nu[CG_DMAX];
-    int free_[CG_DMAX];
+// work arrays of one job, sized for phases of at most DM site fractions and NM derivative variables (a kernel per
+// size class keeps them small; CgWork: the largest of the system)
+template <int DM, int NM>
+struct CgWorkT {
+    double y[DM], z[DM], zt[DM], yt[DM], gz[DM], gzt[DM], gy[DM], gyt[DM], gl[DM], d[DM], w[DM], coef[DM], sc[DM],
+        bt[DM], nu[DM];
+    int free_[DM];
     double mval[CG_CMAX], mu[CG_CMAX];
-    double inp[CG_NS + CG_DMAX];
-    double eg[1 + CG_NMAX];
-    double H[CG_NMAX * CG_NMAX];
-    double Hy[CG_DMAX * CG_DMAX], Mx[CG_DMAX * CG_DMAX], Hz[CG_DMAX * CG_DMAX], V[CG_DMAX * CG_DMAX],
-        Hs[CG_DMAX * CG_DMAX], Ev[CG_DMAX * CG_DMAX];
+    double inp[CG_NS + DM];
+    double eg[1 + NM];
+    double H[NM * NM];
+    double Hy[DM * DM], Mx[DM * DM], Hz[DM * DM], V[DM * DM], Hs[DM * DM], Ev[DM * DM];
     double Mtot, G_fu;
     int last_indef, evals1, evals2;
 };
+typedef CgWorkT<CG_DMAX, CG_NMAX> CgWork;
 
 CG_DEVICE static inline double cg_fabs(double a) { return a < 0 ? -a : a; }
 
@@ -74,7 +77,8 @@ CG_DEVICE static void cg_y_of_z(const CgPhase& P, const double* z, double* y) {
     }
 }
 
-CG_DEVICE static void cg_moles(const CgPhase& P, CgWork& W, const double* y) {
+template <class WT>
+CG_DEVICE static void cg_moles(const CgPhase& P, WT& W, const double* y) {
     W.Mtot = 0.0;
     for (int j = 0; j < P.D; ++j) W.Mtot += P.asum[j] * y[j];
     for (int i = 0; i < P.C; ++i) {
@@ -85,7 +89,8 @@ CG_DEVICE static void cg_moles(const CgPhase& P, CgWork& W, const double* y) {
 }
 
 // energy and gradient (hess: also the Hessian), formula moles
-CG_DEVICE static void cg_evaluate(const CgPhase& P, CgWork& W, const double* y, int hess) {
+template <class WT>
+CG_DEVICE static void cg_evaluate(const CgPhase& P, WT& W, const double* y, int hess) {
     if (hess) W.evals2++;
     W.evals1++;
     for (int j = 0; j < P.D; ++j) W.inp[CG_NS + j] = y[j];
@@ -95,7 +100,8 @@ CG_DEVICE static void cg_evaluate(const CgPhase& P, CgWork& W, const double* y, 
 }
 
 // after cg_evaluate at y: TPD/RT (without the vacancy penalty), its gradient in y
-CG_DEVICE static double cg_tpd_parts(const CgPhase& P, CgWork& W, double* gy) {
+template <class WT>
+CG_DEVICE static double cg_tpd_parts(const CgPhase& P, WT& W, double* gy) {
     double M = W.Mtot, u = W.G_fu / P.RT;
     for (int i = 0; i < P.C; ++i) u -= W.mu[i] * W.mval[i];
     double f = u / M;
@@ -106,7 +112,8 @@ CG_DEVICE static double cg_tpd_parts(const CgPhase& P, CgWork& W, double* gy) {
     return f;
 }
 
-CG_DEVICE static double cg_fgz(const CgPhase& P, CgWork& W, const double* z, double* y, double* gz, double* gy) {
+template <class WT>
+CG_DEVICE static double cg_fgz(const CgPhase& P, WT& W, const double* z, double* y, double* gz, double* gy) {
     cg_y_of_z(P, z, y);
     cg_evaluate(P, W, y, 0);
     double f = cg_tpd_parts(P, W, gy), M = W.Mtot;
@@ -123,14 +130,16 @@ CG_DEVICE static double cg_fgz(const CgPhase& P, CgWork& W, const double* z, dou
     return f;
 }
 
-CG_DEVICE static double cg_gznorm(const CgPhase& P, const CgWork& W) {
+template <class WT>
+CG_DEVICE static double cg_gznorm(const CgPhase& P, const WT& W) {
     double s = 0.0;
     for (int j = 0; j < P.D; ++j) s += W.gz[j] * W.gz[j];
     return sqrt(s);
 }
 
 // stationarity in potentials (see CPhase.kkt)
-CG_DEVICE static double cg_kkt(const CgPhase& P, CgWork& W) {
+template <class WT>
+CG_DEVICE static double cg_kkt(const CgPhase& P, WT& W) {
     double out = 0.0;
     for (int j = 0; j < P.D; ++j) W.gl[j] = W.gy[j];
     for (int b = 0; b < P.nb; ++b) {
@@ -149,7 +158,8 @@ CG_DEVICE static double cg_kkt(const CgPhase& P, CgWork& W) {
 }
 
 // Gauss-Newton Hessian over the free variables, Jacobi-scaled (V and Hs, m x m); returns m (see build_hessian)
-CG_DEVICE static int cg_build_hessian(const CgPhase& P, CgWork& W) {
+template <class WT>
+CG_DEVICE static int cg_build_hessian(const CgPhase& P, WT& W) {
     const int D = P.D, nd = P.nder, o = P.doff;
     cg_evaluate(P, W, W.y, 1);
     double M = W.Mtot, f = cg_tpd_parts(P, W, W.gyt);
@@ -282,7 +292,8 @@ CG_DEVICE static int cg_eigh(double* A, int m, double* w, double* E) {
 }
 
 // factor the scaled Hessian (V): Cholesky, else of its eigenvalue-modified version (|w| floored at 1e-8)
-CG_DEVICE static int cg_factor(CgWork& W, int m) {
+template <class WT>
+CG_DEVICE static int cg_factor(WT& W, int m) {
     W.last_indef = cg_cholesky(W.V, m) != 0;
     if (!W.last_indef) return 0;
     for (int p = 0; p < m * m; ++p) W.V[p] = W.Hs[p];
@@ -301,7 +312,8 @@ CG_DEVICE static int cg_factor(CgWork& W, int m) {
     return cg_cholesky(W.V, m) == 0 ? 0 : -1;
 }
 
-CG_DEVICE static int cg_symmetric(const CgPhase& P, const CgWork& W) {
+template <class WT>
+CG_DEVICE static int cg_symmetric(const CgPhase& P, const WT& W) {
     for (int k = 0; k < P.nsym; ++k) {
         int same = 1;
         for (int q = P.sym_off[k]; q < P.sym_off[k + 1]; ++q)
@@ -312,7 +324,8 @@ CG_DEVICE static int cg_symmetric(const CgPhase& P, const CgWork& W) {
 }
 
 // at a stationary point: along a direction of negative curvature to a lower point (see escape_saddle)
-CG_DEVICE static int cg_escape_saddle(const CgPhase& P, CgWork& W, double* f) {
+template <class WT>
+CG_DEVICE static int cg_escape_saddle(const CgPhase& P, WT& W, double* f) {
     const int D = P.D;
     double best = *f;
     int m = cg_build_hessian(P, W);
@@ -345,7 +358,8 @@ CG_DEVICE static int cg_escape_saddle(const CgPhase& P, CgWork& W, double* f) {
     return 0;
 }
 
-CG_DEVICE static int cg_newton_direction(const CgPhase& P, CgWork& W, int m) {
+template <class WT>
+CG_DEVICE static int cg_newton_direction(const CgPhase& P, WT& W, int m) {
     for (int p = 0; p < m; ++p) W.coef[p] = -W.sc[p] * W.gz[W.free_[p]];
     cg_cholesky_solve(W.V, m, W.coef);
     for (int p = 0; p < P.D; ++p) W.d[p] = 0.0;
@@ -354,7 +368,8 @@ CG_DEVICE static int cg_newton_direction(const CgPhase& P, CgWork& W, int m) {
 }
 
 // minimize the TPD (mu in RT units) of phase P from y0 (see CPhase.price); returns 1 at a stationary point
-CG_DEVICE static int cg_price(const CgPhase& P, CgWork& W, const double* sv, const double* mu, const double* y0,
+template <class WT>
+CG_DEVICE static int cg_price(const CgPhase& P, WT& W, const double* sv, const double* mu, const double* y0,
                               double* y_out, double* x_out, double* G_out, double* tpd_out) {
     const int D = P.D, C = P.C;
     W.last_indef = 0; W.evals1 = 0; W.evals2 = 0;
@@ -440,10 +455,11 @@ CG_DEVICE static void cg_phase_from_desc(CgPhase& P, int ph, const int* di, cons
 
 // one job (index j of the job arrays): phase job_phase[j] (an index into the descriptions), potentials of row
 // job_cond[j] of mu (C per row, RT units), start y0[j * ystride ...]
+template <class WT>
 CG_DEVICE static void cg_price_job(int j, const int* job_phase, const int* job_cond, const double* mu, const double* y0,
                                    int ystride, double* y_out, double* x_out, double* G_out, double* tpd_out,
                                    int* conv_out, int* evals_out, const int* di, const double* dd, const int* ip,
-                                   const double* dp, int C, double RT, const double* sv, CgWork& W) {
+                                   const double* dp, int C, double RT, const double* sv, WT& W) {
     CgPhase P;
     cg_phase_from_desc(P, job_phase[j], di, dd, ip, dp, C, RT);
     conv_out[j] = cg_price(P, W, sv, mu + (long)job_cond[j] * C, y0 + (long)j * ystride, y_out + (long)j * ystride,

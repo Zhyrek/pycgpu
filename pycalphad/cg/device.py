@@ -40,24 +40,40 @@ _HOST_ENTRY = (
     '    for (int k = 0; k < n; ++k) cg_price_job(jobs[k], ' + _PASS_ARGS + ', W);\n'
     '}\n')
 
-# one thread per job
-_KERNEL = (
-    'extern "C" __global__ void cg_price_kernel(' + _ENTRY_ARGS + ') {\n'
-    '    int k = blockIdx.x * blockDim.x + threadIdx.x;\n'
-    '    if (k >= n) return;\n'
-    '    CgWork W;\n'
-    '    cg_price_job(jobs[k], ' + _PASS_ARGS + ', W);\n'
-    '}\n')
 
-# the kernel run on the host (cpu_compat.h makes the thread indices variables): checks its source without a GPU
-_KERNEL_ON_HOST = (
-    'extern "C" void cg_price_kernel_on_host(' + _ENTRY_ARGS + ') {\n'
-    '    blockDim.x = 1; blockIdx.x = 0;\n'
-    '    for (int k = 0; k < n; ++k) {\n'
-    '        threadIdx.x = k;\n'
-    '        cg_price_kernel(n, jobs, ' + _PASS_ARGS + ');\n'
-    '    }\n'
-    '}\n')
+def _kernels(classes):
+    """One kernel per size class (D site fractions, N derivative variables): the work arrays fit the class. (Also
+    cg_price_kernel, sized for the largest phase: for comparisons.)"""
+    out = ['extern "C" __global__ void cg_price_kernel(' + _ENTRY_ARGS + ') {\n'
+           '    int k = blockIdx.x * blockDim.x + threadIdx.x;\n'
+           '    if (k >= n) return;\n'
+           '    CgWork W;\n'
+           '    cg_price_job(jobs[k], ' + _PASS_ARGS + ', W);\n'
+           '}\n']
+    for D, N in classes:
+        out.append(
+            f'extern "C" __global__ void cg_price_kernel_{D}_{N}(' + _ENTRY_ARGS + ') {\n'
+            '    int k = blockIdx.x * blockDim.x + threadIdx.x;\n'
+            '    if (k >= n) return;\n'
+            f'    CgWorkT<{D}, {N}> W;\n'
+            '    cg_price_job(jobs[k], ' + _PASS_ARGS + ', W);\n'
+            '}\n')
+    return '\n'.join(out)
+
+
+def _kernels_on_host(classes):
+    """The class kernels run on the host (cpu_compat.h makes the thread indices variables), each job by its
+    phase's class: checks their source and the size classes without a GPU."""
+    body = ['extern "C" void cg_price_kernel_on_host(' + _ENTRY_ARGS + ') {',
+            '    blockDim.x = 1; blockIdx.x = 0; threadIdx.x = 0;',
+            '    for (int k = 0; k < n; ++k) {',
+            '        const int* d = di + job_phase[jobs[k]] * CGI_COUNT;']
+    for D, N in classes:
+        body.append(f'        if (d[CGI_D] <= {D} && d[CGI_NDER] <= {N}) {{ '
+                    f'cg_price_kernel_{D}_{N}(1, jobs + k, ' + _PASS_ARGS + '); continue; }')
+    body += ['    }', '}']
+    return '\n'.join(body) + '\n'
+
 
 _RTC_PRELUDE = '''#if defined(__CUDACC_RTC__) || defined(__HIPCC_RTC__)
 #ifndef NAN
@@ -123,7 +139,7 @@ def describe(cores, names, index, deriv, elements):
     return (ok, di.ravel(), dd.ravel(), np.array(ip or [0], dtype=np.int32), np.array(dp or [0.0]))
 
 
-def _source(model_code, index, names, Dmax, C, ns, nmax, target='host'):
+def _source(model_code, index, names, Dmax, C, ns, nmax, target='host', classes=()):
     """The pricing source: 'host' (a C++ library), 'cuda' (a CUDA/HIP kernel), 'cuda-on-host' (that kernel as C++,
     called in a loop over threads)."""
     disp = ['CG_DEVICE void cg_eval(int model, int hess, double* eg, double* H, const double* x) {',
@@ -137,10 +153,10 @@ def _source(model_code, index, names, Dmax, C, ns, nmax, target='host'):
     sizes = f'#define CG_DMAX {Dmax}\n#define CG_CMAX {C}\n#define CG_NS {ns}\n#define CG_NMAX {nmax}\n'
     if target == 'cuda':
         return '\n'.join([_RTC_PRELUDE, model_code, '#define CG_DEVICE __device__\n' + sizes, '\n'.join(disp),
-                          header, _KERNEL])
+                          header, _kernels(classes)])
     compat = (_HERE.parent / 'gpu' / 'cpu_compat.h').read_text()
     parts = [compat, '#include <cmath>', model_code, '#define CG_DEVICE\n' + sizes, '\n'.join(disp), header]
-    parts += [_HOST_ENTRY] if target == 'host' else [_KERNEL, _KERNEL_ON_HOST]
+    parts += [_HOST_ENTRY] if target == 'host' else [_kernels(classes), _kernels_on_host(classes)]
     return '\n'.join(parts)
 
 
@@ -181,10 +197,17 @@ class _Pricer:
         self.nmax = max([len(v) for v in self.deriv.values()] or [1])
         self.ns = len(wks.phase_record_factory.state_variables)
         self.elements = elements
+        # size classes (site fractions, derivative variables), smallest first; each phase in the first that fits
+        D_of = {ph.name: ph.D for ph in phases}
+        self.classes = sorted({(D_of[n], len(self.deriv[n])) for n in self.cand})
+        self.class_of = np.full(len(phases), -1, dtype=np.int64)
+        for p, name in enumerate(self.names):
+            if name in self.cand:
+                self.class_of[p] = self.classes.index((D_of[name], len(self.deriv[name])))
 
     def source(self, target):
         return _source(self.model_code, self.index, self.cand, self.Dmax, len(self.elements), self.ns, self.nmax,
-                       target)
+                       target, self.classes)
 
     def descriptions(self, cores):
         return describe(cores, self.names, self.index, self.deriv, self.elements)
@@ -223,6 +246,7 @@ class CudaPricer(_Pricer):
         self._setup(wks, phases, elements)
         ensure_device_stack_limit(self.STACK)
         self.module = cuda_raw_module(self.source('cuda'), ('-std=c++14',))
+        self.kernels = [self.module.get_function(f'cg_price_kernel_{D}_{N}') for D, N in self.classes]
         self.kernel = self.module.get_function('cg_price_kernel')
         self.seconds = 0.0; self.kernel_seconds = 0.0; self.jobs = 0; self.batches = 0
 
@@ -240,22 +264,33 @@ class CudaPricer(_Pricer):
         return int(ok.sum())
 
     def price(self, jobs, job_phase, job_cond, mu, y0, y, x, G, tpd, conv, evals):
-        """Price jobs (indices into the job tables) on the device, writing the results into the tables."""
+        """Price jobs (indices into the job tables) on the device, writing the results into the tables: sorted by
+        size class and phase, one launch per class (each warp runs one phase's code, with work arrays of its
+        class)."""
         cp = self.cp
         t0 = time.perf_counter()
+        jobs = np.asarray(jobs)
+        jp_h = job_phase[jobs]
+        cls = self.class_of[jp_h]
+        order = np.lexsort((jp_h, cls))
+        jobs = jobs[order]; jp_h = jp_h[order]; cls = cls[order]
         n = len(jobs)
         C, ys = mu.shape[1], y0.shape[1]
-        jp = cp.asarray(job_phase[jobs]); jc = cp.asarray(job_cond[jobs])
+        jp = cp.asarray(jp_h); jc = cp.asarray(job_cond[jobs])
         d_mu = cp.asarray(mu); d_y0 = cp.asarray(y0[jobs])
         d_y = cp.zeros((n, ys)); d_x = cp.zeros((n, C)); d_G = cp.zeros(n); d_t = cp.zeros(n)
         d_c = cp.zeros(n, dtype=cp.int32); d_e = cp.zeros(2 * n, dtype=cp.int32)
         ident = cp.arange(n, dtype=cp.int32)
         di, dd, ip, dp = self.d_desc
-        grid = ((n + self.BLOCK - 1) // self.BLOCK,)
+        bounds = np.searchsorted(cls, np.arange(len(self.classes) + 1))
         start, stop = cp.cuda.Event(), cp.cuda.Event()
         start.record()
-        self.kernel(grid, (self.BLOCK,), (np.int32(n), ident, jp, jc, d_mu, d_y0, np.int32(ys), d_y, d_x, d_G, d_t,
-                                           d_c, d_e, di, dd, ip, dp, np.int32(C), np.float64(self.RT), self.d_sv))
+        for c, kernel in enumerate(self.kernels):
+            a, b = int(bounds[c]), int(bounds[c + 1])
+            if b > a:
+                kernel(((b - a + self.BLOCK - 1) // self.BLOCK,), (self.BLOCK,),
+                       (np.int32(b - a), ident[a:b], jp, jc, d_mu, d_y0, np.int32(ys), d_y, d_x, d_G, d_t, d_c, d_e,
+                        di, dd, ip, dp, np.int32(C), np.float64(self.RT), self.d_sv))
         stop.record(); stop.synchronize()
         self.kernel_seconds += cp.cuda.get_elapsed_time(start, stop) / 1e3
         y[jobs] = d_y.get(); x[jobs] = d_x.get(); G[jobs] = d_G.get(); tpd[jobs] = d_t.get(); conv[jobs] = d_c.get()

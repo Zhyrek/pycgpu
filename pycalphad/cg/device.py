@@ -237,6 +237,9 @@ class CudaPricer(_Pricer):
     are compacted, copied over, priced and copied back. seconds / jobs / batches: what it did."""
 
     BLOCK = int(os.environ.get('PYCALPHAD_CG_BLOCK', 64))
+    # one launch of the largest-size kernel over the jobs sorted by phase (T4: 2.3x faster than unsorted; the class
+    # kernels, one per size class on its own stream, were slower there: its FP64 rate, not memory, is the limit)
+    CLASS_KERNELS = bool(int(os.environ.get('PYCALPHAD_CG_CLASS_KERNELS', '0')))
     STACK = int(os.environ.get('PYCALPHAD_CG_STACK', 65536))   # bytes per thread (the work arrays live there)
 
     def __init__(self, wks, phases, elements):
@@ -264,9 +267,9 @@ class CudaPricer(_Pricer):
         return int(ok.sum())
 
     def price(self, jobs, job_phase, job_cond, mu, y0, y, x, G, tpd, conv, evals):
-        """Price jobs (indices into the job tables) on the device, writing the results into the tables: sorted by
-        size class and phase, one launch per class (each warp runs one phase's code, with work arrays of its
-        class)."""
+        """Price jobs (indices into the job tables) on the device, writing the results into the tables, sorted by
+        phase (each warp runs one phase's code); with CLASS_KERNELS one kernel per size class (work arrays of the
+        class), each on its own stream."""
         cp = self.cp
         t0 = time.perf_counter()
         jobs = np.asarray(jobs)
@@ -282,15 +285,23 @@ class CudaPricer(_Pricer):
         d_c = cp.zeros(n, dtype=cp.int32); d_e = cp.zeros(2 * n, dtype=cp.int32)
         ident = cp.arange(n, dtype=cp.int32)
         di, dd, ip, dp = self.d_desc
-        bounds = np.searchsorted(cls, np.arange(len(self.classes) + 1))
+        args = (jp, jc, d_mu, d_y0, np.int32(ys), d_y, d_x, d_G, d_t, d_c, d_e, di, dd, ip, dp, np.int32(C),
+                np.float64(self.RT), self.d_sv)
         start, stop = cp.cuda.Event(), cp.cuda.Event()
         start.record()
-        for c, kernel in enumerate(self.kernels):
-            a, b = int(bounds[c]), int(bounds[c + 1])
-            if b > a:
-                kernel(((b - a + self.BLOCK - 1) // self.BLOCK,), (self.BLOCK,),
-                       (np.int32(b - a), ident[a:b], jp, jc, d_mu, d_y0, np.int32(ys), d_y, d_x, d_G, d_t, d_c, d_e,
-                        di, dd, ip, dp, np.int32(C), np.float64(self.RT), self.d_sv))
+        if self.CLASS_KERNELS:
+            bounds = np.searchsorted(cls, np.arange(len(self.classes) + 1))
+            streams = [cp.cuda.Stream(non_blocking=True) for _ in self.kernels]
+            for c, kernel in enumerate(self.kernels):
+                a, b = int(bounds[c]), int(bounds[c + 1])
+                if b > a:
+                    with streams[c]:
+                        kernel(((b - a + self.BLOCK - 1) // self.BLOCK,), (self.BLOCK,),
+                               (np.int32(b - a), ident[a:b]) + args)
+            for st in streams:
+                st.synchronize()
+        else:
+            self.kernel(((n + self.BLOCK - 1) // self.BLOCK,), (self.BLOCK,), (np.int32(n), ident) + args)
         stop.record(); stop.synchronize()
         self.kernel_seconds += cp.cuda.get_elapsed_time(start, stop) / 1e3
         y[jobs] = d_y.get(); x[jobs] = d_x.get(); G[jobs] = d_G.get(); tpd[jobs] = d_t.get(); conv[jobs] = d_c.get()

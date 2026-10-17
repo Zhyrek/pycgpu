@@ -7,6 +7,7 @@ include pycalphad/cg/cg_price.h
 include pycalphad/cg/cg_round.h
 include pycalphad/cg/cg_tile.h
 include pycalphad/cg/cg_tile_host.h
+include pycalphad/cg/cg_tile_device.h
 
 # This subpckage is only used in development checkouts and should not be
 # included in source distributions

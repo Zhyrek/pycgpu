@@ -140,9 +140,29 @@ def describe(cores, names, index, deriv, elements):
     return (ok, di.ravel(), dd.ravel(), np.array(ip or [0], dtype=np.int32), np.array(dp or [0.0]))
 
 
+def _tile_kernels():
+    """The kernels of a whole tile on a device (cg_tile.h's steps as cg_tile_device.h's kernels, and the binding of
+    the driver's arrays)."""
+    from pycalphad.cg.device_tile import bind_source
+    return '\n'.join([(_HERE / 'cg_tile.h').read_text(), (_HERE / 'cg_tile_device.h').read_text(), bind_source()])
+
+
+def _launchers(source):
+    """For each kernel of source, NAME_launch with its arguments: its threads (the first argument) in turn on the
+    host (cpu_compat.h makes the thread indices variables)."""
+    out = []
+    for name, params in re.findall(r'extern "C" __global__ void (\w+)\(([^)]*)\)', source):
+        args = ', '.join(re.findall(r'(\w+)\s*(?:,|$)', params))
+        out.append(f'extern "C" void {name}_launch({params}) {{\n'
+                   '    blockDim.x = 1; threadIdx.x = 0;\n'
+                   f'    for (int b_ = 0; b_ < n; ++b_) {{ blockIdx.x = b_; {name}({args}); }}\n'
+                   '}\n')
+    return '\n'.join(out)
+
+
 def _source(model_code, index, names, Dmax, C, ns, nmax, target='host', classes=()):
-    """The pricing source: 'host' (a C++ library), 'cuda' (a CUDA/HIP kernel), 'cuda-on-host' (that kernel as C++,
-    called in a loop over threads)."""
+    """The pricing source: 'host' (a C++ library), 'cuda' (a CUDA/HIP kernel), 'cuda-tile' (a whole tile's
+    kernels, cg_tile_device.h), 'cuda-on-host' (all of the kernels as C++, called in a loop over threads)."""
     disp = ['CG_DEVICE void cg_eval(int model, int hess, double* eg, double* H, const double* x) {',
             '    switch (model) {']
     for name in names:
@@ -152,15 +172,17 @@ def _source(model_code, index, names, Dmax, C, ns, nmax, target='host', classes=
     disp += ['    }', '}']
     header = (_HERE / 'cg_price.h').read_text() + '\n' + (_HERE / 'cg_round.h').read_text()
     sizes = f'#define CG_DMAX {Dmax}\n#define CG_CMAX {C}\n#define CG_NS {ns}\n#define CG_NMAX {nmax}\n'
-    if target == 'cuda':
-        return '\n'.join([_RTC_PRELUDE, model_code, '#define CG_DEVICE __device__\n' + sizes, '\n'.join(disp),
-                          header, _kernels(classes)])
+    if target in ('cuda', 'cuda-tile'):
+        parts = [_RTC_PRELUDE, model_code, '#define CG_DEVICE __device__\n' + sizes, '\n'.join(disp), header]
+        parts += [_kernels(classes)] if target == 'cuda' else [_kernels(()), _tile_kernels()]
+        return '\n'.join(parts)
     compat = (_HERE.parent / 'gpu' / 'cpu_compat.h').read_text()
     parts = [compat, '#include <cmath>', model_code, '#define CG_DEVICE\n' + sizes, '\n'.join(disp), header]
     if target == 'host':
         parts += [_HOST_ENTRY, (_HERE / 'cg_tile.h').read_text(), (_HERE / 'cg_tile_host.h').read_text()]
     else:
-        parts += [_kernels(classes), _kernels_on_host(classes)]
+        kernels = _kernels(classes) + '\n' + _tile_kernels()
+        parts += [kernels, _kernels_on_host(classes), _launchers(kernels)]
     return '\n'.join(parts)
 
 
@@ -223,6 +245,7 @@ class HostPricer(_Pricer):
 
     def __init__(self, wks, phases, elements, target='host'):
         self._setup(wks, phases, elements)
+        self.target = target
         self.lib = _compile(self.source(target))
         self.function = self.lib.cg_price_batch if target == 'host' else self.lib.cg_price_kernel_on_host
         self.address = ctypes.cast(self.function, ctypes.c_void_p).value
@@ -336,55 +359,81 @@ def _pack_seeds(seeds, phases, Dm):
     return np.ascontiguousarray(np.vstack(rows) if off[-1] else np.zeros((1, Dm))), np.array(off, dtype=np.int32)
 
 
-def _host_tile_solve(self, solver, cores, sv_values, phases, R, b, mu_fixed, fixed, seeds, stage, init_from,
-                     max_rounds=60):
-    """A whole tile in compiled code (cg_tile.h's steps, cg_tile_host.h's driver) from the solver's store, basis and
-    skip state: the arrays of Solver.solve_sequence, or None if a phase is not supported (the caller solves it)."""
-    ok, di, dd, ip, dp = self.descriptions(cores)
+def tile_inputs(pricer, solver, cores, sv_values, phases, R, b, mu_fixed, fixed, seeds, stage, init_from):
+    """What a compiled tile starts from (the solver's store, basis and skip state, the scaled condition rows,
+    seeds, stages), or None if a phase is not supported there (the caller solves the tile)."""
+    from types import SimpleNamespace
+    ok, di, dd, ip, dp = pricer.descriptions(cores)
     if any(not ok[p] and not ph.stoichiometric for p, ph in enumerate(phases)):
         return None
     if any(ph.stoichiometric and di.reshape(len(phases), -1)[p, 0] == 0 for p, ph in enumerate(phases)):
         return None   # (a stoichiometric phase the compiled code cannot evaluate)
     RT = float(cores[0].RT)
-    B = len(b); C = len(self.elements)
+    B = len(b); C = len(pricer.elements)
     Rs, bs, mfs, fx = _scaled_rows(R, b, mu_fixed, fixed, RT)
     K = bs.shape[1]
     st = solver.export_points()
     Dm = solver.Dmax
     n = st['n']
-    Py = np.zeros((max(n, 1), Dm)); Py[:n] = st['Py']
+    c = np.ascontiguousarray
     seedY, seed_off = _pack_seeds(seeds, phases, Dm)
     skip = st['skip']
-    has_last = np.array([s[0] for s in skip], dtype=np.uint8)
-    last_tpd = np.array([s[1] for s in skip], dtype=float)
-    last_mu = np.ascontiguousarray(np.array([s[2] for s in skip], dtype=float).reshape(len(phases), C))
-    basis0 = np.ascontiguousarray(np.asarray(st['basis'][:K], dtype=np.int32)) if st['K'] == K else \
-        np.array([-(1 + k) for k in range(K)], dtype=np.int32)
     gauge = solver.gauge_matrix().reshape(-1, C)
+    return SimpleNamespace(
+        B=B, C=C, K=K, Dm=Dm, nph=len(phases), ngauge=gauge.shape[0], max_late=solver.max_late,
+        use_polish=int(solver.use_polish), RT=RT, prune=solver.prune, prune_late=solver.prune_late,
+        skip_margin=solver.skip_margin, tol=solver.tol,
+        seed_prune=solver.seed_prune if np.isfinite(solver.seed_prune) else 1e300,
+        di=c(di, np.int32), dd=c(dd, float), ip=c(ip, np.int32), dp=c(dp, float), sv=c(sv_values, float),
+        gauge=c(gauge if gauge.size else np.zeros((1, C)), float),
+        npts=n, Py=c(st['Py'], float).reshape(n, Dm), Px=c(st['Px'], float).reshape(n, C), PG=c(st['PG'], float),
+        Pph=c(st['Pph'], np.int32), Pcode=c(st['Pcode'], np.int64), Pnext=c(st['Pnext'], np.int32),
+        head=c(st['head'], np.int32),
+        R=c(Rs, float), b=c(bs, float), mf=c(mfs, float), fixed=c(fx, np.int32),
+        seedY=c(seedY, float), seed_off=c(seed_off, np.int32), use_seeds=int(seeds is not None),
+        own_first=int(seed_off[-1]) + 4096, own_other=512,
+        stage=c(stage, np.int32), init_from=c(init_from, np.int32),
+        basis0=c(st['basis'][:K], np.int32) if st['K'] == K else np.array([-(1 + k) for k in range(K)], dtype=np.int32),
+        has_last0=np.array([s_[0] for s_ in skip], dtype=np.uint8),
+        last_tpd0=np.array([s_[1] for s_ in skip], dtype=float),
+        last_mu0=c(np.array([s_[2] for s_ in skip], dtype=float).reshape(len(phases), C)))
+
+
+def _host_tile_solve(self, solver, cores, sv_values, phases, R, b, mu_fixed, fixed, seeds, stage, init_from,
+                     max_rounds=60):
+    """A whole tile in compiled code (cg_tile.h's steps, cg_tile_host.h's driver; with target 'cuda-on-host'
+    cg_tile_device.h's kernels run on the host by the device driver): the arrays of Solver.solve_sequence, or None
+    if a phase is not supported (the caller solves it)."""
+    t = tile_inputs(self, solver, cores, sv_values, phases, R, b, mu_fixed, fixed, seeds, stage, init_from)
+    if t is None:
+        return None
+    if self.target != 'host':
+        from pycalphad.cg.device_tile import DeviceTile
+        tile = DeviceTile.on_host(self)
+        out = tile.solve(t, max_rounds)
+        self.tile_counters, self.tile_times = tile.counters, tile.times
+        return out
+    B, C, K, Dm, n = t.B, t.C, t.K, t.Dm, t.npts
     status = np.zeros(B, dtype=np.int32); nout = np.zeros(B, dtype=np.int32)
     phs = np.full((B, C), -1, dtype=np.int32); amt = np.zeros((B, C)); X = np.zeros((B, C, C))
     Y = np.full((B, C, Dm), np.nan); G = np.zeros((B, C)); mu = np.zeros((B, C))
     counters = np.zeros(8, dtype=np.int64)
     P = ctypes.c_void_p
-    def a(x, dtype):
-        x = np.ascontiguousarray(x, dtype=dtype); keep.append(x); return x.ctypes.data_as(P)
     keep = []
+    def a(x, rows=None):
+        if rows is not None and len(x) == 0:   # (an empty store)
+            x = np.zeros((1,) + x.shape[1:], dtype=x.dtype)
+        keep.append(x)
+        return x.ctypes.data_as(P)
     I, D_ = ctypes.c_int, ctypes.c_double
     rc = self.lib.cg_tile_solve_host(
-        I(B), I(C), I(K), I(Dm), I(len(phases)), I(gauge.shape[0]), I(solver.max_late), I(int(solver.use_polish)),
-        I(max_rounds), D_(RT), D_(solver.prune), D_(solver.prune_late), D_(solver.skip_margin), D_(solver.tol),
-        D_(solver.seed_prune if np.isfinite(solver.seed_prune) else 1e300),
-        a(di, np.int32), a(dd, float), a(ip, np.int32), a(dp, float), a(sv_values, float),
-        a(gauge if gauge.size else np.zeros(C), float),
-        I(n), a(Py, float), a(st['Px'] if n else np.zeros((1, C)), float), a(st['PG'] if n else np.zeros(1), float),
-        a(st['Pph'] if n else np.zeros(1), np.int32), a(st['Pcode'] if n else np.zeros(1), np.int64),
-        a(st['Pnext'] if n else np.zeros(1), np.int32), a(st['head'], np.int32),
-        a(Rs, float), a(bs, float), a(mfs, float), a(fx, np.int32),
-        a(seedY, float), a(seed_off, np.int32), I(int(seeds is not None)), I(int(seed_off[-1]) + 4096), I(512),
-        a(stage, np.int32), a(init_from, np.int32),
-        a(basis0, np.int32), a(has_last, np.uint8), a(last_tpd, float), a(last_mu, float),
-        status.ctypes.data_as(P), nout.ctypes.data_as(P), phs.ctypes.data_as(P), amt.ctypes.data_as(P),
-        X.ctypes.data_as(P), Y.ctypes.data_as(P), G.ctypes.data_as(P), mu.ctypes.data_as(P), counters.ctypes.data_as(P))
+        I(B), I(C), I(K), I(Dm), I(t.nph), I(t.ngauge), I(t.max_late), I(t.use_polish), I(max_rounds), D_(t.RT),
+        D_(t.prune), D_(t.prune_late), D_(t.skip_margin), D_(t.tol), D_(t.seed_prune),
+        a(t.di), a(t.dd), a(t.ip), a(t.dp), a(t.sv), a(t.gauge),
+        I(n), a(t.Py, 1), a(t.Px, 1), a(t.PG, 1), a(t.Pph, 1), a(t.Pcode, 1), a(t.Pnext, 1), a(t.head),
+        a(t.R), a(t.b), a(t.mf), a(t.fixed), a(t.seedY), a(t.seed_off), I(t.use_seeds), I(t.own_first),
+        I(t.own_other), a(t.stage), a(t.init_from), a(t.basis0), a(t.has_last0), a(t.last_tpd0), a(t.last_mu0),
+        a(status), a(nout), a(phs), a(amt), a(X), a(Y), a(G), a(mu), a(counters))
     if rc != 0:
         raise RuntimeError(f'cg_tile_solve_host failed ({rc})')
     self.tile_counters = dict(zip(('priced', 'lp_iters', 'rounds', 'subrounds', 'jobs', 'own_full', 'store'),
@@ -393,3 +442,23 @@ def _host_tile_solve(self, solver, cores, sv_values, phases, R, b, mu_fixed, fix
 
 
 HostPricer.solve_tile = _host_tile_solve
+
+
+def _cuda_tile_solve(self, solver, cores, sv_values, phases, R, b, mu_fixed, fixed, seeds, stage, init_from,
+                     max_rounds=60):
+    """A whole tile on the device (cg_tile_device.h's kernels, pycalphad.cg.device_tile's driver); as
+    HostPricer.solve_tile. Its kernels are a module of their own, built on first use."""
+    t = tile_inputs(self, solver, cores, sv_values, phases, R, b, mu_fixed, fixed, seeds, stage, init_from)
+    if t is None:
+        return None
+    from pycalphad.cg.device_tile import DeviceTile, _CudaLaunch
+    if getattr(self, '_device_tile', None) is None:
+        from pycalphad.gpu.kernel_manager import cuda_raw_module
+        module = cuda_raw_module(self.source('cuda-tile'), ('-std=c++14',))
+        self._device_tile = DeviceTile(_CudaLaunch(module, self.BLOCK))
+    out = self._device_tile.solve(t, max_rounds)
+    self.tile_counters, self.tile_times = self._device_tile.counters, self._device_tile.times
+    return out
+
+
+CudaPricer.solve_tile = _cuda_tile_solve

@@ -500,7 +500,8 @@ RESEED_DT = float(_os.environ.get("PYCALPHAD_CG_RESEED_DT", 100.0))
 # Experimental: solve each sequence of plain conditions in lockstep rounds over one shared point store (TileSolver,
 # the scheme of a batched solver) instead of one condition after the other; the work per round is kept in
 # TILE_STATS (one list per sequence)
-# (2: the same with each round's pricing done as batches of independent jobs, TileSolver.solve_tile_batched)
+# (2: the same with each round's pricing done as batches of independent jobs, TileSolver.solve_tile_batched;
+# 3: the whole tile in compiled code, cg_tile.h, with DEVICE 'cuda' on the GPU)
 TILE_MODE = int(_os.environ.get("PYCALPHAD_CG_TILE", "0"))
 # Diagnostics: with PYCALPHAD_CG_STATS=1, the work of each sequence of plain conditions is appended to
 # SEQUENCE_STATS (conditions, minimizations, energy gradient and Hessian evaluations, LP iterations, CPU seconds;
@@ -716,9 +717,11 @@ def solve_workspace(wks):
                 worker.solver.set_pricer_callback(None, None)
             out = None
             if TILE_MODE == 3:
-                # the whole tile in compiled code (cg_tile.h), if every phase is supported there
+                # the whole tile in compiled code (cg_tile.h), if every phase is supported there: on the host, or
+                # on the device with DEVICE 'cuda' (its kernels on the host with 'cuda-on-host')
                 stage, init = _tile_stages([i for i, _ in items], TILE_LEVELS)
-                out = _pricer_for(wks, phases, elements, 'host').solve_tile(
+                where = DEVICE if DEVICE in ('cuda', 'cuda-on-host') else 'host'
+                out = _pricer_for(wks, phases, elements, where).solve_tile(
                     worker.solver, worker.cores, sv_values, phases, *args[:4], args[4], stage, init)
             if out is not None:
                 st, na, phs, amt, Xs, Ys, Gs, mus = out

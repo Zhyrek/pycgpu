@@ -150,3 +150,30 @@ def test_compiled_tile_matches_batched_tile(monkeypatch):
                          ['+'.join(sorted(p for p, n in zip(Ph[i], NP[i]) if p and n > 1e-6)) for i in range(len(NP))])
     np.testing.assert_allclose(out[3][0], out[2][0], atol=1e-4)
     assert out[3][1] == out[2][1]
+
+
+def test_device_tile_on_host_matches_host_tile(monkeypatch):
+    "The GPU tile driver (cg_tile_device.h's kernels, built for the host) gives the host driver's results and work."
+    import shutil
+    if not (shutil.which('clang++') or shutil.which('g++')):
+        pytest.skip('no C++ compiler')
+    from pycalphad import Database, equilibrium, variables as v
+    from pycalphad.backend import backend
+    from importlib.resources import files
+    import pycalphad.tests.databases as dbs
+    dbf = Database(str(files(dbs) / 'alcocrni.tdb'))
+    conds = {v.N: 1, v.P: 101325, v.T: 1300, v.X('AL'): list(np.linspace(0.02, 0.5, 30)),
+             v.X('CR'): list(np.linspace(0.02, 0.5, 30))}
+    out = {}
+    monkeypatch.setattr(solve, 'TILE_MODE', 3)
+    with backend('cg', threads=1):
+        for device in ('', 'cuda-on-host'):
+            monkeypatch.setattr(solve, 'DEVICE', device)
+            eq = equilibrium(dbf, ['AL', 'CR', 'NI', 'VA'], list(dbf.phases), conds)
+            NP = eq.NP.values.reshape(-1, eq.NP.shape[-1]); Ph = eq.Phase.values.reshape(NP.shape)
+            pricer = [p for (d, *_), p in solve._PRICERS.items() if d == (device or 'host')][-1]
+            out[device] = (eq.GM.values.ravel(), pricer.tile_counters,
+                           ['+'.join(sorted(p for p, n in zip(Ph[i], NP[i]) if p and n > 1e-6)) for i in range(len(NP))])
+    np.testing.assert_allclose(out['cuda-on-host'][0], out[''][0], atol=1e-6)
+    assert out['cuda-on-host'][1] == out[''][1]
+    assert out['cuda-on-host'][2] == out[''][2]

@@ -125,6 +125,7 @@ CG_DEVICE static int cg_add_point(CgTile& T, int t, int ph, const double* y, con
 // ---- pricing jobs
 
 CG_DEVICE static inline int cg_push_job(CgTile& T, int t, int ph, const double* y, int D, int keep) {
+    if (!T.j_cond) { T.nj++; return 1; }   // (no job buffers: only counting, as the device driver sizes ranges)
     if (T.nj >= T.jcap) return 0;   // (the caller sized the buffers; see cg_tile_job_bound)
     int j = T.nj++;
     T.j_cond[j] = t; T.j_phase[j] = ph; T.j_keep[j] = keep;
@@ -364,9 +365,9 @@ CG_DEVICE static void cg_record(CgTile& T, int t, int st, int polished) {
 
 // ---- the steps of a round (TileSolver.solve_tile_batched), one condition each
 
-// LP, gauge fix, polish (unless the last certification failed), the pricing jobs
+// LP, gauge fix, polish (unless the last certification failed); whether pricing jobs follow (cg_gen_jobs)
 template <class WT>
-CG_DEVICE static void cg_step_start(CgTile& T, int t, int rounds, int use_seeds, WT& W, CgPolishWork& PW) {
+CG_DEVICE static int cg_step_lp(CgTile& T, int t, WT& W, CgPolishWork& PW) {
     const int C = T.C, K = T.K;
     double obj = 0.0, dual[CG_CMAX], cB[CG_CMAX], LU[CG_CMAX * CG_CMAX], tmp[CG_CMAX];
     int ipiv[CG_CMAX];
@@ -374,14 +375,20 @@ CG_DEVICE static void cg_step_start(CgTile& T, int t, int rounds, int use_seeds,
            T.basis + (long)t * K, T.xB + (long)t * K, T.mu + (long)t * C, dual, cB, LU, tmp, ipiv, T.RT,
            T.lp_iters + t};
     int st = cg_lp_solve(L, &obj);
-    if (st != 0) { cg_record(T, t, st, 0); T.kind[t] = CG_IDLE; return; }
+    if (st != 0) { cg_record(T, t, st, 0); T.kind[t] = CG_IDLE; return 0; }
     cg_gauge_fix(T.mu + (long)t * C, T.gauge, T.ngauge, C);
     T.skipped[t] = T.nopol[t];
     int polished = 0;
     if (T.use_polish && !T.nopol[t]) polished = cg_tile_polish(T, t, W, PW);
     T.nopol[t] = 0;
-    cg_gen_jobs(T, t, rounds, use_seeds, W);
     T.polished[t] = polished; T.added[t] = 0; T.aug[t] = 0; T.kind[t] = CG_MAIN;
+    return 1;
+}
+
+// the start of a round: LP, gauge fix, polish, the pricing jobs
+template <class WT>
+CG_DEVICE static void cg_step_start(CgTile& T, int t, int rounds, int use_seeds, WT& W, CgPolishWork& PW) {
+    if (cg_step_lp(T, t, W, PW)) cg_gen_jobs(T, t, rounds, use_seeds, W);
 }
 
 // the job results; what comes next
@@ -406,18 +413,17 @@ CG_DEVICE static void cg_step_consume(CgTile& T, int t, int rounds, int max_roun
 }
 
 // another Newton pass with the minimum found below a polished tangent plane, or the polish of a round that
-// skipped it; their pricing jobs
+// skipped it; whether pricing jobs follow (cg_gen_jobs, without seeds)
 template <class WT>
-CG_DEVICE static void cg_step_next(CgTile& T, int t, int rounds, int max_rounds, WT& W, CgPolishWork& PW) {
-    int kind = T.kind[t];
-    if (kind != CG_NEED_AUG && kind != CG_NEED_FINAL) return;
+CG_DEVICE static int cg_step_repolish(CgTile& T, int t, int rounds, int max_rounds, WT& W, CgPolishWork& PW) {
+    int kind = T.kind[t], jobs = 0;
+    if (kind != CG_NEED_AUG && kind != CG_NEED_FINAL) return 0;
     int added = T.added[t];
     if (kind == CG_NEED_AUG) {
         T.aug[t]++;
         if (cg_tile_polish_augment(T, t, W, PW)) {
             T.nopol[t] = 0;
-            cg_gen_jobs(T, t, rounds, 0, W);
-            kind = CG_AUG;
+            jobs = 1; kind = CG_AUG;
         } else {
             T.polished[t] = 0;
             kind = CG_IDLE;
@@ -425,8 +431,7 @@ CG_DEVICE static void cg_step_next(CgTile& T, int t, int rounds, int max_rounds,
     } else {
         if (cg_tile_polish(T, t, W, PW)) {
             T.polished[t] = 1;
-            cg_gen_jobs(T, t, rounds, 0, W);
-            kind = CG_FINAL;
+            jobs = 1; kind = CG_FINAL;
         } else {
             kind = CG_IDLE;
             if (!added || rounds == max_rounds) { cg_record(T, t, added ? 6 : 0, T.polished[t]); }
@@ -434,6 +439,13 @@ CG_DEVICE static void cg_step_next(CgTile& T, int t, int rounds, int max_rounds,
     }
     T.kind[t] = kind;
     if (kind == CG_IDLE && added && rounds == max_rounds && !T.done[t]) cg_record(T, t, 6, T.polished[t]);
+    return jobs;
+}
+
+// the next step of a sub-round and its pricing jobs
+template <class WT>
+CG_DEVICE static void cg_step_next(CgTile& T, int t, int rounds, int max_rounds, WT& W, CgPolishWork& PW) {
+    if (cg_step_repolish(T, t, rounds, max_rounds, W, PW)) cg_gen_jobs(T, t, rounds, 0, W);
 }
 
 // ---- the end of a round: the conditions' own points into the store, condition by condition (one thread)

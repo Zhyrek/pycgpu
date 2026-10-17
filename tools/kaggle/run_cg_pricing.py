@@ -326,6 +326,10 @@ def variant(src, name):
     if name == 'tile_only':
         a = src.index('extern "C" __global__ void cg_price_kernel(')
         src = src[:a] + src[src.index('\n}\n', a) + 3:]
+    if name == 'price_x2':   # (two kernels reaching the energy code: is it compiled for each?)
+        src = src[:src.index(tile_h[:300])]
+        a = src.index('extern "C" __global__ void cg_price_kernel(')
+        src += src[a:src.index('\n}\n', a) + 3].replace('cg_price_kernel(', 'cg_price_kernel_copy(')
     return src
 import tempfile
 is_hip = bool(getattr(cp.cuda.runtime, 'is_hip', False))
@@ -350,9 +354,9 @@ for name in sys.argv[2:]:
         try:
             if var == 'cupy':   # (the module as CudaPricer builds it: from CuPy's kernel cache if it holds it)
                 cupy_module(src, options).get_function('cg_dev_lp')
-            elif var == 'ptx':   # (NVRTC to PTX only: the time before the assembler, ptxas)
+            elif var.startswith('ptx'):   # (ptx[:VARIANT]: NVRTC to PTX only, the time before the assembler)
                 from cupy_backends.cuda.libs import nvrtc
-                prog = nvrtc.createProgram(src, 'tile.cu', [], [])
+                prog = nvrtc.createProgram(variant(src, var[4:] or 'as_is'), 'tile.cu', [], [])
                 nvrtc.compileProgram(prog, ['-arch=compute_%s' % report['arch']] + list(options))
                 out_ptx = len(nvrtc.getPTX(prog))
             else:
@@ -361,7 +365,7 @@ for name in sys.argv[2:]:
                 m = cp.RawModule(code=variant(src, base), options=tuple(options) + tuple(extra), backend=backend)
                 m.get_function('cg_price_kernel' if base == 'price_only' else 'cg_dev_lp')
             out = {'seconds': round(time.perf_counter() - t, 1)}
-            if var == 'ptx':
+            if var.startswith('ptx'):
                 out['ptx_bytes'] = out_ptx
         except Exception as e:
             out = {'seconds': round(time.perf_counter() - t, 1), 'error': repr(e)[-1500:]}
@@ -387,6 +391,7 @@ def main():
                              "variants of its source), 'cache' (the tile's module as CuPy builds it, in a new process: from its "
                              "kernel cache after 'tile')")
     parser.add_argument('--no-fmad', action='store_true', help='kernels without fused multiply-adds')
+    parser.add_argument('--variants', default=None, help="the compile bench's variants (comma-separated)")
     args = parser.parse_args(KAGGLE_ARGS if ON_KAGGLE else None)
     os.makedirs(args.out, exist_ok=True)
     summary = {'branch': BRANCH, 'gpu': environment(args.out)}
@@ -405,6 +410,8 @@ def main():
                    PYCALPHAD_CG_FMAD='0' if args.no_fmad else '1')
         if name == 'cache':
             env['CG_COMPILE_VARIANTS'] = 'cupy'
+        elif args.variants:
+            env['CG_COMPILE_VARIANTS'] = args.variants
         summary['bench'][name] = run([sys.executable, bench, result] + args.cases.split(','),
                                      os.path.join(args.out, 'bench.log'), timeout=args.timeout, cwd=args.out, env=env)
         if os.path.exists(result):

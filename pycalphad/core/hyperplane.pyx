@@ -1,13 +1,12 @@
 # distutils: language = c++
 cimport numpy as np
-import numpy as np
 cimport cython
 from libc.stdlib cimport malloc, free
 cimport scipy.linalg.cython_lapack as cython_lapack
 
 
 @cython.boundscheck(False)
-cdef void solve(double* A, int N, double* x, int* ipiv) nogil:
+cdef void solve(double* A, int N, double* x, int* ipiv) noexcept nogil:
     cdef int i
     cdef int info = 0
     cdef int NRHS = 1
@@ -19,14 +18,14 @@ cdef void solve(double* A, int N, double* x, int* ipiv) nogil:
 
 
 @cython.boundscheck(False)
-cdef void prodsum(double[::1] chempots, double[:,::1] points, double[::1] result) nogil:
+cdef void prodsum(double[::1] chempots, double[:,::1] points, double[::1] result) noexcept nogil:
     for i in range(chempots.shape[0]):
         for j in range(result.shape[0]):
             result[j] -= chempots[i]*points[j,i]
 
 
 @cython.boundscheck(False)
-cdef double _min(double* a, int a_shape) nogil:
+cdef double _min(double* a, int a_shape) noexcept nogil:
     cdef int i
     cdef double result = 1e300
     for i in range(a_shape):
@@ -35,7 +34,7 @@ cdef double _min(double* a, int a_shape) nogil:
     return result
 
 @cython.boundscheck(False)
-cdef int argmin(double* a, int a_shape, double* lowest) nogil:
+cdef int argmin(double* a, int a_shape, double* lowest) noexcept nogil:
     cdef int i
     cdef int result = 0
     for i in range(a_shape):
@@ -46,7 +45,7 @@ cdef int argmin(double* a, int a_shape, double* lowest) nogil:
 
 
 @cython.boundscheck(False)
-cdef int argmax(double* a, int a_shape) nogil:
+cdef int argmax(double* a, int a_shape) noexcept nogil:
     cdef int i
     cdef int result = 0
     cdef double highest = -1e30
@@ -61,24 +60,33 @@ cpdef void hyperplane_coefficients(double[:,::1] compositions,
                                    size_t[::1] fixed_chempot_indices,
                                    int[::1] trial_simplex,
                                    double[::1] out_plane_coefs) except * nogil:
+    compute_hyperplane_coefficients(compositions, fixed_chempot_indices, &trial_simplex[0], trial_simplex.shape[0],
+                                    &out_plane_coefs[0])
+
+@cython.boundscheck(False)
+cdef int compute_hyperplane_coefficients(double[:,::1] compositions,
+                                         size_t[::1] fixed_chempot_indices,
+                                         int* trial_simplex, int trial_simplex_size,
+                                         double* out_plane_coefs) except -1 nogil:
     cdef int i, j
-    cdef int plane_rows = trial_simplex.shape[0] + fixed_chempot_indices.shape[0]
+    cdef int plane_rows = trial_simplex_size + fixed_chempot_indices.shape[0]
     if plane_rows != compositions.shape[1]:
         raise ValueError('Hyperplane coefficient matrix is not square')
     cdef double* f_plane_matrix = <double*>malloc(plane_rows * compositions.shape[1] * sizeof(double))
     cdef int* int_tmp = <int*>malloc(plane_rows * sizeof(int))
-    for i in range(trial_simplex.shape[0]):
+    for i in range(trial_simplex_size):
         for j in range(compositions.shape[1]):
             f_plane_matrix[i + j*plane_rows] = compositions[trial_simplex[i], j]
         out_plane_coefs[i] = 1
     for i in range(fixed_chempot_indices.shape[0]):
         for j in range(compositions.shape[1]):
-            f_plane_matrix[i + trial_simplex.shape[0] + j*plane_rows] = 0
-        f_plane_matrix[i + trial_simplex.shape[0] + fixed_chempot_indices[i]*plane_rows] = 1
-        out_plane_coefs[i + trial_simplex.shape[0]] = 0
-    solve(f_plane_matrix, plane_rows, &out_plane_coefs[0], int_tmp)
+            f_plane_matrix[i + trial_simplex_size + j*plane_rows] = 0
+        f_plane_matrix[i + trial_simplex_size + fixed_chempot_indices[i]*plane_rows] = 1
+        out_plane_coefs[i + trial_simplex_size] = 0
+    solve(f_plane_matrix, plane_rows, out_plane_coefs, int_tmp)
     free(f_plane_matrix)
     free(int_tmp)
+    return 0
 
 @cython.boundscheck(False)
 cpdef void intersecting_point(double[:,::1] compositions,
@@ -87,20 +95,31 @@ cpdef void intersecting_point(double[:,::1] compositions,
                               double[:,::1] fixed_lincomb_molefrac_coefs,
                               double[::1] fixed_lincomb_molefrac_rhs,
                               double[::1] out_intersecting_point) except * nogil:
+    compute_intersecting_point(compositions, fixed_chempot_indices, &trial_simplex[0], trial_simplex.shape[0],
+                               fixed_lincomb_molefrac_coefs, fixed_lincomb_molefrac_rhs, &out_intersecting_point[0])
+
+@cython.boundscheck(False)
+cdef int compute_intersecting_point(double[:,::1] compositions,
+                                    size_t[::1] fixed_chempot_indices,
+                                    int* trial_simplex, int trial_simplex_size,
+                                    double[:,::1] fixed_lincomb_molefrac_coefs,
+                                    double[::1] fixed_lincomb_molefrac_rhs,
+                                    double* out_intersecting_point) except -1 nogil:
     cdef int i, j
-    if trial_simplex.shape[0] == 1:
+    if trial_simplex_size == 1:
         # Simplex is zero-dimensional, so there is no intersection; just return the point defining the 0-simplex
         for i in range(compositions.shape[1]):
             out_intersecting_point[i] = compositions[trial_simplex[0], i]
-        return
+        return 0
     if (fixed_lincomb_molefrac_rhs.shape[0] + 1 != compositions.shape[1]) and fixed_chempot_indices.shape[0] > 0:
         raise ValueError('Constraint matrix is not square')
     cdef int* int_tmp = <int*>malloc(compositions.shape[1] * sizeof(int))
     cdef double* constraint_matrix = <double*>malloc((fixed_lincomb_molefrac_rhs.shape[0] + 1) * compositions.shape[1] * sizeof(double))
     cdef double* constraint_rhs = <double*>malloc((fixed_lincomb_molefrac_rhs.shape[0] + 1) * sizeof(double))
-    out_intersecting_point[:] = 0
-    cdef double[::1] plane_coefs = out_intersecting_point
-    hyperplane_coefficients(compositions, fixed_chempot_indices, trial_simplex, plane_coefs)
+    for i in range(compositions.shape[1]):
+        out_intersecting_point[i] = 0
+    cdef double* plane_coefs = out_intersecting_point
+    compute_hyperplane_coefficients(compositions, fixed_chempot_indices, trial_simplex, trial_simplex_size, plane_coefs)
     for j in range(compositions.shape[1]):
         for i in range(fixed_lincomb_molefrac_rhs.shape[0]):
             constraint_matrix[i + j*compositions.shape[1]] = fixed_lincomb_molefrac_coefs[i, j]
@@ -113,25 +132,26 @@ cpdef void intersecting_point(double[:,::1] compositions,
     free(int_tmp)
     free(constraint_matrix)
     free(constraint_rhs)
+    return 0
 
 @cython.boundscheck(False)
-cdef void simplex_fractions(double[:,::1] compositions,
-                             size_t[::1] fixed_chempot_indices,
-                             int[::1] trial_simplex,
-                             double[:,::1] fixed_lincomb_molefrac_coefs,
-                             double[::1] fixed_lincomb_molefrac_rhs,
-                             double* out_fractions) except *:
-    cdef int simplex_size = trial_simplex.shape[0]
+cdef int simplex_fractions(double[:,::1] compositions,
+                           size_t[::1] fixed_chempot_indices,
+                           int* trial_simplex, int simplex_size,
+                           double[:,::1] fixed_lincomb_molefrac_coefs,
+                           double[::1] fixed_lincomb_molefrac_rhs,
+                           int* free_chempot_indices,
+                           double* out_fractions) except -1 nogil:
+    "free_chempot_indices: the components without fixed chemical potentials, in increasing order"
     # Note that compositions.shape[1] = simplex_size + fixed_chempot_indices.shape[0], by construction
     cdef int i, j
     cdef double* f_coord_matrix = <double*>malloc(simplex_size * simplex_size * sizeof(double))
     cdef double* target_point = <double*>malloc(compositions.shape[1] * sizeof(double))
     cdef int* int_tmp = <int*>malloc(simplex_size * sizeof(int))
-    cdef size_t[::1] free_chempot_indices = np.array(list(set(range(compositions.shape[1])) - set(fixed_chempot_indices)), dtype=np.uintp)
     # Get target point for calculation
-    intersecting_point(compositions, fixed_chempot_indices, trial_simplex,
-                       fixed_lincomb_molefrac_coefs, fixed_lincomb_molefrac_rhs,
-                       <double[:compositions.shape[1]]>target_point)
+    compute_intersecting_point(compositions, fixed_chempot_indices, trial_simplex, simplex_size,
+                               fixed_lincomb_molefrac_coefs, fixed_lincomb_molefrac_rhs,
+                               target_point)
     # Fill coordinate matrix
     for j in range(simplex_size):
         for i in range(simplex_size):
@@ -141,6 +161,7 @@ cdef void simplex_fractions(double[:,::1] compositions,
     free(f_coord_matrix)
     free(target_point)
     free(int_tmp)
+    return 0
 
 @cython.boundscheck(False)
 cpdef double hyperplane(double[:,::1] compositions,
@@ -244,59 +265,61 @@ cpdef double hyperplane(double[:,::1] compositions,
     cdef double* f_candidate_tieline = <double*>malloc(simplex_size * simplex_size * sizeof(double))
 
 
-    while iterations < max_iterations:
-        iterations += 1
+    with nogil:
+        while iterations < max_iterations:
+            iterations += 1
 
-        for trial_idx in range(simplex_size):
-            for simplex_idx in range(simplex_size):
-                fractions[trial_idx*simplex_size + simplex_idx] = 0
-            simplex_fractions(compositions, fixed_chempot_indices, <int[:simplex_size]>&trial_simplices[trial_idx*simplex_size],
-                              fixed_lincomb_molefrac_coefs, fixed_lincomb_molefrac_rhs, &fractions[trial_idx*simplex_size])
-            smallest_fractions[trial_idx] = _min(&fractions[trial_idx*simplex_size], simplex_size)
-        # Choose simplex with the largest smallest-fraction
-        saved_trial = argmax(smallest_fractions, simplex_size)
-        if smallest_fractions[saved_trial] < -simplex_size:
-            break
-        # Should be exactly one candidate simplex
-        for i in range(simplex_size):
-            candidate_simplex[i] = trial_simplices[saved_trial*simplex_size + i]
-        for i in range(simplex_size):
-            idx = candidate_simplex[i]
+            for trial_idx in range(simplex_size):
+                for simplex_idx in range(simplex_size):
+                    fractions[trial_idx*simplex_size + simplex_idx] = 0
+                simplex_fractions(compositions, fixed_chempot_indices, &trial_simplices[trial_idx*simplex_size], simplex_size,
+                                  fixed_lincomb_molefrac_coefs, fixed_lincomb_molefrac_rhs, free_chempot_indices,
+                                  &fractions[trial_idx*simplex_size])
+                smallest_fractions[trial_idx] = _min(&fractions[trial_idx*simplex_size], simplex_size)
+            # Choose simplex with the largest smallest-fraction
+            saved_trial = argmax(smallest_fractions, simplex_size)
+            if smallest_fractions[saved_trial] < -simplex_size:
+                break
+            # Should be exactly one candidate simplex
+            for i in range(simplex_size):
+                candidate_simplex[i] = trial_simplices[saved_trial*simplex_size + i]
+            for i in range(simplex_size):
+                idx = candidate_simplex[i]
+                for ici in range(simplex_size):
+                    chempot_idx = free_chempot_indices[ici]
+                    f_candidate_tieline[i + simplex_size*ici] = compositions[idx, chempot_idx]
+                free_candidate_potentials[i] = energies[idx]
+                for ici in range(num_fixed_chempots):
+                    chempot_idx = fixed_chempot_indices[ici]
+                    free_candidate_potentials[i] -= chemical_potentials[chempot_idx] * compositions[idx, chempot_idx]
+            solve(f_candidate_tieline, simplex_size, free_candidate_potentials, int_tmp)
+            if free_candidate_potentials[0] == -1e19:
+                break
             for ici in range(simplex_size):
-                chempot_idx = free_chempot_indices[ici]
-                f_candidate_tieline[i + simplex_size*ici] = compositions[idx, chempot_idx]
-            free_candidate_potentials[i] = energies[idx]
-            for ici in range(num_fixed_chempots):
-                chempot_idx = fixed_chempot_indices[ici]
-                free_candidate_potentials[i] -= chemical_potentials[chempot_idx] * compositions[idx, chempot_idx]
-        solve(f_candidate_tieline, simplex_size, free_candidate_potentials, int_tmp)
-        if free_candidate_potentials[0] == -1e19:
-            break
-        for ici in range(simplex_size):
-            candidate_potentials[free_chempot_indices[ici]] = free_candidate_potentials[ici]
-        lowest_df = 1e10
-        min_df = -1
-        for idx in range(num_points):
-            driving_force = energies[idx]
-            for comp_idx in range(num_components):
-                driving_force -= candidate_potentials[comp_idx] * compositions[idx, comp_idx]
-            if driving_force < lowest_df:
-                lowest_df = driving_force
-                min_df = idx
-        for i in range(simplex_size):
-            best_guess_simplex[i] = candidate_simplex[i]
-        for i in range(simplex_size):
-            for j in range(simplex_size):
-                trial_simplices[i*simplex_size + j] = best_guess_simplex[j]
+                candidate_potentials[free_chempot_indices[ici]] = free_candidate_potentials[ici]
+            lowest_df = 1e10
+            min_df = -1
+            for idx in range(num_points):
+                driving_force = energies[idx]
+                for comp_idx in range(num_components):
+                    driving_force -= candidate_potentials[comp_idx] * compositions[idx, comp_idx]
+                if driving_force < lowest_df:
+                    lowest_df = driving_force
+                    min_df = idx
+            for i in range(simplex_size):
+                best_guess_simplex[i] = candidate_simplex[i]
+            for i in range(simplex_size):
+                for j in range(simplex_size):
+                    trial_simplices[i*simplex_size + j] = best_guess_simplex[j]
 
-        # Trial simplices will be the current simplex with each vertex
-        #     replaced by the trial point
-        # Exactly one of those simplices will contain a given test point,
-        #     excepting edge cases
-        for i in range(simplex_size):
-            trial_simplices[i*simplex_size + i] = min_df
-        if lowest_df > -1e-8:
-            break
+            # Trial simplices will be the current simplex with each vertex
+            #     replaced by the trial point
+            # Exactly one of those simplices will contain a given test point,
+            #     excepting edge cases
+            for i in range(simplex_size):
+                trial_simplices[i*simplex_size + i] = min_df
+            if lowest_df > -1e-8:
+                break
     out_energy = 0
     for i in range(simplex_size):
         idx = best_guess_simplex[i]

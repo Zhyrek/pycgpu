@@ -9,6 +9,9 @@
 #ifndef CG_DEVICE
 #define CG_DEVICE
 #endif
+#ifndef CG_SYNC
+#define CG_SYNC()   // (a block's barrier on a device: __syncthreads)
+#endif
 
 // LU with partial pivoting of the n x n column-major A (dgetf2); ipiv 0-based. 0, or k + 1 for a zero pivot
 CG_DEVICE static int cg_getrf(int n, double* A, int* ipiv) {
@@ -94,8 +97,48 @@ CG_DEVICE static inline int cg_lp_is_basic(const CgLP& L, int var) {
 
 CG_DEVICE static inline int cg_lp_bland_rank(const CgLP& L, int var) { return var < 0 ? -(1 + var) : L.K + var; }
 
-// revised primal simplex, warm-started from basis (see Solver.lp_solve); the potentials (RT units) in mu
-CG_DEVICE static int cg_lp_solve(CgLP& L, double* obj) {
+// the lanes that share an LP's scans over the store: on a device the threads of a block (lane threadIdx.x, step
+// blockDim.x), on the host one thread taking the n lanes in turn (lane 0, step 1), so both split the points the same
+// way. Lane l scans points l, l + n, ...; best and arg (n entries, shared by the block) hold the lanes' results.
+// Every lane runs the whole LP on its own copies of the small arrays (the same arithmetic, so the same control
+// flow and results); only the scans are split
+struct CgLanes {
+    int lane, step, n;
+    double* best; int* arg;
+};
+
+// the entering point (cg_lp_solve's scan): the lowest reduced cost below *best, the first point among ties; with
+// Bland's rule the first point below *best. -1 if none, else its reduced cost in *best
+CG_DEVICE static int cg_lp_scan(const CgLP& L, const CgLanes& G, double* best, int bland) {
+    const int C = L.C;
+    CG_SYNC();   // (the lanes' last results read)
+    for (int l = G.lane; l < G.n; l += G.step) {
+        double b = *best;
+        int q = -1;
+        for (int j = l; j < L.npts; j += G.n) {
+            double rc = L.PG[j] / L.RT;
+            for (int i = 0; i < C; ++i) rc -= L.mu[i] * L.Px[(long)j * C + i];
+            if (rc < b && !cg_lp_is_basic(L, j)) {
+                b = rc; q = j;
+                if (bland) break;
+            }
+        }
+        G.best[l] = b; G.arg[l] = q;
+    }
+    CG_SYNC();
+    int q = -1;
+    for (int l = 0; l < G.n; ++l) {
+        int j = G.arg[l];
+        if (j < 0) continue;
+        double b = G.best[l];
+        if (q < 0 || (bland ? j < q : b < *best || (b == *best && j < q))) { q = j; *best = b; }
+    }
+    return q;
+}
+
+// revised primal simplex, warm-started from basis (see Solver.lp_solve); the potentials (RT units) in mu. The scans
+// over the store by the lanes G (one lane: in turn)
+CG_DEVICE static int cg_lp_solve(CgLP& L, double* obj, const CgLanes& G) {
     const int K = L.K, C = L.C;
     int bland = 0, resets = 0;
     for (int it = 0; it < 20000; ++it) {
@@ -138,14 +181,8 @@ CG_DEVICE static int cg_lp_solve(CgLP& L, double* obj) {
             }
         }
         if (leave == -2 || !bland) {
-            for (int j = 0; j < L.npts; ++j) {
-                double rc = L.PG[j] / L.RT;
-                for (int i = 0; i < C; ++i) rc -= L.mu[i] * L.Px[(long)j * C + i];
-                if (rc < best && !cg_lp_is_basic(L, j)) {
-                    best = rc; q = j; leave = -1;
-                    if (bland) break;
-                }
-            }
+            int j = cg_lp_scan(L, G, &best, bland);
+            if (j >= 0) { q = j; leave = -1; }
         }
         if (leave == -2) {
             *obj = 0.0;

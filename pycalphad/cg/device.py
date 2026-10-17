@@ -25,6 +25,8 @@ import numpy as np
 
 _HERE = Path(__file__).parent
 _LIBRARIES = {}   # source hash -> loaded library
+# threads of a block that share a condition's LP (cg_dev_lp): 64, one wavefront on AMD GPUs, two warps on NVIDIA's
+LANES = int(os.environ.get('PYCALPHAD_CG_LANES', 64))
 
 # phase description layout (cg_price.h: CGI_*, CGD_*)
 _CGI = ['D', 'nb', 'model', 'nsym', 'nder', 'doff', 'boff', 'bidx', 'blk', 'single', 'pinned', 'sym_a', 'sym_b',
@@ -177,13 +179,16 @@ def _source(model_code, index, names, Dmax, C, ns, nmax, target='host', classes=
                     f'eg[0] = pycgpu_model_{k}_formulaobj(x); pycgpu_model_{k}_formulagrad(&eg[1], x); }} return;')
     disp += ['    }', '}']
     header = (_HERE / 'cg_price.h').read_text() + '\n' + (_HERE / 'cg_round.h').read_text()
-    sizes = f'#define CG_DMAX {Dmax}\n#define CG_CMAX {C}\n#define CG_NS {ns}\n#define CG_NMAX {nmax}\n'
+    sizes = (f'#define CG_DMAX {Dmax}\n#define CG_CMAX {C}\n#define CG_NS {ns}\n#define CG_NMAX {nmax}\n'
+             f'#define CG_LANES {LANES}\n')
     if target in ('cuda', 'cuda-tile'):
-        parts = [_RTC_PRELUDE, model_code, '#define CG_DEVICE __device__\n' + sizes, '\n'.join(disp), header]
+        parts = [_RTC_PRELUDE, model_code, '#define CG_DEVICE __device__\n#define CG_SYNC() __syncthreads()\n' + sizes,
+                 '\n'.join(disp), header]
         parts += [_kernels(classes)] if target == 'cuda' else [_kernels(()), _tile_kernels()]
         return '\n'.join(parts)
     compat = (_HERE.parent / 'gpu' / 'cpu_compat.h').read_text()
-    parts = [compat, '#include <cmath>', model_code, '#define CG_DEVICE\n' + sizes, '\n'.join(disp), header]
+    parts = [compat, '#include <cmath>', model_code, '#define CG_DEVICE\n#define __shared__\n' + sizes, '\n'.join(disp),
+             header]
     if target == 'host':
         parts += [_HOST_ENTRY, (_HERE / 'cg_tile.h').read_text(), (_HERE / 'cg_tile_host.h').read_text()]
     else:
@@ -486,7 +491,7 @@ def _cuda_tile_solve(self, solver, cores, sv_values, phases, R, b, mu_fixed, fix
         return None
     from pycalphad.cg.device_tile import DeviceTile, _CudaLaunch
     if self._device_tile is None:
-        self._device_tile = DeviceTile(_CudaLaunch(self.compile('cuda-tile'), self.BLOCK))
+        self._device_tile = DeviceTile(_CudaLaunch(self.compile('cuda-tile'), self.BLOCK, LANES))
     out = self._device_tile.solve(t, max_rounds)
     self.tile_counters, self.tile_times = self._device_tile.counters, self._device_tile.times
     return out

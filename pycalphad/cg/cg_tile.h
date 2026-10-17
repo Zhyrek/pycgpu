@@ -365,16 +365,22 @@ CG_DEVICE static void cg_record(CgTile& T, int t, int st, int polished) {
 
 // ---- the steps of a round (TileSolver.solve_tile_batched), one condition each
 
-// LP, gauge fix, polish (unless the last certification failed); whether pricing jobs follow (cg_gen_jobs)
-template <class WT>
-CG_DEVICE static int cg_step_lp(CgTile& T, int t, WT& W, CgPolishWork& PW) {
+// condition t's LP over the store from the basis, basic amounts and potentials at basis, xB, mu (its own in T, or
+// a lane's copies), its iterations counted in *iters; the scans by the lanes G (cg_lp_solve). Its status
+CG_DEVICE static int cg_tile_lp(const CgTile& T, int t, int* basis, double* xB, double* mu, long long* iters,
+                                const CgLanes& G) {
     const int C = T.C, K = T.K;
     double obj = 0.0, dual[CG_CMAX], cB[CG_CMAX], LU[CG_CMAX * CG_CMAX], tmp[CG_CMAX];
     int ipiv[CG_CMAX];
     CgLP L{K, C, T.nshared, T.Px, T.PG, T.R + (long)t * K * C, T.b + (long)t * K, T.mf + (long)t * C,
-           T.basis + (long)t * K, T.xB + (long)t * K, T.mu + (long)t * C, dual, cB, LU, tmp, ipiv, T.RT,
-           T.lp_iters + t};
-    int st = cg_lp_solve(L, &obj);
+           basis, xB, mu, dual, cB, LU, tmp, ipiv, T.RT, iters};
+    return cg_lp_solve(L, &obj, G);
+}
+
+// cg_step_lp after the LP (status st): gauge fix, polish
+template <class WT>
+CG_DEVICE static int cg_step_lp_polish(CgTile& T, int t, int st, WT& W, CgPolishWork& PW) {
+    const int C = T.C;
     if (st != 0) { cg_record(T, t, st, 0); T.kind[t] = CG_IDLE; return 0; }
     cg_gauge_fix(T.mu + (long)t * C, T.gauge, T.ngauge, C);
     T.skipped[t] = T.nopol[t];
@@ -383,6 +389,15 @@ CG_DEVICE static int cg_step_lp(CgTile& T, int t, WT& W, CgPolishWork& PW) {
     T.nopol[t] = 0;
     T.polished[t] = polished; T.added[t] = 0; T.aug[t] = 0; T.kind[t] = CG_MAIN;
     return 1;
+}
+
+// LP, gauge fix, polish (unless the last certification failed); whether pricing jobs follow (cg_gen_jobs)
+template <class WT>
+CG_DEVICE static int cg_step_lp(CgTile& T, int t, WT& W, CgPolishWork& PW) {
+    double best; int arg;
+    CgLanes G{0, 1, 1, &best, &arg};
+    int st = cg_tile_lp(T, t, T.basis + (long)t * T.K, T.xB + (long)t * T.K, T.mu + (long)t * T.C, T.lp_iters + t, G);
+    return cg_step_lp_polish(T, t, st, W, PW);
 }
 
 // the start of a round: LP, gauge fix, polish, the pricing jobs

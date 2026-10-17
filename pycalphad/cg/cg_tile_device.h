@@ -10,7 +10,8 @@
 //   job and group counters are its own; the arrays are shared).
 // - The steps' work arrays (CgWork, CgPolishWork) are one per condition in device memory: on the stack they would
 //   need a stack limit that the device reserves for every resident thread.
-// - Every kernel's first argument is its number of threads (the launchers on the host loop over them).
+// - Every kernel's first argument is its number of threads (the launchers on the host loop over them), except
+//   cg_dev_lp's: its number of blocks (of CG_LANES threads; on the host one thread takes the lanes in turn).
 #pragma once
 
 extern "C" __global__ void cg_dev_sizes(int n, long long* out) {
@@ -33,14 +34,40 @@ extern "C" __global__ void cg_dev_stage_init(int n, const CgTile* T, const int* 
     L.nopol[t] = 0;
 }
 
-// a round's start (cg_step_lp); want[i]: whether condition conds[i] lists pricing jobs now
-extern "C" __global__ void cg_dev_lp(int n, const CgTile* T, const int* conds, CgWork* work, CgPolishWork* pwork,
-                                     int* want) {
+// a round's start, the LP (cg_tile_lp): a block of CG_LANES threads per condition (n blocks), which split the scans
+// over the store, each on its own copies of the condition's basis, amounts and potentials (lane 0 writes them
+// back); st[i]: the LP's status
+extern "C" __global__ void cg_dev_lp(int n, const CgTile* T, const int* conds, int* st) {
+    __shared__ double best[CG_LANES];
+    __shared__ int arg[CG_LANES];
+    int i = blockIdx.x;
+    if (i >= n) return;
+    const CgTile& L = *T;
+    const int K = L.K, C = L.C;
+    long t = conds[i];
+    int basis[CG_CMAX];
+    double xB[CG_CMAX], mu[CG_CMAX];
+    long long iters = 0;
+    for (int k = 0; k < K; ++k) { basis[k] = L.basis[t * K + k]; xB[k] = L.xB[t * K + k]; }
+    for (int c = 0; c < C; ++c) mu[c] = L.mu[t * C + c];
+    CgLanes G{(int)threadIdx.x, (int)blockDim.x, CG_LANES, best, arg};
+    int s = cg_tile_lp(L, t, basis, xB, mu, &iters, G);
+    if (threadIdx.x != 0) return;
+    for (int k = 0; k < K; ++k) { L.basis[t * K + k] = basis[k]; L.xB[t * K + k] = xB[k]; }
+    for (int c = 0; c < C; ++c) L.mu[t * C + c] = mu[c];
+    L.lp_iters[t] += iters;
+    st[i] = s;
+}
+
+// the rest of a round's start (cg_step_lp_polish), one thread per condition; want[i]: the LP's status (cg_dev_lp),
+// then whether condition conds[i] lists pricing jobs now
+extern "C" __global__ void cg_dev_lp_polish(int n, const CgTile* T, const int* conds, CgWork* work,
+                                            CgPolishWork* pwork, int* want) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     CgTile L = *T;
     int t = conds[i];
-    want[i] = cg_step_lp(L, t, work[t], pwork[t]);
+    want[i] = cg_step_lp_polish(L, t, want[i], work[t], pwork[t]);
 }
 
 // the job results (cg_step_consume)

@@ -153,7 +153,8 @@ def test_compiled_tile_matches_batched_tile(monkeypatch):
 
 
 def test_device_tile_on_host_matches_host_tile(monkeypatch):
-    "The GPU tile driver (cg_tile_device.h's kernels, built for the host) gives the host driver's results and work."
+    """The GPU tile driver (cg_tile_device.h's kernels, built for the host) gives the host driver's results and work
+    exactly (the LP's scans split over the lanes of a block reduce to the serial choice)."""
     import shutil
     if not (shutil.which('clang++') or shutil.which('g++')):
         pytest.skip('no C++ compiler')
@@ -174,6 +175,6 @@ def test_device_tile_on_host_matches_host_tile(monkeypatch):
             pricer = [p for (d, *_), p in solve._PRICERS.items() if d == (device or 'host')][-1]
             out[device] = (eq.GM.values.ravel(), pricer.tile_counters,
                            ['+'.join(sorted(p for p, n in zip(Ph[i], NP[i]) if p and n > 1e-6)) for i in range(len(NP))])
-    np.testing.assert_allclose(out['cuda-on-host'][0], out[''][0], atol=1e-6)
+    np.testing.assert_array_equal(out['cuda-on-host'][0], out[''][0])
     assert out['cuda-on-host'][1] == out[''][1]
     assert out['cuda-on-host'][2] == out[''][2]

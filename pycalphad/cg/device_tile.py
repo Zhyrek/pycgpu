@@ -5,10 +5,11 @@ The arrays are CuPy arrays and the kernels a CuPy RawModule (CudaPricer.solve_ti
 the kernels without a GPU, NumPy arrays and the same kernel source compiled for the host, each launch running its
 threads in turn (HostPricer with target 'cuda-on-host').
 
-Per round: the LP step (one thread per active condition), then sub-rounds of job listing (count, prefix sum,
-fill), pricing (one thread per job, sorted by phase), consumption and the next polish, until no jobs are listed;
-then the merge of the conditions' own points into the store. The host sees only counts between kernels (to size
-the job buffers and the store) and the done flags.
+Per round: the LP (a block of threads per active condition, which split its scans over the store), the polish (one
+thread per condition), then sub-rounds of job listing (count, prefix sum, fill), pricing (one thread per job,
+sorted by phase), consumption and the next polish, until no jobs are listed; then the merge of the conditions' own
+points into the store. The host sees only counts between kernels (to size the job buffers and the store) and the
+done flags.
 """
 import ctypes
 import time
@@ -84,13 +85,17 @@ class _HostLaunch:
         pass
 
 
-class _CudaLaunch:
-    """Kernels of a CuPy RawModule, BLOCK threads per block."""
+# kernels with a block of lanes per item (cg_tile_device.h): their first argument is the number of blocks
+_LANE_KERNELS = ('cg_dev_lp',)
 
-    def __init__(self, module, block):
+
+class _CudaLaunch:
+    """Kernels of a CuPy RawModule, BLOCK threads per block (_LANE_KERNELS: one block of LANES threads per item)."""
+
+    def __init__(self, module, block, lanes):
         import cupy as cp
         self.xp = cp
-        self.module, self.block, self.functions = module, block, {}
+        self.module, self.block, self.lanes, self.functions = module, block, lanes, {}
 
     def __call__(self, name, n, *args):
         f = self.functions.get(name)
@@ -99,7 +104,9 @@ class _CudaLaunch:
         conv = [np.float64(a) if isinstance(a, (float, np.floating)) else
                 a if isinstance(a, self.xp.ndarray) else np.int32(a) for a in args]
         n = int(n)
-        if n > 0:
+        if n > 0 and name in _LANE_KERNELS:
+            f((n,), (self.lanes,), (np.int32(n), *conv))
+        elif n > 0:
             f(((n + self.block - 1) // self.block,), (self.block,), (np.int32(n), *conv))
 
     @staticmethod
@@ -115,7 +122,7 @@ class _CudaLaunch:
 
 
 class DeviceTile:
-    """The driver; times (seconds per step: lp, jobs, price, consume, repolish, merge, and the transfers) and
+    """The driver; times (seconds per step: lp, polish, jobs, price, consume, repolish, merge, and the transfers) and
     counters (as cg_tile_solve_host's) of the last solve."""
 
     def __init__(self, launch):
@@ -307,7 +314,8 @@ class DeviceTile:
                 if len(act):
                     d_act = xp.asarray(act)
                     want = xp.zeros(len(act), dtype=np.int32)
-                    self._timed('lp', 'cg_dev_lp', len(act), T, d_act, self.work, self.pwork, want)
+                    self._timed('lp', 'cg_dev_lp', len(act), T, d_act, want)
+                    self._timed('polish', 'cg_dev_lp_polish', len(act), T, d_act, self.work, self.pwork, want)
                     nj = self._list_jobs(d_act, want, rounds, int(t.use_seeds and st == 0 and rounds == 1))
                     while nj > 0:
                         subrounds += 1; jobs_total += nj

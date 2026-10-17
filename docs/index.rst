@@ -48,6 +48,7 @@ The newest stable version can be found on `PyPI`_.
    :caption: Reference
 
    reference/calphad_databases
+   reference/workspace_get
    reference/faq
 
 .. toctree::

@@ -8,6 +8,7 @@ to the output directory (/kaggle/working on Kaggle): env.txt, install.log, cg_pr
 With --bench tile (launch.py push ... -- --bench tile): whole tiles in compiled code (PYCALPHAD_CG_TILE=3) by the
 host driver (cg_tile_host.h, one core) and by the device driver (cg_tile_device.h's kernels, DEVICE 'cuda'):
 phase sets and GM against the host driver's, wall time per tile and per kernel step; into cg_tile.json.
+With --bench compile: nvcc's time for the tile's module (and variants of its source), into cg_compile.json.
 
 Elsewhere (a machine with an NVIDIA or ROCm GPU): python run_cg_pricing.py --out results/ [--repo-dir checkout/]
 [--no-install]
@@ -260,20 +261,107 @@ for name in sys.argv[2:]:
             walls.append(round(time.perf_counter() - t, 3))
         GM = eq.GM.values.ravel(); NP = eq.NP.values.reshape(len(GM), -1); Ph = eq.Phase.values.reshape(NP.shape)
         sets = ['+'.join(sorted(p for p, a in zip(Ph[i], NP[i]) if p and a > 1e-6)) for i in range(len(GM))]
-        out[dev or 'host'] = (GM, sets)
+        out[dev or 'host'] = (GM, sets, eq.MU.values.reshape(len(GM), -1))
         r = {'first_call_s': round(first, 2), 'wall_s': walls, 'tiles': list(TILES)}
         if dev == 'cuda':
             import cupy as cp
             r['device_pool_bytes'] = int(cp.get_default_memory_pool().total_bytes())
         rep[dev or 'host'] = r
-    ref_GM, ref_sets = out['host']
-    G, sets = out['cuda']
+    ref_GM, ref_sets, ref_MU = out['host']
+    G, sets, MU = out['cuda']
     rep['cuda']['max_abs_dGM_vs_host'] = float(np.nanmax(np.abs(G - ref_GM)))
+    dG = np.nan_to_num(np.abs(G - ref_GM))
+    rep['cuda']['largest_dGM_vs_host'] = [   # (condition, phases, GM, |dGM|, max |dMU|)
+        [int(i), ref_sets[i], float(ref_GM[i]), float(dG[i]), float(np.nanmax(np.abs(MU[i] - ref_MU[i])))]
+        for i in np.argsort(-dG)[:8]]
     rep['cuda']['phase_sets_differ_vs_host'] = int(sum(a != b for a, b in zip(sets, ref_sets)))
     rep['cuda']['nan'] = [int(np.isnan(G).sum()), int(np.isnan(ref_GM).sum())]
     report[name] = rep
     print(name, json.dumps(rep, indent=1), flush=True)
     json.dump(report, open(sys.argv[1], 'w'), indent=1)
+'''
+
+COMPILE_BENCH = r'''
+import json, os, re, subprocess, sys, time, warnings
+warnings.filterwarnings('ignore')
+import numpy as np, pycalphad
+from importlib.resources import files
+import pycalphad.tests.databases as dbs
+from pycalphad import Database, equilibrium, variables as v
+from pycalphad.core.utils import filter_phases, unpack_species, instantiate_models
+import pycalphad.cg.solve as S
+import pycalphad.gpu.kernel_manager as KM
+import cupy as cp
+pycalphad.set_backend('cg', threads=1)
+S.TILE_MODE = 3; S.DEVICE = 'cuda'
+cost = ['AL', 'MG', 'SI', 'CU', 'ZN', 'FE', 'MN', 'NI', 'CR', 'TI']
+minor = {'FE': 0.005, 'MN': 0.005, 'NI': 0.005, 'CR': 0.005, 'TI': 0.001}
+CASES = {
+    'alcrni_40x40': ('alcocrni.tdb', ['AL', 'CR', 'NI', 'VA'], {v.T: 1300.0, v.X('AL'): [0.1, 0.2], v.X('CR'): [0.1, 0.2]}),
+    'cost10_8^4': ('COST507.tdb', cost + ['VA'],
+                   {v.T: 750.0, **{v.X(e): x for e, x in minor.items()}, v.X('MG'): [0.01, 0.02], v.X('SI'): [0.01, 0.02],
+                    v.X('CU'): [0.01, 0.02], v.X('ZN'): [0.01, 0.02]}),
+}
+class Captured(Exception):
+    pass
+def capture(code, options, verbose=False):
+    raise Captured(code, options)
+KM.cuda_raw_module = capture
+price_h = open(os.path.join(os.path.dirname(S.__file__), 'cg_price.h')).read()
+NOINLINE = ('cg_price', 'cg_sens', 'cg_polish_core', 'cg_gen_jobs', 'cg_add_point')
+def variant(src, name):
+    """the tile module's source with: generated model functions out of line (model), also the solver's big
+    functions (all), without the model code (no_model), or the model code alone (model_only)"""
+    if name in ('model', 'all'):
+        src = re.sub(r'(?m)^__device__ (\w+) (pycgpu_model_\d+_)', r'__device__ __noinline__ \1 \2', src)
+    if name == 'all':
+        for f in NOINLINE:
+            src = re.sub(r'CG_DEVICE static (\w+) %s\(' % f, r'CG_DEVICE __noinline__ static \1 %s(' % f, src)
+    if name == 'no_model':
+        a = src.index('#endif\n', src.index('#include <math.h>')) + 7
+        src = src[:a] + src[src.index('#define CG_DEVICE __device__'):]
+        src = re.sub(r'(?m)^    case \d+: .*$', '', src)
+    if name == 'model_only':
+        src = src[:src.index(price_h[:300])]
+        src += ('extern "C" __global__ void cg_eval_kernel(int n, const int* model, double* eg, double* H, const double* x) {\n'
+                '    int i = blockIdx.x * blockDim.x + threadIdx.x;\n'
+                '    if (i < n) cg_eval(model[i], i & 1, eg + i * 64, H + i * 4096, x + i * 64);\n}\n')
+    return src
+cc = cp.cuda.Device().compute_capability
+nvcc = cp.cuda.get_nvcc_path() if hasattr(cp.cuda, 'get_nvcc_path') else 'nvcc'
+report = {'nvcc': subprocess.run([nvcc, '--version'], capture_output=True, text=True).stdout.strip().splitlines()[-1],
+          'arch': f'sm_{cc}', 'cupy': cp.__version__, 'cupy_cache_dir': os.environ.get('CUPY_CACHE_DIR', '~/.cupy/kernel_cache')}
+work = os.path.abspath('compile_work'); os.makedirs(work, exist_ok=True)
+for name in sys.argv[2:]:
+    db, comps, c = CASES[name]
+    dbf = Database(str(files(dbs) / db)); phases = filter_phases(dbf, unpack_species(dbf, comps))
+    models = instantiate_models(dbf, comps, phases)
+    try:
+        equilibrium(dbf, comps, phases, {v.N: 1, v.P: 101325, **c}, model=models)
+        raise RuntimeError('the tile module was not compiled')
+    except Captured as e:
+        src, options = e.args
+    rep = {'source_bytes': len(src), 'options': list(options)}
+    for var in os.environ.get('CG_COMPILE_VARIANTS', 'model,all,no_model,model_only,as_is').split(','):
+        vs = variant(src, var)
+        path = os.path.join(work, f'{name}_{var}.cu')
+        open(path, 'w').write(vs)
+        cmd = [nvcc, '--cubin', f'-arch=sm_{cc}', *options, '--time', path + '.time.csv', '-o', path + '.cubin', path]
+        t = time.perf_counter()
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=1500)
+            out = {'seconds': round(time.perf_counter() - t, 1), 'rc': r.returncode, 'stderr': r.stderr[-1500:]}
+        except subprocess.TimeoutExpired:
+            out = {'seconds': 'timeout 1500'}
+        if os.path.exists(path + '.time.csv'):
+            out['phases'] = open(path + '.time.csv').read()[-3000:]
+        if os.path.exists(path + '.cubin'):
+            out['cubin_bytes'] = os.path.getsize(path + '.cubin')
+        rep[var] = out
+        print(name, var, json.dumps(out)[:600], flush=True)
+        report[name] = rep
+        json.dump(report, open(sys.argv[1], 'w'), indent=1)
+json.dump(report, open(sys.argv[1], 'w'), indent=1)
 '''
 
 
@@ -285,8 +373,9 @@ def main():
     parser.add_argument('--cases', default='alcrni_40x40,cost10_8^4')
     parser.add_argument('--timeout', type=int, default=7200)
     parser.add_argument('--devices', default=',host,cuda', help="pricers to compare ('' = Cython)")
-    parser.add_argument('--bench', choices=('pricing', 'tile'), default='pricing',
-                        help='the pricing kernel in the Cython tile, or whole tiles on the device')
+    parser.add_argument('--bench', choices=('pricing', 'tile', 'compile'), default='pricing',
+                        help='the pricing kernel in the Cython tile, whole tiles on the device, or the compile time of '
+                             "the tile's module (variants of its source, by nvcc)")
     parser.add_argument('--no-fmad', action='store_true', help='kernels without fused multiply-adds')
     args = parser.parse_args(KAGGLE_ARGS if ON_KAGGLE else None)
     os.makedirs(args.out, exist_ok=True)
@@ -297,8 +386,8 @@ def main():
                                        cwd=args.repo_dir).stdout.strip()
     bench = os.path.join(args.out, f'cg_{args.bench}_bench.py')
     with open(bench, 'w') as f:
-        f.write(BENCH if args.bench == 'pricing' else TILE_BENCH)
-    result = os.path.join(args.out, 'cg_pricing.json' if args.bench == 'pricing' else 'cg_tile.json')
+        f.write({'pricing': BENCH, 'tile': TILE_BENCH, 'compile': COMPILE_BENCH}[args.bench])
+    result = os.path.join(args.out, f'cg_{args.bench}.json')
     env = dict(os.environ, PYTHONHASHSEED='0', CG_DEVICES=args.devices, PYCALPHAD_CG_FMAD='0' if args.no_fmad else '1')
     summary['fmad'] = not args.no_fmad
     summary['bench'] = run([sys.executable, bench, result] + args.cases.split(','), os.path.join(args.out, 'bench.log'),

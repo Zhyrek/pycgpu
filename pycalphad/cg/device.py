@@ -24,7 +24,7 @@ _LIBRARIES = {}   # source hash -> loaded library
 
 # phase description layout (cg_price.h: CGI_*, CGD_*)
 _CGI = ['D', 'nb', 'model', 'nsym', 'nder', 'doff', 'boff', 'bidx', 'blk', 'single', 'pinned', 'sym_a', 'sym_b',
-        'sym_off', 'A', 'asum']
+        'sym_off', 'A', 'asum', 'elem_of', 'stoich']
 _CGD = ['m_lo', 'pen_w', 'max_dz']
 
 _ENTRY_ARGS = ('int n, const int* jobs, const int* job_phase, const int* job_cond, const double* mu, '
@@ -129,8 +129,9 @@ def describe(cores, names, index, deriv, elements):
         if nder < D or any('Y(' not in s for s in deriv[name][nder - D:]):
             continue
         ok[p] = 0 if d['stoich'] else 1   # (stoichiometric phases: described for the polish, never priced)
-        row = {'D': D, 'nb': d['nb'], 'model': index[name], 'nsym': d['nsym'], 'nder': nder, 'doff': nder - D}
-        for key in ('boff', 'bidx', 'blk', 'single', 'pinned', 'sym_a', 'sym_b', 'sym_off'):
+        row = {'D': D, 'nb': d['nb'], 'model': index[name], 'nsym': d['nsym'], 'nder': nder, 'doff': nder - D,
+               'stoich': int(d['stoich'])}
+        for key in ('boff', 'bidx', 'blk', 'single', 'pinned', 'sym_a', 'sym_b', 'sym_off', 'elem_of'):
             row[key] = len(ip); ip.extend(np.asarray(d[key], dtype=np.int64).ravel().tolist() or [0])
         for key in ('A', 'asum'):
             row[key] = len(dp); dp.extend(np.asarray(d[key], dtype=float).ravel().tolist())
@@ -156,7 +157,10 @@ def _source(model_code, index, names, Dmax, C, ns, nmax, target='host', classes=
                           header, _kernels(classes)])
     compat = (_HERE.parent / 'gpu' / 'cpu_compat.h').read_text()
     parts = [compat, '#include <cmath>', model_code, '#define CG_DEVICE\n' + sizes, '\n'.join(disp), header]
-    parts += [_HOST_ENTRY] if target == 'host' else [_kernels(classes), _kernels_on_host(classes)]
+    if target == 'host':
+        parts += [_HOST_ENTRY, (_HERE / 'cg_tile.h').read_text(), (_HERE / 'cg_tile_host.h').read_text()]
+    else:
+        parts += [_kernels(classes), _kernels_on_host(classes)]
     return '\n'.join(parts)
 
 
@@ -307,3 +311,85 @@ class CudaPricer(_Pricer):
         y[jobs] = d_y.get(); x[jobs] = d_x.get(); G[jobs] = d_G.get(); tpd[jobs] = d_t.get(); conv[jobs] = d_c.get()
         evals.reshape(-1, 2)[jobs] = d_e.get().reshape(n, 2)
         self.seconds += time.perf_counter() - t0; self.jobs += n; self.batches += 1
+
+
+def _scaled_rows(R, b, mu_fixed, fixed, RT):
+    """Condition rows as the solver scales them (Solver._set_conditions_c): each row by its right-hand side (else
+    its largest coefficient), b >= 0; fixed potentials in RT units."""
+    R = np.array(R, dtype=float); b = np.array(b, dtype=float)
+    for k in range(b.shape[-1]):
+        sc = np.where(b[..., k] < 0, -1.0, 1.0)
+        m = np.abs(b[..., k])
+        mr = np.abs(R[..., k, :]).max(axis=-1)
+        m = np.where(m > 0, m, np.where(mr > 0, mr, 1.0))
+        R[..., k, :] *= (sc / m)[..., None]
+        b[..., k] *= sc / m
+    return R, b, np.asarray(mu_fixed, dtype=float) / RT, np.asarray(fixed, dtype=np.int32)
+
+
+def _pack_seeds(seeds, phases, Dm):
+    rows, off = [], [0]
+    for ph, sd in zip(phases, seeds if seeds is not None else [None] * len(phases)):
+        S = np.zeros((0, Dm)) if sd is None else np.asarray(sd, dtype=float).reshape(-1, ph.D)
+        P = np.zeros((S.shape[0], Dm)); P[:, :ph.D] = S
+        rows.append(P); off.append(off[-1] + S.shape[0])
+    return np.ascontiguousarray(np.vstack(rows) if off[-1] else np.zeros((1, Dm))), np.array(off, dtype=np.int32)
+
+
+def _host_tile_solve(self, solver, cores, sv_values, phases, R, b, mu_fixed, fixed, seeds, stage, init_from,
+                     max_rounds=60):
+    """A whole tile in compiled code (cg_tile.h's steps, cg_tile_host.h's driver) from the solver's store, basis and
+    skip state: the arrays of Solver.solve_sequence, or None if a phase is not supported (the caller solves it)."""
+    ok, di, dd, ip, dp = self.descriptions(cores)
+    if any(not ok[p] and not ph.stoichiometric for p, ph in enumerate(phases)):
+        return None
+    if any(ph.stoichiometric and di.reshape(len(phases), -1)[p, 0] == 0 for p, ph in enumerate(phases)):
+        return None   # (a stoichiometric phase the compiled code cannot evaluate)
+    RT = float(cores[0].RT)
+    B = len(b); C = len(self.elements)
+    Rs, bs, mfs, fx = _scaled_rows(R, b, mu_fixed, fixed, RT)
+    K = bs.shape[1]
+    st = solver.export_points()
+    Dm = solver.Dmax
+    n = st['n']
+    Py = np.zeros((max(n, 1), Dm)); Py[:n] = st['Py']
+    seedY, seed_off = _pack_seeds(seeds, phases, Dm)
+    skip = st['skip']
+    has_last = np.array([s[0] for s in skip], dtype=np.uint8)
+    last_tpd = np.array([s[1] for s in skip], dtype=float)
+    last_mu = np.ascontiguousarray(np.array([s[2] for s in skip], dtype=float).reshape(len(phases), C))
+    basis0 = np.ascontiguousarray(np.asarray(st['basis'][:K], dtype=np.int32)) if st['K'] == K else \
+        np.array([-(1 + k) for k in range(K)], dtype=np.int32)
+    gauge = solver.gauge_matrix().reshape(-1, C)
+    status = np.zeros(B, dtype=np.int32); nout = np.zeros(B, dtype=np.int32)
+    phs = np.full((B, C), -1, dtype=np.int32); amt = np.zeros((B, C)); X = np.zeros((B, C, C))
+    Y = np.full((B, C, Dm), np.nan); G = np.zeros((B, C)); mu = np.zeros((B, C))
+    counters = np.zeros(8, dtype=np.int64)
+    P = ctypes.c_void_p
+    def a(x, dtype):
+        x = np.ascontiguousarray(x, dtype=dtype); keep.append(x); return x.ctypes.data_as(P)
+    keep = []
+    I, D_ = ctypes.c_int, ctypes.c_double
+    rc = self.lib.cg_tile_solve_host(
+        I(B), I(C), I(K), I(Dm), I(len(phases)), I(gauge.shape[0]), I(solver.max_late), I(int(solver.use_polish)),
+        I(max_rounds), D_(RT), D_(solver.prune), D_(solver.prune_late), D_(solver.skip_margin), D_(solver.tol),
+        D_(solver.seed_prune if np.isfinite(solver.seed_prune) else 1e300),
+        a(di, np.int32), a(dd, float), a(ip, np.int32), a(dp, float), a(sv_values, float),
+        a(gauge if gauge.size else np.zeros(C), float),
+        I(n), a(Py, float), a(st['Px'] if n else np.zeros((1, C)), float), a(st['PG'] if n else np.zeros(1), float),
+        a(st['Pph'] if n else np.zeros(1), np.int32), a(st['Pcode'] if n else np.zeros(1), np.int64),
+        a(st['Pnext'] if n else np.zeros(1), np.int32), a(st['head'], np.int32),
+        a(Rs, float), a(bs, float), a(mfs, float), a(fx, np.int32),
+        a(seedY, float), a(seed_off, np.int32), I(int(seeds is not None)), I(int(seed_off[-1]) + 4096), I(512),
+        a(stage, np.int32), a(init_from, np.int32),
+        a(basis0, np.int32), a(has_last, np.uint8), a(last_tpd, float), a(last_mu, float),
+        status.ctypes.data_as(P), nout.ctypes.data_as(P), phs.ctypes.data_as(P), amt.ctypes.data_as(P),
+        X.ctypes.data_as(P), Y.ctypes.data_as(P), G.ctypes.data_as(P), mu.ctypes.data_as(P), counters.ctypes.data_as(P))
+    if rc != 0:
+        raise RuntimeError(f'cg_tile_solve_host failed ({rc})')
+    self.tile_counters = dict(zip(('priced', 'lp_iters', 'rounds', 'subrounds', 'jobs', 'own_full', 'store'),
+                                  counters[:7].tolist()))
+    return status, nout, phs, amt, X, Y, G, mu
+
+
+HostPricer.solve_tile = _host_tile_solve

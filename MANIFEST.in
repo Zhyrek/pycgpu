@@ -5,6 +5,8 @@ recursive-include pycalphad *.pyx *.px[di]
 recursive-include pycalphad/gpu *.h *.mm
 include pycalphad/cg/cg_price.h
 include pycalphad/cg/cg_round.h
+include pycalphad/cg/cg_tile.h
+include pycalphad/cg/cg_tile_host.h
 
 # This subpckage is only used in development checkouts and should not be
 # included in source distributions

@@ -125,3 +125,28 @@ def test_compiled_pricer_matches_cython():
             assert abs(tpd / RT - to[k]) < 1e-11
             np.testing.assert_allclose(yo[k, :ph.D], y, atol=1e-10)
             assert conv == bool(co[k])
+
+
+def test_compiled_tile_matches_batched_tile(monkeypatch):
+    "A whole tile solved by the compiled per-condition steps (cg_tile.h) gives the Cython tile's phase sets and GM."
+    import shutil
+    if not (shutil.which('clang++') or shutil.which('g++')):
+        pytest.skip('no C++ compiler')
+    from pycalphad import Database, equilibrium, variables as v
+    from pycalphad.backend import backend
+    from importlib.resources import files
+    import pycalphad.tests.databases as dbs
+    dbf = Database(str(files(dbs) / 'alcocrni.tdb'))
+    conds = {v.N: 1, v.P: 101325, v.T: 1300, v.X('AL'): list(np.linspace(0.02, 0.5, 30)),
+             v.X('CR'): list(np.linspace(0.02, 0.5, 30))}
+    out = {}
+    monkeypatch.setattr(solve, 'DEVICE', '')
+    with backend('cg', threads=1):
+        for mode in (2, 3):
+            monkeypatch.setattr(solve, 'TILE_MODE', mode)
+            eq = equilibrium(dbf, ['AL', 'CR', 'NI', 'VA'], list(dbf.phases), conds)
+            NP = eq.NP.values.reshape(-1, eq.NP.shape[-1]); Ph = eq.Phase.values.reshape(NP.shape)
+            out[mode] = (eq.GM.values.ravel(),
+                         ['+'.join(sorted(p for p, n in zip(Ph[i], NP[i]) if p and n > 1e-6)) for i in range(len(NP))])
+    np.testing.assert_allclose(out[3][0], out[2][0], atol=1e-4)
+    assert out[3][1] == out[2][1]

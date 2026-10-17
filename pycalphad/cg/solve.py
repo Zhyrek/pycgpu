@@ -519,13 +519,14 @@ _PRICERS = OrderedDict()   # (device, phase keys, elements) -> pricer
 _PRICERS_LOCK = __import__('threading').Lock()   # (worker threads of one call reach this together)
 
 
-def _pricer_for(wks, phases, elements):
-    key = (DEVICE, tuple(id(ph) for ph in phases), tuple(elements))
+def _pricer_for(wks, phases, elements, device=None):
+    device = DEVICE if device is None else device
+    key = (device, tuple(id(ph) for ph in phases), tuple(elements))
     with _PRICERS_LOCK:
         pr = _PRICERS.get(key)
         if pr is None:
             from pycalphad.cg.device import HostPricer, CudaPricer
-            pr = CudaPricer(wks, phases, elements) if DEVICE == 'cuda' else HostPricer(wks, phases, elements, DEVICE)
+            pr = CudaPricer(wks, phases, elements) if device == 'cuda' else HostPricer(wks, phases, elements, device)
             _PRICERS[key] = pr
             if len(_PRICERS) > 16:
                 _PRICERS.popitem(last=False)
@@ -708,14 +709,22 @@ def solve_workspace(wks):
             args = (np.array([r[0] for r in rows]), np.array([r[1] for r in rows]), np.array([r[2] for r in rows]),
                     np.array([r[3] for r in rows]), seeds)
             w0 = _work(worker) if COLLECT_STATS else None
-            if TILE_MODE == 2 and DEVICE:
+            if TILE_MODE in (2, 3) and DEVICE:
                 _pricer_for(wks, phases, elements).attach(worker.solver, worker.cores, sv_values)
-            elif TILE_MODE == 2:
+            elif TILE_MODE in (2, 3):
                 worker.solver.set_pricer(0, None, None, None, None, None, None, 0.0)
                 worker.solver.set_pricer_callback(None, None)
-            if TILE_MODE:
+            out = None
+            if TILE_MODE == 3:
+                # the whole tile in compiled code (cg_tile.h), if every phase is supported there
                 stage, init = _tile_stages([i for i, _ in items], TILE_LEVELS)
-                solve = worker.solver.solve_tile_batched if TILE_MODE == 2 else worker.solver.solve_tile
+                out = _pricer_for(wks, phases, elements, 'host').solve_tile(
+                    worker.solver, worker.cores, sv_values, phases, *args[:4], args[4], stage, init)
+            if out is not None:
+                st, na, phs, amt, Xs, Ys, Gs, mus = out
+            elif TILE_MODE:
+                stage, init = _tile_stages([i for i, _ in items], TILE_LEVELS)
+                solve = worker.solver.solve_tile_batched if TILE_MODE in (2, 3) else worker.solver.solve_tile
                 st, na, phs, amt, Xs, Ys, Gs, mus = solve(*args, stage=stage, init_from=init)
             else:
                 st, na, phs, amt, Xs, Ys, Gs, mus = worker.solver.solve_sequence(*args)

@@ -87,3 +87,5 @@ NOTES_PYCALPHAD_CORE.md
 kaggle_results/
 !pycalphad/cg/cg_price.h
 !pycalphad/cg/cg_round.h
+!pycalphad/cg/cg_tile.h
+!pycalphad/cg/cg_tile_host.h

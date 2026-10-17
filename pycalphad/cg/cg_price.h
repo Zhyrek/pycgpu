@@ -26,7 +26,7 @@
 enum {
     CGI_D = 0, CGI_NB, CGI_MODEL, CGI_NSYM, CGI_NDER, CGI_DOFF,
     CGI_BOFF, CGI_BIDX, CGI_BLK, CGI_SINGLE, CGI_PINNED, CGI_SYMA, CGI_SYMB, CGI_SYMOFF, CGI_A, CGI_ASUM,
-    CGI_COUNT
+    CGI_ELEMOF, CGI_STOICH, CGI_COUNT
 };
 enum { CGD_MLO = 0, CGD_PENW, CGD_MAXDZ, CGD_COUNT };
 
@@ -499,5 +499,5 @@ CG_DEVICE static void cg_price_job(int j, const int* job_phase, const int* job_c
     cg_phase_from_desc(P, job_phase[j], di, dd, ip, dp, C, RT);
     conv_out[j] = cg_price(P, W, sv, mu + (long)job_cond[j] * C, y0 + (long)j * ystride, y_out + (long)j * ystride,
                            x_out + (long)j * C, G_out + j, tpd_out + j);
-    evals_out[2 * j] = W.evals1; evals_out[2 * j + 1] = W.evals2;
+    if (evals_out) { evals_out[2 * j] = W.evals1; evals_out[2 * j + 1] = W.evals2; }
 }

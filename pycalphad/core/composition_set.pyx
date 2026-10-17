@@ -70,3 +70,20 @@ cdef public class CompositionSet(object)[type CompositionSetType, object Composi
         self.phase_record.obj(self._energy_2d_view, self.dof)
         for comp_idx in range(self.X.shape[0]):
             self.phase_record.mass_obj(self._X_2d_view[comp_idx], self.dof, comp_idx)
+
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    cdef void solver_update(self, double* site_fracs, int num_site_fracs, double phase_amt,
+                            double* state_variables, int num_statevars) noexcept nogil:
+        "Same as update(), without the GIL. Requires phase_record.prepare_solver_functions() to have been called."
+        cdef int comp_idx
+        for comp_idx in range(num_statevars):
+            self.dof[comp_idx] = state_variables[comp_idx]
+        for comp_idx in range(num_site_fracs):
+            self.dof[num_statevars + comp_idx] = site_fracs[comp_idx]
+        self.NP = phase_amt
+        self.energy = 0
+        memset(&self.X[0], 0, self.X.shape[0] * sizeof(double))
+        self.phase_record.solver_obj(&self.energy, &self.dof[0])
+        for comp_idx in range(self.X.shape[0]):
+            self.phase_record.solver_mass_obj(&self.X[comp_idx], &self.dof[0], comp_idx)

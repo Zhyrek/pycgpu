@@ -14,3 +14,5 @@ cdef public class CompositionSet(object)[type CompositionSetType, object Composi
     cdef public int num_phase_local_conditions
     cpdef void set_local_conditions(self, dict phase_local_conditions)
     cpdef void update(self, double[::1] site_fracs, double phase_amt, double[::1] state_variables)
+    cdef void solver_update(self, double* site_fracs, int num_site_fracs, double phase_amt,
+                            double* state_variables, int num_statevars) noexcept nogil

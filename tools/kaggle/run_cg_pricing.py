@@ -5,6 +5,10 @@ solves the same tiles (TileSolver, PYCALPHAD_CG_TILE=2) with pricing in Cython, 
 the CUDA kernel; checks the kernel's results job by job against the host library's; and times them. Results go
 to the output directory (/kaggle/working on Kaggle): env.txt, install.log, cg_pricing.json.
 
+With --bench tile (launch.py push ... -- --bench tile): whole tiles in compiled code (PYCALPHAD_CG_TILE=3) by the
+host driver (cg_tile_host.h, one core) and by the device driver (cg_tile_device.h's kernels, DEVICE 'cuda'):
+phase sets and GM against the host driver's, wall time per tile and per kernel step; into cg_tile.json.
+
 Elsewhere (a machine with an NVIDIA or ROCm GPU): python run_cg_pricing.py --out results/ [--repo-dir checkout/]
 [--no-install]
 """
@@ -206,6 +210,72 @@ print('divergence:', div, flush=True)
 json.dump(report, open(sys.argv[1], 'w'), indent=1)
 '''
 
+TILE_BENCH = r'''
+import json, sys, time, warnings
+warnings.filterwarnings('ignore')
+import numpy as np, pycalphad
+from importlib.resources import files
+import pycalphad.tests.databases as dbs
+from pycalphad import Database, equilibrium, variables as v
+from pycalphad.core.utils import filter_phases, unpack_species, instantiate_models
+import pycalphad.cg.solve as S
+from pycalphad.cg import device as Dv
+pycalphad.set_backend('cg', threads=1)
+S.TILE_MODE = 3
+cost = ['AL', 'MG', 'SI', 'CU', 'ZN', 'FE', 'MN', 'NI', 'CR', 'TI']
+minor = {'FE': 0.005, 'MN': 0.005, 'NI': 0.005, 'CR': 0.005, 'TI': 0.001}
+def g(n): return list(np.linspace(0.005, 0.06, n))
+CASES = {
+    'alcrni_40x40': ('alcocrni.tdb', ['AL', 'CR', 'NI', 'VA'],
+                     {v.T: 1300.0, v.X('AL'): list(np.linspace(0.02, 0.5, 40)), v.X('CR'): list(np.linspace(0.02, 0.5, 40))}),
+    'cost10_8^4': ('COST507.tdb', cost + ['VA'],
+                   {v.T: 750.0, **{v.X(e): x for e, x in minor.items()}, v.X('MG'): g(8), v.X('SI'): g(8), v.X('CU'): g(8), v.X('ZN'): g(8)}),
+}
+TILES = []   # per solve_tile call: where, conditions, seconds, counters, step times
+def timed(cls, where):
+    orig = cls.solve_tile
+    def solve_tile(self, *a, **k):
+        t = time.perf_counter(); out = orig(self, *a, **k); sec = time.perf_counter() - t
+        if out is not None:
+            TILES.append({'where': where, 'conditions': len(out[0]), 'seconds': round(sec, 4),
+                          'counters': dict(self.tile_counters),
+                          'steps': {s_: round(x, 4) for s_, x in (getattr(self, 'tile_times', None) or {}).items()}})
+        return out
+    cls.solve_tile = solve_tile
+timed(Dv.HostPricer, 'host'); timed(Dv.CudaPricer, 'cuda')
+report = {}
+for name in sys.argv[2:]:
+    db, comps, c = CASES[name]
+    dbf = Database(str(files(dbs) / db)); phases = filter_phases(dbf, unpack_species(dbf, comps))
+    models = instantiate_models(dbf, comps, phases)
+    conds = {v.N: 1, v.P: 101325, **c}
+    out, rep = {}, {}
+    for dev in ('', 'cuda'):
+        S.DEVICE = dev
+        t = time.perf_counter(); equilibrium(dbf, comps, phases, conds, model=models); first = time.perf_counter() - t
+        walls = []
+        for rep_ in range(2):
+            TILES.clear()
+            t = time.perf_counter(); eq = equilibrium(dbf, comps, phases, conds, model=models)
+            walls.append(round(time.perf_counter() - t, 3))
+        GM = eq.GM.values.ravel(); NP = eq.NP.values.reshape(len(GM), -1); Ph = eq.Phase.values.reshape(NP.shape)
+        sets = ['+'.join(sorted(p for p, a in zip(Ph[i], NP[i]) if p and a > 1e-6)) for i in range(len(GM))]
+        out[dev or 'host'] = (GM, sets)
+        r = {'first_call_s': round(first, 2), 'wall_s': walls, 'tiles': list(TILES)}
+        if dev == 'cuda':
+            import cupy as cp
+            r['device_pool_bytes'] = int(cp.get_default_memory_pool().total_bytes())
+        rep[dev or 'host'] = r
+    ref_GM, ref_sets = out['host']
+    G, sets = out['cuda']
+    rep['cuda']['max_abs_dGM_vs_host'] = float(np.nanmax(np.abs(G - ref_GM)))
+    rep['cuda']['phase_sets_differ_vs_host'] = int(sum(a != b for a, b in zip(sets, ref_sets)))
+    rep['cuda']['nan'] = [int(np.isnan(G).sum()), int(np.isnan(ref_GM).sum())]
+    report[name] = rep
+    print(name, json.dumps(rep, indent=1), flush=True)
+    json.dump(report, open(sys.argv[1], 'w'), indent=1)
+'''
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -215,6 +285,8 @@ def main():
     parser.add_argument('--cases', default='alcrni_40x40,cost10_8^4')
     parser.add_argument('--timeout', type=int, default=7200)
     parser.add_argument('--devices', default=',host,cuda', help="pricers to compare ('' = Cython)")
+    parser.add_argument('--bench', choices=('pricing', 'tile'), default='pricing',
+                        help='the pricing kernel in the Cython tile, or whole tiles on the device')
     args = parser.parse_args(KAGGLE_ARGS if ON_KAGGLE else None)
     os.makedirs(args.out, exist_ok=True)
     summary = {'branch': BRANCH, 'gpu': environment(args.out)}
@@ -222,10 +294,10 @@ def main():
         summary['install'] = install(args.out, args.repo_dir)
     summary['commit'] = subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True,
                                        cwd=args.repo_dir).stdout.strip()
-    bench = os.path.join(args.out, 'cg_pricing_bench.py')
+    bench = os.path.join(args.out, f'cg_{args.bench}_bench.py')
     with open(bench, 'w') as f:
-        f.write(BENCH)
-    result = os.path.join(args.out, 'cg_pricing.json')
+        f.write(BENCH if args.bench == 'pricing' else TILE_BENCH)
+    result = os.path.join(args.out, 'cg_pricing.json' if args.bench == 'pricing' else 'cg_tile.json')
     env = dict(os.environ, PYTHONHASHSEED='0', CG_DEVICES=args.devices)
     summary['bench'] = run([sys.executable, bench, result] + args.cases.split(','), os.path.join(args.out, 'bench.log'),
                            timeout=args.timeout, cwd=args.out, env=env)

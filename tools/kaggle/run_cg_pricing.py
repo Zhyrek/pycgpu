@@ -287,6 +287,7 @@ def main():
     parser.add_argument('--devices', default=',host,cuda', help="pricers to compare ('' = Cython)")
     parser.add_argument('--bench', choices=('pricing', 'tile'), default='pricing',
                         help='the pricing kernel in the Cython tile, or whole tiles on the device')
+    parser.add_argument('--no-fmad', action='store_true', help='kernels without fused multiply-adds')
     args = parser.parse_args(KAGGLE_ARGS if ON_KAGGLE else None)
     os.makedirs(args.out, exist_ok=True)
     summary = {'branch': BRANCH, 'gpu': environment(args.out)}
@@ -298,7 +299,8 @@ def main():
     with open(bench, 'w') as f:
         f.write(BENCH if args.bench == 'pricing' else TILE_BENCH)
     result = os.path.join(args.out, 'cg_pricing.json' if args.bench == 'pricing' else 'cg_tile.json')
-    env = dict(os.environ, PYTHONHASHSEED='0', CG_DEVICES=args.devices)
+    env = dict(os.environ, PYTHONHASHSEED='0', CG_DEVICES=args.devices, PYCALPHAD_CG_FMAD='0' if args.no_fmad else '1')
+    summary['fmad'] = not args.no_fmad
     summary['bench'] = run([sys.executable, bench, result] + args.cases.split(','), os.path.join(args.out, 'bench.log'),
                            timeout=args.timeout, cwd=args.out, env=env)
     if os.path.exists(result):

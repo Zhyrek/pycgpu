@@ -8,6 +8,10 @@ GPU code generator, compiled once per system.
 
 Only phases cg_price.h supports are priced there (linear formula moles, no constraints beyond the sublattice
 balances, no pinned species); TileSolver prices the others itself.
+
+Both also solve whole tiles (solve_tile, when every phase is supported): HostPricer with cg_tile_host.h's driver,
+CudaPricer with pycalphad.cg.device_tile's over cg_tile_device.h's kernels (HostPricer with target 'cuda-on-host':
+the same driver and kernels on the host).
 """
 import ctypes
 import hashlib
@@ -163,7 +167,9 @@ def _launchers(source):
 def _source(model_code, index, names, Dmax, C, ns, nmax, target='host', classes=()):
     """The pricing source: 'host' (a C++ library), 'cuda' (a CUDA/HIP kernel), 'cuda-tile' (a whole tile's
     kernels, cg_tile_device.h), 'cuda-on-host' (all of the kernels as C++, called in a loop over threads)."""
-    disp = ['CG_DEVICE void cg_eval(int model, int hess, double* eg, double* H, const double* x) {',
+    # (on a device, out of line: the energy code compiled once, not into every kernel and call site)
+    disp = [('__noinline__ ' if target in ('cuda', 'cuda-tile') else '') +
+            'CG_DEVICE void cg_eval(int model, int hess, double* eg, double* H, const double* x) {',
             '    switch (model) {']
     for name in names:
         k = index[name]
@@ -268,17 +274,44 @@ class CudaPricer(_Pricer):
     # kernels, one per size class on its own stream, were slower there: its FP64 rate, not memory, is the limit)
     CLASS_KERNELS = bool(int(os.environ.get('PYCALPHAD_CG_CLASS_KERNELS', '0')))
     STACK = int(os.environ.get('PYCALPHAD_CG_STACK', 65536))   # bytes per thread (the work arrays live there)
+    # 0: no fused multiply-adds (rounding as on a host without them; a check)
+    FMAD = os.environ.get('PYCALPHAD_CG_FMAD', '1') != '0'
 
     def __init__(self, wks, phases, elements):
         import cupy as cp
-        from pycalphad.gpu.kernel_manager import cuda_raw_module, ensure_device_stack_limit
+        from pycalphad.gpu.kernel_manager import ensure_device_stack_limit
         self.cp = cp
         self._setup(wks, phases, elements)
         ensure_device_stack_limit(self.STACK)
-        self.module = cuda_raw_module(self.source('cuda'), ('-std=c++14',))
-        self.kernels = [self.module.get_function(f'cg_price_kernel_{D}_{N}') for D, N in self.classes]
-        self.kernel = self.module.get_function('cg_price_kernel')
+        self._module = self._kernel = self._device_tile = None   # (built on first use)
         self.seconds = 0.0; self.kernel_seconds = 0.0; self.jobs = 0; self.batches = 0
+
+    def source(self, target):
+        return _source(self.model_code, self.index, self.cand, self.Dmax, len(self.elements), self.ns, self.nmax,
+                       target, self.classes if self.CLASS_KERNELS else ())
+
+    def compile(self, target):
+        from pycalphad.gpu.kernel_manager import cuda_raw_module
+        return cuda_raw_module(self.source(target), ('-std=c++14',) + (() if self.FMAD else ('--fmad=false',)))
+
+    @property
+    def module(self):
+        """The pricing kernels (cg_price_kernel; with CLASS_KERNELS one per size class)."""
+        if self._module is None:
+            self._module = self.compile('cuda')
+        return self._module
+
+    @property
+    def kernel(self):
+        """cg_price_kernel: from the tile's module if that is built (it has one), else the pricing module's."""
+        if self._kernel is None:
+            m = self._device_tile.launch.module if self._device_tile is not None else self.module
+            self._kernel = m.get_function('cg_price_kernel')
+        return self._kernel
+
+    @property
+    def kernels(self):
+        return [self.module.get_function(f'cg_price_kernel_{D}_{N}') for D, N in self.classes]
 
     def upload(self, cores, sv_values):
         cp = self.cp
@@ -452,10 +485,8 @@ def _cuda_tile_solve(self, solver, cores, sv_values, phases, R, b, mu_fixed, fix
     if t is None:
         return None
     from pycalphad.cg.device_tile import DeviceTile, _CudaLaunch
-    if getattr(self, '_device_tile', None) is None:
-        from pycalphad.gpu.kernel_manager import cuda_raw_module
-        module = cuda_raw_module(self.source('cuda-tile'), ('-std=c++14',))
-        self._device_tile = DeviceTile(_CudaLaunch(module, self.BLOCK))
+    if self._device_tile is None:
+        self._device_tile = DeviceTile(_CudaLaunch(self.compile('cuda-tile'), self.BLOCK))
     out = self._device_tile.solve(t, max_rounds)
     self.tile_counters, self.tile_times = self._device_tile.counters, self._device_tile.times
     return out

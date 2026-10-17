@@ -179,6 +179,19 @@ cdef class CPhase:
         P.set_bounds(self.m_lo)
         return P
 
+    def device_description(self):
+        """What cg_price.h needs about this phase: sublattice structure, formula moles (linear phases), bounds; and
+        whether that port can price it (linear formula moles, no constraints beyond the sublattice balances, no
+        pinned species)."""
+        return {'D': self.D, 'nb': self.nb, 'boff': np.asarray(self.boff).copy(), 'bidx': np.asarray(self.bidx).copy(),
+                'blk': np.asarray(self.blk).copy(), 'single': np.asarray(self.single).copy(),
+                'pinned': np.asarray(self.pinned).copy(), 'nsym': self.nsym,
+                'sym_a': np.asarray(self.sym_a).copy(), 'sym_b': np.asarray(self.sym_b).copy(),
+                'sym_off': np.asarray(self.sym_off).copy(), 'A': np.asarray(self.A).copy(),
+                'asum': np.asarray(self.asum).copy(), 'm_lo': self.m_lo, 'pen_w': self.pen_w,
+                'max_dz': self.max_dz, 'RT': self.RT,
+                'supported': bool(self.linear and self.ne == 0 and not np.asarray(self.pinned).any() and not self.stoich)}
+
     def set_constraints(self, E, e):
         """Linear equality constraints E y = e beyond the site-fraction balances."""
         cdef int D = self.D
@@ -615,6 +628,7 @@ cdef class CPhase:
             self.z[j] = log(s)
         self.set_mu(mu)
         self.nprice += 1
+        self.last_indef = False   # (nothing carried over from the previous minimization: jobs are independent)
         for j in range(self.ne): self.lam[j] = 0.0
         f = self.fgz(&self.z[0], &self.y[0], &self.gz[0], &self.gy[0])
         escapes = 0
@@ -1837,6 +1851,11 @@ cdef class Solver:
             self.K = K0; self.R = R0; self.b = b0; self.mf = mf0; self.fixed = fixed0
 
 
+ctypedef void (*pricer_fn)(int n, const int* jobs, const int* job_phase, const int* job_cond, const double* mu,
+                          const double* y0, int ystride, double* y_out, double* x_out, double* G_out, double* tpd_out,
+                          int* conv, int* evals, const int* di, const double* dd, const int* ip, const double* dp,
+                          int C, double RT, const double* sv) noexcept nogil
+
 cdef int STAGED = 1 << 29   # LP basis entries >= STAGED name a point staged in the current round (STAGED + its index)
 
 
@@ -1873,6 +1892,15 @@ cdef class TileSolver(Solver):
     cdef double[:, ::1] j_y0, j_y, j_x
     cdef double[::1] j_G, j_tpd
     cdef public list job_batches
+    # an external batched pricer (cg_price.h compiled for this system): a C function, the phases it prices, and
+    # its phase descriptions
+    cdef pricer_fn pricer
+    cdef unsigned char[::1] pricer_ok
+    cdef int[::1] pr_di, pr_ip, pr_jobs, pr_evals
+    cdef double[::1] pr_dd, pr_dp, pr_sv
+    cdef double pr_RT
+    cdef public object pricer_keep
+    cdef public long device_jobs
 
     def __init__(self, phases, int C, **kw):
         Solver.__init__(self, phases, C, **kw)
@@ -1886,6 +1914,7 @@ cdef class TileSolver(Solver):
         self.own_s = np.zeros(64, dtype=np.int32)
         self.jcap = 0; self.cpcap = 0; self.nj = 0; self.ncp = 0
         self.job_batches = []
+        self.pricer = NULL; self.device_jobs = 0
 
     def _grow_staged(self):
         cap = 2 * self.scap
@@ -2224,10 +2253,52 @@ cdef class TileSolver(Solver):
         self.cp_last[t] = self.ncp
         for i in range(C): self.t_mu[t, i] = mu[i]
 
+    def set_pricer(self, size_t address, ok, di, dd, ip, dp, sv, double RT, keep=None):
+        """Price the jobs of the phases flagged in ok with the batched C function at address (cg_price_batch of
+        cg_price.h; descriptions di, dd, pools ip, dp, state variables sv); address 0: price everything here."""
+        if address == 0:
+            self.pricer = NULL; self.pricer_keep = None
+            return
+        self.pricer = <pricer_fn>address
+        self.pricer_ok = np.ascontiguousarray(ok, dtype=np.uint8)
+        self.pr_di = np.ascontiguousarray(di, dtype=np.int32); self.pr_dd = np.ascontiguousarray(dd, dtype=float)
+        self.pr_ip = np.ascontiguousarray(ip, dtype=np.int32); self.pr_dp = np.ascontiguousarray(dp, dtype=float)
+        self.pr_sv = np.ascontiguousarray(sv, dtype=float); self.pr_RT = RT
+        self.pr_jobs = np.zeros(max(self.jcap, 1024), dtype=np.int32)
+        self.pr_evals = np.zeros(2 * max(self.jcap, 1024), dtype=np.int32)
+        self.pricer_keep = keep
+
+    def _grow_pricer_buffers(self):
+        self.pr_jobs = np.zeros(self.jcap, dtype=np.int32); self.pr_evals = np.zeros(2 * self.jcap, dtype=np.int32)
+
     cdef void _execute_jobs(self) noexcept nogil:
         """Every pricing job: a local TPD minimization of its phase from its start at its condition's potentials.
-        (Independent of each other: the part a batched device kernel would do.)"""
-        cdef int j
+        (Independent of each other: the part a batched device kernel does, see set_pricer.)"""
+        cdef int j, n = 0, k
+        cdef void* pp
+        if self.pricer != NULL:
+            if self.pr_jobs.shape[0] < self.nj:
+                with gil:
+                    self._grow_pricer_buffers()
+            for j in range(self.nj):
+                if self.pricer_ok[self.j_phase[j]]:
+                    self.pr_jobs[n] = j; n += 1
+                else:
+                    self.j_conv[j] = (<CPhase>self.pptr[self.j_phase[j]]).price(
+                        &self.t_mu[self.j_cond[j], 0], &self.j_y0[j, 0], &self.j_y[j, 0], &self.j_x[j, 0],
+                        &self.j_G[j], &self.j_tpd[j])
+            if n > 0:
+                self.pricer(n, &self.pr_jobs[0], &self.j_phase[0], &self.j_cond[0], &self.t_mu[0, 0],
+                            &self.j_y0[0, 0], self.Dmax, &self.j_y[0, 0], &self.j_x[0, 0], &self.j_G[0],
+                            &self.j_tpd[0], &self.j_conv[0], &self.pr_evals[0], &self.pr_di[0], &self.pr_dd[0],
+                            &self.pr_ip[0], &self.pr_dp[0], self.C, self.pr_RT, &self.pr_sv[0])
+                self.device_jobs += n
+                for k in range(n):
+                    j = self.pr_jobs[k]; pp = self.pptr[self.j_phase[j]]
+                    (<CPhase>pp).nprice = (<CPhase>pp).nprice + 1
+                    (<CPhase>pp).evals1 = (<CPhase>pp).evals1 + self.pr_evals[2 * j]
+                    (<CPhase>pp).evals2 = (<CPhase>pp).evals2 + self.pr_evals[2 * j + 1]
+            return
         for j in range(self.nj):
             self.j_conv[j] = (<CPhase>self.pptr[self.j_phase[j]]).price(
                 &self.t_mu[self.j_cond[j], 0], &self.j_y0[j, 0], &self.j_y[j, 0], &self.j_x[j, 0], &self.j_G[j],

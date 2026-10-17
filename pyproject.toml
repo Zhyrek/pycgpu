@@ -130,6 +130,7 @@ packages = [
 
 [tool.setuptools.package-data]
 "pycalphad.core" = ["*.pxd"]
+"pycalphad.cg" = ["*.h"]
 "pycalphad.tests.databases" = ["*"]
 
 [tool.pytest.ini_options]

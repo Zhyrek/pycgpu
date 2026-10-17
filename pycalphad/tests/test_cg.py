@@ -68,6 +68,7 @@ def test_batched_pricing_is_bit_identical_to_lockstep(monkeypatch):
     conds = {v.N: 1, v.P: 101325, v.T: 1300, v.X('AL'): list(np.linspace(0.02, 0.5, 40)),
              v.X('CR'): list(np.linspace(0.02, 0.5, 40))}
     out = {}
+    monkeypatch.setattr(solve, 'DEVICE', '')   # (the compiled pricer agrees to rounding, not bit for bit)
     with backend('cg', threads=1):
         for mode in (1, 2):
             monkeypatch.setattr(solve, 'TILE_MODE', mode)
@@ -75,3 +76,52 @@ def test_batched_pricing_is_bit_identical_to_lockstep(monkeypatch):
     for k in ('GM', 'MU', 'NP', 'X', 'Y'):
         np.testing.assert_array_equal(out[1][k].values, out[2][k].values)
     np.testing.assert_array_equal(out[1].Phase.values, out[2].Phase.values)
+
+
+def test_compiled_pricer_matches_cython():
+    "cg_price.h compiled for the host prices like CPhase.price (to rounding) from random starts and potentials."
+    import shutil
+    if not (shutil.which('clang++') or shutil.which('g++')):
+        pytest.skip('no C++ compiler')
+    import ctypes
+    from pycalphad import Database, Workspace, variables as v
+    from importlib.resources import files
+    import pycalphad.tests.databases as dbs
+    from pycalphad.cg.device import HostPricer, describe
+    dbf = Database(str(files(dbs) / 'alni_dupin_2001.tdb'))
+    comps = ['AL', 'NI', 'VA']
+    wks = Workspace(dbf, comps, list(dbf.phases), {v.N: 1, v.P: 101325, v.T: 1200, v.X('AL'): 0.3})
+    prf = wks.phase_record_factory
+    elements = [str(e) for e in prf.nonvacant_elements]
+    phases = solve._phases_for(prf, elements)
+    sv = np.array([1.0, 101325.0, 1200.0])
+    for ph in phases:
+        ph.core.set_state(sv, np.asarray(prf.param_values, dtype=float))
+    pricer = HostPricer(wks, phases, elements)
+    cores = [ph.core for ph in phases]
+    ok, di, dd, ip, dp = describe(cores, pricer.names, pricer.index, pricer.deriv, elements)
+    assert ok.sum() == sum(not ph.stoichiometric for ph in phases)
+    rng = np.random.default_rng(0)
+    RT, C, Dmax = cores[0].RT, len(elements), max(ph.D for ph in phases)
+    P = ctypes.c_void_p
+    for p, ph in enumerate(phases):
+        if not ok[p]:
+            continue
+        n = 20
+        Y0 = np.zeros((n, Dmax)); MU = (-30000 + 20000 * rng.standard_normal((n, C))) / RT
+        for k in range(n):
+            y = rng.random(ph.D) + 1e-3
+            for blk in ph.blocks:
+                y[blk] /= y[blk].sum()
+            Y0[k, :ph.D] = y
+        jobs = np.arange(n, dtype=np.int32); jp = np.full(n, p, dtype=np.int32)
+        yo, xo, Go, to = np.zeros((n, Dmax)), np.zeros((n, C)), np.zeros(n), np.zeros(n)
+        co, ev = np.zeros(n, dtype=np.int32), np.zeros(2 * n, dtype=np.int32)
+        args = [jobs, jp, jobs, MU, Y0, None, yo, xo, Go, to, co, ev, di, dd, ip, dp]
+        pricer.lib.cg_price_batch(ctypes.c_int(n), *[ctypes.c_int(Dmax) if a is None else a.ctypes.data_as(P) for a in args],
+                                  ctypes.c_int(C), ctypes.c_double(RT), sv.ctypes.data_as(P))
+        for k in range(n):
+            tpd, y, x, G, conv = ph.core.py_price(MU[k] * RT, Y0[k, :ph.D])
+            assert abs(tpd / RT - to[k]) < 1e-11
+            np.testing.assert_allclose(yo[k, :ph.D], y, atol=1e-10)
+            assert conv == bool(co[k])

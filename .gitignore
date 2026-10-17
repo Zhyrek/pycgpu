@@ -85,3 +85,4 @@ NOTES_PYCALPHAD_CORE.md
 
 # results fetched by tools/kaggle/launch.py
 kaggle_results/
+!pycalphad/cg/cg_price.h

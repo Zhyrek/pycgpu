@@ -511,6 +511,24 @@ SEQUENCE_STATS = []
 # each halving of the stride, every condition starting from the nearest one solved in an earlier stage (0: one stage,
 # all starting from the first condition)
 TILE_LEVELS = int(_os.environ.get("PYCALPHAD_CG_TILE_LEVELS", "3"))
+# Experimental, with TILE_MODE 2: price the jobs of supported phases with cg_price.h compiled for the system
+# ('host': a C++ library on this machine; see pycalphad.cg.device)
+DEVICE = _os.environ.get("PYCALPHAD_CG_DEVICE", "")
+_PRICERS = OrderedDict()   # (phase keys, elements) -> HostPricer
+_PRICERS_LOCK = __import__('threading').Lock()   # (worker threads of one call reach this together)
+
+
+def _pricer_for(wks, phases, elements):
+    key = (tuple(id(ph) for ph in phases), tuple(elements))
+    with _PRICERS_LOCK:
+        pr = _PRICERS.get(key)
+        if pr is None:
+            from pycalphad.cg.device import HostPricer
+            pr = HostPricer(wks, phases, elements)
+            _PRICERS[key] = pr
+            if len(_PRICERS) > 16:
+                _PRICERS.popitem(last=False)
+    return pr
 
 
 def _tile_stages(idx, levels):
@@ -689,6 +707,10 @@ def solve_workspace(wks):
             args = (np.array([r[0] for r in rows]), np.array([r[1] for r in rows]), np.array([r[2] for r in rows]),
                     np.array([r[3] for r in rows]), seeds)
             w0 = _work(worker) if COLLECT_STATS else None
+            if TILE_MODE == 2 and DEVICE == 'host':
+                _pricer_for(wks, phases, elements).attach(worker.solver, worker.cores, sv_values)
+            elif TILE_MODE == 2:
+                worker.solver.set_pricer(0, None, None, None, None, None, None, 0.0)
             if TILE_MODE:
                 stage, init = _tile_stages([i for i, _ in items], TILE_LEVELS)
                 solve = worker.solver.solve_tile_batched if TILE_MODE == 2 else worker.solver.solve_tile

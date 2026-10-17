@@ -310,25 +310,22 @@ def capture(code, options, verbose=False):
 cupy_module = KM.cuda_raw_module
 KM.cuda_raw_module = capture
 price_h = open(os.path.join(os.path.dirname(S.__file__), 'cg_price.h')).read()
-NOINLINE = ('cg_price', 'cg_sens', 'cg_polish_core', 'cg_gen_jobs', 'cg_add_point')
+tile_h = open(os.path.join(os.path.dirname(S.__file__), 'cg_tile.h')).read()
+MORE = ('cg_build_hessian', 'cg_eigh', 'cg_escape_saddle', 'cg_evaluate', 'cg_lstsq', 'cg_getrf', 'cg_getrs',
+        'cg_consume', 'cg_tile_polish', 'cg_tile_polish_augment', 'cg_polish')
 def variant(src, name):
-    """the tile module's source (as_is) with: the generated model functions inlined into cg_eval (inline), also
-    the solver's big functions out of line (all), without the model code (no_model), or the model code alone
-    (model_only)"""
+    """the tile module's source (as_is) with: the CG_NOINLINE routines inlined (inline), more routines out of line
+    (more), the pricing kernel alone (price_only), the tile's kernels alone (tile_only)"""
     if name == 'inline':
-        src = re.sub(r'(?m)^__device__ __noinline__ (\w+) (pycgpu_model_\d+_)', r'__device__ \1 \2', src)
-    if name == 'all':
-        for f in NOINLINE:
+        src = src.replace('#define CG_NOINLINE __noinline__\n', '#define CG_NOINLINE\n')
+    if name == 'more':
+        for f in MORE:
             src = re.sub(r'CG_DEVICE static (\w+) %s\(' % f, r'CG_DEVICE __noinline__ static \1 %s(' % f, src)
-    if name == 'no_model':
-        a = src.index('#endif\n', src.index('#include <math.h>')) + 7
-        src = src[:a] + src[src.index('#define CG_DEVICE __device__'):]
-        src = re.sub(r'(?m)^    case \d+: .*$', '', src)
-    if name == 'model_only':
-        src = src[:src.index(price_h[:300])]
-        src += ('extern "C" __global__ void cg_eval_kernel(int n, const int* model, double* eg, double* H, const double* x) {\n'
-                '    int i = blockIdx.x * blockDim.x + threadIdx.x;\n'
-                '    if (i < n) cg_eval(model[i], i & 1, eg + i * 64, H + i * 4096, x + i * 64);\n}\n')
+    if name == 'price_only':
+        src = src[:src.index(tile_h[:300])]
+    if name == 'tile_only':
+        a = src.index('extern "C" __global__ void cg_price_kernel(')
+        src = src[:a] + src[src.index('\n}\n', a) + 3:]
     return src
 import tempfile
 is_hip = bool(getattr(cp.cuda.runtime, 'is_hip', False))
@@ -346,17 +343,26 @@ for name in sys.argv[2:]:
         src, options = e.args
     rep = report[name] = {'source_bytes': len(src), 'options': list(options)}
     # VARIANT or VARIANT+OPTION+...: the source variant, compiled with extra options, in an empty kernel cache
-    for var in os.environ.get('CG_COMPILE_VARIANTS', 'as_is,no_model,model_only,all,as_is+-Ofast-compile=max,as_is+--ptxas-options=-O1,inline').split(','):
+    default = ('as_is,inline,more,price_only,tile_only,ptx,as_is+-rdc=true' if name.startswith('alcrni') else
+               'as_is,ptx,more,price_only,tile_only')
+    for var in os.environ.get('CG_COMPILE_VARIANTS', default).split(','):
         t = time.perf_counter()
         try:
             if var == 'cupy':   # (the module as CudaPricer builds it: from CuPy's kernel cache if it holds it)
                 cupy_module(src, options).get_function('cg_dev_lp')
+            elif var == 'ptx':   # (NVRTC to PTX only: the time before the assembler, ptxas)
+                from cupy_backends.cuda.libs import nvrtc
+                prog = nvrtc.createProgram(src, 'tile.cu', [], [])
+                nvrtc.compileProgram(prog, ['-arch=compute_%s' % report['arch']] + list(options))
+                out_ptx = len(nvrtc.getPTX(prog))
             else:
                 base, *extra = var.split('+')
                 os.environ['CUPY_CACHE_DIR'] = tempfile.mkdtemp()
                 m = cp.RawModule(code=variant(src, base), options=tuple(options) + tuple(extra), backend=backend)
-                m.get_function('cg_eval_kernel' if base == 'model_only' else 'cg_dev_lp')
+                m.get_function('cg_price_kernel' if base == 'price_only' else 'cg_dev_lp')
             out = {'seconds': round(time.perf_counter() - t, 1)}
+            if var == 'ptx':
+                out['ptx_bytes'] = out_ptx
         except Exception as e:
             out = {'seconds': round(time.perf_counter() - t, 1), 'error': repr(e)[-1500:]}
         os.environ.pop('CUPY_CACHE_DIR', None)

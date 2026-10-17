@@ -182,11 +182,8 @@ def _source(model_code, index, names, Dmax, C, ns, nmax, target='host', classes=
     sizes = (f'#define CG_DMAX {Dmax}\n#define CG_CMAX {C}\n#define CG_NS {ns}\n#define CG_NMAX {nmax}\n'
              f'#define CG_LANES {LANES}\n')
     if target in ('cuda', 'cuda-tile'):
-        # (each generated function out of line too: inlined, cg_eval is one function of all of them, which the
-        # device compiler takes superlinear time over)
-        model_code = re.sub(r'(?m)^__device__ ', '__device__ __noinline__ ', model_code)
-        parts = [_RTC_PRELUDE, model_code, '#define CG_DEVICE __device__\n#define CG_SYNC() __syncthreads()\n' + sizes,
-                 '\n'.join(disp), header]
+        device = '#define CG_DEVICE __device__\n#define CG_NOINLINE __noinline__\n#define CG_SYNC() __syncthreads()\n'
+        parts = [_RTC_PRELUDE, model_code, device + sizes, '\n'.join(disp), header]
         parts += [_kernels(classes)] if target == 'cuda' else [_kernels(()), _tile_kernels()]
         return '\n'.join(parts)
     compat = (_HERE.parent / 'gpu' / 'cpu_compat.h').read_text()

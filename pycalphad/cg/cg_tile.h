@@ -102,7 +102,7 @@ CG_DEVICE static inline void cg_phase(const CgTile& T, CgPhase& P, int ph) {
 
 // a point of phase ph into condition t's slab unless it duplicates a point it sees (Solver.add_point): its index,
 // or -1
-CG_DEVICE static int cg_add_point(CgTile& T, int t, int ph, const double* y, const double* x, double G) {
+CG_DEVICE CG_NOINLINE static int cg_add_point(CgTile& T, int t, int ph, const double* y, const double* x, double G) {
     if (!CG_ISFINITE(G)) return -1;
     for (int i = 0; i < T.C; ++i) if (!CG_ISFINITE(x[i])) return -1;
     CgPhase P; cg_phase(T, P, ph);
@@ -142,7 +142,7 @@ CG_DEVICE static inline int cg_tile_job_bound(const CgTile& T, int with_seeds) {
 // skip rule; the best stored point, the LP solution's points of the phase, the best of other ordering patterns,
 // a composition start in a first round; with use_seeds, also the seeds (stored if new even when above the plane)
 template <class WT>
-CG_DEVICE static void cg_gen_jobs(CgTile& T, int t, int rounds, int use_seeds, WT& W) {
+CG_DEVICE CG_NOINLINE static void cg_gen_jobs(CgTile& T, int t, int rounds, int use_seeds, WT& W) {
     const int C = T.C, K = T.K;
     const double* mu = T.mu + (long)t * C;
     long long codes[64]; int code_pt[64]; double code_tpd[64];

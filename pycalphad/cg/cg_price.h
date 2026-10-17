@@ -14,6 +14,12 @@
 // (eg = [G, dG/dv], H row-major d2G/dv2 over the model's derivative variables v; G per formula unit).
 #pragma once
 
+// the big shared routines are out of line on a device (CG_NOINLINE: __noinline__): inlined into each kernel and
+// call site, the device compiler takes several times longer
+#ifndef CG_NOINLINE
+#define CG_NOINLINE
+#endif
+
 #define CG_Y_FLOOR 1e-14
 #if defined(__CUDACC__) || defined(__HIPCC__) || defined(__CUDACC_RTC__) || defined(__HIPCC_RTC__)
 #define CG_ISFINITE(v) isfinite(v)
@@ -369,7 +375,7 @@ CG_DEVICE static int cg_newton_direction(const CgPhase& P, WT& W, int m) {
 
 // minimize the TPD (mu in RT units) of phase P from y0 (see CPhase.price); returns 1 at a stationary point
 template <class WT>
-CG_DEVICE static int cg_price(const CgPhase& P, WT& W, const double* sv, const double* mu, const double* y0,
+CG_DEVICE CG_NOINLINE static int cg_price(const CgPhase& P, WT& W, const double* sv, const double* mu, const double* y0,
                               double* y_out, double* x_out, double* G_out, double* tpd_out) {
     const int D = P.D, C = P.C;
     W.last_indef = 0; W.evals1 = 0; W.evals2 = 0;
@@ -443,7 +449,7 @@ CG_DEVICE static int cg_price(const CgPhase& P, WT& W, const double* sv, const d
 // after cg_price: S = dx/dmu (C x C, row-major, mu in RT units) at the minimum = B H^-1 B^T over the free
 // variables (see CPhase.sens_full, unconstrained). 0, or -1 if the Hessian there is not positive definite
 template <class WT>
-CG_DEVICE static int cg_sens(const CgPhase& P, WT& W, double* S, double* Bm, double* Wm) {
+CG_DEVICE CG_NOINLINE static int cg_sens(const CgPhase& P, WT& W, double* S, double* Bm, double* Wm) {
     const int C = P.C;
     for (int i = 0; i < C * C; ++i) S[i] = 0.0;
     for (int j = 0; j < P.D; ++j) W.gl[j] = W.gy[j];

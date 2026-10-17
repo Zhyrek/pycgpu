@@ -295,7 +295,7 @@ struct CgPolish {
 // Newton from the state in pol_* (na points); see Solver._polish_core. Returns 1 if it converged (pol_na points,
 // pol_mu), else 0 with polish_fail set
 template <class WT>
-CG_DEVICE static int cg_polish_core(CgPolish& S, int na, int max_it, int allow_drop, WT& W) {
+CG_DEVICE CG_NOINLINE static int cg_polish_core(CgPolish& S, int na, int max_it, int allow_drop, WT& W) {
     const int C = S.C, K = S.K, Dm = S.Dm;
     double* py = S.pol_y; double* px = S.pol_x; double* pS = S.pol_S; double* pJ = S.pol_J; double* pF = S.pol_F;
     double last_res = INFINITY;

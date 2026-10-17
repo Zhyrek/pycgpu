@@ -545,3 +545,51 @@ def test_calculate_dof_state_variable_width_matches_phase_record(load_database):
     # Leading dims are the supplied state variables (N, T); trailing dim is 'points'.
     n_statevar_dims = res.GM.values.ndim - 1
     assert n_statevar_dims == prf["LIQUID"].num_statevars == len(prf.state_variables)
+
+
+@select_database("alcrni.tdb")
+def test_endmember_pair_lines_do_not_repeat_endmembers(load_database):
+    "Points on the lines between endmember pairs are the interior points only; endmembers appear once."
+    from pycalphad.core.calculate import _sample_phase_constitution
+    from pycalphad.core.utils import point_sample, endmember_matrix
+    dbf = load_database()
+    mod = Model(dbf, ['AL', 'CR', 'NI', 'VA'], 'L12_FCC')
+    num_endmembers = endmember_matrix([3, 3]).shape[0]
+    num_pairs = num_endmembers * (num_endmembers - 1) // 2
+    num_random = point_sample([3, 3], pdof=60).shape[0]
+    points = _sample_phase_constitution(mod, point_sample, True, 60, {})
+    assert points.shape[0] == num_endmembers + num_pairs * (60 - 2) + num_random
+    fixed = points[:num_endmembers + num_pairs * (60 - 2)]
+    assert np.unique(fixed.round(12), axis=0).shape[0] == fixed.shape[0]
+
+
+@select_database("alcrni.tdb")
+def test_pair_pdens_independent_of_pdens(load_database):
+    "pair_pdens sets the number of points per endmember pair line; pdens still sets the random points."
+    from pycalphad.core.calculate import _sample_phase_constitution
+    from pycalphad.core.utils import point_sample, endmember_matrix
+    dbf = load_database()
+    mod = Model(dbf, ['AL', 'CR', 'NI', 'VA'], 'L12_FCC')
+    num_endmembers = endmember_matrix([3, 3]).shape[0]
+    num_pairs = num_endmembers * (num_endmembers - 1) // 2
+    for pdens, pair_pdens in [(60, 2), (60, 15), (20, 100)]:
+        points = _sample_phase_constitution(mod, point_sample, True, pdens, {}, pair_pdens)
+        num_random = point_sample([3, 3], pdof=pdens).shape[0]
+        assert points.shape[0] == num_endmembers + num_pairs * (pair_pdens - 2) + num_random
+    # Through calculate(), as a dict per phase
+    res = calculate(dbf, ['AL', 'CR', 'NI', 'VA'], ['L12_FCC', 'LIQUID'], T=1300, P=101325, N=1,
+                    pdens=60, pair_pdens={'L12_FCC': 15}, to_xarray=False)
+    num_l12 = res.attrs['phase_indices']['L12_FCC']
+    assert num_l12.stop - num_l12.start == num_endmembers + num_pairs * 13 + point_sample([3, 3], pdof=60).shape[0]
+
+
+@select_database("alni_dupin_2001.tdb")
+def test_equilibrium_pair_pdens_calc_opt(load_database):
+    "pair_pdens passes through calc_opts and gives the same equilibrium on a simple Al-Ni section."
+    from pycalphad import equilibrium
+    dbf = load_database()
+    conds = {v.T: 1400, v.P: 101325, v.N: 1, v.X('AL'): [0.1, 0.25, 0.4, 0.6]}
+    phases = ['LIQUID', 'FCC_L12', 'BCC_B2', 'AL3NI2']
+    default = equilibrium(dbf, ['AL', 'NI', 'VA'], phases, conds)
+    coarse = equilibrium(dbf, ['AL', 'NI', 'VA'], phases, conds, calc_opts={'pair_pdens': 15})
+    assert_allclose(coarse.GM.values, default.GM.values, atol=1e-3)

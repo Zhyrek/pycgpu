@@ -8,7 +8,7 @@ to the output directory (/kaggle/working on Kaggle): env.txt, install.log, cg_pr
 With --bench tile (launch.py push ... -- --bench tile): whole tiles in compiled code (PYCALPHAD_CG_TILE=3) by the
 host driver (cg_tile_host.h, one core) and by the device driver (cg_tile_device.h's kernels, DEVICE 'cuda'):
 phase sets and GM against the host driver's, wall time per tile and per kernel step; into cg_tile.json.
-With --bench compile: nvcc's time for the tile's module (and variants of its source), into cg_compile.json;
+With --bench compile: the compile time of the tile's module (and of variants of its source), into cg_compile.json;
 --bench cache: the module as CuPy builds it in a new process (cg_cache.json). Several, in turn: --bench tile,cache.
 
 Elsewhere (a machine with an NVIDIA or ROCm GPU): python run_cg_pricing.py --out results/ [--repo-dir checkout/]
@@ -330,11 +330,11 @@ def variant(src, name):
                 '    int i = blockIdx.x * blockDim.x + threadIdx.x;\n'
                 '    if (i < n) cg_eval(model[i], i & 1, eg + i * 64, H + i * 4096, x + i * 64);\n}\n')
     return src
-cc = cp.cuda.Device().compute_capability
-nvcc = cp.cuda.get_nvcc_path() if hasattr(cp.cuda, 'get_nvcc_path') else 'nvcc'
-report = {'nvcc': subprocess.run([nvcc, '--version'], capture_output=True, text=True).stdout.strip().splitlines()[-1],
-          'arch': f'sm_{cc}', 'cupy': cp.__version__, 'cupy_cache_dir': os.environ.get('CUPY_CACHE_DIR', '~/.cupy/kernel_cache')}
-work = os.path.abspath('compile_work'); os.makedirs(work, exist_ok=True)
+import tempfile
+is_hip = bool(getattr(cp.cuda.runtime, 'is_hip', False))
+backend = 'nvcc' if KM._cupy_offline_compiler(cp, is_hip) else 'nvrtc'
+report = {'backend': backend, 'nvrtc': list(cp.cuda.nvrtc.getVersion()), 'cupy': cp.__version__,
+          'arch': cp.cuda.Device().compute_capability}
 for name in sys.argv[2:]:
     db, comps, c = CASES[name]
     dbf = Database(str(files(dbs) / db)); phases = filter_phases(dbf, unpack_species(dbf, comps))
@@ -344,31 +344,24 @@ for name in sys.argv[2:]:
         raise RuntimeError('the tile module was not compiled')
     except Captured as e:
         src, options = e.args
-    rep = {'source_bytes': len(src), 'options': list(options)}
-    for var in os.environ.get('CG_COMPILE_VARIANTS', 'as_is,all,no_model,model_only,inline').split(','):
-        if var == 'cupy':   # (the module as CudaPricer builds it: from CuPy's kernel cache if it holds it)
-            t = time.perf_counter()
-            cupy_module(src, options).get_function('cg_dev_lp')
-            rep[var] = {'seconds': round(time.perf_counter() - t, 2)}
-            print(name, var, rep[var], flush=True)
-            continue
-        vs = variant(src, var)
-        path = os.path.join(work, f'{name}_{var}.cu')
-        open(path, 'w').write(vs)
-        cmd = [nvcc, '--cubin', f'-arch=sm_{cc}', *options, '--time', path + '.time.csv', '-o', path + '.cubin', path]
+    rep = report[name] = {'source_bytes': len(src), 'options': list(options)}
+    # VARIANT or VARIANT+OPTION+...: the source variant, compiled with extra options, in an empty kernel cache
+    for var in os.environ.get('CG_COMPILE_VARIANTS', 'as_is,no_model,model_only,all,as_is+-Ofast-compile=max,as_is+--ptxas-options=-O1,inline').split(','):
         t = time.perf_counter()
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=1500)
-            out = {'seconds': round(time.perf_counter() - t, 1), 'rc': r.returncode, 'stderr': r.stderr[-1500:]}
-        except subprocess.TimeoutExpired:
-            out = {'seconds': 'timeout 1500'}
-        if os.path.exists(path + '.time.csv'):
-            out['phases'] = open(path + '.time.csv').read()[-3000:]
-        if os.path.exists(path + '.cubin'):
-            out['cubin_bytes'] = os.path.getsize(path + '.cubin')
+            if var == 'cupy':   # (the module as CudaPricer builds it: from CuPy's kernel cache if it holds it)
+                cupy_module(src, options).get_function('cg_dev_lp')
+            else:
+                base, *extra = var.split('+')
+                os.environ['CUPY_CACHE_DIR'] = tempfile.mkdtemp()
+                m = cp.RawModule(code=variant(src, base), options=tuple(options) + tuple(extra), backend=backend)
+                m.get_function('cg_eval_kernel' if base == 'model_only' else 'cg_dev_lp')
+            out = {'seconds': round(time.perf_counter() - t, 1)}
+        except Exception as e:
+            out = {'seconds': round(time.perf_counter() - t, 1), 'error': repr(e)[-1500:]}
+        os.environ.pop('CUPY_CACHE_DIR', None)
         rep[var] = out
         print(name, var, json.dumps(out)[:600], flush=True)
-        report[name] = rep
         json.dump(report, open(sys.argv[1], 'w'), indent=1)
 json.dump(report, open(sys.argv[1], 'w'), indent=1)
 '''
@@ -384,8 +377,8 @@ def main():
     parser.add_argument('--devices', default=',host,cuda', help="pricers to compare ('' = Cython)")
     parser.add_argument('--bench', default='pricing',
                         help="comma-separated, run in turn: 'pricing' (the pricing kernel in the Cython tile), 'tile' "
-                             "(whole tiles on the device), 'compile' (nvcc's time for the tile's module and variants "
-                             "of its source), 'cache' (the tile's module as CuPy builds it, in a new process: from its "
+                             "(whole tiles on the device), 'compile' (the compile time of the tile's module and "
+                             "variants of its source), 'cache' (the tile's module as CuPy builds it, in a new process: from its "
                              "kernel cache after 'tile')")
     parser.add_argument('--no-fmad', action='store_true', help='kernels without fused multiply-adds')
     args = parser.parse_args(KAGGLE_ARGS if ON_KAGGLE else None)

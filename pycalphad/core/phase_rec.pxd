@@ -7,13 +7,14 @@ from libcpp.string cimport string
 import numpy
 cimport numpy
 
-ctypedef void (*math_function_t)(double*, const double*, void* user_data) nogil
+ctypedef void (*math_function_t)(double*, const double*, void* user_data) noexcept nogil
 
 cdef class FastFunction:
     cdef readonly object _objref
     cdef math_function_t f_ptr
     cdef void *func_data
-    cdef void call(self, double *out, double *inp) nogil
+    cdef readonly bint reentrant
+    cdef void call(self, double *out, double *inp) noexcept nogil
 
 cdef class FastFunctionFactory:
     cdef object phase_record_factory
@@ -22,6 +23,7 @@ cdef class FastFunctionFactory:
     cdef map[pair[string, string], int] _cache_property_map
     cdef int _cache_cur_idx
     cdef void** _cache_ptr
+    cdef int _cache_insert(self, pair[string, string] cache_key, FastFunction func) except -1
     cdef void* get_func(self, string property_name) except * nogil
     cdef void* get_grad(self, string property_name) except * nogil
     cdef void* get_hess(self, string property_name) except * nogil
@@ -66,6 +68,20 @@ cdef public class PhaseRecord(object)[type PhaseRecordType, object PhaseRecordOb
     cdef public int phase_dof
     cdef public int num_statevars
     cdef public unicode phase_name 
+    cdef bint _solver_functions_ready
+    cdef bint _solver_functions_reentrant
+    cdef bint prepare_solver_functions(self) except -1
+    cdef void call_function(self, FastFunction func, double* out, double* dof) noexcept nogil
+    cdef void solver_obj(self, double* out, double* dof) noexcept nogil
+    cdef void solver_formulaobj(self, double* out, double* dof) noexcept nogil
+    cdef void solver_formulagrad(self, double* out, double* dof) noexcept nogil
+    cdef void solver_formulahess(self, double* out, double* dof) noexcept nogil
+    cdef void solver_internal_cons_func(self, double* out, double* dof) noexcept nogil
+    cdef void solver_internal_cons_jac(self, double* out, double* dof) noexcept nogil
+    cdef void solver_mass_obj(self, double* out, double* dof, int comp_idx) noexcept nogil
+    cdef void solver_formulamole_obj(self, double* out, double* dof, int comp_idx) noexcept nogil
+    cdef void solver_formulamole_grad(self, double* out, double* dof, int comp_idx) noexcept nogil
+    cdef void solver_formulamole_hess(self, double* out, double* dof, int comp_idx) noexcept nogil
     cpdef void prop(self, double[::1] out, double[::1] dof, string property_name) except * nogil
     cpdef void prop_2d(self, double[::1] out, double[:, ::1] dof, string property_name) except * nogil
     cpdef void prop_parameters_2d(self, double[:, ::1] out, double[:, ::1] dof,

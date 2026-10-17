@@ -10,6 +10,11 @@ import numpy as np
 cimport numpy as np
 import pycalphad.variables as v
 import ctypes
+try:
+    # Functions compiled to machine code by LLVM keep no state between calls
+    from symengine.lib.symengine_wrapper import _LLVMLambdify as _ReentrantLambdify
+except ImportError:
+    _ReentrantLambdify = ()
 
 cdef class FastFunction:
     """``FastFunction`` provides a stable(-ish) interface that encapsulates SymEngine function pointers.
@@ -18,17 +23,22 @@ cdef class FastFunction:
         if func is None:
             self.f_ptr = NULL
             self.func_data = NULL
+            self.reentrant = True
             return
         if isinstance(func, FastFunction):
             func = func._objref
         # Preserve reference to object to prevent garbage collection
         self._objref = func
+        # SymEngine's interpreted (lambda) backend writes common subexpressions
+        # to the function object during a call, so it must not be called
+        # concurrently from several threads
+        self.reentrant = isinstance(func, _ReentrantLambdify)
         addr1, addr2 = func.as_ctypes()
         self.f_ptr = (<math_function_t*><size_t>ctypes.addressof(addr1))[0]
         self.func_data =  (<void**><size_t>ctypes.addressof(addr2))[0]
     def __reduce__(self):
         return FastFunction, (self._objref,)
-    cdef void call(self, double *out, double *inp) nogil:
+    cdef void call(self, double *out, double *inp) noexcept nogil:
         if self.f_ptr != NULL:
             self.f_ptr(out, inp, self.func_data)
 
@@ -41,17 +51,24 @@ cdef class FastFunctionFactory:
         self._cache_ptr = <void**> self._cache.data
         self._cache_cur_idx = -1
 
+    cdef int _cache_insert(self, pair[string, string] cache_key, FastFunction func) except -1:
+        # Building func runs Python code, during which another thread may have added the same function
+        if self._cache_property_map.find(cache_key) != self._cache_property_map.end():
+            return 0
+        self._cache_cur_idx += 1
+        if self._cache_cur_idx > self._cache.shape[0]:
+            raise ValueError('Cache error')
+        self._cache[self._cache_cur_idx] = func
+        self._cache_property_map[cache_key] = self._cache_cur_idx
+        return 0
+
     cdef void* get_func(self, string property_name) except * nogil:
         cdef pair[string, string] cache_key = pair[string, string](string(<char*>'func'), property_name)
         cdef map[pair[string, string], int].iterator it
         it = self._cache_property_map.find(cache_key)
         if it == self._cache_property_map.end():
             with gil:
-                self._cache_cur_idx += 1
-                if self._cache_cur_idx > self._cache.shape[0]:
-                    raise ValueError('Cache error')
-                self._cache[self._cache_cur_idx] = FastFunction(self.phase_record_factory.get_phase_property(self.phase_name, (<bytes>property_name).decode('utf-8'), include_grad=False, include_hess=False).func)
-                self._cache_property_map[cache_key] = self._cache_cur_idx
+                self._cache_insert(cache_key, FastFunction(self.phase_record_factory.get_phase_property(self.phase_name, (<bytes>property_name).decode('utf-8'), include_grad=False, include_hess=False).func))
             it = self._cache_property_map.find(cache_key)
         return <void*>self._cache_ptr[deref(it).second]
 
@@ -61,11 +78,7 @@ cdef class FastFunctionFactory:
         it = self._cache_property_map.find(cache_key)
         if it == self._cache_property_map.end():
             with gil:
-                self._cache_cur_idx += 1
-                if self._cache_cur_idx > self._cache.shape[0]:
-                    raise ValueError('Cache error')
-                self._cache[self._cache_cur_idx] = FastFunction(self.phase_record_factory.get_phase_property(self.phase_name, (<bytes>property_name).decode('utf-8'), include_grad=True, include_hess=False).grad)
-                self._cache_property_map[cache_key] = self._cache_cur_idx
+                self._cache_insert(cache_key, FastFunction(self.phase_record_factory.get_phase_property(self.phase_name, (<bytes>property_name).decode('utf-8'), include_grad=True, include_hess=False).grad))
             it = self._cache_property_map.find(cache_key)
         return <void*>self._cache_ptr[deref(it).second]
 
@@ -75,11 +88,7 @@ cdef class FastFunctionFactory:
         it = self._cache_property_map.find(cache_key)
         if it == self._cache_property_map.end():
             with gil:
-                self._cache_cur_idx += 1
-                if self._cache_cur_idx > self._cache.shape[0]:
-                    raise ValueError('Cache error')
-                self._cache[self._cache_cur_idx] = FastFunction(self.phase_record_factory.get_phase_property(self.phase_name, (<bytes>property_name).decode('utf-8'), include_grad=False, include_hess=True).hess)
-                self._cache_property_map[cache_key] = self._cache_cur_idx
+                self._cache_insert(cache_key, FastFunction(self.phase_record_factory.get_phase_property(self.phase_name, (<bytes>property_name).decode('utf-8'), include_grad=False, include_hess=True).hess))
             it = self._cache_property_map.find(cache_key)
         return <void*>self._cache_ptr[deref(it).second]
 
@@ -393,3 +402,84 @@ cdef public class PhaseRecord(object)[type PhaseRecordType, object PhaseRecordOb
         if self.parameters.shape[0] > 0:
             free(dof_concat)
 
+    cdef bint prepare_solver_functions(self) except -1:
+        """
+        Look up the functions the minimizer calls, so that the solver_* methods can be called without the GIL.
+        Returns True if all of them can be called concurrently from several threads.
+        """
+        cdef FastFunction obj, formulaobj, formulagrad, formulahess
+        cdef bint reentrant
+        cdef int el_idx
+        if self._solver_functions_ready:
+            return self._solver_functions_reentrant
+        obj = <FastFunction>self.function_factory.get_func(<char*>'GM')
+        formulaobj = <FastFunction>self.function_factory.get_func(<char*>'G')
+        formulagrad = <FastFunction>self.function_factory.get_grad(<char*>'G')
+        formulahess = <FastFunction>self.function_factory.get_hess(<char*>'G')
+        reentrant = (obj.reentrant and formulaobj.reentrant and formulagrad.reentrant and formulahess.reentrant and
+                     self._internal_cons_func.reentrant and self._internal_cons_jac.reentrant)
+        for el_idx in range(len(self.nonvacant_elements)):
+            reentrant = (reentrant and (<FastFunction>self._masses_ptr[el_idx]).reentrant and
+                         (<FastFunction>self._formulamoles_ptr[el_idx]).reentrant and
+                         (<FastFunction>self._formulamolegrads_ptr[el_idx]).reentrant and
+                         (<FastFunction>self._formulamolehessians_ptr[el_idx]).reentrant)
+        # Building functions runs Python code, during which another thread may have finished this
+        if not self._solver_functions_ready:
+            self._obj = obj
+            self._formulaobj = formulaobj
+            self._formulagrad = formulagrad
+            self._formulahess = formulahess
+            self._solver_functions_reentrant = reentrant
+            self._solver_functions_ready = True
+        return self._solver_functions_reentrant
+
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    cdef void call_function(self, FastFunction func, double* out, double* dof) noexcept nogil:
+        """Call func with dof (num_statevars+phase_dof values), followed by the parameters."""
+        cdef int j
+        cdef int num_dof = self.num_statevars + self.phase_dof
+        cdef int num_params = self.parameters.shape[0]
+        cdef double* dof_concat
+        if num_params == 0:
+            func.call(out, dof)
+            return
+        dof_concat = <double *> malloc((num_dof + num_params) * sizeof(double))
+        for j in range(num_dof):
+            dof_concat[j] = dof[j]
+        for j in range(num_params):
+            dof_concat[num_dof + j] = self.parameters[j]
+        func.call(out, dof_concat)
+        free(dof_concat)
+
+    # The solver_* methods require prepare_solver_functions() to have been called
+
+    cdef void solver_obj(self, double* out, double* dof) noexcept nogil:
+        self.call_function(self._obj, out, dof)
+
+    cdef void solver_formulaobj(self, double* out, double* dof) noexcept nogil:
+        self.call_function(self._formulaobj, out, dof)
+
+    cdef void solver_formulagrad(self, double* out, double* dof) noexcept nogil:
+        self.call_function(self._formulagrad, out, dof)
+
+    cdef void solver_formulahess(self, double* out, double* dof) noexcept nogil:
+        self.call_function(self._formulahess, out, dof)
+
+    cdef void solver_internal_cons_func(self, double* out, double* dof) noexcept nogil:
+        self.call_function(self._internal_cons_func, out, dof)
+
+    cdef void solver_internal_cons_jac(self, double* out, double* dof) noexcept nogil:
+        self.call_function(self._internal_cons_jac, out, dof)
+
+    cdef void solver_mass_obj(self, double* out, double* dof, int comp_idx) noexcept nogil:
+        self.call_function(<FastFunction>self._masses_ptr[comp_idx], out, dof)
+
+    cdef void solver_formulamole_obj(self, double* out, double* dof, int comp_idx) noexcept nogil:
+        self.call_function(<FastFunction>self._formulamoles_ptr[comp_idx], out, dof)
+
+    cdef void solver_formulamole_grad(self, double* out, double* dof, int comp_idx) noexcept nogil:
+        self.call_function(<FastFunction>self._formulamolegrads_ptr[comp_idx], out, dof)
+
+    cdef void solver_formulamole_hess(self, double* out, double* dof, int comp_idx) noexcept nogil:
+        self.call_function(<FastFunction>self._formulamolehessians_ptr[comp_idx], out, dof)

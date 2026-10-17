@@ -17,9 +17,19 @@ cdef class SystemState:
     cdef double[::1] _driving_forces
     cdef double[:, ::1] _phase_energies_per_mole_atoms
     cdef double[:, :, ::1] _phase_amounts_per_mole_atoms
+    # Bound by _prepare, for the solver functions that run without the GIL
+    cdef int num_compsets
+    cdef object _cs_state_refs
+    cdef void** _cs_state_ptrs
+    cdef int[::1] _phase_ids
+    cdef int[::1] _free_stable_buffer, _new_free_stable_buffer, _remove_flags, _add_flags
+    cdef double[::1] _equilibrium_matrix, _equilibrium_soln
+    cdef bint _buffers_ready
+    cdef bint _prepare(self, SystemSpecification spec) except -1
     cpdef void recompute(self, SystemSpecification spec)
-    cdef double[::1] driving_forces(self)
-    cdef void increment_phase_metastability_counters(self)
+    cdef int _recompute(self, SystemSpecification spec) except -1 nogil
+    cdef int compute_driving_forces(self) except -1 nogil
+    cdef void increment_phase_metastability_counters(self) noexcept nogil
 
 cdef class SystemSpecification:
     cdef int num_statevars, num_components, max_num_free_stable_phases
@@ -32,7 +42,9 @@ cdef class SystemSpecification:
     cdef int[::1] fixed_chemical_potential_indices, fixed_statevar_indices, fixed_stable_compset_indices
     cdef bint debugging_output
     cpdef bint check_convergence(self, SystemState state)
+    cdef int _check_convergence(self, SystemState state) except -1 nogil
     cpdef bint pre_solve_hook(self, SystemState state)
     cpdef bint post_solve_hook(self, SystemState state)
     cpdef bint run_loop(self, SystemState state, int max_iterations)
+    cdef int _run_loop(self, SystemState state, int max_iterations, bint use_overrides) except -1 nogil
     cpdef SystemState get_new_state(self, list compsets)

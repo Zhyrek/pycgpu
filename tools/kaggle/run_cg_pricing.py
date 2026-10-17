@@ -127,6 +127,7 @@ import ctypes
 host = [p for (d, *_), p in S._PRICERS.items() if d == 'host'][-1]
 cuda = [p for (d, *_), p in S._PRICERS.items() if d == 'cuda'][-1]
 diffs = {'tpd': 0.0, 'y': 0.0, 'conv': 0, 'jobs': 0}
+biggest = {}
 def both(jobs, job_phase, job_cond, mu, y0, y, x, G, tpd, conv, evals):
     P = ctypes.c_void_p
     hy, hx, hG, ht = y.copy(), x.copy(), G.copy(), tpd.copy(); hc, he = conv.copy(), evals.copy()
@@ -135,6 +136,9 @@ def both(jobs, job_phase, job_cond, mu, y0, y, x, G, tpd, conv, evals):
                   ctypes.c_int(y0.shape[1]), *[a.ctypes.data_as(P) for a in (hy, hx, hG, ht, hc, he, di, dd, ip, dp)],
                   ctypes.c_int(mu.shape[1]), ctypes.c_double(cuda.RT), host._sv.ctypes.data_as(P))
     cuda.price(jobs, job_phase, job_cond, mu, y0, y, x, G, tpd, conv, evals)
+    if len(jobs) > len(biggest.get('jobs', ())):
+        biggest.update(jobs=np.array(jobs), jp=job_phase[jobs].copy(), jc=job_cond[jobs].copy(), mu=mu.copy(),
+                       y0=y0[jobs].copy())
     fin = np.isfinite(ht[jobs]) & np.isfinite(tpd[jobs])
     diffs['tpd'] = max(diffs['tpd'], float(np.max(np.abs(ht[jobs] - tpd[jobs])[fin], initial=0)))
     diffs['y'] = max(diffs['y'], float(np.nanmax(np.abs(hy[jobs] - y[jobs]), initial=0)))
@@ -152,6 +156,45 @@ dbf = Database(str(files(dbs) / db)); phases = filter_phases(dbf, unpack_species
 equilibrium(dbf, comps, phases, {v.N: 1, v.P: 101325, **c})
 report['kernel_vs_host_jobs'] = diffs
 print('kernel vs host, job by job:', diffs, flush=True)
+
+# divergence: the largest batch replayed on the device in condition order (warps mix phases, as a kernel running
+# a whole condition per thread would) and sorted by phase (each warp runs one phase's code); several block sizes
+import cupy as cp
+b = biggest; n = len(b['jobs'])
+C, ys = b['mu'].shape[1], b['y0'].shape[1]
+di, dd, ip, dp = cuda.d_desc
+def replay(order, block, reps=3):
+    jp = cp.asarray(b['jp'][order]); jc = cp.asarray(b['jc'][order]); d_mu = cp.asarray(b['mu']); d_y0 = cp.asarray(b['y0'][order])
+    d_y = cp.zeros((n, ys)); d_x = cp.zeros((n, C)); d_G = cp.zeros(n); d_t = cp.zeros(n)
+    d_c = cp.zeros(n, dtype=cp.int32); d_e = cp.zeros(2 * n, dtype=cp.int32); ident = cp.arange(n, dtype=cp.int32)
+    best = None
+    for _ in range(reps):
+        s_, e_ = cp.cuda.Event(), cp.cuda.Event(); s_.record()
+        cuda.kernel(((n + block - 1) // block,), (block,), (np.int32(n), ident, jp, jc, d_mu, d_y0, np.int32(ys), d_y, d_x,
+                    d_G, d_t, d_c, d_e, di, dd, ip, dp, np.int32(C), np.float64(cuda.RT), cuda.d_sv))
+        e_.record(); e_.synchronize()
+        ms = cp.cuda.get_elapsed_time(s_, e_); best = ms if best is None else min(best, ms)
+    return best / 1e3, d_e.get()
+div = {'jobs': n}
+by_phase = np.argsort(b['jp'], kind='stable')
+for block in (32, 64, 128, 256):
+    for lab, order in (('condition_order', np.arange(n)), ('sorted_by_phase', by_phase)):
+        try:
+            sec, ev = replay(order, block)
+            div[f'{lab}_block{block}_s'] = round(sec, 4)
+        except Exception as e:
+            div[f'{lab}_block{block}_s'] = repr(e)[:200]
+div['evals_per_job'] = [float(ev[0::2].mean()), float(ev[1::2].mean())]
+# the same batch on one host core (the library)
+P = ctypes.c_void_p
+hy = np.zeros((n, ys)); hx = np.zeros((n, C)); hG = np.zeros(n); ht = np.zeros(n); hc = np.zeros(n, dtype=np.int32); he = np.zeros(2 * n, dtype=np.int32)
+hdi, hdd, hip, hdp = host._desc; ident = np.arange(n, dtype=np.int32)
+t = time.perf_counter()
+host.function(ctypes.c_int(n), *[np.ascontiguousarray(a).ctypes.data_as(P) for a in (ident, b['jp'], b['jc'], b['mu'], b['y0'])], ctypes.c_int(ys),
+              *[a.ctypes.data_as(P) for a in (hy, hx, hG, ht, hc, he, hdi, hdd, hip, hdp)], ctypes.c_int(C), ctypes.c_double(cuda.RT), host._sv.ctypes.data_as(P))
+div['host_one_core_s'] = round(time.perf_counter() - t, 4)
+report['divergence'] = div
+print('divergence:', div, flush=True)
 json.dump(report, open(sys.argv[1], 'w'), indent=1)
 '''
 

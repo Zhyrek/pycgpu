@@ -15,6 +15,12 @@
 #pragma once
 
 #define CG_Y_FLOOR 1e-14
+#if defined(__CUDACC__) || defined(__HIPCC__) || defined(__CUDACC_RTC__) || defined(__HIPCC_RTC__)
+#define CG_ISFINITE(v) isfinite(v)
+#else
+#include <cmath>
+#define CG_ISFINITE(v) std::isfinite(v)   // (g++'s <cmath> has no global isfinite)
+#endif
 
 // Phase description: integers (desc_i) and doubles (desc_d) per phase; offsets index the int / double pools
 enum {
@@ -327,7 +333,7 @@ CG_DEVICE static int cg_escape_saddle(const CgPhase& P, CgWork& W, double* f) {
         for (int sgn = 0; sgn < 2; ++sgn) {
             for (int p = 0; p < D; ++p) W.zt[p] = W.z[p] + (sgn == 0 ? t : -t) * W.d[p];
             double ft = cg_fgz(P, W, W.zt, W.yt, W.gzt, W.gyt);
-            if (isfinite(ft) && ft < best - 1e-12) {
+            if (CG_ISFINITE(ft) && ft < best - 1e-12) {
                 for (int p = 0; p < D; ++p) { W.z[p] = W.zt[p]; W.y[p] = W.yt[p]; W.gz[p] = W.gzt[p]; W.gy[p] = W.gyt[p]; }
                 *f = ft;
                 return 1;
@@ -384,7 +390,7 @@ CG_DEVICE static int cg_price(const CgPhase& P, CgWork& W, const double* sv, con
         for (int ls = 0; ls < 30; ++ls) {
             for (int j = 0; j < D; ++j) W.zt[j] = W.z[j] + step * W.d[j];
             ft = cg_fgz(P, W, W.zt, W.yt, W.gzt, W.gyt);
-            if (isfinite(ft) && ft <= f + 1e-4 * step * (slope < 0 ? slope : 0.0) + 1e-12) { accepted = 1; break; }
+            if (CG_ISFINITE(ft) && ft <= f + 1e-4 * step * (slope < 0 ? slope : 0.0) + 1e-12) { accepted = 1; break; }
             step *= 0.5;
         }
         if (!accepted) { f = cg_fgz(P, W, W.z, W.y, W.gz, W.gy); break; }
@@ -394,13 +400,13 @@ CG_DEVICE static int cg_price(const CgPhase& P, CgWork& W, const double* sv, con
     // steepest-descent clean-up if Newton stalled
     double gnorm = cg_gznorm(P, W);
     int it = 0;
-    while (cg_kkt(P, W) >= 1e-7 && it < 200 && isfinite(gnorm)) {
+    while (cg_kkt(P, W) >= 1e-7 && it < 200 && CG_ISFINITE(gnorm)) {
         double step = 1.0 / (gnorm > 1.0 ? gnorm : 1.0), ft = 0.0;
         int accepted = 0;
         for (int ls = 0; ls < 40; ++ls) {
             for (int j = 0; j < D; ++j) W.zt[j] = W.z[j] - step * W.gz[j];
             ft = cg_fgz(P, W, W.zt, W.yt, W.gzt, W.gyt);
-            if (isfinite(ft) && ft <= f - 1e-4 * step * gnorm * gnorm) { accepted = 1; break; }
+            if (CG_ISFINITE(ft) && ft <= f - 1e-4 * step * gnorm * gnorm) { accepted = 1; break; }
             step *= 0.5;
         }
         if (!accepted) break;

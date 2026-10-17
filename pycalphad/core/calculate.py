@@ -20,6 +20,7 @@ from pycalphad.core.utils import endmember_matrix, extract_parameters, \
     get_pure_elements, filter_phases, instantiate_models, point_sample, \
     unpack_species, unpack_condition, unpack_kwarg
 from pycalphad.core.constants import MIN_SITE_FRACTION, MAX_ENDMEMBER_PAIRS, MAX_EXTRA_POINTS, ALLOWED_NET_CHARGE
+from symengine import S, Add, Mul, Piecewise
 
 
 def _jacobian_from_constraints(constraints, variables):
@@ -61,8 +62,149 @@ def _get_local_constraint_equations(model, phase_local_conditions):
         phase_local_constraints.append(cons.expand())
     return phase_local_constraints
 
+def _is_zero_expression(expr):
+    "True only if `expr` is structurally zero (symengine leaves e.g. Piecewise((0, c1), (0, True)) unevaluated)."
+    if expr == S.Zero:
+        return True
+    if isinstance(expr, Piecewise):
+        return all(_is_zero_expression(branch) for branch in expr.args[::2])
+    if isinstance(expr, Mul):
+        return any(_is_zero_expression(factor) for factor in expr.args)
+    if isinstance(expr, Add):
+        return all(_is_zero_expression(term) for term in expr.args)
+    return False
+
+
 @lru_cache(maxsize=1024)
-def _sample_phase_constitution(model, sampler, fixed_grid, pdens, phase_local_conditions):
+def _convex_mixing_sublattice(model):
+    """
+    Index of the mixing sublattice if the phase's Gibbs energy is provably convex, else None.
+
+    The criterion is deliberately strict. The phase must be a plain `Model` instance description with:
+
+    * constant site ratios, no ordering (partitioned) model and no ionic liquid,
+    * exactly one sublattice with more than one constituent; every constituent of that
+      sublattice is neutral and has atoms (no vacancies), all other sublattices have a single constituent,
+    * Gibbs energy (per formula unit) equal to ``ref + idmix`` only (every other contribution,
+      including excess, magnetic, two-state, Einstein and ordering, is zero), where ``ref`` is linear in
+      the site fractions and ``idmix`` is pycalphad's ideal mixing term.
+
+    Then G(y) = sum_i y_i G_i(T, P) + R T a sum_i y_i ln y_i, with ``a`` the site ratio of the mixing sublattice.
+    In terms of the amounts n_i >= 0 of the constituents, G(n) = sum_i n_i G_i + R T a sum_i n_i ln(n_i / sum_j n_j)
+    is convex, and the element amounts b = sum_i n_i b_i are linear in n, so the lowest Gibbs energy per
+    mole of atoms at a given composition, min {G(n) : sum_i n_i b_i = x}, is a convex function of x. Such a
+    phase cannot have a miscibility gap, it lies on the lower convex hull at most once, and for given chemical
+    potentials its largest driving force is reached at the closed-form point y_i ~ exp((mu . b_i - G_i) / (R T a)).
+    """
+    if not isinstance(model, Model):
+        return None
+    phase = model._dbe.phases.get(model.phase_name)
+    if phase is None:
+        return None
+    hints = phase.model_hints
+    if hints.get('ordered_phase') or hints.get('disordered_phase') or hints.get('ionic_liquid_2SL'):
+        return None
+    try:
+        site_ratios = [float(sr) for sr in model.site_ratios]
+    except (TypeError, RuntimeError):
+        return None
+    mixing = [idx for idx, subl in enumerate(model.constituents) if len(subl) > 1]
+    if len(mixing) != 1:
+        return None
+    mixing_idx = mixing[0]
+    if any(spec.number_of_atoms <= 0 or spec.charge != 0 for spec in model.constituents[mixing_idx]):
+        return None
+    if site_ratios[mixing_idx] <= 0:
+        return None
+    if set(model.models.keys()) - {'ref', 'idmix'} and \
+            not all(_is_zero_expression(model.models[key]) for key in model.models if key not in ('ref', 'idmix')):
+        return None
+    if 'ref' not in model.models or 'idmix' not in model.models:
+        return None
+    if model.models['idmix'] != Model.ideal_mixing_energy(model, model._dbe):
+        return None
+    mixing_fractions = [y for y in model.site_fractions if y.sublattice_index == mixing_idx]
+    singles = {y: 1 for y in model.site_fractions if y.sublattice_index != mixing_idx}
+    ref = model.models['ref'].xreplace(singles)
+    if any(isinstance(sym, v.SiteFraction) and sym not in mixing_fractions for sym in ref.free_symbols):
+        return None
+    for i, yi in enumerate(mixing_fractions):
+        dref = ref.diff(yi)
+        for yj in mixing_fractions[i:]:
+            if not _is_zero_expression(dref.diff(yj)):
+                return None
+    return mixing_idx
+
+
+def _site_fraction_formula_moles(model, pure_elements):
+    """
+    Matrix M (site fractions x elements) such that y @ M is the moles of each element per formula unit
+    (constant site ratios only).
+    """
+    site_ratios = [float(sr) for sr in model.site_ratios]
+    columns = []
+    for subl_idx, sublattice in enumerate(model.constituents):
+        for spec in sorted(sublattice):
+            columns.append([site_ratios[subl_idx] * spec.constituents.get(el, 0) for el in pure_elements])
+    return np.asarray(columns, dtype=np.float64)
+
+
+def _ordering_sublattices(model):
+    """
+    For a partitioned (order/disorder) phase, the indices of the sublattices that order and those that do not.
+    Follows the convention of `Model.atomic_ordering_energy`: an ordered sublattice is one whose active
+    constituents equal those of the disordered phase's first sublattice. Returns None for other phases.
+    """
+    if not isinstance(model, Model):
+        return None
+    phase = model._dbe.phases.get(model.phase_name)
+    if phase is None or phase.model_hints.get('ordered_phase') != model.phase_name:
+        return None
+    disordered_name = phase.model_hints.get('disordered_phase')
+    if disordered_name not in model._dbe.phases:
+        return None
+    disordered_constituents = set(model._dbe.phases[disordered_name].constituents[0]).intersection(model.components)
+    ordered = [idx for idx, subl in enumerate(model.constituents) if set(subl) == disordered_constituents]
+    if len(ordered) < 2:
+        return None
+    others = [idx for idx in range(len(model.constituents)) if idx not in ordered]
+    return ordered, others
+
+
+def _disordered_points(model, sampler, pdens):
+    """
+    Points on the disordered manifold of a partitioned phase (equal site fractions on all ordering sublattices),
+    sampled with `sampler` over the disordered constitution (substitutional + interstitial sublattices).
+    """
+    subls = _ordering_sublattices(model)
+    if subls is None:
+        return None
+    ordered, others = subls
+    sublattice_dof = [len(subl) for subl in model.constituents]
+    dis_dof = [sublattice_dof[ordered[0]]] + [sublattice_dof[idx] for idx in others]
+    if sum(dis_dof) - len(dis_dof) == 0:
+        return None
+    dis_points = sampler(dis_dof, pdof=pdens)
+    offsets = np.concatenate(([0], np.cumsum(sublattice_dof)))
+    dis_offsets = np.concatenate(([0], np.cumsum(dis_dof)))
+    points = np.empty((dis_points.shape[0], sum(sublattice_dof)))
+    for idx in ordered:
+        points[:, offsets[idx]:offsets[idx+1]] = dis_points[:, dis_offsets[0]:dis_offsets[1]]
+    for k, idx in enumerate(others):
+        points[:, offsets[idx]:offsets[idx+1]] = dis_points[:, dis_offsets[k+1]:dis_offsets[k+2]]
+    # Drop points that are (numerically) pure vacancy on every sublattice
+    vacancy_columns = [offsets[subl_idx] + spec_idx for subl_idx, subl in enumerate(model.constituents)
+                       for spec_idx, spec in enumerate(sorted(subl)) if spec.number_of_atoms == 0]
+    if len(vacancy_columns) > 0:
+        nonvacant_sites = points.sum(axis=1) - points[:, vacancy_columns].sum(axis=1)
+        points = points[nonvacant_sites > 1e-12]
+    return points
+
+
+@lru_cache(maxsize=1024)
+def _sample_phase_constitution(model, sampler, fixed_grid, pdens, phase_local_conditions,
+                               pair_pdens=None, convex_endmembers_only=False, disordered_pdens=0,
+                               max_pair_points=None):
     """
     Sample the internal degrees of freedom of a phase.
 
@@ -76,6 +218,15 @@ def _sample_phase_constitution(model, sampler, fixed_grid, pdens, phase_local_co
         If True, sample pdens points between each pair of endmembers
     pdens : int
         Number of points to sample in each sampled dimension
+    pair_pdens : int, optional
+        If given, the number of points on each line between a pair of endmembers (counting the endmembers,
+        which are not repeated), independent of `pdens`. Default: `pdens`, with the endmembers repeated.
+    convex_endmembers_only : bool, optional
+        If True and the phase's Gibbs energy is provably convex (see `_convex_mixing_sublattice`),
+        sample its endmembers only.
+    disordered_pdens : int, optional
+        If positive, add `disordered_pdens` points per degree of freedom on the disordered manifold
+        of partitioned (order/disorder) phases.
 
     Returns
     -------
@@ -143,12 +294,23 @@ def _sample_phase_constitution(model, sampler, fixed_grid, pdens, phase_local_co
         # Charge neutral endmembers and mixed pseudo-endmembers
         points = np.asarray(em_pts)
 
+    if convex_endmembers_only and not linearly_constrained_space and _convex_mixing_sublattice(model) is not None:
+        return np.atleast_2d(np.asarray(points, dtype=np.float64))
+
     if (fixed_grid is True) and not linearly_constrained_space:
         # Sample along the edges of the endmembers
         # These constitution space edges are often the equilibrium points!
         em_pairs = list(itertools.combinations(points, 2))[:MAX_ENDMEMBER_PAIRS]
-        if len(em_pairs) > 0:
+        if len(em_pairs) > 0 and (pair_pdens is not None or max_pair_points is not None):
+            # Interior points only: the endmembers are already in `points`
+            num_line = min(pair_pdens if pair_pdens is not None else pdens, MAX_EXTRA_POINTS/len(em_pairs))
+            if max_pair_points is not None:
+                # At most max_pair_points on all lines of this phase, but always at least the midpoints
+                num_line = max(min(num_line, max_pair_points/len(em_pairs) + 2), 3)
+            lingrid = np.linspace(0, 1, int(num_line))[1:-1]
+        elif len(em_pairs) > 0:
             lingrid = np.linspace(0, 1, int(min(pdens, MAX_EXTRA_POINTS/len(em_pairs))))
+        if len(em_pairs) > 0 and len(lingrid) > 0:
             extra_points = [first_em * lingrid[np.newaxis].T +
                             second_em * lingrid[::-1][np.newaxis].T
                             for first_em, second_em in em_pairs]
@@ -183,6 +345,10 @@ def _sample_phase_constitution(model, sampler, fixed_grid, pdens, phase_local_co
                 return np.full((num_points, constraint_jac.shape[1]), np.nan)
         else:
             points = np.concatenate((points, sampler(sublattice_dof, pdof=pdens)))
+            if disordered_pdens > 0:
+                dis_points = _disordered_points(model, sampler, disordered_pdens)
+                if dis_points is not None:
+                    points = np.concatenate((points, dis_points))
 
     # Filter out nan's that may have slipped in if we sampled too high a vacancy concentration
     # Issues with this appear to be platform-dependent
@@ -428,6 +594,10 @@ def calculate(dbf, comps, phases, mode=None, output='GM', fake_points=False, bro
     callables = kwargs.pop('callables', {})
     sampler_dict = unpack_kwarg(kwargs.pop('sampler', None), default_arg=None)
     fixedgrid_dict = unpack_kwarg(kwargs.pop('grid_points', True), default_arg=True)
+    pair_pdens_dict = unpack_kwarg(kwargs.pop('pair_pdens', None), default_arg=None)
+    convex_dict = unpack_kwarg(kwargs.pop('convex_endmembers_only', False), default_arg=False)
+    disordered_pdens_dict = unpack_kwarg(kwargs.pop('disordered_pdens', 0), default_arg=0)
+    max_pair_points_dict = unpack_kwarg(kwargs.pop('max_pair_points', None), default_arg=None)
     model = kwargs.pop('model', None)
     conditions = conditions or OrderedDict()
     parameters = parameters or dict()
@@ -511,6 +681,7 @@ def calculate(dbf, comps, phases, mode=None, output='GM', fake_points=False, bro
     plc_shape = tuple(len(x) for x in phase_local_conditions.values())
     # TODO: move state variable conditions into conditions dict
 
+    convex_phases = {}
     for phase_name in sorted(active_phases):
         mod = models[phase_name]
         phase_record = phase_records[phase_name]
@@ -528,14 +699,25 @@ def calculate(dbf, comps, phases, mode=None, output='GM', fake_points=False, bro
                                               if k.phase_name == phase_name}
                 cur_points = _sample_phase_constitution(mod, sampler_dict[phase_name] or point_sample,
                                                         fixedgrid_dict[phase_name], pdens_dict[phase_name],
-                                                        cur_phase_local_conditions)
+                                                        cur_phase_local_conditions, pair_pdens_dict[phase_name],
+                                                        bool(convex_dict[phase_name]), int(disordered_pdens_dict[phase_name]),
+                                                    max_pair_points_dict[phase_name])
                 # Collect all points arrays for all PLCs
                 collected_points_arrays.append(cur_points)
             if len(collected_points_arrays) == 0:
                 # No phase-local conditions, can use standard approach
                 points = _sample_phase_constitution(mod, sampler_dict[phase_name] or point_sample,
                                                     fixedgrid_dict[phase_name], pdens_dict[phase_name],
-                                                    {})
+                                                    {}, pair_pdens_dict[phase_name],
+                                                    bool(convex_dict[phase_name]), int(disordered_pdens_dict[phase_name]),
+                                                    max_pair_points_dict[phase_name])
+                if convex_dict[phase_name] and _convex_mixing_sublattice(mod) is not None:
+                    # Endmembers only (see _sample_phase_constitution); the solver adds the phase's
+                    # best point for the current chemical potentials in closed form
+                    convex_phases[phase_name] = {
+                        'site_ratio': float(mod.site_ratios[_convex_mixing_sublattice(mod)]),
+                        'column_moles': _site_fraction_formula_moles(mod, phase_record.nonvacant_elements),
+                        'points': points}
             else:
                 # Assumes all points arrays for this phase will be the same shape (no zero-solutions)
                 points = np.array(collected_points_arrays).reshape(plc_shape + collected_points_arrays[0].shape)
@@ -572,6 +754,8 @@ def calculate(dbf, comps, phases, mode=None, output='GM', fake_points=False, bro
     else:
         final_ds = all_phase_data[0]
     final_ds.attrs['phase_indices'] = islice_by_phase
+    if len(convex_phases) > 0:
+        final_ds.attrs['convex_phases'] = convex_phases
     if final_ds[output].size == 0:
         raise ConditionError(f"No valid points found in any of the active phases ({active_phases}). This can be caused by the point samplers failing to produce feasible points with the given conditions ({conditions}) and state variables ({statevar_dict}).")
     if to_xarray:

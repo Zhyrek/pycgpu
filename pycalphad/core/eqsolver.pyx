@@ -51,10 +51,32 @@ cpdef bint add_new_phases(object composition_sets, object removed_compsets, obje
                 continue
             largest_df = driving_forces[i]
             df_idx = i
+    candidate_Y = current_grid_Y[df_idx]
+    df_comp = current_grid_X[df_idx]
+    df_phase_name = <unicode>current_grid_Phase[df_idx]
+    for cand_name, cand_Y, cand_X, cand_df in convex_phase_candidates(grid, current_idx, chemical_potentials,
+                                                                     state_variables, phase_records):
+        if cand_df <= largest_df:
+            continue
+        distinct = True
+        for compset in removed_compsets:
+            if cand_name != compset.phase_record.phase_name:
+                continue
+            distinct = False
+            for comp_idx in range(compset.phase_record.phase_dof):
+                if abs(cand_Y[comp_idx] - compset.dof[num_statevars+comp_idx]) > 10*COMP_DIFFERENCE_TOL:
+                    distinct = True
+                    break
+            if not distinct:
+                break
+        if not distinct:
+            continue
+        largest_df = cand_df
+        candidate_Y = cand_Y
+        df_comp = cand_X
+        df_phase_name = cand_name
     if largest_df > minimum_df:
         # To add a phase, must not be within COMP_DIFFERENCE_TOL of composition of the same phase of its type
-        df_comp = current_grid_X[df_idx]
-        df_phase_name = <unicode>current_grid_Phase[df_idx]
         if df_phase_name == '_FAKE_':
             if verbose:
                 print('Chemical potentials are poorly conditioned')
@@ -71,13 +93,105 @@ cpdef bint add_new_phases(object composition_sets, object removed_compsets, obje
                     print('Candidate composition set ' + df_phase_name + ' at ' + str(np.array(df_comp)) + ' is not distinct')
                 return False
         compset = CompositionSet(phase_records[df_phase_name])
-        compset.update(current_grid_Y[df_idx, :compset.phase_record.phase_dof], 1e-6,
+        compset.update(np.asarray(candidate_Y[:compset.phase_record.phase_dof]), 1e-6,
                        state_variables)
         composition_sets.append(compset)
         if verbose:
             print('Adding ' + repr(compset) + ' Driving force: ' + str(largest_df))
         return True
     return False
+
+
+def convex_phase_candidates(object grid, object current_idx, double[::1] chemical_potentials,
+                            double[::1] state_variables, object phase_records, object skip_phases=()):
+    """
+    For phases sampled at their endmembers only because their Gibbs energy is provably convex
+    (``grid.attrs['convex_phases']``, see calculate._convex_mixing_sublattice), return the point of
+    largest driving force for the given chemical potentials, in closed form:
+    y_i ~ exp((mu . b_i - G_i) / (R T a)), which maximizes the driving force times the moles of atoms.
+
+    Returns a list of (phase_name, site_fractions, mole_fractions, driving_force).
+    """
+    convex_phases = grid.attrs.get('convex_phases', None)
+    if not convex_phases:
+        return []
+    result = []
+    current_grid_GM = grid.GM[(*current_idx, Ellipsis)]
+    mu = np.asarray(chemical_potentials)
+    for phase_name, info in convex_phases.items():
+        if phase_name in skip_phases:
+            continue
+        phase_record = phase_records[phase_name]
+        temperature = state_variables[[str(sv) for sv in phase_record.state_variables].index('T')]
+        indices = grid.attrs['phase_indices'][phase_name]
+        endmembers = info['points']
+        column_moles = info['column_moles']
+        em_moles = endmembers @ column_moles
+        em_atoms = em_moles.sum(axis=1)
+        em_G = np.asarray(current_grid_GM[indices.start:indices.stop]) * em_atoms
+        rta = 8.3145 * temperature * info['site_ratio']
+        # Driving force per mole of atoms, DF(y) = F(y) / A(y) with F(y) = mu . b(y) - G(y) concave and
+        # A(y) = atoms per formula unit linear in y. Dinkelbach iterations: y_k maximizes F - DF_k A,
+        # which is a Boltzmann distribution, then DF_{k+1} = DF(y_k); DF_k increases to max DF.
+        driving_force = -np.inf
+        for _ in range(50):
+            shift = 0.0 if not np.isfinite(driving_force) else driving_force
+            z = (em_moles @ mu - em_G - shift * em_atoms) / rta
+            y = np.exp(z - z.max())
+            y /= y.sum()
+            moles = y @ em_moles
+            atoms = moles.sum()
+            positive = y > 0
+            gibbs = y @ em_G + rta * np.sum(y[positive] * np.log(y[positive]))
+            new_driving_force = (moles @ mu - gibbs) / atoms
+            if np.isfinite(driving_force) and new_driving_force - driving_force <= 1e-9 * max(1.0, abs(driving_force)):
+                driving_force = max(driving_force, new_driving_force)
+                break
+            driving_force = new_driving_force
+        site_fractions = y @ endmembers
+        result.append((phase_name, site_fractions, moles / atoms, driving_force))
+    return result
+
+
+def merge_convex_compsets(object composition_sets, object grid):
+    """
+    A phase with a provably convex Gibbs energy can be stable at one composition only: merge
+    several composition sets of such a phase (e.g. several endmember vertices of the starting hull)
+    into one with the same total amount and mole fractions, and no higher energy.
+    """
+    convex_phases = grid.attrs.get('convex_phases', None)
+    if not convex_phases:
+        return composition_sets
+    cdef CompositionSet compset
+    merged = []
+    groups = {}
+    for compset in composition_sets:
+        name = compset.phase_record.phase_name
+        if name in convex_phases:
+            groups.setdefault(name, []).append(compset)
+        else:
+            merged.append(compset)
+    for name, compsets in groups.items():
+        if len(compsets) == 1:
+            merged.append(compsets[0])
+            continue
+        column_moles = convex_phases[name]['column_moles']
+        num_statevars = len(compsets[0].phase_record.state_variables)
+        phase_dof = compsets[0].phase_record.phase_dof
+        total_amount = 0.0
+        formula_units = 0.0
+        site_fractions = np.zeros(phase_dof)
+        for compset in compsets:
+            y = np.asarray(compset.dof[num_statevars:num_statevars+phase_dof])
+            units = compset.NP / (y @ column_moles).sum()
+            site_fractions += units * y
+            formula_units += units
+            total_amount += compset.NP
+        site_fractions /= formula_units
+        compset = compsets[0]
+        compset.update(site_fractions, total_amount, np.asarray(compset.dof[:num_statevars]))
+        merged.append(compset)
+    return merged
 
 @cython.boundscheck(False)
 cdef int argmax(double* a, int a_shape) nogil:
@@ -105,10 +219,23 @@ def add_nearly_stable(object composition_sets, object phase_records,
     cdef int df_idx, minimum_df_idx
     cdef bint phases_added = False
     driving_forces = np.dot(current_grid_X, chemical_potentials) - current_grid_GM
+    convex_candidates = {cand[0]: cand for cand in convex_phase_candidates(grid, current_idx, chemical_potentials,
+                                                                           state_variables, phase_records,
+                                                                           skip_phases=entered_phases)}
     # Add unrepresented phases as metastable composition sets
     # This should help catch phases around the limit of stability
     for phase_name in sorted(phase_records.keys()):
         if phase_name in entered_phases:
+            continue
+        if phase_name in convex_candidates:
+            cand_name, cand_Y, cand_X, cand_df = convex_candidates[phase_name]
+            if cand_df >= minimum_df:
+                phases_added = True
+                compset = CompositionSet(phase_records[phase_name])
+                compset.update(np.asarray(cand_Y), 0.0, state_variables)
+                if verbose:
+                    print('Adding metastable ' + repr(compset) + ' Driving force: ' + str(cand_df))
+                composition_sets.append(compset)
             continue
         phase_record = phase_records[phase_name]
         phase_indices = grid.attrs['phase_indices'].get(phase_name, slice(0,0))
@@ -223,6 +350,7 @@ def _solve_eq_at_conditions(properties, phase_records, grid, conds_keys, state_v
             compset = CompositionSet(phase_record)
             compset.update(sfx, phase_amt, state_variable_values)
             composition_sets.append(compset)
+        composition_sets = merge_convex_compsets(composition_sets, grid)
         chemical_potentials = prop_MU_values[it.multi_index]
         energy = prop_GM_values[it.multi_index]
         add_nearly_stable(composition_sets, phase_records, grid, curr_idx, chemical_potentials,

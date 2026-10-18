@@ -15,7 +15,8 @@
 #pragma once
 
 // the big shared routines are out of line on a device (CG_NOINLINE: __noinline__): inlined into each kernel and
-// call site, the device compiler takes several times longer
+// call site, the device compiler takes several times longer. (cg_price is inlined, into the pricing and the polish:
+// out of line it made the tile's pricing 5% slower for 45 s less compile time, COST507-10 on a T4)
 #ifndef CG_NOINLINE
 #define CG_NOINLINE
 #endif

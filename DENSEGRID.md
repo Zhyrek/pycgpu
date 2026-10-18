@@ -71,6 +71,14 @@ Each worker first solves its own share of the tiles. Under SLURM, the share
 comes from `SLURM_NODEID` and the node count; elsewhere, pass `--node` and
 `--nodes`. When its share is done, a worker takes whatever tiles are left.
 
+With cg's compiled tiles (`PYCALPHAD_CG_TILE=3`, on a GPU with
+`PYCALPHAD_CG_DEVICE=cuda`), each system's code is compiled on first use
+(minutes for a large system on a GPU) and cached on disk: point
+`CUPY_CACHE_DIR` (GPU modules) and `PYCALPHAD_CG_CACHE` (host libraries) at a
+shared directory, so that later workers and runs load it instead (workers
+that start together may each compile it the first time). The cache hits only
+for the same `PYTHONHASHSEED`, which the launcher sets (see Reproducibility).
+
 After an interruption, run the same command again; finished tiles are
 skipped. A failed tile records its traceback in `tiles/failed/` and is not
 retried unless you pass `--retry-failed`.

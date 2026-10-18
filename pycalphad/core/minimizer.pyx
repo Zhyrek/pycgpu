@@ -5,7 +5,7 @@ from pycalphad.core.composition_set cimport CompositionSet
 from pycalphad.core.constants import MIN_SITE_FRACTION
 cimport scipy.linalg.cython_lapack as cython_lapack
 from libc.stdlib cimport malloc, free
-from libc.math cimport isnan
+from libc.math cimport isnan, fabs
 
 @cython.boundscheck(False)
 cdef void lstsq(double *A, int M, int N, double* x, double rcond) nogil:
@@ -72,6 +72,93 @@ cdef void invert_matrix(double *A, int N, int* ipiv) nogil:
     if info != 0:
         for i in range(N**2):
             A[i] = -1e19
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef int null_space_basis(double[:, ::1] phase_matrix, int phase_dof, double* vt) nogil:
+    """
+    Orthonormal basis for the null space of the constraint rows of a phase matrix (LHS of Eq. 41, Sundman 2015).
+
+    vt (phase_dof x phase_dof, column-major) is filled with V^T from the SVD of the constraint Jacobian, so
+    that rows rank..phase_dof-1 of V^T span its null space. Returns the rank, or -1 on failure.
+    """
+    cdef int n = phase_dof
+    cdef int m = phase_matrix.shape[0] - phase_dof
+    cdef int i, j, rank = 0, info = 0, lwork = -1, one = 1
+    cdef double work_query = 0
+    cdef double* cons_jac
+    cdef double* singular_values
+    cdef double* work
+    cdef char jobu = b'N', jobvt = b'A'
+    if m == 0:
+        for i in range(n):
+            for j in range(n):
+                vt[i + j * n] = 1.0 if i == j else 0.0
+        return 0
+    cons_jac = <double*>malloc(m * n * sizeof(double))
+    singular_values = <double*>malloc(min(m, n) * sizeof(double))
+    for i in range(m):
+        for j in range(n):
+            cons_jac[i + j * m] = phase_matrix[n + i, j]
+    cython_lapack.dgesvd(&jobu, &jobvt, &m, &n, cons_jac, &m, singular_values, NULL, &one, vt, &n,
+                         &work_query, &lwork, &info)
+    lwork = <int>work_query
+    work = <double*>malloc(lwork * sizeof(double))
+    cython_lapack.dgesvd(&jobu, &jobvt, &m, &n, cons_jac, &m, singular_values, NULL, &one, vt, &n,
+                         work, &lwork, &info)
+    if info == 0:
+        for i in range(min(m, n)):
+            if singular_values[i] > max(m, n) * 2.220446049250313e-16 * singular_values[0]:
+                rank += 1
+    else:
+        rank = -1
+    free(work)
+    free(singular_values)
+    free(cons_jac)
+    return rank
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef void reduced_hessian(double[:, ::1] phase_matrix, int phase_dof, double* vt, int rank,
+                          double* hz, double* reduced_hess) nogil:
+    """
+    Reduced Hessian Z^T H Z (k x k, column-major, k = phase_dof - rank), where H is the upper-left
+    phase_dof x phase_dof block of phase_matrix and the columns of Z are rows rank..phase_dof-1 of vt
+    (see null_space_basis). hz is scratch space (phase_dof x k).
+    """
+    cdef int n = phase_dof
+    cdef int k = phase_dof - rank
+    cdef int i, j, a, b
+    cdef double s
+    for i in range(n):
+        for a in range(k):
+            s = 0
+            for j in range(n):
+                s += phase_matrix[i, j] * vt[(rank + a) + j * n]
+            hz[i + a * n] = s
+    for a in range(k):
+        for b in range(a, k):
+            s = 0
+            for i in range(n):
+                s += 0.5 * (vt[(rank + a) + i * n] * hz[i + b * n] + vt[(rank + b) + i * n] * hz[i + a * n])
+            reduced_hess[a + b * k] = s
+            reduced_hess[b + a * k] = s
+
+
+cdef int symmetric_eigendecomposition(double* A, int N, double* eigenvalues) nogil:
+    """Eigenvalues (ascending) and eigenvectors (overwriting the columns of A, column-major) of symmetric A."""
+    cdef int info = 0, lwork = -1
+    cdef double work_query = 0
+    cdef double* work
+    cdef char jobz = b'V', uplo = b'U'
+    cython_lapack.dsyev(&jobz, &uplo, &N, A, &N, eigenvalues, &work_query, &lwork, &info)
+    lwork = <int>work_query
+    work = <double*>malloc(lwork * sizeof(double))
+    cython_lapack.dsyev(&jobz, &uplo, &N, A, &N, eigenvalues, work, &lwork, &info)
+    free(work)
+    return info
+
 
 @cython.boundscheck(False)
 cdef void compute_phase_matrix(double[:,::1] phase_matrix, double[:,::1] hess,
@@ -524,6 +611,12 @@ cdef class CompsetState:
     cdef double[:, ::1] cons_jac_tmp
     cdef double[:, ::1] phase_local_jac_tmp
     cdef double[:, ::1] mass_hess_tmp
+    cdef double[::1] null_space
+    cdef double[:, ::1] null_space_cons_jac
+    cdef int null_space_rank
+    cdef double[::1] null_space_hz
+    cdef double[::1] reduced_hess
+    cdef double[::1] reduced_hess_eigenvalues
 
     def __init__(self, SystemSpecification spec, CompositionSet compset):
         self.x = np.zeros(spec.num_statevars + compset.phase_record.phase_dof)
@@ -551,6 +644,15 @@ cdef class CompsetState:
         self.phase_local_jac_tmp = np.zeros((compset.num_phase_local_conditions, spec.num_statevars + compset.phase_record.phase_dof))
         self.mass_hess_tmp = np.zeros((spec.num_statevars + compset.phase_record.phase_dof,
                                        spec.num_statevars + compset.phase_record.phase_dof))
+        # Scratch space for make_reduced_hessian_positive_definite; the null space basis of the constraints is
+        # recomputed when the constraint rows (initially NaN) change
+        self.null_space = np.zeros(max(1, compset.phase_record.phase_dof**2))
+        self.null_space_cons_jac = np.full((self.phase_matrix.shape[0] - compset.phase_record.phase_dof,
+                                            compset.phase_record.phase_dof), np.nan)
+        self.null_space_rank = -1
+        self.null_space_hz = np.zeros(max(1, compset.phase_record.phase_dof**2))
+        self.reduced_hess = np.zeros(max(1, compset.phase_record.phase_dof**2))
+        self.reduced_hess_eigenvalues = np.zeros(max(1, compset.phase_record.phase_dof))
 
     def __getstate__(self):
         return (np.array(self.x), self.energy, np.array(self.grad), np.array(self.hess),
@@ -563,6 +665,166 @@ cdef class CompsetState:
          self.masses, self.mass_jac, self.c_G, self.c_statevars,
          self.c_component, self.moles_normalization, self.internal_cons, self.moles_normalization_grad, self.fixed_phase_dof_indices,
          self.ipiv) = state
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef bint make_reduced_hessian_positive_definite(CompsetState csst, double[:, ::1] phase_matrix, int phase_dof,
+                                                 int num_statevars, double[::1] x, double[::1] chemical_potentials):
+    """
+    Modify the Hessian block of a phase matrix (LHS of Eq. 41, Sundman 2015) in place, so that its projection
+    onto the null space of the phase's constraints (the reduced Hessian) is positive definite.
+
+    The upper-left phase_dof x phase_dof block of phase_matrix holds the Hessian of the phase energy, H, and
+    the remaining rows hold the Jacobian of the internal and phase-local constraints, A. With Z an orthonormal
+    basis for the null space of A, the site fraction step of Eq. 43 is a descent step only when the reduced
+    Hessian Z^T H Z is positive definite. Where it is not, the step moves uphill along the directions of
+    negative curvature, towards a saddle point or a maximum. Nothing is changed when Z^T H Z is positive
+    definite. Otherwise:
+
+    1. Site fractions at the lower bound that would decrease (positive reduced gradient: the derivative of
+       G - sum_i mu_i N_i less the constraint multipliers, estimated from the site fractions above the bound)
+       are held: their rows and columns of H are made diagonal, as for the binding constraints of the
+       projected Newton method (D.P. Bertsekas, SIAM J. Control Optim. 20 (1982) 221-246), so that their
+       curvature does not enter the step of the other site fractions. For example, in an MQMQA liquid with a
+       dilute species whose quadruplets are all at the bound, the configurational entropy is concave, because
+       the like-pair quadruplet of that species (e.g. C-C in a Cu-rich liquid) is not much smaller than the
+       square of the species' coordination-equivalent fraction. Holding that quadruplet lets the quadruplets
+       of the dilute species with the major species grow, where every step would otherwise reduce them.
+    2. If the reduced Hessian is still not positive definite, its negative eigenvalues are replaced by their
+       absolute values (floored at a small fraction of the largest), changing H only in the null space:
+       H <- H + Z V (|L| - L) V^T Z^T.
+
+    The constraint rows are unchanged. Returns True if phase_matrix was modified.
+    """
+    cdef double EIGENVALUE_RTOL = 1e-10
+    cdef double AT_LOWER_BOUND = 1e-12  # 100 * MIN_SITE_FRACTION
+    cdef int n = phase_dof
+    cdef int m = phase_matrix.shape[0] - phase_dof
+    cdef int k, rank, i, j, a, b, info = 0, lwork = -1, num_free = 0, num_held = 0, lstsq_rank = 0, one = 1
+    cdef int ldb, iwork_query = 0
+    cdef double work_query = 0, largest_abs_eigenvalue, new_eigenvalue, s, rcond = -1
+    cdef double* vt
+    cdef double* hz
+    cdef double* reduced_hess
+    cdef double* eigenvalues
+    cdef double* free_cons_jac
+    cdef double* multipliers
+    cdef double* singular_values
+    cdef double* work
+    cdef double* lagrangian_grad
+    cdef int* iwork
+    cdef bint* held
+    cdef bint same_constraints = True
+    cdef char uplo = b'U'
+    if n == 0:
+        return False
+    for i in range(phase_matrix.shape[0]):
+        for j in range(phase_matrix.shape[1]):
+            if isnan(phase_matrix[i, j]):
+                return False
+    # The null space basis is kept while the constraint rows are unchanged (internal constraints are linear)
+    for i in range(m):
+        for j in range(n):
+            if phase_matrix[n + i, j] != csst.null_space_cons_jac[i, j]:
+                same_constraints = False
+                csst.null_space_cons_jac[i, j] = phase_matrix[n + i, j]
+    if (not same_constraints) or (csst.null_space_rank < 0):
+        csst.null_space_rank = null_space_basis(phase_matrix, phase_dof, &csst.null_space[0])
+    rank = csst.null_space_rank
+    k = n - rank
+    if (rank < 0) or (k == 0):
+        return False
+    vt = &csst.null_space[0]
+    hz = &csst.null_space_hz[0]
+    reduced_hess = &csst.reduced_hess[0]
+    eigenvalues = &csst.reduced_hess_eigenvalues[0]
+    reduced_hessian(phase_matrix, phase_dof, vt, rank, hz, reduced_hess)
+    # Positive definite (Cholesky factorization succeeds): nothing to do
+    for i in range(k * k):
+        hz[i] = reduced_hess[i]
+    cython_lapack.dpotrf(&uplo, &k, hz, &k, &info)
+    if info == 0:
+        return False
+    info = symmetric_eigendecomposition(reduced_hess, k, eigenvalues)
+    largest_abs_eigenvalue = max(fabs(eigenvalues[0]), fabs(eigenvalues[k-1]))
+    if (info != 0) or (eigenvalues[0] >= -EIGENVALUE_RTOL * largest_abs_eigenvalue):
+        return False
+    # 1. Hold site fractions at the lower bound with a positive reduced gradient
+    held = <bint*>malloc(n * sizeof(bint))
+    lagrangian_grad = <double*>malloc(n * sizeof(double))
+    for j in range(n):
+        held[j] = False
+        if x[num_statevars + j] > AT_LOWER_BOUND:
+            num_free += 1
+        lagrangian_grad[j] = csst.grad[num_statevars + j]
+        for i in range(chemical_potentials.shape[0]):
+            lagrangian_grad[j] -= chemical_potentials[i] * csst.mass_jac[i, num_statevars + j]
+    if (m > 0) and (num_free > 0) and (num_free < n):
+        # Constraint multipliers: least squares solution of A_free^T multipliers = lagrangian_grad_free
+        ldb = max(num_free, m)
+        free_cons_jac = <double*>malloc(num_free * m * sizeof(double))
+        multipliers = <double*>malloc(ldb * sizeof(double))
+        singular_values = <double*>malloc(min(num_free, m) * sizeof(double))
+        a = 0
+        for j in range(n):
+            if x[num_statevars + j] > AT_LOWER_BOUND:
+                for i in range(m):
+                    free_cons_jac[a + i * num_free] = phase_matrix[n + i, j]
+                multipliers[a] = lagrangian_grad[j]
+                a += 1
+        cython_lapack.dgelsd(&num_free, &m, &one, free_cons_jac, &num_free, multipliers, &ldb, singular_values,
+                             &rcond, &lstsq_rank, &work_query, &lwork, &iwork_query, &info)
+        lwork = <int>work_query
+        work = <double*>malloc(lwork * sizeof(double))
+        iwork = <int*>malloc(max(1, iwork_query) * sizeof(int))
+        cython_lapack.dgelsd(&num_free, &m, &one, free_cons_jac, &num_free, multipliers, &ldb, singular_values,
+                             &rcond, &lstsq_rank, work, &lwork, iwork, &info)
+        if info == 0:
+            for j in range(n):
+                if x[num_statevars + j] > AT_LOWER_BOUND:
+                    continue
+                s = lagrangian_grad[j]
+                for i in range(m):
+                    s -= phase_matrix[n + i, j] * multipliers[i]
+                if s > 0:
+                    held[j] = True
+                    num_held += 1
+        free(iwork)
+        free(work)
+        free(singular_values)
+        free(multipliers)
+        free(free_cons_jac)
+    if num_held > 0:
+        for i in range(n):
+            for j in range(n):
+                if (i != j) and (held[i] or held[j]):
+                    phase_matrix[i, j] = 0
+        reduced_hessian(phase_matrix, phase_dof, vt, rank, hz, reduced_hess)
+        info = symmetric_eigendecomposition(reduced_hess, k, eigenvalues)
+        largest_abs_eigenvalue = max(fabs(eigenvalues[0]), fabs(eigenvalues[k-1]))
+    free(lagrangian_grad)
+    free(held)
+    # 2. Replace the remaining negative eigenvalues of the reduced Hessian by their absolute values
+    if (info == 0) and (eigenvalues[0] < -EIGENVALUE_RTOL * largest_abs_eigenvalue):
+        # hz <- Z V (|L| - L)^(1/2), so that the change to H is hz hz^T
+        for b in range(k):
+            if eigenvalues[b] >= 0:
+                new_eigenvalue = eigenvalues[b]
+            else:
+                new_eigenvalue = max(-eigenvalues[b], EIGENVALUE_RTOL * largest_abs_eigenvalue)
+            for i in range(n):
+                s = 0
+                for a in range(k):
+                    s += vt[(rank + a) + i * n] * reduced_hess[a + b * k]
+                hz[i + b * n] = s * (new_eigenvalue - eigenvalues[b]) ** 0.5
+        for i in range(n):
+            for j in range(n):
+                s = 0
+                for b in range(k):
+                    s += hz[i + b * n] * hz[j + b * n]
+                phase_matrix[i, j] += s
+    return True
 
 
 cdef class SystemState:
@@ -685,6 +947,9 @@ cdef class SystemState:
             for i in range(csst.full_e_matrix.shape[0]):
                 for j in range(csst.full_e_matrix.shape[1]):
                     csst.full_e_matrix[i,j] = csst.phase_matrix[i,j]
+            # Take a descent step where the phase's energy has negative curvature
+            make_reduced_hessian_positive_definite(csst, csst.full_e_matrix, compset.phase_record.phase_dof,
+                                                   spec.num_statevars, x, self.chemical_potentials)
             invert_matrix(&csst.full_e_matrix[0,0], csst.full_e_matrix.shape[0], &csst.ipiv[0])
 
             num_phase_dof = compset.phase_record.phase_dof

@@ -9,7 +9,7 @@ import pytest
 from symengine import Symbol
 from numpy.testing import assert_allclose
 import numpy as np
-from pycalphad import Database, Model, calculate, equilibrium, EquilibriumError, ConditionError
+from pycalphad import Database, Model, Workspace, calculate, equilibrium, EquilibriumError, ConditionError
 from pycalphad.codegen.phase_record_factory import PhaseRecordFactory
 from pycalphad.core.solver import SolverBase, Solver
 from pycalphad.core.utils import get_state_variables, instantiate_models
@@ -1416,3 +1416,47 @@ def test_eq_charged_phase_negative_phase_amount_zero_division(load_database):
     # The overall composition (phase-fraction weighted) must satisfy the conditions
     assert_allclose(wks.get(v.X("O")), 0.25, atol=1e-8)
     assert_allclose(wks.get(v.X("TI")), 0.375, atol=1e-8)
+
+
+@pytest.mark.solver
+@select_database("CuFeC-Kang.dat")
+def test_eq_cufec_kang_liquid_fcc_and_graphite(load_database):
+    """Thermochimica TestThermo56 conditions: Cu-rich LIQUID + Fe-rich, carbon-bearing FCC_A1 + graphite (gh-746).
+
+    The starting LIQUID composition set has all carbon quadruplets at the lower bound, where the MQMQA
+    configurational entropy has negative curvature. Newton steps with that Hessian moved the liquid uphill
+    and the solver converged to a state with the LIQUID and FCC_A1 compositions swapped.
+    """
+    dbf = load_database()
+    conds = {v.N: 1, v.P: 101325, v.T: 1400, v.X('C'): 1/3, v.X('FE'): 1/3}
+    wks = Workspace(dbf, ['C', 'CU', 'FE', 'VA'], ['BCC_A2', 'C_GRAPHITE(S)', 'FCC_A1', 'LIQUID'], conds)
+    # Thermochimica: GM, phase amounts (moles of atoms) and phase compositions [X(C), X(CU), X(FE)]
+    assert_allclose(wks.get('GM'), -57775.063, atol=0.05)
+    assert_allclose(wks.get(v.NP('C_GRAPHITE(S)')), 0.305876, atol=1e-5)
+    assert_allclose(wks.get(v.NP('LIQUID')), 0.329627, atol=1e-5)
+    assert_allclose(wks.get(v.NP('FCC_A1')), 0.364497, atol=1e-5)
+    assert_allclose([wks.get(v.X('LIQUID', el)) for el in ['C', 'CU', 'FE']], [0.000024, 0.975694, 0.024281], atol=1e-5)
+    assert_allclose([wks.get(v.X('FCC_A1', el)) for el in ['C', 'CU', 'FE']], [0.075307, 0.032150, 0.892543], atol=1e-5)
+
+
+@pytest.mark.solver
+@select_database("CuFeC-Kang.dat")
+def test_eq_cufec_kang_liquid_miscibility_gap(load_database):
+    """At 1500 K: Cu-rich LIQUID + Fe-C-rich LIQUID + graphite (gh-746).
+
+    Both LIQUID composition sets of the starting point have a dilute species with all its quadruplets at the
+    lower bound. Without a descent step there, the solver converged to a single LIQUID at the Cu:Fe ratio
+    of the system, about 940 J/mol above the miscibility gap.
+    """
+    dbf = load_database()
+    conds = {v.N: 1, v.P: 101325, v.T: 1500, v.X('C'): 1/3, v.X('FE'): 1/3}
+    wks = Workspace(dbf, ['C', 'CU', 'FE', 'VA'], ['BCC_A2', 'C_GRAPHITE(S)', 'FCC_A1', 'LIQUID'], conds)
+    # Thermochimica: GM, phase amounts (moles of atoms) and phase compositions [X(C), X(CU), X(FE)]
+    assert_allclose(wks.get('GM'), -64947.714, atol=0.05)
+    assert_allclose(wks.get(v.NP('C_GRAPHITE(S)')), 0.266279, atol=1e-5)
+    # one entry per LIQUID composition set, compared in order of increasing X(CU): Fe-C-rich, then Cu-rich
+    liquid_np = np.ravel(wks.get(v.NP('LIQUID')))
+    liquid_x = np.array([np.ravel(wks.get(v.X('LIQUID', el))) for el in ['C', 'CU', 'FE']]).T
+    order = np.argsort(liquid_x[:, 1])
+    assert_allclose(liquid_np[order], [0.402307, 0.331414], atol=1e-5)
+    assert_allclose(liquid_x[order], [[0.166598, 0.033546, 0.799856], [0.000094, 0.965069, 0.034838]], atol=1e-5)

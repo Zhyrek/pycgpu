@@ -1,0 +1,12 @@
+{"branch":"develop","r":1,"t":{"import": 0.6721159999999999, "load": 1.1578060000000001, "models": 1.084992, "compile": 14.938625, "n_phases": 74}}
+{"branch":"739","r":1,"t":{"import": 0.687232, "load": 1.15875, "models": 1.0778490000000003, "compile": 14.875834000000001, "n_phases": 74}}
+{"branch":"bocklund","r":1,"t":{"import": 0.676572, "load": 1.164222, "models": 1.143273, "compile": 14.961831999999998, "n_phases": 74}}
+{"branch":"develop","r":2,"t":{"import": 0.65735, "load": 1.1627300000000003, "models": 1.0860729999999998, "compile": 15.044864, "n_phases": 74}}
+{"branch":"739","r":2,"t":{"import": 0.6631940000000001, "load": 1.166684, "models": 1.082391, "compile": 14.985128999999999, "n_phases": 74}}
+{"branch":"bocklund","r":2,"t":{"import": 0.658055, "load": 1.167948, "models": 1.139975, "compile": 15.028874000000002, "n_phases": 74}}
+{"branch":"develop","r":3,"t":{"import": 0.656621, "load": 1.162077, "models": 1.079607, "compile": 15.159574, "n_phases": 74}}
+{"branch":"739","r":3,"t":{"import": 0.659744, "load": 1.1847940000000001, "models": 1.1020710000000002, "compile": 15.074525000000001, "n_phases": 74}}
+{"branch":"bocklund","r":3,"t":{"import": 0.662883, "load": 1.164849, "models": 1.142976, "compile": 15.132188, "n_phases": 74}}
+{"branch":"develop","r":4,"t":{"import": 0.666214, "load": 1.167255, "models": 1.0874260000000002, "compile": 15.113207, "n_phases": 74}}
+{"branch":"739","r":4,"t":{"import": 0.671865, "load": 1.16483, "models": 1.0938290000000002, "compile": 15.070061999999998, "n_phases": 74}}
+{"branch":"bocklund","r":4,"t":{"import": 0.6649280000000001, "load": 1.1695600000000002, "models": 1.1470729999999998, "compile": 15.10183, "n_phases": 74}}

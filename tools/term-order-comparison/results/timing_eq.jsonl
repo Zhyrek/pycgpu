@@ -1,0 +1,9 @@
+{"branch":"develop","r":1,"t":{"import": 0.657875, "load": 1.158514, "equilibrium_total": 15.922687999999999, "GM": -79456.81822375527, "phases": ["FCC_A1", "M23C6_D84"]}}
+{"branch":"739","r":1,"t":{"import": 0.702298, "load": 1.162108, "equilibrium_total": 15.941423, "GM": -79456.81818619769, "phases": ["FCC_A1", "M23C6_D84"]}}
+{"branch":"bocklund","r":1,"t":{"import": 0.699583, "load": 1.1612900000000002, "equilibrium_total": 16.047652, "GM": -79456.81812648251, "phases": ["FCC_A1", "M23C6_D84"]}}
+{"branch":"develop","r":2,"t":{"import": 0.695484, "load": 1.162009, "equilibrium_total": 15.901914000000001, "GM": -79456.81822375527, "phases": ["FCC_A1", "M23C6_D84"]}}
+{"branch":"739","r":2,"t":{"import": 0.696111, "load": 1.1682709999999998, "equilibrium_total": 15.955607, "GM": -79456.81818619769, "phases": ["FCC_A1", "M23C6_D84"]}}
+{"branch":"bocklund","r":2,"t":{"import": 0.6976, "load": 1.167736, "equilibrium_total": 16.17027, "GM": -79456.81812648251, "phases": ["FCC_A1", "M23C6_D84"]}}
+{"branch":"develop","r":3,"t":{"import": 0.696558, "load": 1.166299, "equilibrium_total": 16.050915, "GM": -79456.81822375527, "phases": ["FCC_A1", "M23C6_D84"]}}
+{"branch":"739","r":3,"t":{"import": 0.663791, "load": 1.1572930000000001, "equilibrium_total": 16.050667, "GM": -79456.81818619769, "phases": ["FCC_A1", "M23C6_D84"]}}
+{"branch":"bocklund","r":3,"t":{"import": 0.660218, "load": 1.1685, "equilibrium_total": 16.068685000000002, "GM": -79456.81812648251, "phases": ["FCC_A1", "M23C6_D84"]}}

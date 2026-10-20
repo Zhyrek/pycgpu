@@ -1,7 +1,7 @@
 """
 The test_model module contains unit tests for the Model object.
 """
-from pycalphad import Database, Model, variables as v, equilibrium
+from pycalphad import Database, Model, variables as v, equilibrium, calculate
 from pycalphad.tests.fixtures import select_database, load_database
 from pycalphad.core.errors import DofError
 from symengine import Piecewise
@@ -342,3 +342,28 @@ def test_inconsistent_charge_balance_constraint_is_kept():
     mod = Model(dbf, ["LA", "O", "VA"], "IMPOSSIBLE")
     constraints = mod.get_internal_constraints()
     assert len(constraints) == len(mod.constituents) + 1
+
+
+@pytest.mark.parametrize("phase_name, points", [
+    ("LIQUID", [0.3, 0.7]),
+    ("FCC_A1", [0.3, 0.7, 1.0]),  # magnetic
+    ("FCC_L12", [0.9, 0.1, 0.1, 0.9, 0.2, 0.8, 0.3, 0.7, 1.0]),  # order-disorder
+])
+@select_database("alnipt.tdb")
+def test_custom_model_build_phase_sees_substituted_symbols(load_database, phase_name, points):
+    "A build_phase override can differentiate the energy built by Model.build_phase (gh-452)"
+    dbf = load_database()
+
+    class EntropyModel(Model):
+        def build_phase(self, dbe):
+            super().build_phase(dbe)
+            self.entropyval = -self.GM.diff(v.T)
+
+    comps = ["AL", "NI", "VA"]
+    mod = EntropyModel(dbf, comps, phase_name)
+    calc_kwargs = dict(T=[950, 1750], P=101325, N=1, points=np.array([points]),
+                       model={phase_name: mod})
+    sm = calculate(dbf, comps, phase_name, output="SM", **calc_kwargs).SM.values.squeeze()
+    entropy = calculate(dbf, comps, phase_name, output="entropyval", **calc_kwargs).entropyval.values.squeeze()
+    assert np.all(np.isfinite(sm))
+    np.testing.assert_allclose(entropy, sm, rtol=1e-12)

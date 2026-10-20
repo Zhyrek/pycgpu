@@ -319,6 +319,9 @@ class Model(object):
         self.models = OrderedDict()
         self.build_phase(dbe)
 
+        # build_phase already substitutes symbols into each contribution. This pass
+        # covers subclasses that override build_phase, and it also extrapolates the
+        # temperature bounds of nested piecewise functions, which one pass misses.
         for name, value in self.models.items():
             # XXX: xreplace hack because SymEngine seems to let Symbols slip in somehow
             self.models[name] = self.symbol_replace(value, symbols).xreplace(get_supported_variables())
@@ -602,8 +605,14 @@ class Model(object):
                 # Users that need to override this behavior should override build_phase
                 raise ValueError('\'atomic_ordering_energy\' must be the final contribution')
         self.models.clear()
+        supported_variables = get_supported_variables()
         for key, value in self.__class__.contributions:
-            self.models[key] = S(getattr(self, value)(dbe))
+            # Substitute database symbols as each contribution is built, so that
+            # later contributions (e.g., in subclasses) see the complete form of
+            # earlier ones and can differentiate them (gh-452)
+            # XXX: xreplace hack because SymEngine seems to let Symbols slip in somehow
+            self.models[key] = self.symbol_replace(S(getattr(self, value)(dbe)),
+                                                   self._symbols).xreplace(supported_variables)
 
     def _array_validity(self, constituent_array):
         """

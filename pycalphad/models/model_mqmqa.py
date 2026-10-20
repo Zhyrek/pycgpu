@@ -732,7 +732,10 @@ class ModelMQMQA(Model):
         """
         self.models.clear()
         for key, value in self.__class__.contributions:
-            self.models[key] = S(getattr(self, value)(dbe))
+            # Substitute database symbols as each contribution is built, so that
+            # later contributions (e.g., in subclasses) see the complete form of
+            # earlier ones and can differentiate them (gh-452)
+            self.models[key] = self.symbol_replace(S(getattr(self, value)(dbe)), self._symbols)
 
     @staticmethod
     def symbol_replace(obj, symbols):

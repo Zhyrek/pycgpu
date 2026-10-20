@@ -700,9 +700,10 @@ def test_issue_662_phase_boundary_loop(load_database):
     assert no_more_nodes
 
     # should only have zpf lines for liquid-AlCuY
-    # there should be two zpf lines since the node we manually add
-    # will map in the positive and negative axis directions
-    assert len(strat.zpf_lines) == 2
+    # the node we manually add maps in the positive and negative axis directions;
+    # the first line goes around the loop, and the second one, which lies on it,
+    # is removed, so there should be one zpf line
+    assert len(strat.zpf_lines) == 1
     for z in strat.zpf_lines:
         assert len(set(z.stable_phases) - {'LIQUID', 'ALCUY'}) == 0
 
@@ -886,11 +887,16 @@ def _overlapping_zpf_lines(strategy, tol=0.005):
 @pytest.mark.parametrize("db, comps, phases, T_lims", [
     ("pbsn.tdb", ["PB", "SN", "VA"], None, (300, 700)),
     ("alcrni.tdb", ["CR", "NI", "VA"], ["B2", "L12_FCC", "LIQUID"], (800, 2300)),
+    ("CrV-92Lee-LB.tdb", ["CR", "V", "VA"], None, (300, 4000)),
+    ("AlTe-19Shi.tdb", ["AL", "TE", "VA"], None, (300, 1500)),
 ])
 def test_binary_strategy_does_not_trace_zpf_lines_twice(db, comps, phases, T_lims):
     """
     Starting points can land in the same two-phase region (several step calculations along the axis limits), and a
-    line traced from one end reaches the starting point at its other end; neither may trace the ZPF line again
+    line traced from one end reaches the starting point at its other end; neither may trace the ZPF line again.
+    Cr-V: the line across the LIQUID + BCC_A2 lens from the Cr end fails just short of the V end, where the starting
+    point there would trace it again in reverse. Al-Te: the LIQUID + AL2TE3_BETA exit of the eutectic at 1120 K
+    leads back to that node (no length), and the line traced later from 993 K ends there
     """
     dbf = Database(str(files(pycalphad.tests.databases).joinpath(db)))
     phases = phases or list(dbf.phases.keys())

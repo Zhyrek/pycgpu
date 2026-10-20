@@ -21,6 +21,8 @@ _log = logging.getLogger(__name__)
 
 # Distance (in units of the axis step sizes) within which a starting point counts as lying on a ZPF line
 STARTING_POINT_TOLERANCE = 0.5
+# Distance (in the same units) within which two points coincide
+COINCIDENT_TOLERANCE = 1e-3
 
 def _distance_to_segment(p, a, b):
     """Distance from point p to the segment from a to b (any dimension)"""
@@ -28,6 +30,44 @@ def _distance_to_segment(p, a, b):
     denominator = np.dot(ab, ab)
     t = 0.0 if denominator == 0 else np.clip(np.dot(p - a, ab) / denominator, 0, 1)
     return np.linalg.norm(p - (a + t * ab))
+
+def _on_locations(p, locations):
+    """Whether p lies on the ZPF line through `locations` (a single point or its segments), within the tolerance"""
+    if len(locations) == 1:
+        return np.max(np.abs(p - locations[0])) < STARTING_POINT_TOLERANCE
+    return any(_distance_to_segment(p, a, b) < STARTING_POINT_TOLERANCE for a, b in zip(locations[:-1], locations[1:]))
+
+def _within_line(p, locations):
+    """
+    Whether p lies on the ZPF line through `locations` within the tolerance, and not beyond either of its ends (a
+    point a fraction of a step past an end still adds to what the line draws)
+    """
+    if len(locations) == 1:
+        return np.max(np.abs(p - locations[0])) < COINCIDENT_TOLERANCE
+    last_segment = len(locations) - 2
+    for i, (a, b) in enumerate(zip(locations[:-1], locations[1:])):
+        ab = b - a
+        length = np.linalg.norm(ab)
+        t = 0.0 if length == 0 else np.dot(p - a, ab) / length**2
+        if np.linalg.norm(p - (a + np.clip(t, 0, 1) * ab)) >= STARTING_POINT_TOLERANCE:
+            continue
+        beyond = (-t if i == 0 and t < 0 else 0.0) + (t - 1 if i == last_segment and t > 1 else 0.0)
+        if beyond * length < COINCIDENT_TOLERANCE:
+            return True
+    return False
+
+def _steps_back_along(prev, last, locations):
+    """
+    Whether the step from prev to last ends on the ZPF line through `locations` (two or more), away from its first
+    point, going the opposite way to it there (towards its first point)
+    """
+    if len(locations) < 2 or np.max(np.abs(last - locations[0])) < STARTING_POINT_TOLERANCE:
+        return False
+    distances = [_distance_to_segment(last, a, b) for a, b in zip(locations[:-1], locations[1:])]
+    i = int(np.argmin(distances))
+    if distances[i] >= STARTING_POINT_TOLERANCE:
+        return False
+    return np.dot(last - prev, locations[i + 1] - locations[i]) < 0
 
 class MapStrategy:
     """
@@ -252,9 +292,12 @@ class MapStrategy:
                 If not finished, continue ZPF line
         """
         if len(self.zpf_lines) > 0 and self.zpf_lines[-1].status == ZPFState.NOT_FINISHED:
+            zpf_line = self.zpf_lines[-1]
             self._continue_zpf_line()
             if self.zpf_lines and self.zpf_lines[-1].status not in (ZPFState.NOT_FINISHED, ZPFState.FAILED):
                 self._drop_starting_points_on_line(self.zpf_lines[-1])
+            if zpf_line.status != ZPFState.NOT_FINISHED:
+                self._remove_covered_lines(zpf_line)
         elif len(self._exits) > self._exit_index:
             _log.info("No zpf line or last zpf line has finished. Attempting to start zpf line from next exit")
             # This will start a new zpf line that is not finished
@@ -466,6 +509,14 @@ class MapStrategy:
                 # (a line that is on an existing line from its start adds nothing)
                 if len(zpf_line.points) <= 2 and self.zpf_lines and self.zpf_lines[-1] is zpf_line:
                     self.zpf_lines.pop()
+            failed_line = self._failed_line_stepped_back_along(zpf_line) if zpf_line.status == ZPFState.NOT_FINISHED else None
+            if failed_line is not None:
+                _log.info(f"ZPF line {zpf_line.fixed_phases}, {zpf_line.free_phases} steps back along a failed ZPF line with the same phases. Ending ZPF line")
+                zpf_line.status = ZPFState.REACHED_LIMIT
+                # (a line that is on it from its start adds nothing)
+                start = self._point_location(zpf_line.points[0], sorted(zpf_line.stable_phases))
+                if len(zpf_line.points) <= 2 and self.zpf_lines and self.zpf_lines[-1] is zpf_line and _on_locations(start, failed_line):
+                    self.zpf_lines.pop()
 
             # If we successfully added a new point, attempt to increase the axis delta if is smaller than the default
             if zpf_line.current_delta < self.axis_delta[zpf_line.axis_var]:
@@ -558,6 +609,69 @@ class MapStrategy:
             elif any(_distance_to_segment(last, a, b) < STARTING_POINT_TOLERANCE for a, b in zip(locations[:-1], locations[1:])):
                 return True
         return False
+
+    def _same_boundary(self, zpf_line: ZPFLine, other: ZPFLine):
+        """
+        Whether two ZPF lines with points on the same tie-lines (see _point_location) are the same boundary: if they
+        have the same phases. (Not in an isopleth: see IsoplethStrategy)
+        """
+        return sorted(zpf_line.stable_phases) == sorted(other.stable_phases)
+
+    def _failed_line_stepped_back_along(self, zpf_line: ZPFLine):
+        """
+        If the last step of the ZPF line ends on a ZPF line with the same phases that failed, going back along it
+        (towards its start), the positions of that line (else None): it already covers the way back (e.g. from the
+        starting point at the end where it failed, this line would trace it again in reverse). Stepping the same way
+        as the failed line, a line can go on past where it stopped, so that does not count; nor does its first point
+        (the other half of a line traced from a starting point or a node exit begins there). Positions are
+        tie-lines, as in _point_location.
+        """
+        if len(self.axis_vars) < 2 or len(zpf_line.points) < 2:
+            return None
+        phases = sorted(zpf_line.stable_phases)
+        last = self._point_location(zpf_line.points[-1], phases)
+        prev = self._point_location(zpf_line.points[-2], phases)
+        if last is None or prev is None:
+            return None
+        for other in self.zpf_lines:
+            if other is zpf_line or other.status != ZPFState.FAILED or not self._same_boundary(zpf_line, other):
+                continue
+            locations = [self._point_location(point, phases) for point in other.points]
+            if any(loc is None for loc in locations):
+                continue
+            if _steps_back_along(prev, last, locations):
+                return locations
+        return None
+
+    def _remove_covered_lines(self, zpf_line: ZPFLine):
+        """
+        After a ZPF line ended: of it and the other ZPF lines with the same phases, a line whose points all lie on
+        the other (the same tie-lines, within half a step, and not past its ends) draws nothing the other does not,
+        so it is removed. E.g. a line that ended at the node it started from, at the end of a line traced later; or a
+        line traced along one that failed, which then failed too.
+        """
+        if len(self.axis_vars) < 2 or len(zpf_line.points) < 2 or not any(z is zpf_line for z in self.zpf_lines):
+            return
+        phases = sorted(zpf_line.stable_phases)
+        locations = [self._point_location(point, phases) for point in zpf_line.points]
+        if any(loc is None for loc in locations):
+            return
+        others = []
+        for other in self.zpf_lines:
+            if other is zpf_line or len(other.points) == 0 or not self._same_boundary(zpf_line, other):
+                continue
+            other_locations = [self._point_location(point, phases) for point in other.points]
+            if any(loc is None for loc in other_locations):
+                continue
+            if all(_within_line(loc, other_locations) for loc in locations):
+                _log.info(f"Removing ZPF line {zpf_line.fixed_phases}, {zpf_line.free_phases}: it lies on another ZPF line with the same phases")
+                self.zpf_lines[:] = [z for z in self.zpf_lines if z is not zpf_line]
+                return
+            others.append((other, other_locations))
+        removed = [other for other, other_locations in others if all(_within_line(loc, locations) for loc in other_locations)]
+        for other in removed:
+            _log.info(f"Removing ZPF line {other.fixed_phases}, {other.free_phases}: it lies on the ZPF line just traced")
+        self.zpf_lines[:] = [z for z in self.zpf_lines if not any(z is r for r in removed)]
 
     def _drop_duplicate_starting_points(self, zpf_line: ZPFLine):
         """

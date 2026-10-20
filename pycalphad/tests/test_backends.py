@@ -459,3 +459,50 @@ kernel void t(device const pyc_f64* a [[buffer(0)]], device const pyc_f64* b [[b
     scale[:, 4] = np.maximum(scale[:, 4], 1.0)
     rel = np.abs(got - want) / np.where(scale > 0, scale, 1)
     assert np.all(rel[finite] < 1e-12), np.max(np.where(finite, rel, 0), axis=0)
+
+
+@needs_cpp
+@select_database("C002_NiTiCr_LuXiaogang.tdb")
+def test_isolated_phase_compiled_chain_cold_start_retry(load_database):
+    """On a compiled backend, an IsolatedPhase step that does not converge from
+    the previous step's result is retried from the starting composition set,
+    as the reference does (gh-670), and the values match the reference."""
+    import pycalphad.gpu.dispatch as dispatch
+    from pycalphad.property_framework import IsolatedPhase
+    dbf = load_database()
+    phase_name = 'B19_PRIME'
+    conds = {v.X('NI'): (0.499, 0.52, 0.001), v.T: 300, v.P: 101325, v.N: 1}
+    results = {}
+    for mode in ('compiled', 'reference'):
+        with pycalphad.backend('cpp'):
+            wks = Workspace(dbf, ['NI', 'TI', 'VA'], [phase_name], conds)
+            iph = IsolatedPhase(phase_name, wks=wks)
+            original = dispatch.workspace_properties
+            if mode == 'reference':
+                dispatch.workspace_properties = lambda *args, **kwargs: {}
+            try:
+                results[mode] = [np.asarray(x, dtype=float) for x in wks.get('GM', iph(f'GM({phase_name})'))]
+            finally:
+                dispatch.workspace_properties = original
+    for compiled, reference in zip(results['compiled'], results['reference']):
+        assert np.array_equal(np.isnan(compiled), np.isnan(reference))
+        np.testing.assert_allclose(compiled, reference, rtol=1e-8, atol=1e-6)
+    gm, isolated_gm = results['compiled']
+    np.testing.assert_allclose(isolated_gm, gm)
+
+
+@needs_cpp
+@select_database("C002_NiTiCr_LuXiaogang.tdb")
+def test_isolated_phase_custom_solver_uses_reference(load_database):
+    """An IsolatedPhase with a non-default solver is evaluated by the reference
+    path on a compiled backend, so the solver is used."""
+    from pycalphad.property_framework import IsolatedPhase
+    from pycalphad.tests.fixtures import ConvergenceFailureSolver
+    dbf = load_database()
+    phase_name = 'B19_PRIME'
+    with pycalphad.backend('cpp'):
+        wks = Workspace(dbf, ['NI', 'TI', 'VA'], [phase_name],
+                        {v.X('NI'): (0.499, 0.52, 0.005), v.T: 300, v.P: 101325, v.N: 1})
+        iso = IsolatedPhase(phase_name, wks)
+        iso.solver = ConvergenceFailureSolver()
+        assert np.all(np.isnan(np.asarray(wks.get(iso(f'GM({phase_name})')))))

@@ -12,8 +12,10 @@ sequence on the compiled solver (one condition per call, no grid, so no
 phase additions: Solver.solve semantics), feeding each step's result into
 the next, and evaluates each property with its own compute_property on the
 composition set the step produced. A step that does not converge is redone
-with the reference Solver.solve from the same starting state, since the
-reference uses its final state either way.
+with the reference Solver.solve from the same starting state. If that does
+not converge either, the step is retried once from the IsolatedPhase's
+starting composition set, as the reference does (gh-670); a step that still
+does not converge evaluates its properties without a composition set.
 
 DormantPhase relaxes its composition set at every condition under that
 condition's equilibrium chemical potentials and state variables, by a fixed
@@ -164,29 +166,38 @@ def _site_fractions(compset):
     return np.asarray(compset.dof)[nsv:nsv + compset.phase_record.phase_dof].copy()
 
 
-def isolated_phase_steps(wks, compset, step_conditions):
+def isolated_phase_steps(wks, compset, step_conditions, initial_compset=None):
     """Solve `compset` alone at each step's conditions in sequence, each step
-    starting from the previous result (IsolatedPhase semantics).
+    starting from the previous result (IsolatedPhase semantics). A step that
+    does not converge is retried once from `initial_compset` (the
+    IsolatedPhase's starting composition set), if given.
 
     step_conditions: list of Workspace.get_dict's cur_conds (condition object
-    -> value) per step. Returns a list of (site_fractions, NP, chemical_potentials)
-    per step; `compset` is left in the final state, as Solver.solve leaves it.
+    -> value) per step. Returns a list of (site_fractions, NP,
+    chemical_potentials, converged) per step; `compset` is left in the final
+    state, as Solver.solve leaves it.
     """
     from pycalphad.core.solver import Solver
     steps_solver = _workspace_step_solver(wks, compset, step_conditions)
     reference = Solver()
+
+    def solve(k, y, amount):
+        converged, y_new, amount_new, mu = steps_solver.run(k, y, amount)
+        if converged and np.all(np.isfinite(y_new)) and np.isfinite(amount_new):
+            return True, y_new, float(amount_new), mu
+        # reference Solver.solve from the same starting state
+        compset.update(y, amount, steps_solver.statevars(k))
+        res = reference.solve([compset], step_conditions[k])
+        return (bool(res.converged), _site_fractions(compset), float(compset.NP),
+                np.asarray(res.chemical_potentials, dtype=np.float64).copy())
+
     steps = []
     y, amount = _site_fractions(compset), float(compset.NP)
     for k in range(len(step_conditions)):
-        converged, y_new, amount_new, mu = steps_solver.run(k, y, amount)
-        if not (converged and np.all(np.isfinite(y_new)) and np.isfinite(amount_new)):
-            # reference Solver.solve from the same starting state
-            compset.update(y, amount, steps_solver.statevars(k))
-            res = reference.solve([compset], step_conditions[k])
-            y_new, amount_new = _site_fractions(compset), compset.NP
-            mu = np.asarray(res.chemical_potentials, dtype=np.float64).copy()
-        y, amount = y_new, float(amount_new)
-        steps.append((y.copy(), amount, mu))
+        converged, y, amount, mu = solve(k, y, amount)
+        if not converged and initial_compset is not None:
+            converged, y, amount, mu = solve(k, _site_fractions(initial_compset), float(initial_compset.NP))
+        steps.append((y.copy(), amount, mu, converged))
     compset.update(y, amount, steps_solver.statevars(len(step_conditions) - 1))
     return steps
 

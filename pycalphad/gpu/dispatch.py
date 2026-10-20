@@ -238,6 +238,7 @@ def _metaproperty_chain_properties(wks, props, display_units):
     from pycalphad.core.composition_set import CompositionSet
     from pycalphad.property_framework.units import Q_
     from pycalphad.gpu.metaproperty_chains import chain_supported, dormant_phase_steps, isolated_phase_steps
+    from pycalphad.core.solver import Solver
     groups = {}
     for prop in props:
         tagged = _metaproperty_of(prop)
@@ -256,6 +257,8 @@ def _metaproperty_chain_properties(wks, props, display_units):
         reason = chain_supported(wks, compset)
         if reason is None and compset_users[id(compset)] > 1:
             reason = 'composition set shared by several meta-properties'
+        if reason is None and kind == 'isolated' and type(meta.solver) is not Solver:
+            reason = 'non-default solver'
         if reason is None and kind == 'dormant':
             phase = np.asarray(wks.eq.Phase).reshape(len(cur_conds), -1)
             if not np.all(((phase != '') & (phase != '_FAKE_')).any(axis=1)):
@@ -276,12 +279,14 @@ def _metaproperty_chain_properties(wks, props, display_units):
         step_conditions = [c for c in cur_conds for _ in group]
         try:
             if kind == 'isolated':
-                steps = isolated_phase_steps(wks, compset, step_conditions)
+                steps = isolated_phase_steps(wks, compset, step_conditions,
+                                             getattr(meta, '_initial_compset', None))
             else:
                 mu = np.asarray(wks.eq.MU, dtype=np.float64).reshape(len(cur_conds), -1)
                 steps = dormant_phase_steps(wks, compset, step_conditions,
                                             np.repeat(mu, len(group), axis=0), meta.max_iterations)
             pr = compset.phase_record
+            eq_mu = np.asarray(wks.eq.MU, dtype=np.float64).reshape(len(cur_conds), -1)
             state_variables = [str(sv) for sv in pr.state_variables]
             values = [np.full((len(cur_conds),) + p.shape, np.nan) for p in group]
             for c, conds in enumerate(cur_conds):
@@ -289,6 +294,10 @@ def _metaproperty_chain_properties(wks, props, display_units):
                 statevars = np.array([by_name[sv] for sv in state_variables], dtype=np.float64)
                 for j, p in enumerate(group):
                     step = steps[c * len(group) + j]
+                    if kind == 'isolated' and not step[3]:
+                        # unconverged: IsolatedPhase evaluates without a composition set
+                        values[j][c, ...] = p.inner_property.compute_property([], conds, eq_mu[c])
+                        continue
                     # IsolatedPhase evaluates with the step's chemical
                     # potentials, DormantPhase with the equilibrium's
                     chemical_potentials = step[2] if kind == 'isolated' else mu[c]

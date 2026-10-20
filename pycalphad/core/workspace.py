@@ -387,9 +387,9 @@ class Workspace:
                 multiplicity[key] = max(multiplicity[key], value)
         return multiplicity
 
-    def _expand_property_arguments(self, args: Sequence[ComputableProperty]):
-        "Mutates args"
-        multiplicity = self._detect_phase_multiplicity()
+    def _expand_property_arguments(self, args: Sequence[ComputableProperty], expand_composition_sets: bool = True):
+        "Mutates args. Expands wildcards and, if expand_composition_sets, miscibility gaps."
+        multiplicity = self._detect_phase_multiplicity() if expand_composition_sets else None
         indices_to_delete = []
         i = 0
         while i < len(args):
@@ -415,17 +415,25 @@ class Workspace:
                     components = [comp for comp in self.components if comp != v.Component('VA')]  # TODO: Special case for vacancy
                 additional_args = args[i].expand_wildcard(components=components)
                 args.extend(additional_args)
+            elif hasattr(args[i], 'inner_property'):
+                # Metaproperty (e.g., IsolatedPhase): expand wildcards in the wrapped property and wrap each
+                # result again. The metaproperty chooses its own composition set, so miscibility gaps are not expanded.
+                inner_args = [args[i].inner_property]
+                self._expand_property_arguments(inner_args, expand_composition_sets=False)
+                if len(inner_args) != 1 or inner_args[0] is not args[i].inner_property:
+                    indices_to_delete.append(i)
+                    args.extend(args[i].metaproperty(inner_arg) for inner_arg in inner_args)
             elif isinstance(args[i], JanssonDerivative):
                 numerator_args = [args[i].numerator]
-                self._expand_property_arguments(numerator_args)
+                self._expand_property_arguments(numerator_args, expand_composition_sets)
                 denominator_args = [args[i].denominator]
-                self._expand_property_arguments(denominator_args)
+                self._expand_property_arguments(denominator_args, expand_composition_sets)
                 if (len(numerator_args) > 1) or (len(denominator_args) > 1):
                     for n_arg in numerator_args:
                         for d_arg in denominator_args:
                             args.append(JanssonDerivative(n_arg, d_arg))
                     indices_to_delete.append(i)
-            else:
+            elif expand_composition_sets:
                 # This is a concrete ComputableProperty
                 if hasattr(args[i], 'phase_name') and (args[i].phase_name is not None) \
                     and not ('#' in args[i].phase_name) and multiplicity[args[i].phase_name] > 1:

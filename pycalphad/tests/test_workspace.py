@@ -4,7 +4,7 @@ from pycalphad import Database, Workspace, variables as v
 from pycalphad.core.conditions import ConditionError
 from pycalphad.core.composition_set import CompositionSet
 from pycalphad.core.solver import Solver
-from pycalphad.property_framework import as_property, ComputableProperty, T0, IsolatedPhase, DormantPhase
+from pycalphad.property_framework import as_property, ComputableProperty, T0, IsolatedPhase, DormantPhase, ReferenceState
 from pycalphad.property_framework.units import Q_, unit_conversion_context
 from pycalphad.tests.fixtures import load_database, select_database, ConvergenceFailureSolver
 import pytest
@@ -479,10 +479,35 @@ def test_shallow_ternary_with_isolated_phase(load_database):
     assert_allclose(global_MU, np.array([-47947.48767057, -62817.25958317, -71546.46372217]))
     # TODO: test isolated phase MU? Might need https://github.com/pycalphad/pycalphad/pull/595
     isolated_GM = wks.get(IsolatedPhase('BCC_A2',wks=wks)("GM"))
-    # TODO: switch notation to IsolatedPhase('BCC_A2',wks=wks)("MU(*)") when possible
-    isoalted_MU = np.asarray([wks.get(IsolatedPhase('BCC_A2',wks=wks)(x)) for x in ["MU(CR)", "MU(FE)", "MU(NI)"]])
+    isolated_MU = np.asarray(wks.get(IsolatedPhase('BCC_A2',wks=wks)("MU(*)")))
+    assert_allclose(isolated_GM, np.dot(isolated_MU, wks.get(IsolatedPhase('BCC_A2',wks=wks)("X(*)"))))
     assert_allclose(isolated_GM, -53870.40280079158)
-    # assert_allclose(isoalted_MU, ???)
+    # assert_allclose(isolated_MU, ???)
+
+
+@select_database("alzn_mey.tdb")
+def test_wildcards_in_metaproperties(load_database):
+    "Wildcards inside metaproperties expand to one metaproperty per concrete property (gh-604)"
+    dbf = load_database()
+    wks = Workspace(dbf, ['AL', 'ZN', 'VA'], ['FCC_A1', 'HCP_A3', 'LIQUID'],
+                    {v.N: 1, v.P: 1e5, v.T: 600, v.X('ZN'): 0.3})
+    isolated = IsolatedPhase('FCC_A1', wks=wks)
+    dormant = DormantPhase('LIQUID', wks=wks)
+    reference = ReferenceState([('FCC_A1', {v.X('ZN'): 0}), ('FCC_A1', {v.X('ZN'): 1})], wks)
+    cases = [(isolated, 'X(*)', ['X(AL)', 'X(ZN)']),
+             (isolated, 'MU(*)', ['MU(AL)', 'MU(ZN)']),
+             (isolated, 'MU(*).T', ['MU(AL).T', 'MU(ZN).T']),
+             (isolated, 'Y(FCC_A1,0,*)', ['Y(FCC_A1,0,AL)', 'Y(FCC_A1,0,ZN)']),
+             (dormant, 'MU(*)', ['MU(AL)', 'MU(ZN)']),
+             (dormant, 'X(*)', ['X(AL)', 'X(ZN)']),
+             (reference, 'HM(*)', ['HM(FCC_A1)', 'HM(HCP_A3)', 'HM(LIQUID)'])]
+    for metaproperty, wildcard, explicit in cases:
+        result = wks.get_dict(metaproperty(wildcard))
+        assert [str(key) for key in result.keys()] == [str(metaproperty(prop)) for prop in explicit]
+        assert_allclose(list(result.values()), [wks.get(metaproperty(prop)) for prop in explicit])
+    # Without wildcards, the property passed in is the one returned
+    prop = isolated('MU(AL)')
+    assert list(wks.get_dict(prop).keys()) == [prop]
 
 
 @select_database("cfe_broshe.tdb")

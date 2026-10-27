@@ -29,8 +29,10 @@ functions or PhaseRecords. The following issues track this behavior:
 """
 from pycalphad.core.cache import cacheit, lru_cache
 from pycalphad.core.utils import wrap_symbol
-from symengine import ComplexDouble, sympify, lambdify, I, zoo, oo, have_llvm
+from symengine import ComplexDouble, Piecewise, sympify, lambdify, I, zoo, oo, have_llvm
 from collections import namedtuple
+
+_ComplexInfinity = type(zoo)
 
 BuildFunctionsResult = namedtuple('BuildFunctionsResult', ['func', 'grad', 'hess'])
 ConstraintFunctions = namedtuple('ConstraintFunctions', ['cons_func', 'cons_jac', 'cons_hess'])
@@ -50,6 +52,44 @@ def _get_lambidfy_options(user_options):
     if user_options['backend'] == 'llvm':
         user_options.setdefault('opt_level', LAMBDIFY_DEFAULT_LLVM_OPT_LEVEL)
     return user_options
+
+
+def _real_graph(expr):
+    """Replace complex infinity with real infinity and drop the imaginary parts of complex numbers,
+    in one pass over ``expr``.
+
+    SymEngine cannot lambdify complex numbers, and integer exponents expressed as doubles can evaluate
+    to negligible (1e-16*j) complex parts, which raise runtime errors for ``lambdify(..., real=True)``.
+    Dropping them would also drop legitimate complex numbers (e.g. negative bases for non-integer
+    exponents), but we have been doing this all along internally inside ``lambdify``.
+
+    Nodes with nothing to replace are returned as they are, so the stored order of terms, which
+    compiled functions follow, is kept (``xreplace`` rebuilds every node, which can reorder them).
+    """
+    rebuilt = {}  # node -> its replacement, or None if it has nothing to replace
+
+    def rebuild(e):
+        if isinstance(e, _ComplexInfinity):  # zoo has an argument, so check it before treating e as a leaf
+            return oo
+        args = e.args
+        if not args:
+            if isinstance(e, ComplexDouble):
+                return e.xreplace({I: 0.0})
+            return e
+        try:
+            out = rebuilt[e]
+        except KeyError:
+            new_args = [rebuild(a) for a in args]
+            if all(new is old for new, old in zip(new_args, args)):
+                out = None
+            elif isinstance(e, Piecewise):
+                out = Piecewise(*zip(new_args[0::2], new_args[1::2]))
+            else:
+                out = type(e)(*new_args)
+            rebuilt[e] = out
+        return e if out is None else out
+
+    return rebuild(expr)
 
 
 @lru_cache(maxsize=512)
@@ -113,20 +153,7 @@ def build_functions(symengine_graph, variables, parameters=None, wrt=None,
     # replacement is assumed to be cheap enough that it's safer to replace the
     # complex values and pay the minor time penalty.
     inp = sympify(variables + parameters)
-    graph = sympify(symengine_graph).xreplace({zoo: oo})
-    # We also replace all complex parts of complex numbers with (real) zero,
-    # to address a bug where integer exponents expressed as doubles can evaluate
-    # to have negligible (1e-16*j) complex parts, which raises runtime errors
-    # for the default lambdify(..., real=True).
-    # In practice, this is probably a reasonable workaround, but would drop
-    # cases where we have legitimate, non-negligble complex numbers (e.g. negative
-    # bases for non-integer exponents). Although we have been doing this all
-    # along internally inside `lambdify`.
-    # We have to do this graph.atoms() method to get complex numbers because
-    # just calling xreplace(I, 0.0) doesn't work in SymEngine for some deeply
-    # nested `I`.
-    # We assume that differentiating does create new complex numbers.
-    graph = graph.xreplace({x: x.xreplace({I: 0.0}) for x in graph.atoms(ComplexDouble)})
+    graph = _real_graph(sympify(symengine_graph))
     func = lambdify(inp, [graph], **_get_lambidfy_options(func_options))
     if include_grad or include_hess:
         grad_graphs = list(graph.diff(w).xreplace({zoo: oo}) for w in wrt)

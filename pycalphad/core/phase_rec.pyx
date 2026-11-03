@@ -41,17 +41,24 @@ cdef class FastFunctionFactory:
         self._cache_ptr = <void**> self._cache.data
         self._cache_cur_idx = -1
 
+    cdef int _cache_insert(self, pair[string, string] cache_key, FastFunction func) except -1:
+        # Building func runs Python code, during which another thread may have added the same function
+        if self._cache_property_map.find(cache_key) != self._cache_property_map.end():
+            return 0
+        self._cache_cur_idx += 1
+        if self._cache_cur_idx > self._cache.shape[0]:
+            raise ValueError('Cache error')
+        self._cache[self._cache_cur_idx] = func
+        self._cache_property_map[cache_key] = self._cache_cur_idx
+        return 0
+
     cdef void* get_func(self, string property_name) except * nogil:
         cdef pair[string, string] cache_key = pair[string, string](string(<char*>'func'), property_name)
         cdef map[pair[string, string], int].iterator it
         it = self._cache_property_map.find(cache_key)
         if it == self._cache_property_map.end():
             with gil:
-                self._cache_cur_idx += 1
-                if self._cache_cur_idx > self._cache.shape[0]:
-                    raise ValueError('Cache error')
-                self._cache[self._cache_cur_idx] = FastFunction(self.phase_record_factory.get_phase_property(self.phase_name, (<bytes>property_name).decode('utf-8'), include_grad=False, include_hess=False).func)
-                self._cache_property_map[cache_key] = self._cache_cur_idx
+                self._cache_insert(cache_key, FastFunction(self.phase_record_factory.get_phase_property(self.phase_name, (<bytes>property_name).decode('utf-8'), include_grad=False, include_hess=False).func))
             it = self._cache_property_map.find(cache_key)
         return <void*>self._cache_ptr[deref(it).second]
 
@@ -61,11 +68,7 @@ cdef class FastFunctionFactory:
         it = self._cache_property_map.find(cache_key)
         if it == self._cache_property_map.end():
             with gil:
-                self._cache_cur_idx += 1
-                if self._cache_cur_idx > self._cache.shape[0]:
-                    raise ValueError('Cache error')
-                self._cache[self._cache_cur_idx] = FastFunction(self.phase_record_factory.get_phase_property(self.phase_name, (<bytes>property_name).decode('utf-8'), include_grad=True, include_hess=False).grad)
-                self._cache_property_map[cache_key] = self._cache_cur_idx
+                self._cache_insert(cache_key, FastFunction(self.phase_record_factory.get_phase_property(self.phase_name, (<bytes>property_name).decode('utf-8'), include_grad=True, include_hess=False).grad))
             it = self._cache_property_map.find(cache_key)
         return <void*>self._cache_ptr[deref(it).second]
 
@@ -75,11 +78,7 @@ cdef class FastFunctionFactory:
         it = self._cache_property_map.find(cache_key)
         if it == self._cache_property_map.end():
             with gil:
-                self._cache_cur_idx += 1
-                if self._cache_cur_idx > self._cache.shape[0]:
-                    raise ValueError('Cache error')
-                self._cache[self._cache_cur_idx] = FastFunction(self.phase_record_factory.get_phase_property(self.phase_name, (<bytes>property_name).decode('utf-8'), include_grad=False, include_hess=True).hess)
-                self._cache_property_map[cache_key] = self._cache_cur_idx
+                self._cache_insert(cache_key, FastFunction(self.phase_record_factory.get_phase_property(self.phase_name, (<bytes>property_name).decode('utf-8'), include_grad=False, include_hess=True).hess))
             it = self._cache_property_map.find(cache_key)
         return <void*>self._cache_ptr[deref(it).second]
 

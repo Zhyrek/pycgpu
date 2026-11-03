@@ -16,6 +16,28 @@ import collections
 from collections.abc import Iterable, Mapping, KeysView
 
 
+def atoms_of_type(expr, types):
+    """Return the set of subexpressions of ``expr`` that are instances of ``types``, like
+    ``expr.atoms(*types)``, but visiting each distinct subexpression only once.
+
+    SymEngine's ``atoms`` walks every occurrence of repeated subexpressions. Subexpressions are visited in
+    the same (pre-)order, so where equal subexpressions occur more than once, the one kept is the first,
+    as with ``atoms``.
+    """
+    found = {}
+    seen = set()
+    stack = [expr]
+    while stack:
+        e = stack.pop()
+        if e in seen:
+            continue
+        seen.add(e)
+        if isinstance(e, types) and e not in found:
+            found[e] = None
+        stack.extend(reversed(e.args))
+    return set(found)
+
+
 def point_sample(comp_count, pdof=10):
     """
     Sample 'pdof * (sum(comp_count) - len(comp_count))' points in

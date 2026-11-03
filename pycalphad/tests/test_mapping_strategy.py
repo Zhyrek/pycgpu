@@ -1496,6 +1496,58 @@ def test_composition_sets_equal_up_to_ordering_variant(load_database):
     l12_swapped = comp_set("L12_FCC", [0.8, 0.1, 0.1, 0.1, 0.1, 0.8])
     assert not _eq_compset(l12, l12_swapped)
 
+def _overlapping_zpf_lines(strategy, tol=0.05):
+    """
+    Pairs of ZPF lines with the same phases where more than half of the points of the shorter one lie on the other:
+    within tol of it, and not beyond its ends, in units of the axis step sizes (compositions of all composition sets,
+    and the temperature if it is an axis variable)
+    """
+    composition_step = min(strategy.axis_delta[av] for av in strategy.axis_vars if isinstance(av, v.X))
+    def locations(zpf_line):
+        rows = []
+        for point in zpf_line.points:
+            comp_sets = sorted(point.stable_composition_sets, key=lambda cs: (cs.phase_record.phase_name, tuple(cs.X)))
+            row = [np.asarray(cs.X) / composition_step for cs in comp_sets]
+            if v.T in strategy.axis_vars:
+                row.append([float(np.squeeze(point.global_conditions[v.T])) / strategy.axis_delta[v.T]])
+            rows.append(np.concatenate(row))
+        return np.array(rows)
+    def on_line(p, L):
+        for i, (a, b) in enumerate(zip(L[:-1], L[1:])):
+            ab = b - a
+            t = np.dot(p - a, ab) / max(np.dot(ab, ab), 1e-30)
+            if np.linalg.norm(p - (a + np.clip(t, 0, 1) * ab)) < tol:
+                beyond = (-t if i == 0 and t < 0 else 0) + (t - 1 if i == len(L) - 2 and t > 1 else 0)
+                if beyond * np.linalg.norm(ab) < 0.01:
+                    return True
+        return False
+    pairs = []
+    for i in range(len(strategy.zpf_lines)):
+        for j in range(i + 1, len(strategy.zpf_lines)):
+            a, b = strategy.zpf_lines[i], strategy.zpf_lines[j]
+            if sorted(a.stable_phases) != sorted(b.stable_phases) or min(len(a.points), len(b.points)) < 2:
+                continue
+            A, B = sorted([locations(a), locations(b)], key=len)
+            if np.mean([on_line(row, B) for row in A]) > 0.5:
+                pairs.append((i, j))
+    return pairs
+
+@pytest.mark.parametrize("db, comps, conds", [
+    ("cumg.tdb", ["CU", "MG", "VA"], {v.T: (300, 1500, 30), v.X("MG"): (0, 1, 0.02)}),
+    ("alcrni.tdb", ["AL", "CR", "NI", "VA"], {v.T: 1200, v.X("CR"): (0, 1, 0.05), v.X("NI"): (0, 1, 0.05)}),
+])
+def test_tieline_strategy_does_not_map_zpf_lines_twice(db, comps, conds):
+    """
+    Cu-Mg: the starting point just below the Mg-rich eutectic (759 K, from the step map along the Mg edge) is traced
+    up to the eutectic node (759.6 K) along the CUMG2 + HCP_A3 line that ended there; it draws nothing that line does
+    not. Al-Cr-Ni at 1200 K: the B2 + LIQUID line from the Al-Cr edge ends at a B2 + B2 + LIQUID node, which another
+    line finds again 0.01 away; the B2 + LIQUID exit of that copy steps back along the first line, to the edge
+    """
+    dbf = Database(str(files(pycalphad.tests.databases).joinpath(db)))
+    strategy = TielineStrategy(dbf, comps, filter_phases(dbf, unpack_species(dbf, comps)), {**conds, v.P: 101325, v.N: 1})
+    strategy.do_map()
+    assert _overlapping_zpf_lines(strategy) == []
+
 @select_database("crtiv_ghosh.tdb")
 def test_ternary_strategy_finds_a_miscibility_gap_a_step_crosses(load_database):
     """

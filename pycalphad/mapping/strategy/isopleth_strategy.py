@@ -63,6 +63,15 @@ def _composition_sets_with_phase_fractions(composition_sets: list[CompositionSet
     return new_composition_sets
 
 class IsoplethStrategy(MapStrategy):
+    def _same_boundary(self, zpf_line: ZPFLine, other: ZPFLine):
+        """
+        The tie-lines are not in the plane of an isopleth: the boundaries where one or the other of two phases
+        vanishes can have nearly the same tie-lines at the same temperature (e.g. the liquidus and solidus where the
+        tie-lines lie close to the plane), so the phase with zero amount (the fixed phase) must also be the same
+        """
+        return (sorted(zpf_line.stable_phases) == sorted(other.stable_phases)
+                and sorted(zpf_line.fixed_phases) == sorted(other.fixed_phases))
+
     def generate_automatic_starting_points(self):
         """
         Searches axis limits to find starting points

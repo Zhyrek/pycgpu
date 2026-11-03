@@ -1,0 +1,87 @@
+map                                              upstream-next                   node-robustness                same-tieline-dedup               old-node-robustness
+                                  lines/pts/fail/dup/0w/edge/s      lines/pts/fail/dup/0w/edge/s      lines/pts/fail/dup/0w/edge/s      lines/pts/fail/dup/0w/edge/s
+Al-Te                                       13/162/3/0/0/0/0.7                13/164/2/0/0/0/0.8                13/164/2/0/0/0/0.8                14/164/2/1/0/0/1.0
+Cr-V                                          1/55/1/0/0/0/0.4                  1/55/1/0/0/0/0.4                  1/55/1/0/0/0/0.4                 2/110/2/1/0/0/0.8
+Cu-Mg                                        8/138/0/1/0/0/0.6                 8/138/0/1/0/0/0.7                 7/134/0/0/0/0/0.7                 7/134/0/0/0/0/1.0
+Ba-Ca                                         3/78/2/0/0/0/0.4                  3/78/2/0/0/0/0.4                  2/76/2/0/0/0/0.4                 5/153/3/2/0/0/0.8
+Au-Cu                                        8/158/1/1/0/0/2.6                10/191/1/1/0/0/3.5                 9/189/1/0/0/0/3.6                 8/144/0/1/0/0/4.7
+Ga-La                                       16/223/2/0/0/0/1.3                18/227/2/0/0/0/1.3                17/225/1/0/0/0/1.3                17/226/2/0/0/0/2.0
+Cr-Ta                                        9/119/0/0/1/0/0.8                 9/118/0/0/1/0/0.9                 8/116/0/0/0/0/0.9                 8/116/0/0/0/0/1.3
+Al-Fe                                       14/210/4/0/1/0/1.2                15/216/1/0/1/0/1.2                14/214/1/0/0/0/1.2                14/214/1/0/0/0/1.8
+Al-Ni                                       15/247/4/1/1/0/1.8                15/252/2/0/1/0/1.9                15/246/1/0/1/0/1.9                14/250/2/0/0/0/3.0
+Co-V                                        12/188/3/0/0/0/4.0                16/219/3/1/1/0/4.2                15/217/3/0/0/0/4.1                15/216/3/0/0/0/7.1
+Cr-Ti                                       11/180/1/0/2/0/1.0                11/179/1/0/2/0/1.1                10/177/1/0/1/0/1.2                10/177/1/0/1/0/1.7
+Fe-Nb                                       13/146/0/0/2/0/1.3                13/145/0/0/2/0/1.3                11/141/0/0/0/0/1.3                11/141/0/0/0/0/2.3
+Al-Cr-Ni 1300K (alcocrni)                    15/72/6/1/0/0/4.4                 15/98/4/2/0/0/3.6                 14/77/3/0/0/0/3.4                16/102/5/3/0/0/7.6
+Al-Co-Ni 1233K (alcocrni)                    10/71/4/1/0/0/4.3                 11/76/1/0/0/0/3.3                 11/76/1/0/0/0/3.3                 12/80/2/1/0/0/6.4
+Al-Co-Cr 1334K (alcocrni)                    14/97/6/1/0/0/4.4                 15/91/4/1/0/0/3.2                 14/89/4/0/0/0/3.2                17/103/6/3/0/0/7.4
+Al-Cr-Ni 1200K (alcrni)                      12/72/4/3/0/0/2.2                 12/80/2/2/0/0/2.3                 10/60/1/0/0/0/2.2                 10/60/1/0/0/0/3.4
+Al-Cu-Y 1774.65K                               2/4/2/0/0/0/1.4                12/108/3/3/0/0/2.0                 11/91/3/0/0/0/2.0                 12/98/3/1/0/0/4.6
+TOTAL                                   176/2220/43/9/7/0/32.8           197/2435/29/11/8/0/32.1            182/2347/25/0/2/0/31.9           192/2488/33/13/1/0/56.9
+
+Ga-La: phase_pairs node-robustness vs upstream-next: +['GA6LA + ORTHORHOMBIC_A11'] -[]
+Ga-La: phase_pairs same-tieline-dedup vs upstream-next: +['GA6LA + ORTHORHOMBIC_A11'] -[]
+Ga-La: phase_pairs old-node-robustness vs upstream-next: +['GA6LA + ORTHORHOMBIC_A11'] -[]
+Al-Fe: phase_pairs node-robustness vs upstream-next: +['AL5FE2 + AL5FE4'] -[]
+Al-Fe: node_phases node-robustness vs upstream-next: +['AL2FE + AL5FE2 + AL5FE4'] -[]
+Al-Fe: phase_pairs same-tieline-dedup vs upstream-next: +['AL5FE2 + AL5FE4'] -[]
+Al-Fe: node_phases same-tieline-dedup vs upstream-next: +['AL2FE + AL5FE2 + AL5FE4'] -[]
+Al-Fe: phase_pairs old-node-robustness vs upstream-next: +['AL5FE2 + AL5FE4'] -[]
+Al-Fe: node_phases old-node-robustness vs upstream-next: +['AL2FE + AL5FE2 + AL5FE4'] -[]
+Co-V: phase_pairs node-robustness vs upstream-next: +['CO3V + FCC_A1', 'FCC_4SL + FCC_A1', 'FCC_A1 + HCP_A3'] -[]
+Co-V: node_phases node-robustness vs upstream-next: +['CO3V + FCC_4SL + FCC_A1', 'CO3V + FCC_A1 + HCP_A3'] -[]
+Co-V: phase_pairs same-tieline-dedup vs upstream-next: +['CO3V + FCC_A1', 'FCC_4SL + FCC_A1', 'FCC_A1 + HCP_A3'] -[]
+Co-V: node_phases same-tieline-dedup vs upstream-next: +['CO3V + FCC_4SL + FCC_A1', 'CO3V + FCC_A1 + HCP_A3'] -[]
+Co-V: phase_pairs old-node-robustness vs upstream-next: +['CO3V + FCC_A1', 'FCC_4SL + FCC_A1', 'FCC_A1 + HCP_A3'] -[]
+Co-V: node_phases old-node-robustness vs upstream-next: +['CO3V + FCC_4SL + FCC_A1', 'CO3V + FCC_A1 + HCP_A3'] -[]
+Al-Co-Ni 1233K (alcocrni): phase_pairs node-robustness vs upstream-next: +['AL13CO4 + BCC_B2', 'BCC_B2 + LIQUID'] -[]
+Al-Co-Ni 1233K (alcocrni): node_phases node-robustness vs upstream-next: +[] -['AL13CO4 + AL3CO + AL3NI2', 'AL13CO4 + AL3NI2 + LIQUID']
+Al-Co-Ni 1233K (alcocrni): phase_pairs same-tieline-dedup vs upstream-next: +['AL13CO4 + BCC_B2', 'BCC_B2 + LIQUID'] -[]
+Al-Co-Ni 1233K (alcocrni): node_phases same-tieline-dedup vs upstream-next: +[] -['AL13CO4 + AL3CO + AL3NI2', 'AL13CO4 + AL3NI2 + LIQUID']
+Al-Co-Ni 1233K (alcocrni): phase_pairs old-node-robustness vs upstream-next: +['AL13CO4 + BCC_B2', 'BCC_B2 + LIQUID'] -[]
+Al-Co-Ni 1233K (alcocrni): node_phases old-node-robustness vs upstream-next: +[] -['AL13CO4 + AL3CO + AL3NI2', 'AL13CO4 + AL3NI2 + LIQUID']
+Al-Cu-Y 1774.65K: phase_pairs node-robustness vs upstream-next: +['AL2Y + AL7CU2Y3', 'AL2Y + LIQUID', 'AL7CU2Y3 + ALCU5Y', 'AL7CU2Y3 + LIQUID', 'ALCU5Y + ALCUY', 'ALCU5Y + LIQUID', 'ALCUY + LIQUID'] -[]
+Al-Cu-Y 1774.65K: node_phases node-robustness vs upstream-next: +['AL2Y + AL7CU2Y3 + LIQUID', 'AL7CU2Y3 + ALCU5Y + ALCUY', 'AL7CU2Y3 + ALCU5Y + LIQUID', 'AL7CU2Y3 + ALCUY + LIQUID', 'ALCU5Y + ALCUY + LIQUID'] -[]
+Al-Cu-Y 1774.65K: phase_pairs same-tieline-dedup vs upstream-next: +['AL2Y + AL7CU2Y3', 'AL2Y + LIQUID', 'AL7CU2Y3 + ALCU5Y', 'AL7CU2Y3 + LIQUID', 'ALCU5Y + ALCUY', 'ALCU5Y + LIQUID', 'ALCUY + LIQUID'] -[]
+Al-Cu-Y 1774.65K: node_phases same-tieline-dedup vs upstream-next: +['AL2Y + AL7CU2Y3 + LIQUID', 'AL7CU2Y3 + ALCU5Y + ALCUY', 'AL7CU2Y3 + ALCU5Y + LIQUID', 'AL7CU2Y3 + ALCUY + LIQUID', 'ALCU5Y + ALCUY + LIQUID'] -[]
+Al-Cu-Y 1774.65K: phase_pairs old-node-robustness vs upstream-next: +['AL2Y + AL7CU2Y3', 'AL2Y + LIQUID', 'AL7CU2Y3 + ALCU5Y', 'AL7CU2Y3 + LIQUID', 'ALCU5Y + ALCUY', 'ALCU5Y + LIQUID', 'ALCUY + LIQUID'] -[]
+Al-Cu-Y 1774.65K: node_phases old-node-robustness vs upstream-next: +['AL2Y + AL7CU2Y3 + LIQUID', 'AL7CU2Y3 + ALCU5Y + ALCUY', 'AL7CU2Y3 + ALCU5Y + LIQUID', 'AL7CU2Y3 + ALCUY + LIQUID', 'ALCU5Y + ALCUY + LIQUID'] -[]
+
+points of upstream-next not on a line of node-robustness, Al-Co-Cr 1334K (alcocrni): {'BCC_B2 + SIGMA_SGTE': 1}
+points of upstream-next not on a line of node-robustness, Al-Cr-Ni 1200K (alcrni): {'L12_FCC + L12_FCC': 1}
+points of upstream-next not on a line of same-tieline-dedup, Al-Co-Cr 1334K (alcocrni): {'BCC_B2 + SIGMA_SGTE': 1}
+points of upstream-next not on a line of same-tieline-dedup, Al-Cr-Ni 1200K (alcrni): {'L12_FCC + L12_FCC': 1}
+points of upstream-next not on a line of old-node-robustness, Au-Cu: {'FCC_4SL + FCC_4SL': 36, 'FCC_4SL + LIQUID': 1}
+points of upstream-next not on a line of old-node-robustness, Al-Co-Cr 1334K (alcocrni): {'BCC_B2 + SIGMA_SGTE': 1}
+points of upstream-next not on a line of old-node-robustness, Al-Cr-Ni 1200K (alcrni): {'L12_FCC + L12_FCC': 1}
+points of node-robustness not on a line of upstream-next, Au-Cu: {'FCC_4SL + FCC_A1': 21}
+points of node-robustness not on a line of upstream-next, Ga-La: {'GA6LA + ORTHORHOMBIC_A11': 3, 'GA2LA_C32 + LIQUID': 1}
+points of node-robustness not on a line of upstream-next, Al-Fe: {'B2_BCC + FCC_A1': 1, 'AL2FE + AL5FE2': 1, 'AL2FE + AL5FE4': 1, 'AL5FE2 + AL5FE4': 3}
+points of node-robustness not on a line of upstream-next, Al-Ni: {'AL3NI2 + BCC_B2': 1}
+points of node-robustness not on a line of upstream-next, Co-V: {'FCC_4SL + FCC_A1': 10, 'CO3V + FCC_A1': 11, 'FCC_A1 + HCP_A3': 5}
+points of node-robustness not on a line of upstream-next, Al-Cr-Ni 1300K (alcocrni): {'BCC_B2 + BCC_B2': 22}
+points of node-robustness not on a line of upstream-next, Al-Co-Ni 1233K (alcocrni): {'BCC_B2 + LIQUID': 4, 'AL13CO4 + BCC_B2': 4}
+points of node-robustness not on a line of upstream-next, Al-Cr-Ni 1200K (alcrni): {'B2 + B2': 10}
+points of node-robustness not on a line of upstream-next, Al-Cu-Y 1774.65K: {'AL7CU2Y3 + LIQUID': 30, 'AL2Y + AL7CU2Y3': 4, 'AL2Y + LIQUID': 11, 'AL7CU2Y3 + ALCU5Y': 4, 'ALCU5Y + LIQUID': 27, 'ALCU5Y + ALCUY': 7, 'ALCUY + LIQUID': 21}
+points of node-robustness not on a line of old-node-robustness, Au-Cu: {'FCC_4SL + LIQUID': 1, 'FCC_4SL + FCC_4SL': 43}
+points of node-robustness not on a line of old-node-robustness, Co-V: {'FCC_A1 + HCP_A3': 1}
+points of same-tieline-dedup not on a line of upstream-next, Au-Cu: {'FCC_4SL + FCC_A1': 21}
+points of same-tieline-dedup not on a line of upstream-next, Ga-La: {'GA6LA + ORTHORHOMBIC_A11': 3, 'GA2LA_C32 + LIQUID': 1}
+points of same-tieline-dedup not on a line of upstream-next, Al-Fe: {'B2_BCC + FCC_A1': 1, 'AL2FE + AL5FE2': 1, 'AL2FE + AL5FE4': 1, 'AL5FE2 + AL5FE4': 3}
+points of same-tieline-dedup not on a line of upstream-next, Al-Ni: {'AL3NI2 + BCC_B2': 1}
+points of same-tieline-dedup not on a line of upstream-next, Co-V: {'FCC_4SL + FCC_A1': 10, 'CO3V + FCC_A1': 11, 'FCC_A1 + HCP_A3': 5}
+points of same-tieline-dedup not on a line of upstream-next, Al-Cr-Ni 1300K (alcocrni): {'BCC_B2 + BCC_B2': 12}
+points of same-tieline-dedup not on a line of upstream-next, Al-Co-Ni 1233K (alcocrni): {'BCC_B2 + LIQUID': 4, 'AL13CO4 + BCC_B2': 4}
+points of same-tieline-dedup not on a line of upstream-next, Al-Cr-Ni 1200K (alcrni): {'B2 + B2': 7}
+points of same-tieline-dedup not on a line of upstream-next, Al-Cu-Y 1774.65K: {'AL7CU2Y3 + LIQUID': 17, 'AL2Y + AL7CU2Y3': 4, 'AL2Y + LIQUID': 7, 'AL7CU2Y3 + ALCU5Y': 4, 'ALCU5Y + LIQUID': 27, 'ALCU5Y + ALCUY': 7, 'ALCUY + LIQUID': 21}
+points of same-tieline-dedup not on a line of old-node-robustness, Au-Cu: {'FCC_4SL + LIQUID': 1, 'FCC_4SL + FCC_4SL': 43}
+points of same-tieline-dedup not on a line of old-node-robustness, Co-V: {'FCC_A1 + HCP_A3': 1}
+points of old-node-robustness not on a line of upstream-next, Au-Cu: {'FCC_4SL + FCC_A1': 21}
+points of old-node-robustness not on a line of upstream-next, Ga-La: {'GA6LA + ORTHORHOMBIC_A11': 3, 'GA2LA_C32 + LIQUID': 1}
+points of old-node-robustness not on a line of upstream-next, Al-Fe: {'B2_BCC + FCC_A1': 1, 'AL2FE + AL5FE2': 1, 'AL2FE + AL5FE4': 1, 'AL5FE2 + AL5FE4': 3}
+points of old-node-robustness not on a line of upstream-next, Al-Ni: {'AL3NI2 + BCC_B2': 1}
+points of old-node-robustness not on a line of upstream-next, Co-V: {'FCC_4SL + FCC_A1': 10, 'CO3V + FCC_A1': 11, 'FCC_A1 + HCP_A3': 4}
+points of old-node-robustness not on a line of upstream-next, Al-Cr-Ni 1300K (alcocrni): {'BCC_B2 + BCC_B2': 22}
+points of old-node-robustness not on a line of upstream-next, Al-Co-Ni 1233K (alcocrni): {'BCC_B2 + LIQUID': 4, 'AL13CO4 + BCC_B2': 4}
+points of old-node-robustness not on a line of upstream-next, Al-Cr-Ni 1200K (alcrni): {'B2 + B2': 7}
+points of old-node-robustness not on a line of upstream-next, Al-Cu-Y 1774.65K: {'AL7CU2Y3 + LIQUID': 20, 'AL2Y + AL7CU2Y3': 4, 'AL2Y + LIQUID': 11, 'AL7CU2Y3 + ALCU5Y': 4, 'ALCU5Y + LIQUID': 27, 'ALCU5Y + ALCUY': 7, 'ALCUY + LIQUID': 21}

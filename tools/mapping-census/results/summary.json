@@ -1,0 +1,2133 @@
+{
+ "maps": {
+  "Al-Te": {
+   "upstream-next": {
+    "lines": 13,
+    "points": 162,
+    "failed_lines": 3,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "AL2TE3_ALPHA + AL2TE5",
+     "AL2TE3_ALPHA + ALTE",
+     "AL2TE3_ALPHA + HEXAGONAL_A8",
+     "AL2TE3_ALPHA + LIQUID",
+     "AL2TE3_BETA + ALTE",
+     "AL2TE3_BETA + LIQUID",
+     "AL2TE5 + HEXAGONAL_A8",
+     "AL2TE5 + LIQUID",
+     "ALTE + FCC_A1",
+     "ALTE + LIQUID",
+     "HEXAGONAL_A8 + LIQUID",
+     "LIQUID + LIQUID"
+    ],
+    "node_phases": [
+     "AL2TE3_ALPHA + AL2TE3_BETA + ALTE",
+     "AL2TE3_ALPHA + AL2TE3_BETA + LIQUID",
+     "AL2TE3_ALPHA + AL2TE5 + HEXAGONAL_A8",
+     "AL2TE3_ALPHA + AL2TE5 + LIQUID",
+     "AL2TE3_BETA + ALTE + LIQUID",
+     "AL2TE5 + HEXAGONAL_A8 + LIQUID",
+     "ALTE + FCC_A1 + LIQUID",
+     "ALTE + LIQUID + LIQUID"
+    ],
+    "elapsed": 0.7
+   },
+   "node-robustness": {
+    "lines": 13,
+    "points": 164,
+    "failed_lines": 2,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "AL2TE3_ALPHA + AL2TE5",
+     "AL2TE3_ALPHA + ALTE",
+     "AL2TE3_ALPHA + HEXAGONAL_A8",
+     "AL2TE3_ALPHA + LIQUID",
+     "AL2TE3_BETA + ALTE",
+     "AL2TE3_BETA + LIQUID",
+     "AL2TE5 + HEXAGONAL_A8",
+     "AL2TE5 + LIQUID",
+     "ALTE + FCC_A1",
+     "ALTE + LIQUID",
+     "HEXAGONAL_A8 + LIQUID",
+     "LIQUID + LIQUID"
+    ],
+    "node_phases": [
+     "AL2TE3_ALPHA + AL2TE3_BETA + ALTE",
+     "AL2TE3_ALPHA + AL2TE3_BETA + LIQUID",
+     "AL2TE3_ALPHA + AL2TE5 + HEXAGONAL_A8",
+     "AL2TE3_ALPHA + AL2TE5 + LIQUID",
+     "AL2TE3_BETA + ALTE + LIQUID",
+     "AL2TE5 + HEXAGONAL_A8 + LIQUID",
+     "ALTE + FCC_A1 + LIQUID",
+     "ALTE + LIQUID + LIQUID"
+    ],
+    "elapsed": 0.8
+   },
+   "same-tieline-dedup": {
+    "lines": 13,
+    "points": 164,
+    "failed_lines": 2,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "AL2TE3_ALPHA + AL2TE5",
+     "AL2TE3_ALPHA + ALTE",
+     "AL2TE3_ALPHA + HEXAGONAL_A8",
+     "AL2TE3_ALPHA + LIQUID",
+     "AL2TE3_BETA + ALTE",
+     "AL2TE3_BETA + LIQUID",
+     "AL2TE5 + HEXAGONAL_A8",
+     "AL2TE5 + LIQUID",
+     "ALTE + FCC_A1",
+     "ALTE + LIQUID",
+     "HEXAGONAL_A8 + LIQUID",
+     "LIQUID + LIQUID"
+    ],
+    "node_phases": [
+     "AL2TE3_ALPHA + AL2TE3_BETA + ALTE",
+     "AL2TE3_ALPHA + AL2TE3_BETA + LIQUID",
+     "AL2TE3_ALPHA + AL2TE5 + HEXAGONAL_A8",
+     "AL2TE3_ALPHA + AL2TE5 + LIQUID",
+     "AL2TE3_BETA + ALTE + LIQUID",
+     "AL2TE5 + HEXAGONAL_A8 + LIQUID",
+     "ALTE + FCC_A1 + LIQUID",
+     "ALTE + LIQUID + LIQUID"
+    ],
+    "elapsed": 0.8
+   },
+   "old-node-robustness": {
+    "lines": 14,
+    "points": 164,
+    "failed_lines": 2,
+    "duplicate_pairs": 1,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "AL2TE3_ALPHA + AL2TE5",
+     "AL2TE3_ALPHA + ALTE",
+     "AL2TE3_ALPHA + HEXAGONAL_A8",
+     "AL2TE3_ALPHA + LIQUID",
+     "AL2TE3_BETA + ALTE",
+     "AL2TE3_BETA + LIQUID",
+     "AL2TE5 + HEXAGONAL_A8",
+     "AL2TE5 + LIQUID",
+     "ALTE + FCC_A1",
+     "ALTE + LIQUID",
+     "HEXAGONAL_A8 + LIQUID",
+     "LIQUID + LIQUID"
+    ],
+    "node_phases": [
+     "AL2TE3_ALPHA + AL2TE3_BETA + ALTE",
+     "AL2TE3_ALPHA + AL2TE3_BETA + LIQUID",
+     "AL2TE3_ALPHA + AL2TE5 + HEXAGONAL_A8",
+     "AL2TE3_ALPHA + AL2TE5 + LIQUID",
+     "AL2TE3_BETA + ALTE + LIQUID",
+     "AL2TE5 + HEXAGONAL_A8 + LIQUID",
+     "ALTE + FCC_A1 + LIQUID",
+     "ALTE + LIQUID + LIQUID"
+    ],
+    "elapsed": 1.0
+   }
+  },
+  "Cr-V": {
+   "upstream-next": {
+    "lines": 1,
+    "points": 55,
+    "failed_lines": 1,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "BCC_A2 + LIQUID"
+    ],
+    "node_phases": [],
+    "elapsed": 0.4
+   },
+   "node-robustness": {
+    "lines": 1,
+    "points": 55,
+    "failed_lines": 1,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "BCC_A2 + LIQUID"
+    ],
+    "node_phases": [],
+    "elapsed": 0.4
+   },
+   "same-tieline-dedup": {
+    "lines": 1,
+    "points": 55,
+    "failed_lines": 1,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "BCC_A2 + LIQUID"
+    ],
+    "node_phases": [],
+    "elapsed": 0.4
+   },
+   "old-node-robustness": {
+    "lines": 2,
+    "points": 110,
+    "failed_lines": 2,
+    "duplicate_pairs": 1,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "BCC_A2 + LIQUID"
+    ],
+    "node_phases": [],
+    "elapsed": 0.8
+   }
+  },
+  "Cu-Mg": {
+   "upstream-next": {
+    "lines": 8,
+    "points": 138,
+    "failed_lines": 0,
+    "duplicate_pairs": 1,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "CU2MG + CUMG2",
+     "CU2MG + FCC_A1",
+     "CU2MG + LIQUID",
+     "CUMG2 + HCP_A3",
+     "CUMG2 + LIQUID",
+     "FCC_A1 + LIQUID",
+     "HCP_A3 + LIQUID"
+    ],
+    "node_phases": [
+     "CU2MG + CUMG2 + LIQUID",
+     "CU2MG + FCC_A1 + LIQUID",
+     "CUMG2 + HCP_A3 + LIQUID"
+    ],
+    "elapsed": 0.6
+   },
+   "node-robustness": {
+    "lines": 8,
+    "points": 138,
+    "failed_lines": 0,
+    "duplicate_pairs": 1,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "CU2MG + CUMG2",
+     "CU2MG + FCC_A1",
+     "CU2MG + LIQUID",
+     "CUMG2 + HCP_A3",
+     "CUMG2 + LIQUID",
+     "FCC_A1 + LIQUID",
+     "HCP_A3 + LIQUID"
+    ],
+    "node_phases": [
+     "CU2MG + CUMG2 + LIQUID",
+     "CU2MG + FCC_A1 + LIQUID",
+     "CUMG2 + HCP_A3 + LIQUID"
+    ],
+    "elapsed": 0.7
+   },
+   "same-tieline-dedup": {
+    "lines": 7,
+    "points": 134,
+    "failed_lines": 0,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "CU2MG + CUMG2",
+     "CU2MG + FCC_A1",
+     "CU2MG + LIQUID",
+     "CUMG2 + HCP_A3",
+     "CUMG2 + LIQUID",
+     "FCC_A1 + LIQUID",
+     "HCP_A3 + LIQUID"
+    ],
+    "node_phases": [
+     "CU2MG + CUMG2 + LIQUID",
+     "CU2MG + FCC_A1 + LIQUID",
+     "CUMG2 + HCP_A3 + LIQUID"
+    ],
+    "elapsed": 0.7
+   },
+   "old-node-robustness": {
+    "lines": 7,
+    "points": 134,
+    "failed_lines": 0,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "CU2MG + CUMG2",
+     "CU2MG + FCC_A1",
+     "CU2MG + LIQUID",
+     "CUMG2 + HCP_A3",
+     "CUMG2 + LIQUID",
+     "FCC_A1 + LIQUID",
+     "HCP_A3 + LIQUID"
+    ],
+    "node_phases": [
+     "CU2MG + CUMG2 + LIQUID",
+     "CU2MG + FCC_A1 + LIQUID",
+     "CUMG2 + HCP_A3 + LIQUID"
+    ],
+    "elapsed": 1.0
+   }
+  },
+  "Ba-Ca": {
+   "upstream-next": {
+    "lines": 3,
+    "points": 78,
+    "failed_lines": 2,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "BCC_A2 + FCC_A1",
+     "BCC_A2 + LIQUID"
+    ],
+    "node_phases": [],
+    "elapsed": 0.4
+   },
+   "node-robustness": {
+    "lines": 3,
+    "points": 78,
+    "failed_lines": 2,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "BCC_A2 + FCC_A1",
+     "BCC_A2 + LIQUID"
+    ],
+    "node_phases": [],
+    "elapsed": 0.4
+   },
+   "same-tieline-dedup": {
+    "lines": 2,
+    "points": 76,
+    "failed_lines": 2,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "BCC_A2 + FCC_A1",
+     "BCC_A2 + LIQUID"
+    ],
+    "node_phases": [],
+    "elapsed": 0.4
+   },
+   "old-node-robustness": {
+    "lines": 5,
+    "points": 153,
+    "failed_lines": 3,
+    "duplicate_pairs": 2,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "BCC_A2 + FCC_A1",
+     "BCC_A2 + LIQUID"
+    ],
+    "node_phases": [],
+    "elapsed": 0.8
+   }
+  },
+  "Au-Cu": {
+   "upstream-next": {
+    "lines": 8,
+    "points": 158,
+    "failed_lines": 1,
+    "duplicate_pairs": 1,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "FCC_4SL + FCC_4SL",
+     "FCC_4SL + FCC_A1",
+     "FCC_4SL + LIQUID"
+    ],
+    "node_phases": [
+     "FCC_4SL + FCC_4SL + FCC_4SL",
+     "FCC_4SL + FCC_4SL + FCC_A1"
+    ],
+    "elapsed": 2.6
+   },
+   "node-robustness": {
+    "lines": 10,
+    "points": 191,
+    "failed_lines": 1,
+    "duplicate_pairs": 1,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "FCC_4SL + FCC_4SL",
+     "FCC_4SL + FCC_A1",
+     "FCC_4SL + LIQUID"
+    ],
+    "node_phases": [
+     "FCC_4SL + FCC_4SL + FCC_4SL",
+     "FCC_4SL + FCC_4SL + FCC_A1"
+    ],
+    "elapsed": 3.5
+   },
+   "same-tieline-dedup": {
+    "lines": 9,
+    "points": 189,
+    "failed_lines": 1,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "FCC_4SL + FCC_4SL",
+     "FCC_4SL + FCC_A1",
+     "FCC_4SL + LIQUID"
+    ],
+    "node_phases": [
+     "FCC_4SL + FCC_4SL + FCC_4SL",
+     "FCC_4SL + FCC_4SL + FCC_A1"
+    ],
+    "elapsed": 3.6
+   },
+   "old-node-robustness": {
+    "lines": 8,
+    "points": 144,
+    "failed_lines": 0,
+    "duplicate_pairs": 1,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "FCC_4SL + FCC_4SL",
+     "FCC_4SL + FCC_A1",
+     "FCC_4SL + LIQUID"
+    ],
+    "node_phases": [
+     "FCC_4SL + FCC_4SL + FCC_4SL",
+     "FCC_4SL + FCC_4SL + FCC_A1"
+    ],
+    "elapsed": 4.7
+   }
+  },
+  "Ga-La": {
+   "upstream-next": {
+    "lines": 16,
+    "points": 223,
+    "failed_lines": 2,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "BCC_A2 + LIQUID",
+     "DHCP + GALA3_L12",
+     "FCC_A1 + GALA3_L12",
+     "FCC_A1 + LIQUID",
+     "GA2LA_C32 + GA4LA",
+     "GA2LA_C32 + GALA_B33",
+     "GA2LA_C32 + LIQUID",
+     "GA3LA5 + GALA3_L12",
+     "GA3LA5 + GALA_B33",
+     "GA3LA5 + LIQUID",
+     "GA4LA + GA6LA",
+     "GA4LA + LIQUID",
+     "GA6LA + LIQUID",
+     "GALA3_L12 + LIQUID",
+     "GALA_B33 + LIQUID",
+     "LIQUID + ORTHORHOMBIC_A11"
+    ],
+    "node_phases": [
+     "DHCP + FCC_A1 + GALA3_L12",
+     "FCC_A1 + GALA3_L12 + LIQUID",
+     "GA2LA_C32 + GA4LA + LIQUID",
+     "GA2LA_C32 + GALA_B33 + LIQUID",
+     "GA3LA5 + GALA3_L12 + LIQUID",
+     "GA3LA5 + GALA_B33 + LIQUID",
+     "GA4LA + GA6LA + LIQUID",
+     "GA6LA + LIQUID + ORTHORHOMBIC_A11"
+    ],
+    "elapsed": 1.3
+   },
+   "node-robustness": {
+    "lines": 18,
+    "points": 227,
+    "failed_lines": 2,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "BCC_A2 + LIQUID",
+     "DHCP + GALA3_L12",
+     "FCC_A1 + GALA3_L12",
+     "FCC_A1 + LIQUID",
+     "GA2LA_C32 + GA4LA",
+     "GA2LA_C32 + GALA_B33",
+     "GA2LA_C32 + LIQUID",
+     "GA3LA5 + GALA3_L12",
+     "GA3LA5 + GALA_B33",
+     "GA3LA5 + LIQUID",
+     "GA4LA + GA6LA",
+     "GA4LA + LIQUID",
+     "GA6LA + LIQUID",
+     "GA6LA + ORTHORHOMBIC_A11",
+     "GALA3_L12 + LIQUID",
+     "GALA_B33 + LIQUID",
+     "LIQUID + ORTHORHOMBIC_A11"
+    ],
+    "node_phases": [
+     "DHCP + FCC_A1 + GALA3_L12",
+     "FCC_A1 + GALA3_L12 + LIQUID",
+     "GA2LA_C32 + GA4LA + LIQUID",
+     "GA2LA_C32 + GALA_B33 + LIQUID",
+     "GA3LA5 + GALA3_L12 + LIQUID",
+     "GA3LA5 + GALA_B33 + LIQUID",
+     "GA4LA + GA6LA + LIQUID",
+     "GA6LA + LIQUID + ORTHORHOMBIC_A11"
+    ],
+    "elapsed": 1.3
+   },
+   "same-tieline-dedup": {
+    "lines": 17,
+    "points": 225,
+    "failed_lines": 1,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "BCC_A2 + LIQUID",
+     "DHCP + GALA3_L12",
+     "FCC_A1 + GALA3_L12",
+     "FCC_A1 + LIQUID",
+     "GA2LA_C32 + GA4LA",
+     "GA2LA_C32 + GALA_B33",
+     "GA2LA_C32 + LIQUID",
+     "GA3LA5 + GALA3_L12",
+     "GA3LA5 + GALA_B33",
+     "GA3LA5 + LIQUID",
+     "GA4LA + GA6LA",
+     "GA4LA + LIQUID",
+     "GA6LA + LIQUID",
+     "GA6LA + ORTHORHOMBIC_A11",
+     "GALA3_L12 + LIQUID",
+     "GALA_B33 + LIQUID",
+     "LIQUID + ORTHORHOMBIC_A11"
+    ],
+    "node_phases": [
+     "DHCP + FCC_A1 + GALA3_L12",
+     "FCC_A1 + GALA3_L12 + LIQUID",
+     "GA2LA_C32 + GA4LA + LIQUID",
+     "GA2LA_C32 + GALA_B33 + LIQUID",
+     "GA3LA5 + GALA3_L12 + LIQUID",
+     "GA3LA5 + GALA_B33 + LIQUID",
+     "GA4LA + GA6LA + LIQUID",
+     "GA6LA + LIQUID + ORTHORHOMBIC_A11"
+    ],
+    "elapsed": 1.3
+   },
+   "old-node-robustness": {
+    "lines": 17,
+    "points": 226,
+    "failed_lines": 2,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "BCC_A2 + LIQUID",
+     "DHCP + GALA3_L12",
+     "FCC_A1 + GALA3_L12",
+     "FCC_A1 + LIQUID",
+     "GA2LA_C32 + GA4LA",
+     "GA2LA_C32 + GALA_B33",
+     "GA2LA_C32 + LIQUID",
+     "GA3LA5 + GALA3_L12",
+     "GA3LA5 + GALA_B33",
+     "GA3LA5 + LIQUID",
+     "GA4LA + GA6LA",
+     "GA4LA + LIQUID",
+     "GA6LA + LIQUID",
+     "GA6LA + ORTHORHOMBIC_A11",
+     "GALA3_L12 + LIQUID",
+     "GALA_B33 + LIQUID",
+     "LIQUID + ORTHORHOMBIC_A11"
+    ],
+    "node_phases": [
+     "DHCP + FCC_A1 + GALA3_L12",
+     "FCC_A1 + GALA3_L12 + LIQUID",
+     "GA2LA_C32 + GA4LA + LIQUID",
+     "GA2LA_C32 + GALA_B33 + LIQUID",
+     "GA3LA5 + GALA3_L12 + LIQUID",
+     "GA3LA5 + GALA_B33 + LIQUID",
+     "GA4LA + GA6LA + LIQUID",
+     "GA6LA + LIQUID + ORTHORHOMBIC_A11"
+    ],
+    "elapsed": 2.0
+   }
+  },
+  "Cr-Ta": {
+   "upstream-next": {
+    "lines": 9,
+    "points": 119,
+    "failed_lines": 0,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 1,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "BCC_A2 + C14_LAVES",
+     "BCC_A2 + C15_LAVES",
+     "BCC_A2 + LIQUID",
+     "C14_LAVES + C15_LAVES",
+     "C14_LAVES + LIQUID"
+    ],
+    "node_phases": [
+     "BCC_A2 + C14_LAVES + C15_LAVES",
+     "BCC_A2 + C14_LAVES + LIQUID"
+    ],
+    "elapsed": 0.8
+   },
+   "node-robustness": {
+    "lines": 9,
+    "points": 118,
+    "failed_lines": 0,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 1,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "BCC_A2 + C14_LAVES",
+     "BCC_A2 + C15_LAVES",
+     "BCC_A2 + LIQUID",
+     "C14_LAVES + C15_LAVES",
+     "C14_LAVES + LIQUID"
+    ],
+    "node_phases": [
+     "BCC_A2 + C14_LAVES + C15_LAVES",
+     "BCC_A2 + C14_LAVES + LIQUID"
+    ],
+    "elapsed": 0.9
+   },
+   "same-tieline-dedup": {
+    "lines": 8,
+    "points": 116,
+    "failed_lines": 0,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "BCC_A2 + C14_LAVES",
+     "BCC_A2 + C15_LAVES",
+     "BCC_A2 + LIQUID",
+     "C14_LAVES + C15_LAVES",
+     "C14_LAVES + LIQUID"
+    ],
+    "node_phases": [
+     "BCC_A2 + C14_LAVES + C15_LAVES",
+     "BCC_A2 + C14_LAVES + LIQUID"
+    ],
+    "elapsed": 0.9
+   },
+   "old-node-robustness": {
+    "lines": 8,
+    "points": 116,
+    "failed_lines": 0,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "BCC_A2 + C14_LAVES",
+     "BCC_A2 + C15_LAVES",
+     "BCC_A2 + LIQUID",
+     "C14_LAVES + C15_LAVES",
+     "C14_LAVES + LIQUID"
+    ],
+    "node_phases": [
+     "BCC_A2 + C14_LAVES + C15_LAVES",
+     "BCC_A2 + C14_LAVES + LIQUID"
+    ],
+    "elapsed": 1.3
+   }
+  },
+  "Al-Fe": {
+   "upstream-next": {
+    "lines": 14,
+    "points": 210,
+    "failed_lines": 4,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 1,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "AL13FE4 + AL5FE2",
+     "AL13FE4 + FCC_A1",
+     "AL13FE4 + LIQUID",
+     "AL2FE + AL5FE2",
+     "AL2FE + AL5FE4",
+     "AL2FE + B2_BCC",
+     "AL5FE2 + B2_BCC",
+     "AL5FE2 + LIQUID",
+     "AL5FE4 + B2_BCC",
+     "AL5FE4 + LIQUID",
+     "B2_BCC + FCC_A1",
+     "B2_BCC + LIQUID",
+     "FCC_A1 + LIQUID"
+    ],
+    "node_phases": [
+     "AL13FE4 + AL5FE2 + LIQUID",
+     "AL13FE4 + FCC_A1 + LIQUID",
+     "AL2FE + AL5FE2 + B2_BCC",
+     "AL2FE + AL5FE4 + B2_BCC",
+     "AL5FE2 + AL5FE4 + LIQUID",
+     "AL5FE4 + B2_BCC + LIQUID"
+    ],
+    "elapsed": 1.2
+   },
+   "node-robustness": {
+    "lines": 15,
+    "points": 216,
+    "failed_lines": 1,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 1,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "AL13FE4 + AL5FE2",
+     "AL13FE4 + FCC_A1",
+     "AL13FE4 + LIQUID",
+     "AL2FE + AL5FE2",
+     "AL2FE + AL5FE4",
+     "AL2FE + B2_BCC",
+     "AL5FE2 + AL5FE4",
+     "AL5FE2 + B2_BCC",
+     "AL5FE2 + LIQUID",
+     "AL5FE4 + B2_BCC",
+     "AL5FE4 + LIQUID",
+     "B2_BCC + FCC_A1",
+     "B2_BCC + LIQUID",
+     "FCC_A1 + LIQUID"
+    ],
+    "node_phases": [
+     "AL13FE4 + AL5FE2 + LIQUID",
+     "AL13FE4 + FCC_A1 + LIQUID",
+     "AL2FE + AL5FE2 + AL5FE4",
+     "AL2FE + AL5FE2 + B2_BCC",
+     "AL2FE + AL5FE4 + B2_BCC",
+     "AL5FE2 + AL5FE4 + LIQUID",
+     "AL5FE4 + B2_BCC + LIQUID"
+    ],
+    "elapsed": 1.2
+   },
+   "same-tieline-dedup": {
+    "lines": 14,
+    "points": 214,
+    "failed_lines": 1,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "AL13FE4 + AL5FE2",
+     "AL13FE4 + FCC_A1",
+     "AL13FE4 + LIQUID",
+     "AL2FE + AL5FE2",
+     "AL2FE + AL5FE4",
+     "AL2FE + B2_BCC",
+     "AL5FE2 + AL5FE4",
+     "AL5FE2 + B2_BCC",
+     "AL5FE2 + LIQUID",
+     "AL5FE4 + B2_BCC",
+     "AL5FE4 + LIQUID",
+     "B2_BCC + FCC_A1",
+     "B2_BCC + LIQUID",
+     "FCC_A1 + LIQUID"
+    ],
+    "node_phases": [
+     "AL13FE4 + AL5FE2 + LIQUID",
+     "AL13FE4 + FCC_A1 + LIQUID",
+     "AL2FE + AL5FE2 + AL5FE4",
+     "AL2FE + AL5FE2 + B2_BCC",
+     "AL2FE + AL5FE4 + B2_BCC",
+     "AL5FE2 + AL5FE4 + LIQUID",
+     "AL5FE4 + B2_BCC + LIQUID"
+    ],
+    "elapsed": 1.2
+   },
+   "old-node-robustness": {
+    "lines": 14,
+    "points": 214,
+    "failed_lines": 1,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "AL13FE4 + AL5FE2",
+     "AL13FE4 + FCC_A1",
+     "AL13FE4 + LIQUID",
+     "AL2FE + AL5FE2",
+     "AL2FE + AL5FE4",
+     "AL2FE + B2_BCC",
+     "AL5FE2 + AL5FE4",
+     "AL5FE2 + B2_BCC",
+     "AL5FE2 + LIQUID",
+     "AL5FE4 + B2_BCC",
+     "AL5FE4 + LIQUID",
+     "B2_BCC + FCC_A1",
+     "B2_BCC + LIQUID",
+     "FCC_A1 + LIQUID"
+    ],
+    "node_phases": [
+     "AL13FE4 + AL5FE2 + LIQUID",
+     "AL13FE4 + FCC_A1 + LIQUID",
+     "AL2FE + AL5FE2 + AL5FE4",
+     "AL2FE + AL5FE2 + B2_BCC",
+     "AL2FE + AL5FE4 + B2_BCC",
+     "AL5FE2 + AL5FE4 + LIQUID",
+     "AL5FE4 + B2_BCC + LIQUID"
+    ],
+    "elapsed": 1.8
+   }
+  },
+  "Al-Ni": {
+   "upstream-next": {
+    "lines": 15,
+    "points": 247,
+    "failed_lines": 4,
+    "duplicate_pairs": 1,
+    "zero_width_lines": 1,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "AL3NI1 + AL3NI2",
+     "AL3NI1 + FCC_L12",
+     "AL3NI1 + LIQUID",
+     "AL3NI2 + BCC_B2",
+     "AL3NI2 + LIQUID",
+     "AL3NI5 + BCC_B2",
+     "AL3NI5 + FCC_L12",
+     "BCC_B2 + FCC_L12",
+     "BCC_B2 + LIQUID",
+     "FCC_L12 + FCC_L12",
+     "FCC_L12 + LIQUID"
+    ],
+    "node_phases": [
+     "AL3NI1 + AL3NI2 + LIQUID",
+     "AL3NI1 + FCC_L12 + LIQUID",
+     "AL3NI2 + BCC_B2 + LIQUID",
+     "AL3NI5 + BCC_B2 + FCC_L12",
+     "BCC_B2 + FCC_L12 + LIQUID",
+     "FCC_L12 + FCC_L12 + LIQUID"
+    ],
+    "elapsed": 1.8
+   },
+   "node-robustness": {
+    "lines": 15,
+    "points": 252,
+    "failed_lines": 2,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 1,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "AL3NI1 + AL3NI2",
+     "AL3NI1 + FCC_L12",
+     "AL3NI1 + LIQUID",
+     "AL3NI2 + BCC_B2",
+     "AL3NI2 + LIQUID",
+     "AL3NI5 + BCC_B2",
+     "AL3NI5 + FCC_L12",
+     "BCC_B2 + FCC_L12",
+     "BCC_B2 + LIQUID",
+     "FCC_L12 + FCC_L12",
+     "FCC_L12 + LIQUID"
+    ],
+    "node_phases": [
+     "AL3NI1 + AL3NI2 + LIQUID",
+     "AL3NI1 + FCC_L12 + LIQUID",
+     "AL3NI2 + BCC_B2 + LIQUID",
+     "AL3NI5 + BCC_B2 + FCC_L12",
+     "BCC_B2 + FCC_L12 + LIQUID",
+     "FCC_L12 + FCC_L12 + LIQUID"
+    ],
+    "elapsed": 1.9
+   },
+   "same-tieline-dedup": {
+    "lines": 15,
+    "points": 246,
+    "failed_lines": 1,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 1,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "AL3NI1 + AL3NI2",
+     "AL3NI1 + FCC_L12",
+     "AL3NI1 + LIQUID",
+     "AL3NI2 + BCC_B2",
+     "AL3NI2 + LIQUID",
+     "AL3NI5 + BCC_B2",
+     "AL3NI5 + FCC_L12",
+     "BCC_B2 + FCC_L12",
+     "BCC_B2 + LIQUID",
+     "FCC_L12 + FCC_L12",
+     "FCC_L12 + LIQUID"
+    ],
+    "node_phases": [
+     "AL3NI1 + AL3NI2 + LIQUID",
+     "AL3NI1 + FCC_L12 + LIQUID",
+     "AL3NI2 + BCC_B2 + LIQUID",
+     "AL3NI5 + BCC_B2 + FCC_L12",
+     "BCC_B2 + FCC_L12 + LIQUID",
+     "FCC_L12 + FCC_L12 + LIQUID"
+    ],
+    "elapsed": 1.9
+   },
+   "old-node-robustness": {
+    "lines": 14,
+    "points": 250,
+    "failed_lines": 2,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "AL3NI1 + AL3NI2",
+     "AL3NI1 + FCC_L12",
+     "AL3NI1 + LIQUID",
+     "AL3NI2 + BCC_B2",
+     "AL3NI2 + LIQUID",
+     "AL3NI5 + BCC_B2",
+     "AL3NI5 + FCC_L12",
+     "BCC_B2 + FCC_L12",
+     "BCC_B2 + LIQUID",
+     "FCC_L12 + FCC_L12",
+     "FCC_L12 + LIQUID"
+    ],
+    "node_phases": [
+     "AL3NI1 + AL3NI2 + LIQUID",
+     "AL3NI1 + FCC_L12 + LIQUID",
+     "AL3NI2 + BCC_B2 + LIQUID",
+     "AL3NI5 + BCC_B2 + FCC_L12",
+     "BCC_B2 + FCC_L12 + LIQUID",
+     "FCC_L12 + FCC_L12 + LIQUID"
+    ],
+    "elapsed": 3.0
+   }
+  },
+  "Co-V": {
+   "upstream-next": {
+    "lines": 12,
+    "points": 188,
+    "failed_lines": 3,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "BCC_A2 + COV3_A15",
+     "BCC_A2 + LIQUID",
+     "BCC_A2 + SIGMA_D8B",
+     "CO3V + FCC_4SL",
+     "CO3V + HCP_A3",
+     "CO3V + SIGMA_D8B",
+     "COV3_A15 + SIGMA_D8B",
+     "FCC_4SL + HCP_A3",
+     "FCC_4SL + LIQUID",
+     "FCC_4SL + SIGMA_D8B",
+     "LIQUID + SIGMA_D8B"
+    ],
+    "node_phases": [
+     "BCC_A2 + COV3_A15 + SIGMA_D8B",
+     "BCC_A2 + LIQUID + SIGMA_D8B",
+     "CO3V + FCC_4SL + HCP_A3",
+     "CO3V + FCC_4SL + SIGMA_D8B",
+     "FCC_4SL + LIQUID + SIGMA_D8B"
+    ],
+    "elapsed": 4.0
+   },
+   "node-robustness": {
+    "lines": 16,
+    "points": 219,
+    "failed_lines": 3,
+    "duplicate_pairs": 1,
+    "zero_width_lines": 1,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "BCC_A2 + COV3_A15",
+     "BCC_A2 + LIQUID",
+     "BCC_A2 + SIGMA_D8B",
+     "CO3V + FCC_4SL",
+     "CO3V + FCC_A1",
+     "CO3V + HCP_A3",
+     "CO3V + SIGMA_D8B",
+     "COV3_A15 + SIGMA_D8B",
+     "FCC_4SL + FCC_A1",
+     "FCC_4SL + HCP_A3",
+     "FCC_4SL + LIQUID",
+     "FCC_4SL + SIGMA_D8B",
+     "FCC_A1 + HCP_A3",
+     "LIQUID + SIGMA_D8B"
+    ],
+    "node_phases": [
+     "BCC_A2 + COV3_A15 + SIGMA_D8B",
+     "BCC_A2 + LIQUID + SIGMA_D8B",
+     "CO3V + FCC_4SL + FCC_A1",
+     "CO3V + FCC_4SL + HCP_A3",
+     "CO3V + FCC_4SL + SIGMA_D8B",
+     "CO3V + FCC_A1 + HCP_A3",
+     "FCC_4SL + LIQUID + SIGMA_D8B"
+    ],
+    "elapsed": 4.2
+   },
+   "same-tieline-dedup": {
+    "lines": 15,
+    "points": 217,
+    "failed_lines": 3,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "BCC_A2 + COV3_A15",
+     "BCC_A2 + LIQUID",
+     "BCC_A2 + SIGMA_D8B",
+     "CO3V + FCC_4SL",
+     "CO3V + FCC_A1",
+     "CO3V + HCP_A3",
+     "CO3V + SIGMA_D8B",
+     "COV3_A15 + SIGMA_D8B",
+     "FCC_4SL + FCC_A1",
+     "FCC_4SL + HCP_A3",
+     "FCC_4SL + LIQUID",
+     "FCC_4SL + SIGMA_D8B",
+     "FCC_A1 + HCP_A3",
+     "LIQUID + SIGMA_D8B"
+    ],
+    "node_phases": [
+     "BCC_A2 + COV3_A15 + SIGMA_D8B",
+     "BCC_A2 + LIQUID + SIGMA_D8B",
+     "CO3V + FCC_4SL + FCC_A1",
+     "CO3V + FCC_4SL + HCP_A3",
+     "CO3V + FCC_4SL + SIGMA_D8B",
+     "CO3V + FCC_A1 + HCP_A3",
+     "FCC_4SL + LIQUID + SIGMA_D8B"
+    ],
+    "elapsed": 4.1
+   },
+   "old-node-robustness": {
+    "lines": 15,
+    "points": 216,
+    "failed_lines": 3,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "BCC_A2 + COV3_A15",
+     "BCC_A2 + LIQUID",
+     "BCC_A2 + SIGMA_D8B",
+     "CO3V + FCC_4SL",
+     "CO3V + FCC_A1",
+     "CO3V + HCP_A3",
+     "CO3V + SIGMA_D8B",
+     "COV3_A15 + SIGMA_D8B",
+     "FCC_4SL + FCC_A1",
+     "FCC_4SL + HCP_A3",
+     "FCC_4SL + LIQUID",
+     "FCC_4SL + SIGMA_D8B",
+     "FCC_A1 + HCP_A3",
+     "LIQUID + SIGMA_D8B"
+    ],
+    "node_phases": [
+     "BCC_A2 + COV3_A15 + SIGMA_D8B",
+     "BCC_A2 + LIQUID + SIGMA_D8B",
+     "CO3V + FCC_4SL + FCC_A1",
+     "CO3V + FCC_4SL + HCP_A3",
+     "CO3V + FCC_4SL + SIGMA_D8B",
+     "CO3V + FCC_A1 + HCP_A3",
+     "FCC_4SL + LIQUID + SIGMA_D8B"
+    ],
+    "elapsed": 7.1
+   }
+  },
+  "Cr-Ti": {
+   "upstream-next": {
+    "lines": 11,
+    "points": 180,
+    "failed_lines": 1,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 2,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "BCC_A2 + HCP_A3",
+     "BCC_A2 + LAVES_C14",
+     "BCC_A2 + LAVES_C15",
+     "BCC_A2 + LAVES_C36",
+     "BCC_A2 + LIQUID",
+     "HCP_A3 + LAVES_C15",
+     "LAVES_C14 + LAVES_C36",
+     "LAVES_C15 + LAVES_C36"
+    ],
+    "node_phases": [
+     "BCC_A2 + HCP_A3 + LAVES_C15",
+     "BCC_A2 + LAVES_C14 + LAVES_C36",
+     "BCC_A2 + LAVES_C15 + LAVES_C36"
+    ],
+    "elapsed": 1.0
+   },
+   "node-robustness": {
+    "lines": 11,
+    "points": 179,
+    "failed_lines": 1,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 2,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "BCC_A2 + HCP_A3",
+     "BCC_A2 + LAVES_C14",
+     "BCC_A2 + LAVES_C15",
+     "BCC_A2 + LAVES_C36",
+     "BCC_A2 + LIQUID",
+     "HCP_A3 + LAVES_C15",
+     "LAVES_C14 + LAVES_C36",
+     "LAVES_C15 + LAVES_C36"
+    ],
+    "node_phases": [
+     "BCC_A2 + HCP_A3 + LAVES_C15",
+     "BCC_A2 + LAVES_C14 + LAVES_C36",
+     "BCC_A2 + LAVES_C15 + LAVES_C36"
+    ],
+    "elapsed": 1.1
+   },
+   "same-tieline-dedup": {
+    "lines": 10,
+    "points": 177,
+    "failed_lines": 1,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 1,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "BCC_A2 + HCP_A3",
+     "BCC_A2 + LAVES_C14",
+     "BCC_A2 + LAVES_C15",
+     "BCC_A2 + LAVES_C36",
+     "BCC_A2 + LIQUID",
+     "HCP_A3 + LAVES_C15",
+     "LAVES_C14 + LAVES_C36",
+     "LAVES_C15 + LAVES_C36"
+    ],
+    "node_phases": [
+     "BCC_A2 + HCP_A3 + LAVES_C15",
+     "BCC_A2 + LAVES_C14 + LAVES_C36",
+     "BCC_A2 + LAVES_C15 + LAVES_C36"
+    ],
+    "elapsed": 1.2
+   },
+   "old-node-robustness": {
+    "lines": 10,
+    "points": 177,
+    "failed_lines": 1,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 1,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "BCC_A2 + HCP_A3",
+     "BCC_A2 + LAVES_C14",
+     "BCC_A2 + LAVES_C15",
+     "BCC_A2 + LAVES_C36",
+     "BCC_A2 + LIQUID",
+     "HCP_A3 + LAVES_C15",
+     "LAVES_C14 + LAVES_C36",
+     "LAVES_C15 + LAVES_C36"
+    ],
+    "node_phases": [
+     "BCC_A2 + HCP_A3 + LAVES_C15",
+     "BCC_A2 + LAVES_C14 + LAVES_C36",
+     "BCC_A2 + LAVES_C15 + LAVES_C36"
+    ],
+    "elapsed": 1.7
+   }
+  },
+  "Fe-Nb": {
+   "upstream-next": {
+    "lines": 13,
+    "points": 146,
+    "failed_lines": 0,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 2,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "BCC_A2 + FCC_A1",
+     "BCC_A2 + LAVES_C14",
+     "BCC_A2 + LIQUID",
+     "BCC_A2 + MU_PHASE",
+     "FCC_A1 + LAVES_C14",
+     "LAVES_C14 + LIQUID",
+     "LAVES_C14 + MU_PHASE",
+     "LIQUID + MU_PHASE"
+    ],
+    "node_phases": [
+     "BCC_A2 + FCC_A1 + LAVES_C14",
+     "BCC_A2 + LAVES_C14 + LIQUID",
+     "BCC_A2 + LIQUID + MU_PHASE",
+     "LAVES_C14 + LIQUID + MU_PHASE"
+    ],
+    "elapsed": 1.3
+   },
+   "node-robustness": {
+    "lines": 13,
+    "points": 145,
+    "failed_lines": 0,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 2,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "BCC_A2 + FCC_A1",
+     "BCC_A2 + LAVES_C14",
+     "BCC_A2 + LIQUID",
+     "BCC_A2 + MU_PHASE",
+     "FCC_A1 + LAVES_C14",
+     "LAVES_C14 + LIQUID",
+     "LAVES_C14 + MU_PHASE",
+     "LIQUID + MU_PHASE"
+    ],
+    "node_phases": [
+     "BCC_A2 + FCC_A1 + LAVES_C14",
+     "BCC_A2 + LAVES_C14 + LIQUID",
+     "BCC_A2 + LIQUID + MU_PHASE",
+     "LAVES_C14 + LIQUID + MU_PHASE"
+    ],
+    "elapsed": 1.3
+   },
+   "same-tieline-dedup": {
+    "lines": 11,
+    "points": 141,
+    "failed_lines": 0,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "BCC_A2 + FCC_A1",
+     "BCC_A2 + LAVES_C14",
+     "BCC_A2 + LIQUID",
+     "BCC_A2 + MU_PHASE",
+     "FCC_A1 + LAVES_C14",
+     "LAVES_C14 + LIQUID",
+     "LAVES_C14 + MU_PHASE",
+     "LIQUID + MU_PHASE"
+    ],
+    "node_phases": [
+     "BCC_A2 + FCC_A1 + LAVES_C14",
+     "BCC_A2 + LAVES_C14 + LIQUID",
+     "BCC_A2 + LIQUID + MU_PHASE",
+     "LAVES_C14 + LIQUID + MU_PHASE"
+    ],
+    "elapsed": 1.3
+   },
+   "old-node-robustness": {
+    "lines": 11,
+    "points": 141,
+    "failed_lines": 0,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "BCC_A2 + FCC_A1",
+     "BCC_A2 + LAVES_C14",
+     "BCC_A2 + LIQUID",
+     "BCC_A2 + MU_PHASE",
+     "FCC_A1 + LAVES_C14",
+     "LAVES_C14 + LIQUID",
+     "LAVES_C14 + MU_PHASE",
+     "LIQUID + MU_PHASE"
+    ],
+    "node_phases": [
+     "BCC_A2 + FCC_A1 + LAVES_C14",
+     "BCC_A2 + LAVES_C14 + LIQUID",
+     "BCC_A2 + LIQUID + MU_PHASE",
+     "LAVES_C14 + LIQUID + MU_PHASE"
+    ],
+    "elapsed": 2.3
+   }
+  },
+  "Al-Cr-Ni 1300K (alcocrni)": {
+   "upstream-next": {
+    "lines": 15,
+    "points": 72,
+    "failed_lines": 6,
+    "duplicate_pairs": 1,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "AL3NI2 + AL8CR5_L",
+     "AL3NI2 + BCC_B2",
+     "AL3NI2 + LIQUID",
+     "AL8CR5_L + BCC_B2",
+     "AL8CR5_L + LIQUID",
+     "AL9CR4_L + LIQUID",
+     "BCC_B2 + BCC_B2",
+     "BCC_B2 + L12_FCC",
+     "L12_FCC + L12_FCC"
+    ],
+    "node_phases": [
+     "AL3NI2 + AL8CR5_L + BCC_B2",
+     "AL3NI2 + AL8CR5_L + LIQUID",
+     "AL8CR5_L + AL9CR4_L + LIQUID",
+     "AL8CR5_L + BCC_B2 + BCC_B2",
+     "BCC_B2 + BCC_B2 + L12_FCC",
+     "BCC_B2 + L12_FCC + L12_FCC"
+    ],
+    "elapsed": 4.4
+   },
+   "node-robustness": {
+    "lines": 15,
+    "points": 98,
+    "failed_lines": 4,
+    "duplicate_pairs": 2,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "AL3NI2 + AL8CR5_L",
+     "AL3NI2 + BCC_B2",
+     "AL3NI2 + LIQUID",
+     "AL8CR5_L + BCC_B2",
+     "AL8CR5_L + LIQUID",
+     "AL9CR4_L + LIQUID",
+     "BCC_B2 + BCC_B2",
+     "BCC_B2 + L12_FCC",
+     "L12_FCC + L12_FCC"
+    ],
+    "node_phases": [
+     "AL3NI2 + AL8CR5_L + BCC_B2",
+     "AL3NI2 + AL8CR5_L + LIQUID",
+     "AL8CR5_L + AL9CR4_L + LIQUID",
+     "AL8CR5_L + BCC_B2 + BCC_B2",
+     "BCC_B2 + BCC_B2 + L12_FCC",
+     "BCC_B2 + L12_FCC + L12_FCC"
+    ],
+    "elapsed": 3.6
+   },
+   "same-tieline-dedup": {
+    "lines": 14,
+    "points": 77,
+    "failed_lines": 3,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "AL3NI2 + AL8CR5_L",
+     "AL3NI2 + BCC_B2",
+     "AL3NI2 + LIQUID",
+     "AL8CR5_L + BCC_B2",
+     "AL8CR5_L + LIQUID",
+     "AL9CR4_L + LIQUID",
+     "BCC_B2 + BCC_B2",
+     "BCC_B2 + L12_FCC",
+     "L12_FCC + L12_FCC"
+    ],
+    "node_phases": [
+     "AL3NI2 + AL8CR5_L + BCC_B2",
+     "AL3NI2 + AL8CR5_L + LIQUID",
+     "AL8CR5_L + AL9CR4_L + LIQUID",
+     "AL8CR5_L + BCC_B2 + BCC_B2",
+     "BCC_B2 + BCC_B2 + L12_FCC",
+     "BCC_B2 + L12_FCC + L12_FCC"
+    ],
+    "elapsed": 3.4
+   },
+   "old-node-robustness": {
+    "lines": 16,
+    "points": 102,
+    "failed_lines": 5,
+    "duplicate_pairs": 3,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "AL3NI2 + AL8CR5_L",
+     "AL3NI2 + BCC_B2",
+     "AL3NI2 + LIQUID",
+     "AL8CR5_L + BCC_B2",
+     "AL8CR5_L + LIQUID",
+     "AL9CR4_L + LIQUID",
+     "BCC_B2 + BCC_B2",
+     "BCC_B2 + L12_FCC",
+     "L12_FCC + L12_FCC"
+    ],
+    "node_phases": [
+     "AL3NI2 + AL8CR5_L + BCC_B2",
+     "AL3NI2 + AL8CR5_L + LIQUID",
+     "AL8CR5_L + AL9CR4_L + LIQUID",
+     "AL8CR5_L + BCC_B2 + BCC_B2",
+     "BCC_B2 + BCC_B2 + L12_FCC",
+     "BCC_B2 + L12_FCC + L12_FCC"
+    ],
+    "elapsed": 7.6
+   }
+  },
+  "Al-Co-Ni 1233K (alcocrni)": {
+   "upstream-next": {
+    "lines": 10,
+    "points": 71,
+    "failed_lines": 4,
+    "duplicate_pairs": 1,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "AL13CO4 + LIQUID",
+     "AL3CO + BCC_B2",
+     "AL3NI2 + BCC_B2",
+     "AL3NI2 + LIQUID",
+     "AL5CO2 + BCC_B2",
+     "AL9CO2 + LIQUID",
+     "BCC_B2 + L12_FCC",
+     "L12_FCC + L12_FCC"
+    ],
+    "node_phases": [
+     "AL13CO4 + AL3CO + AL3NI2",
+     "AL13CO4 + AL3CO + BCC_B2",
+     "AL13CO4 + AL3NI2 + LIQUID",
+     "AL13CO4 + AL9CO2 + LIQUID",
+     "AL13CO4 + BCC_B2 + LIQUID",
+     "AL3CO + AL5CO2 + BCC_B2",
+     "AL3NI2 + BCC_B2 + LIQUID",
+     "BCC_B2 + L12_FCC + L12_FCC"
+    ],
+    "elapsed": 4.3
+   },
+   "node-robustness": {
+    "lines": 11,
+    "points": 76,
+    "failed_lines": 1,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "AL13CO4 + BCC_B2",
+     "AL13CO4 + LIQUID",
+     "AL3CO + BCC_B2",
+     "AL3NI2 + BCC_B2",
+     "AL3NI2 + LIQUID",
+     "AL5CO2 + BCC_B2",
+     "AL9CO2 + LIQUID",
+     "BCC_B2 + L12_FCC",
+     "BCC_B2 + LIQUID",
+     "L12_FCC + L12_FCC"
+    ],
+    "node_phases": [
+     "AL13CO4 + AL3CO + BCC_B2",
+     "AL13CO4 + AL9CO2 + LIQUID",
+     "AL13CO4 + BCC_B2 + LIQUID",
+     "AL3CO + AL5CO2 + BCC_B2",
+     "AL3NI2 + BCC_B2 + LIQUID",
+     "BCC_B2 + L12_FCC + L12_FCC"
+    ],
+    "elapsed": 3.3
+   },
+   "same-tieline-dedup": {
+    "lines": 11,
+    "points": 76,
+    "failed_lines": 1,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "AL13CO4 + BCC_B2",
+     "AL13CO4 + LIQUID",
+     "AL3CO + BCC_B2",
+     "AL3NI2 + BCC_B2",
+     "AL3NI2 + LIQUID",
+     "AL5CO2 + BCC_B2",
+     "AL9CO2 + LIQUID",
+     "BCC_B2 + L12_FCC",
+     "BCC_B2 + LIQUID",
+     "L12_FCC + L12_FCC"
+    ],
+    "node_phases": [
+     "AL13CO4 + AL3CO + BCC_B2",
+     "AL13CO4 + AL9CO2 + LIQUID",
+     "AL13CO4 + BCC_B2 + LIQUID",
+     "AL3CO + AL5CO2 + BCC_B2",
+     "AL3NI2 + BCC_B2 + LIQUID",
+     "BCC_B2 + L12_FCC + L12_FCC"
+    ],
+    "elapsed": 3.3
+   },
+   "old-node-robustness": {
+    "lines": 12,
+    "points": 80,
+    "failed_lines": 2,
+    "duplicate_pairs": 1,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "AL13CO4 + BCC_B2",
+     "AL13CO4 + LIQUID",
+     "AL3CO + BCC_B2",
+     "AL3NI2 + BCC_B2",
+     "AL3NI2 + LIQUID",
+     "AL5CO2 + BCC_B2",
+     "AL9CO2 + LIQUID",
+     "BCC_B2 + L12_FCC",
+     "BCC_B2 + LIQUID",
+     "L12_FCC + L12_FCC"
+    ],
+    "node_phases": [
+     "AL13CO4 + AL3CO + BCC_B2",
+     "AL13CO4 + AL9CO2 + LIQUID",
+     "AL13CO4 + BCC_B2 + LIQUID",
+     "AL3CO + AL5CO2 + BCC_B2",
+     "AL3NI2 + BCC_B2 + LIQUID",
+     "BCC_B2 + L12_FCC + L12_FCC"
+    ],
+    "elapsed": 6.4
+   }
+  },
+  "Al-Co-Cr 1334K (alcocrni)": {
+   "upstream-next": {
+    "lines": 14,
+    "points": 97,
+    "failed_lines": 6,
+    "duplicate_pairs": 1,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "AL13CO4 + LIQUID",
+     "AL3CO + LIQUID",
+     "AL5CO2 + BCC_B2",
+     "AL5CO2 + LIQUID",
+     "AL8CR5_L + BCC_B2",
+     "AL8CR5_L + LIQUID",
+     "AL9CR4_H + LIQUID",
+     "BCC_B2 + BCC_B2",
+     "BCC_B2 + L12_FCC",
+     "BCC_B2 + SIGMA_SGTE",
+     "L12_FCC + SIGMA_SGTE"
+    ],
+    "node_phases": [
+     "AL13CO4 + AL3CO + LIQUID",
+     "AL3CO + AL5CO2 + LIQUID",
+     "AL5CO2 + AL8CR5_L + BCC_B2",
+     "AL5CO2 + AL8CR5_L + LIQUID",
+     "AL8CR5_L + AL9CR4_H + LIQUID",
+     "AL8CR5_L + BCC_B2 + BCC_B2",
+     "BCC_B2 + BCC_B2 + SIGMA_SGTE",
+     "BCC_B2 + L12_FCC + SIGMA_SGTE"
+    ],
+    "elapsed": 4.4
+   },
+   "node-robustness": {
+    "lines": 15,
+    "points": 91,
+    "failed_lines": 4,
+    "duplicate_pairs": 1,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "AL13CO4 + LIQUID",
+     "AL3CO + LIQUID",
+     "AL5CO2 + BCC_B2",
+     "AL5CO2 + LIQUID",
+     "AL8CR5_L + BCC_B2",
+     "AL8CR5_L + LIQUID",
+     "AL9CR4_H + LIQUID",
+     "BCC_B2 + BCC_B2",
+     "BCC_B2 + L12_FCC",
+     "BCC_B2 + SIGMA_SGTE",
+     "L12_FCC + SIGMA_SGTE"
+    ],
+    "node_phases": [
+     "AL13CO4 + AL3CO + LIQUID",
+     "AL3CO + AL5CO2 + LIQUID",
+     "AL5CO2 + AL8CR5_L + BCC_B2",
+     "AL5CO2 + AL8CR5_L + LIQUID",
+     "AL8CR5_L + AL9CR4_H + LIQUID",
+     "AL8CR5_L + BCC_B2 + BCC_B2",
+     "BCC_B2 + BCC_B2 + SIGMA_SGTE",
+     "BCC_B2 + L12_FCC + SIGMA_SGTE"
+    ],
+    "elapsed": 3.2
+   },
+   "same-tieline-dedup": {
+    "lines": 14,
+    "points": 89,
+    "failed_lines": 4,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "AL13CO4 + LIQUID",
+     "AL3CO + LIQUID",
+     "AL5CO2 + BCC_B2",
+     "AL5CO2 + LIQUID",
+     "AL8CR5_L + BCC_B2",
+     "AL8CR5_L + LIQUID",
+     "AL9CR4_H + LIQUID",
+     "BCC_B2 + BCC_B2",
+     "BCC_B2 + L12_FCC",
+     "BCC_B2 + SIGMA_SGTE",
+     "L12_FCC + SIGMA_SGTE"
+    ],
+    "node_phases": [
+     "AL13CO4 + AL3CO + LIQUID",
+     "AL3CO + AL5CO2 + LIQUID",
+     "AL5CO2 + AL8CR5_L + BCC_B2",
+     "AL5CO2 + AL8CR5_L + LIQUID",
+     "AL8CR5_L + AL9CR4_H + LIQUID",
+     "AL8CR5_L + BCC_B2 + BCC_B2",
+     "BCC_B2 + BCC_B2 + SIGMA_SGTE",
+     "BCC_B2 + L12_FCC + SIGMA_SGTE"
+    ],
+    "elapsed": 3.2
+   },
+   "old-node-robustness": {
+    "lines": 17,
+    "points": 103,
+    "failed_lines": 6,
+    "duplicate_pairs": 3,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "AL13CO4 + LIQUID",
+     "AL3CO + LIQUID",
+     "AL5CO2 + BCC_B2",
+     "AL5CO2 + LIQUID",
+     "AL8CR5_L + BCC_B2",
+     "AL8CR5_L + LIQUID",
+     "AL9CR4_H + LIQUID",
+     "BCC_B2 + BCC_B2",
+     "BCC_B2 + L12_FCC",
+     "BCC_B2 + SIGMA_SGTE",
+     "L12_FCC + SIGMA_SGTE"
+    ],
+    "node_phases": [
+     "AL13CO4 + AL3CO + LIQUID",
+     "AL3CO + AL5CO2 + LIQUID",
+     "AL5CO2 + AL8CR5_L + BCC_B2",
+     "AL5CO2 + AL8CR5_L + LIQUID",
+     "AL8CR5_L + AL9CR4_H + LIQUID",
+     "AL8CR5_L + BCC_B2 + BCC_B2",
+     "BCC_B2 + BCC_B2 + SIGMA_SGTE",
+     "BCC_B2 + L12_FCC + SIGMA_SGTE"
+    ],
+    "elapsed": 7.4
+   }
+  },
+  "Al-Cr-Ni 1200K (alcrni)": {
+   "upstream-next": {
+    "lines": 12,
+    "points": 72,
+    "failed_lines": 4,
+    "duplicate_pairs": 3,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "B2 + B2",
+     "B2 + L12_FCC",
+     "B2 + LIQUID",
+     "L12_FCC + L12_FCC"
+    ],
+    "node_phases": [
+     "B2 + B2 + B2",
+     "B2 + B2 + L12_FCC",
+     "B2 + B2 + LIQUID",
+     "B2 + L12_FCC + L12_FCC"
+    ],
+    "elapsed": 2.2
+   },
+   "node-robustness": {
+    "lines": 12,
+    "points": 80,
+    "failed_lines": 2,
+    "duplicate_pairs": 2,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "B2 + B2",
+     "B2 + L12_FCC",
+     "B2 + LIQUID",
+     "L12_FCC + L12_FCC"
+    ],
+    "node_phases": [
+     "B2 + B2 + B2",
+     "B2 + B2 + L12_FCC",
+     "B2 + B2 + LIQUID",
+     "B2 + L12_FCC + L12_FCC"
+    ],
+    "elapsed": 2.3
+   },
+   "same-tieline-dedup": {
+    "lines": 10,
+    "points": 60,
+    "failed_lines": 1,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "B2 + B2",
+     "B2 + L12_FCC",
+     "B2 + LIQUID",
+     "L12_FCC + L12_FCC"
+    ],
+    "node_phases": [
+     "B2 + B2 + B2",
+     "B2 + B2 + L12_FCC",
+     "B2 + B2 + LIQUID",
+     "B2 + L12_FCC + L12_FCC"
+    ],
+    "elapsed": 2.2
+   },
+   "old-node-robustness": {
+    "lines": 10,
+    "points": 60,
+    "failed_lines": 1,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "B2 + B2",
+     "B2 + L12_FCC",
+     "B2 + LIQUID",
+     "L12_FCC + L12_FCC"
+    ],
+    "node_phases": [
+     "B2 + B2 + B2",
+     "B2 + B2 + L12_FCC",
+     "B2 + B2 + LIQUID",
+     "B2 + L12_FCC + L12_FCC"
+    ],
+    "elapsed": 3.4
+   }
+  },
+  "Al-Cu-Y 1774.65K": {
+   "upstream-next": {
+    "lines": 2,
+    "points": 4,
+    "failed_lines": 2,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "BCC_A2 + LIQUID"
+    ],
+    "node_phases": [],
+    "elapsed": 1.4
+   },
+   "node-robustness": {
+    "lines": 12,
+    "points": 108,
+    "failed_lines": 3,
+    "duplicate_pairs": 3,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "AL2Y + AL7CU2Y3",
+     "AL2Y + LIQUID",
+     "AL7CU2Y3 + ALCU5Y",
+     "AL7CU2Y3 + LIQUID",
+     "ALCU5Y + ALCUY",
+     "ALCU5Y + LIQUID",
+     "ALCUY + LIQUID",
+     "BCC_A2 + LIQUID"
+    ],
+    "node_phases": [
+     "AL2Y + AL7CU2Y3 + LIQUID",
+     "AL7CU2Y3 + ALCU5Y + ALCUY",
+     "AL7CU2Y3 + ALCU5Y + LIQUID",
+     "AL7CU2Y3 + ALCUY + LIQUID",
+     "ALCU5Y + ALCUY + LIQUID"
+    ],
+    "elapsed": 2.0
+   },
+   "same-tieline-dedup": {
+    "lines": 11,
+    "points": 91,
+    "failed_lines": 3,
+    "duplicate_pairs": 0,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "AL2Y + AL7CU2Y3",
+     "AL2Y + LIQUID",
+     "AL7CU2Y3 + ALCU5Y",
+     "AL7CU2Y3 + LIQUID",
+     "ALCU5Y + ALCUY",
+     "ALCU5Y + LIQUID",
+     "ALCUY + LIQUID",
+     "BCC_A2 + LIQUID"
+    ],
+    "node_phases": [
+     "AL2Y + AL7CU2Y3 + LIQUID",
+     "AL7CU2Y3 + ALCU5Y + ALCUY",
+     "AL7CU2Y3 + ALCU5Y + LIQUID",
+     "AL7CU2Y3 + ALCUY + LIQUID",
+     "ALCU5Y + ALCUY + LIQUID"
+    ],
+    "elapsed": 2.0
+   },
+   "old-node-robustness": {
+    "lines": 12,
+    "points": 98,
+    "failed_lines": 3,
+    "duplicate_pairs": 1,
+    "zero_width_lines": 0,
+    "edge_lines": 0,
+    "phase_pairs": [
+     "AL2Y + AL7CU2Y3",
+     "AL2Y + LIQUID",
+     "AL7CU2Y3 + ALCU5Y",
+     "AL7CU2Y3 + LIQUID",
+     "ALCU5Y + ALCUY",
+     "ALCU5Y + LIQUID",
+     "ALCUY + LIQUID",
+     "BCC_A2 + LIQUID"
+    ],
+    "node_phases": [
+     "AL2Y + AL7CU2Y3 + LIQUID",
+     "AL7CU2Y3 + ALCU5Y + ALCUY",
+     "AL7CU2Y3 + ALCU5Y + LIQUID",
+     "AL7CU2Y3 + ALCUY + LIQUID",
+     "ALCU5Y + ALCUY + LIQUID"
+    ],
+    "elapsed": 4.6
+   }
+  }
+ },
+ "uncovered": {
+  "upstream-next not in node-robustness": {
+   "Al-Te": {},
+   "Cr-V": {},
+   "Cu-Mg": {},
+   "Ba-Ca": {},
+   "Au-Cu": {},
+   "Ga-La": {},
+   "Cr-Ta": {},
+   "Al-Fe": {},
+   "Al-Ni": {},
+   "Co-V": {},
+   "Cr-Ti": {},
+   "Fe-Nb": {},
+   "Al-Cr-Ni 1300K (alcocrni)": {},
+   "Al-Co-Ni 1233K (alcocrni)": {},
+   "Al-Co-Cr 1334K (alcocrni)": {
+    "BCC_B2 + SIGMA_SGTE": 1
+   },
+   "Al-Cr-Ni 1200K (alcrni)": {
+    "L12_FCC + L12_FCC": 1
+   },
+   "Al-Cu-Y 1774.65K": {}
+  },
+  "upstream-next not in same-tieline-dedup": {
+   "Al-Te": {},
+   "Cr-V": {},
+   "Cu-Mg": {},
+   "Ba-Ca": {},
+   "Au-Cu": {},
+   "Ga-La": {},
+   "Cr-Ta": {},
+   "Al-Fe": {},
+   "Al-Ni": {},
+   "Co-V": {},
+   "Cr-Ti": {},
+   "Fe-Nb": {},
+   "Al-Cr-Ni 1300K (alcocrni)": {},
+   "Al-Co-Ni 1233K (alcocrni)": {},
+   "Al-Co-Cr 1334K (alcocrni)": {
+    "BCC_B2 + SIGMA_SGTE": 1
+   },
+   "Al-Cr-Ni 1200K (alcrni)": {
+    "L12_FCC + L12_FCC": 1
+   },
+   "Al-Cu-Y 1774.65K": {}
+  },
+  "upstream-next not in old-node-robustness": {
+   "Al-Te": {},
+   "Cr-V": {},
+   "Cu-Mg": {},
+   "Ba-Ca": {},
+   "Au-Cu": {
+    "FCC_4SL + FCC_4SL": 36,
+    "FCC_4SL + LIQUID": 1
+   },
+   "Ga-La": {},
+   "Cr-Ta": {},
+   "Al-Fe": {},
+   "Al-Ni": {},
+   "Co-V": {},
+   "Cr-Ti": {},
+   "Fe-Nb": {},
+   "Al-Cr-Ni 1300K (alcocrni)": {},
+   "Al-Co-Ni 1233K (alcocrni)": {},
+   "Al-Co-Cr 1334K (alcocrni)": {
+    "BCC_B2 + SIGMA_SGTE": 1
+   },
+   "Al-Cr-Ni 1200K (alcrni)": {
+    "L12_FCC + L12_FCC": 1
+   },
+   "Al-Cu-Y 1774.65K": {}
+  },
+  "node-robustness not in upstream-next": {
+   "Al-Te": {},
+   "Cr-V": {},
+   "Cu-Mg": {},
+   "Ba-Ca": {},
+   "Au-Cu": {
+    "FCC_4SL + FCC_A1": 21
+   },
+   "Ga-La": {
+    "GA6LA + ORTHORHOMBIC_A11": 3,
+    "GA2LA_C32 + LIQUID": 1
+   },
+   "Cr-Ta": {},
+   "Al-Fe": {
+    "B2_BCC + FCC_A1": 1,
+    "AL2FE + AL5FE2": 1,
+    "AL2FE + AL5FE4": 1,
+    "AL5FE2 + AL5FE4": 3
+   },
+   "Al-Ni": {
+    "AL3NI2 + BCC_B2": 1
+   },
+   "Co-V": {
+    "FCC_4SL + FCC_A1": 10,
+    "CO3V + FCC_A1": 11,
+    "FCC_A1 + HCP_A3": 5
+   },
+   "Cr-Ti": {},
+   "Fe-Nb": {},
+   "Al-Cr-Ni 1300K (alcocrni)": {
+    "BCC_B2 + BCC_B2": 22
+   },
+   "Al-Co-Ni 1233K (alcocrni)": {
+    "BCC_B2 + LIQUID": 4,
+    "AL13CO4 + BCC_B2": 4
+   },
+   "Al-Co-Cr 1334K (alcocrni)": {},
+   "Al-Cr-Ni 1200K (alcrni)": {
+    "B2 + B2": 10
+   },
+   "Al-Cu-Y 1774.65K": {
+    "AL7CU2Y3 + LIQUID": 30,
+    "AL2Y + AL7CU2Y3": 4,
+    "AL2Y + LIQUID": 11,
+    "AL7CU2Y3 + ALCU5Y": 4,
+    "ALCU5Y + LIQUID": 27,
+    "ALCU5Y + ALCUY": 7,
+    "ALCUY + LIQUID": 21
+   }
+  },
+  "node-robustness not in same-tieline-dedup": {
+   "Al-Te": {},
+   "Cr-V": {},
+   "Cu-Mg": {},
+   "Ba-Ca": {},
+   "Au-Cu": {},
+   "Ga-La": {},
+   "Cr-Ta": {},
+   "Al-Fe": {},
+   "Al-Ni": {},
+   "Co-V": {},
+   "Cr-Ti": {},
+   "Fe-Nb": {},
+   "Al-Cr-Ni 1300K (alcocrni)": {},
+   "Al-Co-Ni 1233K (alcocrni)": {},
+   "Al-Co-Cr 1334K (alcocrni)": {},
+   "Al-Cr-Ni 1200K (alcrni)": {},
+   "Al-Cu-Y 1774.65K": {}
+  },
+  "node-robustness not in old-node-robustness": {
+   "Al-Te": {},
+   "Cr-V": {},
+   "Cu-Mg": {},
+   "Ba-Ca": {},
+   "Au-Cu": {
+    "FCC_4SL + LIQUID": 1,
+    "FCC_4SL + FCC_4SL": 43
+   },
+   "Ga-La": {},
+   "Cr-Ta": {},
+   "Al-Fe": {},
+   "Al-Ni": {},
+   "Co-V": {
+    "FCC_A1 + HCP_A3": 1
+   },
+   "Cr-Ti": {},
+   "Fe-Nb": {},
+   "Al-Cr-Ni 1300K (alcocrni)": {},
+   "Al-Co-Ni 1233K (alcocrni)": {},
+   "Al-Co-Cr 1334K (alcocrni)": {},
+   "Al-Cr-Ni 1200K (alcrni)": {},
+   "Al-Cu-Y 1774.65K": {}
+  },
+  "same-tieline-dedup not in upstream-next": {
+   "Al-Te": {},
+   "Cr-V": {},
+   "Cu-Mg": {},
+   "Ba-Ca": {},
+   "Au-Cu": {
+    "FCC_4SL + FCC_A1": 21
+   },
+   "Ga-La": {
+    "GA6LA + ORTHORHOMBIC_A11": 3,
+    "GA2LA_C32 + LIQUID": 1
+   },
+   "Cr-Ta": {},
+   "Al-Fe": {
+    "B2_BCC + FCC_A1": 1,
+    "AL2FE + AL5FE2": 1,
+    "AL2FE + AL5FE4": 1,
+    "AL5FE2 + AL5FE4": 3
+   },
+   "Al-Ni": {
+    "AL3NI2 + BCC_B2": 1
+   },
+   "Co-V": {
+    "FCC_4SL + FCC_A1": 10,
+    "CO3V + FCC_A1": 11,
+    "FCC_A1 + HCP_A3": 5
+   },
+   "Cr-Ti": {},
+   "Fe-Nb": {},
+   "Al-Cr-Ni 1300K (alcocrni)": {
+    "BCC_B2 + BCC_B2": 12
+   },
+   "Al-Co-Ni 1233K (alcocrni)": {
+    "BCC_B2 + LIQUID": 4,
+    "AL13CO4 + BCC_B2": 4
+   },
+   "Al-Co-Cr 1334K (alcocrni)": {},
+   "Al-Cr-Ni 1200K (alcrni)": {
+    "B2 + B2": 7
+   },
+   "Al-Cu-Y 1774.65K": {
+    "AL7CU2Y3 + LIQUID": 17,
+    "AL2Y + AL7CU2Y3": 4,
+    "AL2Y + LIQUID": 7,
+    "AL7CU2Y3 + ALCU5Y": 4,
+    "ALCU5Y + LIQUID": 27,
+    "ALCU5Y + ALCUY": 7,
+    "ALCUY + LIQUID": 21
+   }
+  },
+  "same-tieline-dedup not in node-robustness": {
+   "Al-Te": {},
+   "Cr-V": {},
+   "Cu-Mg": {},
+   "Ba-Ca": {},
+   "Au-Cu": {},
+   "Ga-La": {},
+   "Cr-Ta": {},
+   "Al-Fe": {},
+   "Al-Ni": {},
+   "Co-V": {},
+   "Cr-Ti": {},
+   "Fe-Nb": {},
+   "Al-Cr-Ni 1300K (alcocrni)": {},
+   "Al-Co-Ni 1233K (alcocrni)": {},
+   "Al-Co-Cr 1334K (alcocrni)": {},
+   "Al-Cr-Ni 1200K (alcrni)": {},
+   "Al-Cu-Y 1774.65K": {}
+  },
+  "same-tieline-dedup not in old-node-robustness": {
+   "Al-Te": {},
+   "Cr-V": {},
+   "Cu-Mg": {},
+   "Ba-Ca": {},
+   "Au-Cu": {
+    "FCC_4SL + LIQUID": 1,
+    "FCC_4SL + FCC_4SL": 43
+   },
+   "Ga-La": {},
+   "Cr-Ta": {},
+   "Al-Fe": {},
+   "Al-Ni": {},
+   "Co-V": {
+    "FCC_A1 + HCP_A3": 1
+   },
+   "Cr-Ti": {},
+   "Fe-Nb": {},
+   "Al-Cr-Ni 1300K (alcocrni)": {},
+   "Al-Co-Ni 1233K (alcocrni)": {},
+   "Al-Co-Cr 1334K (alcocrni)": {},
+   "Al-Cr-Ni 1200K (alcrni)": {},
+   "Al-Cu-Y 1774.65K": {}
+  },
+  "old-node-robustness not in upstream-next": {
+   "Al-Te": {},
+   "Cr-V": {},
+   "Cu-Mg": {},
+   "Ba-Ca": {},
+   "Au-Cu": {
+    "FCC_4SL + FCC_A1": 21
+   },
+   "Ga-La": {
+    "GA6LA + ORTHORHOMBIC_A11": 3,
+    "GA2LA_C32 + LIQUID": 1
+   },
+   "Cr-Ta": {},
+   "Al-Fe": {
+    "B2_BCC + FCC_A1": 1,
+    "AL2FE + AL5FE2": 1,
+    "AL2FE + AL5FE4": 1,
+    "AL5FE2 + AL5FE4": 3
+   },
+   "Al-Ni": {
+    "AL3NI2 + BCC_B2": 1
+   },
+   "Co-V": {
+    "FCC_4SL + FCC_A1": 10,
+    "CO3V + FCC_A1": 11,
+    "FCC_A1 + HCP_A3": 4
+   },
+   "Cr-Ti": {},
+   "Fe-Nb": {},
+   "Al-Cr-Ni 1300K (alcocrni)": {
+    "BCC_B2 + BCC_B2": 22
+   },
+   "Al-Co-Ni 1233K (alcocrni)": {
+    "BCC_B2 + LIQUID": 4,
+    "AL13CO4 + BCC_B2": 4
+   },
+   "Al-Co-Cr 1334K (alcocrni)": {},
+   "Al-Cr-Ni 1200K (alcrni)": {
+    "B2 + B2": 7
+   },
+   "Al-Cu-Y 1774.65K": {
+    "AL7CU2Y3 + LIQUID": 20,
+    "AL2Y + AL7CU2Y3": 4,
+    "AL2Y + LIQUID": 11,
+    "AL7CU2Y3 + ALCU5Y": 4,
+    "ALCU5Y + LIQUID": 27,
+    "ALCU5Y + ALCUY": 7,
+    "ALCUY + LIQUID": 21
+   }
+  },
+  "old-node-robustness not in node-robustness": {
+   "Al-Te": {},
+   "Cr-V": {},
+   "Cu-Mg": {},
+   "Ba-Ca": {},
+   "Au-Cu": {},
+   "Ga-La": {},
+   "Cr-Ta": {},
+   "Al-Fe": {},
+   "Al-Ni": {},
+   "Co-V": {},
+   "Cr-Ti": {},
+   "Fe-Nb": {},
+   "Al-Cr-Ni 1300K (alcocrni)": {},
+   "Al-Co-Ni 1233K (alcocrni)": {},
+   "Al-Co-Cr 1334K (alcocrni)": {},
+   "Al-Cr-Ni 1200K (alcrni)": {},
+   "Al-Cu-Y 1774.65K": {}
+  },
+  "old-node-robustness not in same-tieline-dedup": {
+   "Al-Te": {},
+   "Cr-V": {},
+   "Cu-Mg": {},
+   "Ba-Ca": {},
+   "Au-Cu": {},
+   "Ga-La": {},
+   "Cr-Ta": {},
+   "Al-Fe": {},
+   "Al-Ni": {},
+   "Co-V": {},
+   "Cr-Ti": {},
+   "Fe-Nb": {},
+   "Al-Cr-Ni 1300K (alcocrni)": {},
+   "Al-Co-Ni 1233K (alcocrni)": {},
+   "Al-Co-Cr 1334K (alcocrni)": {},
+   "Al-Cr-Ni 1200K (alcrni)": {},
+   "Al-Cu-Y 1774.65K": {}
+  }
+ }
+}

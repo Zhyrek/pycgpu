@@ -654,15 +654,18 @@ cdef class CompsetState:
         self.phase_local_jac_tmp = np.zeros((compset.num_phase_local_conditions, spec.num_statevars + compset.phase_record.phase_dof))
         self.mass_hess_tmp = np.zeros((spec.num_statevars + compset.phase_record.phase_dof,
                                        spec.num_statevars + compset.phase_record.phase_dof))
+        self.allocate_reduced_hessian_scratch(compset.phase_record.phase_dof,
+                                              self.phase_matrix.shape[0] - compset.phase_record.phase_dof)
+
+    cdef void allocate_reduced_hessian_scratch(self, int phase_dof, int num_constraint_rows):
         # Scratch space for make_reduced_hessian_positive_definite; the null space basis of the constraints is
         # recomputed when the constraint rows (initially NaN) change
-        self.null_space = np.zeros(max(1, compset.phase_record.phase_dof**2))
-        self.null_space_cons_jac = np.full((self.phase_matrix.shape[0] - compset.phase_record.phase_dof,
-                                            compset.phase_record.phase_dof), np.nan)
+        self.null_space = np.zeros(max(1, phase_dof**2))
+        self.null_space_cons_jac = np.full((num_constraint_rows, phase_dof), np.nan)
         self.null_space_rank = -1
-        self.null_space_hz = np.zeros(max(1, compset.phase_record.phase_dof**2))
-        self.reduced_hess = np.zeros(max(1, compset.phase_record.phase_dof**2))
-        self.reduced_hess_eigenvalues = np.zeros(max(1, compset.phase_record.phase_dof))
+        self.null_space_hz = np.zeros(max(1, phase_dof**2))
+        self.reduced_hess = np.zeros(max(1, phase_dof**2))
+        self.reduced_hess_eigenvalues = np.zeros(max(1, phase_dof))
 
     def __getstate__(self):
         return (np.array(self.trial_x_tmp), self.energy, np.array(self.grad), np.array(self.hess),
@@ -835,6 +838,22 @@ cdef bint make_reduced_hessian_positive_definite(CompsetState csst, double[:, ::
                     s += hz[i + b * n] * hz[j + b * n]
                 phase_matrix[i, j] += s
     return True
+
+
+def _make_reduced_hessian_positive_definite(double[:, ::1] phase_matrix, int phase_dof, int num_statevars,
+                                            double[::1] x, double[::1] grad, double[:, ::1] mass_jac,
+                                            double[::1] chemical_potentials):
+    """
+    Call make_reduced_hessian_positive_definite outside of a solve (for testing). grad and mass_jac stand for
+    the gradients of the phase energy and of the moles of each component (num_statevars + phase_dof columns);
+    phase_matrix is modified in place. Returns True if phase_matrix was modified.
+    """
+    cdef CompsetState csst = CompsetState.__new__(CompsetState)
+    csst.grad = grad
+    csst.mass_jac = mass_jac
+    csst.allocate_reduced_hessian_scratch(phase_dof, phase_matrix.shape[0] - phase_dof)
+    return make_reduced_hessian_positive_definite(csst, phase_matrix, phase_dof, num_statevars, x,
+                                                  chemical_potentials)
 
 
 cdef class SystemState:

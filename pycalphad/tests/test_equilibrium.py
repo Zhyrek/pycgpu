@@ -1481,3 +1481,90 @@ def test_eq_cufec_kang_liquid_miscibility_gap(load_database):
     order = np.argsort(liquid_x[:, 1])
     assert_allclose(liquid_np[order], [0.402307, 0.331414], atol=1e-5)
     assert_allclose(liquid_x[order], [[0.166598, 0.033546, 0.799856], [0.000094, 0.965069, 0.034838]], atol=1e-5)
+
+
+def _kkt_matrix(hess, cons_jac):
+    "Phase matrix (LHS of Eq. 41, Sundman 2015): Hessian block and constraint rows"
+    n, m = hess.shape[0], cons_jac.shape[0]
+    phase_matrix = np.zeros((n + m, n + m))
+    phase_matrix[:n, :n] = hess
+    phase_matrix[n:, :n] = cons_jac
+    phase_matrix[:n, n:] = cons_jac.T
+    return phase_matrix
+
+
+def _reduced_hessian_eigenvalues(phase_matrix, n):
+    "Eigenvalues of Z^T H Z, Z an orthonormal basis for the null space of the constraint rows"
+    cons_jac = phase_matrix[n:, :n]
+    _, _, vt = np.linalg.svd(cons_jac)
+    z = vt[np.linalg.matrix_rank(cons_jac):].T
+    hess = phase_matrix[:n, :n]
+    return np.linalg.eigvalsh(z.T @ (0.5 * (hess + hess.T)) @ z)
+
+
+@pytest.mark.solver
+@pytest.mark.parametrize("phase_grad, chemical_potentials, mass_jac_y3, held", [
+    # the reduced gradient of y3 is its derivative of G - sum_i mu_i N_i less the constraint multiplier,
+    # which is estimated from y1 and y2 (above the bound)
+    ([0, 0, 5], [0, 0], [0, 0], True),
+    ([0, 0, -5], [0, 0], [0, 0], False),
+    ([3, 3, 5], [0, 0], [0, 0], True),
+    ([3, 3, 2], [0, 0], [0, 0], False),
+    ([0, 0, 0], [-5, 0], [1, 0], True),
+    ([0, 0, 0], [5, 0], [1, 0], False),
+])
+def test_make_reduced_hessian_positive_definite_holds_site_fractions_at_bound(phase_grad, chemical_potentials,
+                                                                              mass_jac_y3, held):
+    """One sublattice with three species, y3 at the lower bound. The reduced Hessian (in the null space of
+    y1 + y2 + y3 = 1) has eigenvalues 1 and -5/3, through the coupling of y3 to y1 and y2. A site fraction at the
+    bound with a positive reduced gradient (it would decrease) is held: its row and column of the Hessian are
+    made diagonal, which here makes the reduced Hessian positive definite. Otherwise the negative eigenvalue
+    is replaced by its absolute value, keeping the eigenvectors."""
+    from pycalphad.core.minimizer import _make_reduced_hessian_positive_definite
+    num_statevars, n = 2, 3
+    hess = np.array([[1., 0., 2.], [0., 1., 2.], [2., 2., 1.]])
+    cons_jac = np.array([[1., 1., 1.]])
+    phase_matrix = _kkt_matrix(hess, cons_jac)
+    original = phase_matrix.copy()
+    x = np.array([101325., 1000., 0.5, 0.5, 1e-14])
+    grad = np.array([0., 0.] + phase_grad, dtype=float)
+    mass_jac = np.zeros((2, num_statevars + n))
+    mass_jac[:, num_statevars + 2] = mass_jac_y3
+    assert_allclose(_reduced_hessian_eigenvalues(original, n), [-5/3, 1])
+    assert _make_reduced_hessian_positive_definite(phase_matrix, n, num_statevars, x, grad, mass_jac,
+                                                   np.array(chemical_potentials, dtype=float))
+    # The constraint rows and columns are unchanged
+    np.testing.assert_array_equal(phase_matrix[n:, :], original[n:, :])
+    np.testing.assert_array_equal(phase_matrix[:, n:], original[:, n:])
+    if held:
+        # Row and column of y3 made diagonal; the coupling of y1 and y2 is kept
+        np.testing.assert_array_equal(phase_matrix[:n, :n], np.eye(3))
+        assert_allclose(_reduced_hessian_eigenvalues(phase_matrix, n), [1, 1])
+    else:
+        # Negative eigenvalue flipped: H changes only in the null space, and the reduced Hessian is |Z^T H Z|
+        assert_allclose((phase_matrix[:n, :n] - hess) @ np.ones(3), 0, atol=1e-12)
+        assert_allclose(phase_matrix[:n, :n], phase_matrix[:n, :n].T, atol=1e-12)
+        assert_allclose(_reduced_hessian_eigenvalues(phase_matrix, n), [1, 5/3])
+        assert_allclose(phase_matrix[:n, :n], [[1., 0., 2.], [0., 1., 2.], [2., 2., 1.]] +
+                        (10/3) * np.outer([1, 1, -2], [1, 1, -2]) / 6)
+
+
+@pytest.mark.solver
+def test_make_reduced_hessian_positive_definite_no_change():
+    "Positive definite reduced Hessians, or negative eigenvalues within rounding of zero, are not modified."
+    from pycalphad.core.minimizer import _make_reduced_hessian_positive_definite
+    num_statevars, n = 2, 3
+    cons_jac = np.array([[1., 1., 1.]])
+    x = np.array([101325., 1000., 0.5, 0.5, 1e-14])
+    grad = np.array([0., 0., 0., 0., 5.])
+    mass_jac = np.zeros((2, num_statevars + n))
+    # Indefinite H, but positive definite in the null space of the constraint (-3 along [1, 1, 1] only)
+    hess = np.eye(3) - (4/3) * np.ones((3, 3))
+    # Negative eigenvalue of the reduced Hessian within 1e-10 of the largest, scaled to 1e17 (MQMQA entropy)
+    hess_near_singular = 1e17 * (np.eye(3) - (1 + 1e-11) * np.outer([1, 1, -2], [1, 1, -2]) / 6)
+    for h in [hess, hess_near_singular]:
+        phase_matrix = _kkt_matrix(h, cons_jac)
+        original = phase_matrix.copy()
+        assert not _make_reduced_hessian_positive_definite(phase_matrix, n, num_statevars, x, grad, mass_jac,
+                                                           np.zeros(2))
+        np.testing.assert_array_equal(phase_matrix, original)

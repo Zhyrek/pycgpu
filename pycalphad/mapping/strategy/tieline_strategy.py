@@ -537,6 +537,11 @@ class TielineStrategy(MapStrategy):
                         self.node_queue.add_node(node, True)
 
     def _add_starting_points_from_step_composition_axes(self, step: StepStrategy):
+        # (the step's states are starting points of the global min checks of nodes and starting points, see
+        # zpf_equilibrium.remember_states)
+        for zpf_line in step.zpf_lines:
+            for point in zpf_line.points:
+                zeq.remember_states(self.system_info, point)
         for zpf_line in step.zpf_lines:
             if len(zpf_line.stable_phases) == 2 or len(zpf_line.stable_phases) == 3:
                 num_phases = len(zpf_line.stable_phases)
@@ -560,7 +565,7 @@ class TielineStrategy(MapStrategy):
                     # which CS to fix when finding an exit
                     free_point = map_utils._generate_point_with_free_cs(new_point)
 
-                    cs_result = zeq._find_global_min_cs(free_point, system_info=self.system_info, pdens=self.GLOBAL_MIN_PDENS, tol=self.GLOBAL_MIN_TOL, num_candidates=self.GLOBAL_MIN_NUM_CANDIDATES)
+                    cs_result = zeq._find_global_min_cs(free_point, system_info=self.system_info, pdens=self.GLOBAL_MIN_PDENS, tol=self.GLOBAL_MIN_TOL, num_candidates=self.GLOBAL_MIN_NUM_CANDIDATES, known_states=True)
                     if cs_result is None:
                         new_node = self._create_node_from_point(free_point, None, None, None)
                         self.node_queue.add_node(new_node)
@@ -788,7 +793,7 @@ class TielineStrategy(MapStrategy):
         If it is, the zpf line is ended and the node is not added
         """
         _log.info("Checking if new node is metastable")
-        cs_result = zeq._find_global_min_cs(new_node, system_info=self.system_info, pdens=self.GLOBAL_MIN_PDENS, tol=self.GLOBAL_MIN_TOL, num_candidates=self.GLOBAL_MIN_NUM_CANDIDATES)
+        cs_result = zeq._find_global_min_cs(new_node, system_info=self.system_info, pdens=self.GLOBAL_MIN_PDENS, tol=self.GLOBAL_MIN_TOL, num_candidates=self.GLOBAL_MIN_NUM_CANDIDATES, known_states=True)
         if cs_result is not None:
             if not zeq._detect_degenerate_phase(new_node, cs_result[0]):
                 cs_result = None

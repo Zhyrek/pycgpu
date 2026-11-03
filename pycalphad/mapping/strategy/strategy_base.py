@@ -453,6 +453,7 @@ class MapStrategy:
         if zpf_line.status in valid_statuses:
             new_point, _ = step_results
             zpf_line.append(new_point)
+            zeq.remember_states(self.system_info, new_point)
 
             # If we successfully added a new point, attempt to increase the axis delta if is smaller than the default
             if zpf_line.current_delta < self.axis_delta[zpf_line.axis_var]:

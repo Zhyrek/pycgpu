@@ -22,6 +22,7 @@ cdef class FastFunctionFactory:
     cdef map[pair[string, string], int] _cache_property_map
     cdef int _cache_cur_idx
     cdef void** _cache_ptr
+    cdef int _cache_insert(self, pair[string, string] cache_key, FastFunction func) except -1
     cdef void* get_func(self, string property_name) except * nogil
     cdef void* get_grad(self, string property_name) except * nogil
     cdef void* get_hess(self, string property_name) except * nogil

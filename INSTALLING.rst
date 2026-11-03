@@ -59,6 +59,14 @@ The common workflows can roughly be broken down into the following categories:
 
                Read more in `the uv guide to working on projects <https://docs.astral.sh/uv/guides/projects/>`__.
 
+            .. tip::
+
+               To update PyCalphad in your project to the latest release, run this in the project directory:
+
+               .. code-block:: bash
+
+                  uv sync --upgrade-package pycalphad
+
          .. tab-item:: pixi
 
             If you work with non-Python packages, you may prefer to install PyCalphad as a `conda`_ package, so that you can use the same workflow for packages which are not available on `PyPI <https://pypi.org/>`__, the Python Package Index.
@@ -97,6 +105,14 @@ The common workflows can roughly be broken down into the following categories:
                   pixi add jupyterlab
                   pixi run jupyter lab
 
+            .. tip::
+
+               To update PyCalphad in your project to the latest release, run this in the project directory:
+
+               .. code-block:: bash
+
+                  pixi update pycalphad
+
    .. tab-item:: Environment-based
 
       In project-based workflows, a project is a directory containing a manifest file describing the project, a lock file describing the exact dependencies of the project, and the project's (potentially multiple) environments.
@@ -126,6 +142,8 @@ The common workflows can roughly be broken down into the following categories:
 
                   python -m pip install -U pycalphad
 
+               Running the same command again in the activated environment updates PyCalphad to the latest release.
+
          .. tab-item:: conda
 
             `conda`_ is a package manager that can install Python and non-Python packages.
@@ -139,6 +157,12 @@ The common workflows can roughly be broken down into the following categories:
                conda activate pycalphad-env
 
             This environment must be activated every time you use PyCalphad.
+
+            To update PyCalphad in this environment to the latest release:
+
+            .. code-block:: bash
+
+               conda update -n pycalphad-env -c conda-forge pycalphad
 
    .. tab-item:: Development version
 
@@ -186,6 +210,9 @@ The common workflows can roughly be broken down into the following categories:
             To update the code in the current branch to the latest changes on GitHub, the changes are pulled from GitHub by running ``git pull``.
 
             To switch to a different branch, e.g. ``master`` (which tracks the latest released version) or another feature branch, run ``git checkout <branch>``, where ``<branch>`` is the name of the branch to checkout, such as ``master`` (without the brackets ``<`` and ``>``).
+
+To check which version of PyCalphad is installed, run ``python -c "import pycalphad; print(pycalphad.__version__)"`` in the same project or environment
+(e.g. ``uv run python -c ...`` or ``pixi run python -c ...`` in a project).
 
 See next steps in the :doc:`examples <examples/1_Phase_Diagrams/index>`.
 Questions about installing and using PyCalphad can be addressed on the `PyCalphad Discussion board <https://github.com/pycalphad/pycalphad/discussions>`__.

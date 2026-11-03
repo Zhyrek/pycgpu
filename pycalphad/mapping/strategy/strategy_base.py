@@ -1,6 +1,7 @@
 from typing import Union
 import logging
 import copy
+import itertools
 
 import numpy as np
 
@@ -17,6 +18,16 @@ import pycalphad.mapping.zpf_checks as zchk
 import pycalphad.mapping.utils as map_utils
 
 _log = logging.getLogger(__name__)
+
+# Distance (in units of the axis step sizes) within which a point counts as lying on a ZPF line or at a node
+POSITION_TOLERANCE = 0.5
+
+def _distance_to_segment(p, a, b):
+    """Distance from point p to the segment from a to b (any dimension)"""
+    ab = b - a
+    denominator = np.dot(ab, ab)
+    t = 0.0 if denominator == 0 else np.clip(np.dot(p - a, ab) / denominator, 0, 1)
+    return np.linalg.norm(p - (a + t * ab))
 
 class MapStrategy:
     """
@@ -454,10 +465,72 @@ class MapStrategy:
             new_point, _ = step_results
             zpf_line.append(new_point)
             zeq.remember_states(self.system_info, new_point)
+            node_point = self._reached_known_node(zpf_line) if zpf_line.status == ZPFState.NOT_FINISHED else None
+            if node_point is not None:
+                _log.info(f"ZPF line {zpf_line.fixed_phases}, {zpf_line.free_phases} reached a known node. Ending ZPF line there")
+                zpf_line.points[-1] = node_point
+                zpf_line.status = ZPFState.NEW_NODE_FOUND
 
             # If we successfully added a new point, attempt to increase the axis delta if is smaller than the default
             if zpf_line.current_delta < self.axis_delta[zpf_line.axis_var]:
                 zpf_line.current_delta = np.amin([self.axis_delta[zpf_line.axis_var], zpf_line.current_delta / self.DELTA_SCALE])
+
+    def _point_location(self, point: Point, phases: list[str]):
+        """
+        Compositions of the point's composition sets, ordered as `phases` (sets of one phase by composition), and
+        the temperature if it is an axis variable, in units of the axis step sizes; None if the point does not have
+        these phases
+        """
+        if point is None:
+            return None
+        comp_sets = sorted(point.stable_composition_sets, key=lambda cs: (cs.phase_record.phase_name, tuple(cs.X)))
+        if sorted(cs.phase_record.phase_name for cs in comp_sets) != sorted(phases):
+            return None
+        composition_deltas = [self.axis_delta[av] for av in self.axis_vars if isinstance(av, v.X)]
+        location = [np.asarray(cs.X, dtype=float) / min(composition_deltas) for cs in comp_sets] if composition_deltas else []
+        for av in self.axis_vars:
+            if map_utils.is_state_variable(av):
+                location.append(np.atleast_1d(float(point.get_property(av))) / self.axis_delta[av])
+        return np.concatenate(location)
+
+    def _reached_known_node(self, zpf_line: ZPFLine):
+        """
+        A point at a node found already (three or more composition sets, two of them the line's phases) that the last
+        step of the line passed, or None. The global min check that would end the line there can miss the phase that
+        becomes stable (e.g. the second composition set of a miscibility gap, if no sample lies in its basin), and the
+        line then runs on past the node. The node the line starts from does not count (none of its pairs of sets:
+        a line from one exit of a node would otherwise end at another exit of the same node)
+        """
+        if len(self.axis_vars) < 2 or len(zpf_line.points) < 2:
+            return None
+        phases = sorted(zpf_line.stable_phases)
+        last_point = zpf_line.points[-1]
+        last = self._point_location(last_point, phases)
+        prev = self._point_location(zpf_line.points[-2], phases)
+        start = self._point_location(zpf_line.points[0], phases)
+        if last is None or prev is None or start is None:
+            return None
+        for node in self.node_queue.nodes:
+            if len(node.stable_composition_sets) < 3 or node is self._current_node:
+                continue
+            pairs = [(a, b, self._point_location(Point(node.global_conditions, node.chemical_potentials, [], [a, b]), phases))
+                     for a, b in itertools.combinations(node.stable_composition_sets, 2)]
+            if any(loc is not None and np.max(np.abs(loc - start)) < POSITION_TOLERANCE for _, _, loc in pairs):
+                continue
+            for a, b, location in pairs:
+                if location is None:
+                    continue
+                if _distance_to_segment(location, prev, last) < POSITION_TOLERANCE:
+                    # the node's two sets, in the place of the line's (fixed or free, matched by phase and composition)
+                    remaining, fixed, free = [a, b], [], []
+                    for cs in last_point.stable_composition_sets:
+                        match = min((c for c in remaining if c.phase_record.phase_name == cs.phase_record.phase_name),
+                                    key=lambda c: np.max(np.abs(np.asarray(c.X) - np.asarray(cs.X))))
+                        remaining.remove(match)
+                        match = copy.deepcopy(match)
+                        (fixed if cs in last_point.fixed_composition_sets else free).append(match)
+                    return Point(node.global_conditions, node.chemical_potentials, fixed, free)
+        return None
 
     def _process_new_node(self, zpf_line: ZPFLine, new_node: Node):
         """

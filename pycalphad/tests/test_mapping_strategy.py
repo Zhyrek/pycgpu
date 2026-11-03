@@ -7,7 +7,7 @@ import pytest
 
 from pycalphad import binplot, ternplot, Database, Model, variables as v
 from pycalphad.tests.fixtures import select_database, load_database
-from pycalphad.core.utils import instantiate_models, get_state_variables
+from pycalphad.core.utils import instantiate_models, get_state_variables, filter_phases, unpack_species
 from pycalphad.codegen.phase_record_factory import PhaseRecordFactory
 from pycalphad.core.composition_set import CompositionSet
 from pycalphad.property_framework import as_property
@@ -68,6 +68,27 @@ def test_binary_strategy(load_database):
     new_num_nodes = len(strategy.node_queue.nodes)
     assert new_num_nodes == num_nodes + 2
 
+@select_database("alfe.tdb")
+def test_binary_strategy_node_metastable_to_another_candidate(load_database):
+    """
+    Stepping the AL2FE + AL5FE2 line up in temperature, LIQUID is the candidate with the largest driving force near
+    1428 K, but the node AL2FE + AL5FE2 + LIQUID is metastable to AL5FE4. The node has to be rebuilt with AL5FE4;
+    otherwise the line ends at the metastable node (failed, at 1405 K) and the AL2FE + AL5FE2 + AL5FE4 node is not
+    found.
+    """
+    dbf = load_database()
+    phases = ["AL13FE4", "AL2FE", "AL5FE2", "AL5FE4", "B2_BCC", "FCC_A1", "LIQUID"]
+    strategy = TielineStrategy(dbf, ["AL", "FE", "VA"], phases, {v.T: (700, 1900, 30), v.X("AL"): (0, 1, 0.02), v.P: 101325})
+    strategy.do_map()
+
+    mapping_sets = [set(zpf_line.stable_phases_with_multiplicity) for zpf_line in strategy.zpf_lines]
+    for dzs in [{"AL2FE", "AL5FE2"}, {"AL2FE", "AL5FE4"}, {"AL2FE", "B2_BCC"}]:
+        assert dzs in mapping_sets
+    assert ["AL2FE", "AL5FE2", "AL5FE4"] in [sorted(node.stable_phases) for node in strategy.node_queue.nodes]
+    for zpf_line in strategy.zpf_lines:
+        if sorted(zpf_line.stable_phases) == ["AL2FE", "AL5FE2"]:
+            assert zpf_line.status != ZPFState.FAILED
+
 @select_database("crtiv_ghosh.tdb")
 def test_ternary_strategy(load_database):
     dbf = load_database()
@@ -107,6 +128,25 @@ def test_ternary_strategy(load_database):
     new_num_nodes = len(strategy.node_queue.nodes)
     assert new_num_nodes == num_nodes + 1
 
+
+@select_database("alcocrni.tdb")
+def test_ternary_strategy_exit_near_edge(load_database):
+    """
+    At 1300 K, the BCC_B2 + BCC_B2 line between the two tie triangles leaves the AL8CR5_L + BCC_B2 + BCC_B2 node from
+    an exit point at x(NI) = 0.003, next to the Al-Cr edge. Steps in X(NI), the axis variable the line changes most
+    in there, fail in both directions; the exit has to try X(CR), or the line is not traced from that node and stops
+    short of it (at x(AL) = 0.46 instead of 0.55).
+    """
+    dbf = load_database()
+    comps = ["AL", "CR", "NI", "VA"]
+    phases = filter_phases(dbf, unpack_species(dbf, comps))
+    strategy = TielineStrategy(dbf, comps, phases, {v.X("CR"): (0, 1, 0.05), v.X("NI"): (0, 1, 0.05), v.T: 1300, v.P: 101325})
+    strategy.do_map()
+
+    x_al = [cs.X[0] for zpf_line in strategy.zpf_lines if zpf_line.stable_phases == ["BCC_B2", "BCC_B2"]
+            for point in zpf_line.points for cs in point.stable_composition_sets]
+    assert len(x_al) > 0
+    assert max(x_al) > 0.5
 
 @select_database("crtiv_ghosh.tdb")
 def test_plot_ternary_without_tielines(load_database):
@@ -861,11 +901,12 @@ def test_circular_loop_check_normalizes_axes():
     assert np.max(x_liq) > 0.95
 
 @select_database("GaLa-11Idb.tdb")
-def test_automatic_starting_points_keep_forced_starting_points(load_database):
+def test_automatic_starting_points_keep_forced_starting_points(load_database, monkeypatch):
     """
     Parentless recovery nodes from the edge step maps are kept, e.g. for the narrow La BCC window (1134-1194 K)
     """
     from pycalphad.mapping.primitives import MIN_COMPOSITION
+    import pycalphad.mapping.zpf_checks as zchk
     dbf = load_database()
     # La side of Ga-La. FCC_A1 is needed for the metastable node that the edge step map lands on
     phases = ["LIQUID", "BCC_A2", "FCC_A1"]
@@ -875,8 +916,13 @@ def test_automatic_starting_points_keep_forced_starting_points(load_database):
     # Its coarse step (dT = 185 K) jumps over the BCC window to a metastable FCC_A1+LIQUID node, and the step map
     # only records the LIQUID+BCC_A2 field by the recovery point that it force-adds (without a parent) below the node
     step_conds = {v.P: 101325, v.N: 1, v.T: (300, 4000, 185), v.X("LA"): 1 - MIN_COMPOSITION}
-    step = StepStrategy(dbf, ["GA", "LA", "VA"], phases, step_conds, models=strategy.models, phase_record_factory=strategy.phase_records)
-    step.do_map()
+    # (the metastable node is rebuilt with BCC_A2 by _retry_metastable_node, and the step map then has the LIQUID +
+    # BCC_A2 node with a parent; without the rebuild, it lands on the metastable node, as a step map can wherever
+    # the phase with the largest driving force is not the one that becomes stable first)
+    with monkeypatch.context() as m:
+        m.setattr(zchk, "_retry_metastable_node", lambda new_node, *args, **kwargs: new_node)
+        step = StepStrategy(dbf, ["GA", "LA", "VA"], phases, step_conds, models=strategy.models, phase_record_factory=strategy.phase_records)
+        step.do_map()
     bcc_liquid_nodes = [node for node in step.node_queue.nodes if sorted(node.stable_phases) == ["BCC_A2", "LIQUID"]]
     assert len(bcc_liquid_nodes) == 1 and bcc_liquid_nodes[0].parent is None
 
@@ -892,10 +938,11 @@ def test_automatic_starting_points_keep_forced_starting_points(load_database):
         assert False, "No BCC_A2+LIQUID ZPF line mapped inside the La BCC window (1134-1194 K)"
 
 @select_database("AuCu-98Sun-LB.tdb")
-def test_automatic_starting_points_for_every_merged_field(load_database):
+def test_automatic_starting_points_for_every_merged_field(load_database, monkeypatch):
     """
     Fields merged into one same-name step zpf line each get a starting point (Au-rich fcc+Au3Cu at 300 K)
     """
+    import pycalphad.mapping.zpf_checks as zchk
     dbf = load_database()
     # Au-rich half of Au-Cu. The fcc-based phases (fcc, Au3Cu, AuCu, ...) are all FCC_4SL
     conds = {v.P: 101325, v.N: 1, v.T: (300, 540, 20), v.X("CU"): (0, 0.5, 0.05)}
@@ -904,8 +951,12 @@ def test_automatic_starting_points_for_every_merged_field(load_database):
     # 0.05 steps jump over the narrow Au3Cu field (x(CU) = 0.237-0.280) into the fcc+Au3Cu field: the same two
     # composition sets slide from one field into the other, so both fields end up in one step zpf line
     step_conds = {v.P: 101325, v.N: 1, v.T: 300, v.X("CU"): (0.2, 0.52, 0.05)}
-    step = StepStrategy(dbf, ["AU", "CU", "VA"], ["FCC_4SL"], step_conds, models=strategy.models, phase_record_factory=strategy.phase_records)
-    step.do_map()
+    # (check_composition_jump retries the step that slides into the next field, so the step map no longer merges
+    # them; without it, it does, as such a step map can wherever a field is narrower than the step)
+    with monkeypatch.context() as m:
+        m.setattr(zchk, "check_composition_jump", lambda *args, **kwargs: None)
+        step = StepStrategy(dbf, ["AU", "CU", "VA"], ["FCC_4SL"], step_conds, models=strategy.models, phase_record_factory=strategy.phase_records)
+        step.do_map()
     assert any(len(zpf_line.stable_phases) == 2 and np.min(zpf_line.get_var_list(v.X("CU"))) < 0.237
                and np.max(zpf_line.get_var_list(v.X("CU"))) > 0.280 for zpf_line in step.zpf_lines)
 
@@ -1322,3 +1373,185 @@ def test_mapping_custom_models():
         # error is mostly O(1e-11), though some O(1e-10) occur -> set tolerance above this
         np.testing.assert_allclose([tl["S"].x, tl["M"].x], [exact_sm(T), exact_ms(T)], atol=1e-9, rtol=1e-9)
         # diff from machine precision probably via search/solver tolerances
+
+@select_database("alcrni.tdb")
+def test_global_min_check_other_minimum_of_stable_phase(load_database):
+    """
+    Two B2 composition sets are stable at this point (Al-Cr-Ni, 1200 K, reached by mapping): a disordered Cr-rich one
+    and an ordered Al-Ni one with x(CR) = 0.07. Another ordered B2 minimum, near x(CR) = 0.02, x(NI) = 0.41, lies about
+    150 J/mol below their tangent plane. The B2 sample with the largest driving force is next to the Cr-rich set and
+    relaxes onto it, so the check has to test the best B2 sample away from the stable sets as well.
+    """
+    dbf = load_database()
+    comps = ["AL", "CR", "NI", "VA"]
+    phases = list(dbf.phases.keys())
+    conds = {v.T: 1200, v.P: 101325, v.N: 1, v.X("CR"): 0.07445, v.X("NI"): 0.35214}
+    models = instantiate_models(dbf, comps, phases)
+    phase_records = PhaseRecordFactory(dbf, comps, {v.N, v.P, v.T}, models)
+    state_variables = np.array([1, 101325, 1200], dtype=np.float64)
+
+    cr_rich = CompositionSet(phase_records["B2"])
+    cr_rich.update(np.array([0.44816, 0.54992, 0.00192, 1e-10, 0.44816, 0.54992, 0.00192, 1e-10]), 0.0, state_variables)
+    al_ni = CompositionSet(phase_records["B2"])
+    al_ni.update(np.array([0.13629, 0.14638, 0.69718, 0.02015, 0.99898, 0.00101, 1e-5, 1e-10]), 1.0, state_variables)
+    point = Point(conds, np.array([-71886.23, -62989.81, -159386.097]), [cr_rich], [al_ni])
+
+    sys_info = {
+        "dbf": dbf,
+        "comps": comps,
+        "phases": phases,
+        "models": models,
+        "phase_records": phase_records,
+    }
+    new_point = find_global_min_point(point, sys_info)
+    assert new_point is not None
+    new_cs = new_point.stable_composition_sets[-1]
+    assert new_cs.phase_record.phase_name == "B2"
+    assert new_cs.X[1] < 0.04 and new_cs.X[2] > 0.38
+
+@select_database("alcrni.tdb")
+def test_global_min_check_ignores_stable_state_in_another_description(load_database, monkeypatch):
+    """
+    A global min candidate at a stable composition set's composition with a driving force of rounding size is that
+    set's state (e.g. described by another phase of the database), not a new phase; with a real driving force, it is
+    """
+    import pycalphad.mapping.zpf_equilibrium as zeq
+    dbf = load_database()
+    comps = ["AL", "CR", "NI", "VA"]
+    phases = list(dbf.phases.keys())
+    conds = {v.T: 1200, v.P: 101325, v.N: 1, v.X("CR"): 0.07445, v.X("NI"): 0.35214}
+    models = instantiate_models(dbf, comps, phases)
+    phase_records = PhaseRecordFactory(dbf, comps, {v.N, v.P, v.T}, models)
+    state_variables = np.array([1, 101325, 1200], dtype=np.float64)
+    al_ni = CompositionSet(phase_records["B2"])
+    al_ni.update(np.array([0.13629, 0.14638, 0.69718, 0.02015, 0.99898, 0.00101, 1e-5, 1e-10]), 1.0, state_variables)
+    point = Point(conds, np.array([-71886.23, -62989.81, -159386.097]), [], [al_ni])
+    # a disordered BCC_A2 at the same composition as the stable B2 set
+    candidate = CompositionSet(phase_records["BCC_A2"])
+    y = np.array([float(x) for x in al_ni.X] + [1e-10])
+    candidate.update(y, 1.0, state_variables)
+    sys_info = {"dbf": dbf, "comps": comps, "phases": phases, "models": models, "phase_records": phase_records}
+
+    monkeypatch.setattr(zeq, "_find_global_min_cs", lambda *args, **kwargs: (candidate, 0.05))
+    assert zeq.find_global_min_point(point, sys_info) is None
+    monkeypatch.setattr(zeq, "_find_global_min_cs", lambda *args, **kwargs: (candidate, 50.0))
+    assert zeq.find_global_min_point(point, sys_info) is not None
+
+@select_database("alcrni.tdb")
+def test_composition_sets_equal_up_to_ordering_variant(load_database):
+    """
+    An ordered state and the same state with its equivalent sublattices exchanged (an ordering variant) are one
+    composition set; sublattices with different site ratios (L1_2, 3:1) are not exchangeable
+    """
+    from pycalphad.mapping.primitives import _eq_compset
+    dbf = load_database()
+    comps = ["AL", "CR", "NI", "VA"]
+    phases = ["B2", "L12_FCC"]
+    models = instantiate_models(dbf, comps, phases)
+    phase_records = PhaseRecordFactory(dbf, comps, {v.N, v.P, v.T}, models)
+    state_variables = np.array([1, 101325, 1200], dtype=np.float64)
+
+    def comp_set(phase, y):
+        cs = CompositionSet(phase_records[phase])
+        cs.update(np.array(y), 1.0, state_variables)
+        return cs
+
+    # B2: (AL,CR,NI,VA)0.5(AL,CR,NI,VA)0.5
+    ordered = comp_set("B2", [0.7, 0.05, 0.2, 0.05, 0.01, 0.01, 0.97, 0.01])
+    variant = comp_set("B2", [0.01, 0.01, 0.97, 0.01, 0.7, 0.05, 0.2, 0.05])
+    other = comp_set("B2", [0.6, 0.05, 0.3, 0.05, 0.01, 0.01, 0.97, 0.01])
+    assert _eq_compset(ordered, variant)
+    assert not _eq_compset(ordered, other)
+    # L12_FCC: (AL,CR,NI)0.75(AL,CR,NI)0.25
+    l12 = comp_set("L12_FCC", [0.1, 0.1, 0.8, 0.8, 0.1, 0.1])
+    l12_swapped = comp_set("L12_FCC", [0.8, 0.1, 0.1, 0.1, 0.1, 0.8])
+    assert not _eq_compset(l12, l12_swapped)
+
+@select_database("crtiv_ghosh.tdb")
+def test_ternary_strategy_finds_a_miscibility_gap_a_step_crosses(load_database):
+    """
+    At 923 K the LAVES_C15 + BCC_A2 line from the Cr-Ti edge reaches the BCC_A2 miscibility gap with a step that ends
+    inside it, where the second BCC_A2 merges with the stable one when the two are solved together. A smaller step
+    reaches the boundary, where the LAVES_C15 + BCC_A2 + BCC_A2 node is found
+    """
+    dbf = load_database()
+    comps = ['CR', 'TI', 'V', 'VA']
+    phases = filter_phases(dbf, unpack_species(dbf, comps))
+    strat = TielineStrategy(dbf, comps, phases, {v.X('TI'): (0, 1, 0.05), v.X('V'): (0, 1, 0.05), v.T: 923, v.P: 101325, v.N: 1})
+    strat.do_map()
+    assert ['BCC_A2', 'BCC_A2', 'LAVES_C15'] in [sorted(n.stable_phases) for n in strat.node_queue.nodes]
+
+@select_database("Al-Cu-Y.tdb")
+def test_ternary_strategy_finds_regions_not_connected_to_the_edges(load_database):
+    """
+    At 1774.65 K the ternary compounds ALCUY and ALCU5Y are surrounded by liquid, and every edge of the diagram is
+    liquid, so no starting point from the edges leads to them. The coverage check (equilibria on a grid compared with
+    the map) adds starting points in them
+    """
+    dbf = load_database()
+    comps = ['AL', 'CU', 'Y', 'VA']
+    phases = filter_phases(dbf, unpack_species(dbf, comps))
+    strat = TielineStrategy(dbf, comps, phases, {v.X('CU'): (0, 1, 0.05), v.X('Y'): (0, 1, 0.05), v.T: 1774.65, v.P: 101325, v.N: 1})
+    strat.do_map()
+    phase_sets = [sorted(z.stable_phases) for z in strat.zpf_lines]
+    assert ['ALCUY', 'LIQUID'] in phase_sets
+    assert ['ALCU5Y', 'LIQUID'] in phase_sets
+
+    # with the coverage check off, as before
+    strat = TielineStrategy(dbf, comps, phases, {v.X('CU'): (0, 1, 0.05), v.X('Y'): (0, 1, 0.05), v.T: 1774.65, v.P: 101325, v.N: 1}, COVERAGE_CHECK=False)
+    strat.do_map()
+    assert ['ALCUY', 'LIQUID'] not in [sorted(z.stable_phases) for z in strat.zpf_lines]
+
+@select_database("alfe.tdb")
+def test_binary_strategy_traces_zpf_lines_shorter_than_the_smallest_step(load_database):
+    """
+    Between the invariants AL2FE+AL5FE2+AL5FE4 (1428 K) and AL5FE2+AL5FE4+LIQUID (1430 K), the AL5FE2+AL5FE4 region
+    is 2 K tall, less than the smallest step in temperature (35 K * 0.1). The test step from each node then lands in
+    the next region in both directions, so the line was never traced; shorter test steps find it
+    """
+    dbf = load_database()
+    comps = ['AL', 'FE', 'VA']
+    phases = filter_phases(dbf, unpack_species(dbf, comps))
+    strat = TielineStrategy(dbf, comps, phases, {v.T: (300, 1700, 35), v.X('FE'): (0, 1, 0.02), v.P: 101325, v.N: 1})
+    strat.do_map()
+    assert any(sorted(z.stable_phases) == ['AL5FE2', 'AL5FE4'] for z in strat.zpf_lines)
+
+@select_database("alcocrni.tdb")
+def test_global_min_check_starts_from_known_states(load_database):
+    """
+    At 1233.01 K the AL13CO4 + AL3CO tie triangle has BCC_B2 as its third phase. Its ordered state there
+    (x(Co) = 0.056) is not near any BCC_B2 sample; the best sample relaxes into a state on the Al-Ni edge, so the
+    sampled global min check accepted a metastable triangle with AL3NI2. Starting from the BCC_B2 states found on
+    the map so far finds it
+    """
+    dbf = load_database()
+    comps = ['AL', 'CO', 'NI', 'VA']
+    phases = filter_phases(dbf, unpack_species(dbf, comps))
+    strat = TielineStrategy(dbf, comps, phases, {v.X('CO'): (0, 1, 0.05), v.X('NI'): (0, 1, 0.05), v.T: 1233.01, v.P: 101325, v.N: 1})
+    strat.do_map()
+    triangles = [sorted(n.stable_phases) for n in strat.node_queue.nodes if len(n.stable_composition_sets) == 3]
+    assert ['AL13CO4', 'AL3CO', 'BCC_B2'] in triangles
+    assert ['AL13CO4', 'AL3CO', 'AL3NI2'] not in triangles
+
+@select_database("alcocrni.tdb")
+def test_ternary_strategy_ends_a_line_at_a_known_node(load_database):
+    """
+    At 1334.04 K the BCC_B2 + SIGMA_SGTE line from the BCC_B2 + L12_FCC + SIGMA_SGTE node reaches the BCC_B2 +
+    BCC_B2 + SIGMA_SGTE node (found from the BCC_B2 + BCC_B2 line), where the sampled global min check does not find
+    the second BCC_B2. It ends there instead of running on to the Co-Cr edge
+    """
+    dbf = load_database()
+    comps = ['AL', 'CO', 'CR', 'VA']
+    phases = filter_phases(dbf, unpack_species(dbf, comps))
+    strat = TielineStrategy(dbf, comps, phases, {v.X('CO'): (0, 1, 0.05), v.X('CR'): (0, 1, 0.05), v.T: 1334.04, v.P: 101325, v.N: 1})
+    strat.do_map()
+    def b2(point):
+        return [np.asarray(cs.X) for cs in point.stable_composition_sets if cs.phase_record.phase_name == 'BCC_B2'][0]
+    # the line's ends: BCC_B2 at x(Co), x(Cr) = 0.488, 0.255 (at the BCC_B2 + L12_FCC + SIGMA_SGTE node) and 0.476,
+    # 0.246 (at the BCC_B2 + BCC_B2 + SIGMA_SGTE node)
+    ends = [sorted([tuple(np.round(b2(z.points[0])[1:], 2)), tuple(np.round(b2(z.points[-1])[1:], 2))])
+            for z in strat.zpf_lines if sorted(z.stable_phases) == ['BCC_B2', 'SIGMA_SGTE']]
+    from_node = [e for e in ends if any(np.allclose(end, [0.488, 0.255], atol=0.01) for end in e)]
+    assert len(from_node) >= 1
+    for e in from_node:
+        assert any(np.allclose(end, [0.476, 0.246], atol=0.01) for end in e)

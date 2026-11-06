@@ -1,0 +1,34 @@
+cff-version: 1.2.0
+message: "If you use pycalphad in your research, please cite the article in preferred-citation."
+title: pycalphad
+type: software
+abstract: >-
+  pycalphad is a free and open-source Python library for designing thermodynamic models, calculating phase
+  diagrams and investigating phase equilibria within the CALPHAD method.
+authors:
+  - family-names: Otis
+    given-names: Richard
+  - family-names: Bocklund
+    given-names: Brandon
+repository-code: "https://github.com/pycalphad/pycalphad"
+url: "https://pycalphad.org"
+license: MIT
+keywords:
+  - CALPHAD
+  - computational thermodynamics
+  - phase diagrams
+  - phase equilibria
+preferred-citation:
+  type: article
+  authors:
+    - family-names: Otis
+      given-names: Richard
+    - family-names: Liu
+      given-names: Zi-Kui
+  title: "pycalphad: CALPHAD-based Computational Thermodynamics in Python"
+  journal: Journal of Open Research Software
+  volume: 5
+  issue: 1
+  start: 1
+  year: 2017
+  doi: 10.5334/jors.140

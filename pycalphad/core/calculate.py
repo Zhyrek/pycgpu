@@ -62,7 +62,7 @@ def _get_local_constraint_equations(model, phase_local_conditions):
     return phase_local_constraints
 
 @lru_cache(maxsize=1024)
-def _sample_phase_constitution(model, sampler, fixed_grid, pdens, phase_local_conditions):
+def _sample_phase_constitution(model, sampler, fixed_grid, pdens, phase_local_conditions, pair_pdens=None):
     """
     Sample the internal degrees of freedom of a phase.
 
@@ -73,9 +73,14 @@ def _sample_phase_constitution(model, sampler, fixed_grid, pdens, phase_local_co
     sampler : Callable
         Callable returning an ArrayLike of points
     fixed_grid : bool
-        If True, sample pdens points between each pair of endmembers
+        If True, sample points on the line between each pair of endmembers
     pdens : int
         Number of points to sample in each sampled dimension
+    phase_local_conditions : Mapping
+        Phase-local conditions for this phase
+    pair_pdens : int, optional
+        Number of points on each line between a pair of endmembers, counting the two
+        endmembers (which are not repeated). Default: pdens
 
     Returns
     -------
@@ -148,11 +153,14 @@ def _sample_phase_constitution(model, sampler, fixed_grid, pdens, phase_local_co
         # These constitution space edges are often the equilibrium points!
         em_pairs = list(itertools.combinations(points, 2))[:MAX_ENDMEMBER_PAIRS]
         if len(em_pairs) > 0:
-            lingrid = np.linspace(0, 1, int(min(pdens, MAX_EXTRA_POINTS/len(em_pairs))))
-            extra_points = [first_em * lingrid[np.newaxis].T +
-                            second_em * lingrid[::-1][np.newaxis].T
-                            for first_em, second_em in em_pairs]
-            points = np.concatenate(list(itertools.chain([points], extra_points)))
+            line_density = pdens if pair_pdens is None else pair_pdens
+            # Interior points only: the endmembers at the ends of each line are already in `points`
+            lingrid = np.linspace(0, 1, int(min(line_density, MAX_EXTRA_POINTS/len(em_pairs))))[1:-1]
+            if len(lingrid) > 0:
+                extra_points = [first_em * lingrid[np.newaxis].T +
+                                second_em * lingrid[::-1][np.newaxis].T
+                                for first_em, second_em in em_pairs]
+                points = np.concatenate(list(itertools.chain([points], extra_points)))
     # Sample composition space for more points
     if sum(sublattice_dof) > len(sublattice_dof):
         if linearly_constrained_space:
@@ -402,7 +410,12 @@ def calculate(dbf, comps, phases, mode=None, output='GM', fake_points=False, bro
         Must have same signature as 'pycalphad.core.utils.point_sample'
     grid_points : bool, a dict of phase names to bool, or a seq of both, optional (Default: True)
         Whether to add evenly spaced points between end-members.
-        The density of points is determined by 'pdens'
+        The density of points is determined by 'pair_pdens'
+    pair_pdens : int, a dict of phase names to int, or a seq of both, optional
+        Number of evenly spaced points on the line between each pair of end-members,
+        counting the two end-members, when 'grid_points' is True. The total number of
+        such points per phase is limited to MAX_EXTRA_POINTS.
+        Default: the phase's 'pdens'
     parameters : dict, optional
         Maps SymEngine Symbol to numbers, for overriding the values of parameters in the Database.
     phase_records : Optional[Mapping[str, PhaseRecord]]
@@ -428,6 +441,7 @@ def calculate(dbf, comps, phases, mode=None, output='GM', fake_points=False, bro
     callables = kwargs.pop('callables', {})
     sampler_dict = unpack_kwarg(kwargs.pop('sampler', None), default_arg=None)
     fixedgrid_dict = unpack_kwarg(kwargs.pop('grid_points', True), default_arg=True)
+    pair_pdens_dict = unpack_kwarg(kwargs.pop('pair_pdens', None), default_arg=None)
     model = kwargs.pop('model', None)
     conditions = conditions or OrderedDict()
     parameters = parameters or dict()
@@ -528,14 +542,14 @@ def calculate(dbf, comps, phases, mode=None, output='GM', fake_points=False, bro
                                               if k.phase_name == phase_name}
                 cur_points = _sample_phase_constitution(mod, sampler_dict[phase_name] or point_sample,
                                                         fixedgrid_dict[phase_name], pdens_dict[phase_name],
-                                                        cur_phase_local_conditions)
+                                                        cur_phase_local_conditions, pair_pdens_dict[phase_name])
                 # Collect all points arrays for all PLCs
                 collected_points_arrays.append(cur_points)
             if len(collected_points_arrays) == 0:
                 # No phase-local conditions, can use standard approach
                 points = _sample_phase_constitution(mod, sampler_dict[phase_name] or point_sample,
                                                     fixedgrid_dict[phase_name], pdens_dict[phase_name],
-                                                    {})
+                                                    {}, pair_pdens_dict[phase_name])
             else:
                 # Assumes all points arrays for this phase will be the same shape (no zero-solutions)
                 points = np.array(collected_points_arrays).reshape(plc_shape + collected_points_arrays[0].shape)

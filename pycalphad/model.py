@@ -10,7 +10,7 @@ from tinydb import where
 import pycalphad.variables as v
 from pycalphad.core.errors import DofError
 from pycalphad.core.constants import MIN_SITE_FRACTION
-from pycalphad.core.utils import unpack_species, get_pure_elements, wrap_symbol
+from pycalphad.core.utils import unpack_species, get_pure_elements, wrap_symbol, atoms_of_type
 from pycalphad.io.database import Database, Phase
 from pycalphad.io.tdb import get_supported_variables
 import numpy as np
@@ -318,7 +318,12 @@ class Model(object):
         self._symbols = {wrap_symbol(key): value for key, value in symbols.items()}
 
         self.models = OrderedDict()
-        self.build_phase(dbe)
+        # This phase's parameters, searched once for all of build_phase's queries (see _param_search)
+        self._building_phase_parameters = (dbe, self.phase_name, dbe.search(where('phase_name') == self.phase_name))
+        try:
+            self.build_phase(dbe)
+        finally:
+            del self._building_phase_parameters
 
         for name, value in self.models.items():
             # XXX: xreplace hack because SymEngine seems to let Symbols slip in somehow
@@ -327,11 +332,21 @@ class Model(object):
         self.site_fractions = sorted([x for x in self.variables if isinstance(x, v.SiteFraction)], key=str)
         self.state_variables = sorted([x for x in self.variables if not isinstance(x, v.SiteFraction)], key=str)
 
+    def _param_search(self, dbe, phase_name):
+        """Return a function equivalent to ``dbe.search`` for queries that require a parameter's phase to be
+        ``phase_name``, as all of Model's queries do. While the model is being built, it tests only that
+        phase's parameters, instead of every parameter in the database for every query."""
+        prefiltered = self.__dict__.get('_building_phase_parameters')
+        if prefiltered is None or prefiltered[0] is not dbe or prefiltered[1] != phase_name:
+            return dbe.search
+        phase_parameters = prefiltered[2]
+        return lambda query: [param for param in phase_parameters if query(param)]
+
     @classmethod
     def unwrap_piecewise(cls, graph):
         from pycalphad.io.tdb import to_interval
         replace_dict = {}
-        for atom in graph.atoms(Piecewise):
+        for atom in atoms_of_type(graph, Piecewise):
             args = atom.args
             # Unwrap temperature-dependent piecewise with zero-defaults
             if len(args) == 4 and args[2] == 0 and args[3] == True and args[1].free_symbols == {v.T}:
@@ -738,7 +753,7 @@ class Model(object):
             (where("parameter_type") == "QKT") &
             (where('constituent_array').test(self._array_validity))
         )
-        param_search = dbe.search
+        param_search = self._param_search(dbe, phase.name)
 
         params = param_search(param_query)
         kohler_toop_xs = S.Zero
@@ -925,7 +940,7 @@ class Model(object):
         phase = dbe.phases[self.phase_name]
         if phase.model_hints.get('ordered_phase', False):
             phase = _extend_ordered_if_subset_of_disorder(dbe, self.components, phase)
-        param_search = dbe.search
+        param_search = self._param_search(dbe, self.phase_name)
         pure_energy_term = self.redlich_kister_sum(phase, param_search,
                                                    pure_param_query)
         return pure_energy_term
@@ -967,7 +982,7 @@ class Model(object):
         phase = dbe.phases[self.phase_name]
         if phase.model_hints.get('ordered_phase', False):
             phase = _extend_ordered_if_subset_of_disorder(dbe, self.components, phase)
-        param_search = dbe.search
+        param_search = self._param_search(dbe, self.phase_name)
         param_query = (
             (where('phase_name') == self.phase_name) & \
                 ((where('parameter_type') == 'G') |
@@ -988,7 +1003,7 @@ class Model(object):
         phase = dbe.phases[self.phase_name]
         if phase.model_hints.get('ordered_phase', False):
             phase = _extend_ordered_if_subset_of_disorder(dbe, self.components, phase)
-        param_search = dbe.search
+        param_search = self._param_search(dbe, phase.name)
         self.TC = self.curie_temperature = S.Zero
         self.BMAG = self.beta = S.Zero
         if 'ihj_magnetic_structure_factor' not in phase.model_hints:
@@ -1069,7 +1084,7 @@ class Model(object):
         phase = dbe.phases[self.phase_name]
         if phase.model_hints.get('ordered_phase', False):
             phase = _extend_ordered_if_subset_of_disorder(dbe, self.components, phase)
-        param_search = dbe.search
+        param_search = self._param_search(dbe, phase.name)
         self.TC = self.curie_temperature = S.Zero
         if 'ihj_magnetic_structure_factor' not in phase.model_hints:
             return S.Zero
@@ -1149,7 +1164,7 @@ class Model(object):
         phase = dbe.phases[self.phase_name]
         if phase.model_hints.get('ordered_phase', False):
             phase = _extend_ordered_if_subset_of_disorder(dbe, self.components, phase)
-        param_search = dbe.search
+        param_search = self._param_search(dbe, phase.name)
         gd_param_query = (
             (where('phase_name') == phase.name) & \
             (where('parameter_type') == 'GD') & \
@@ -1173,7 +1188,7 @@ class Model(object):
         phase = dbe.phases[self.phase_name]
         if phase.model_hints.get('ordered_phase', False):
             phase = _extend_ordered_if_subset_of_disorder(dbe, self.components, phase)
-        param_search = dbe.search
+        param_search = self._param_search(dbe, phase.name)
 
         def _query(parameter_type):
             return (
@@ -1596,7 +1611,7 @@ class Model(object):
         phase = dbe.phases[self.phase_name]
         if phase.model_hints.get('ordered_phase', False):
             phase = _extend_ordered_if_subset_of_disorder(dbe, self.components, phase)
-        param_search = dbe.search
+        param_search = self._param_search(dbe, phase.name)
 
         V0_param_query = (
             (where('phase_name') == phase.name) & \

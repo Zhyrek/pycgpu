@@ -9,7 +9,7 @@ import pytest
 from symengine import Symbol
 from numpy.testing import assert_allclose
 import numpy as np
-from pycalphad import Database, Model, calculate, equilibrium, EquilibriumError, ConditionError
+from pycalphad import Database, Model, Workspace, calculate, equilibrium, EquilibriumError, ConditionError
 from pycalphad.codegen.phase_record_factory import PhaseRecordFactory
 from pycalphad.core.solver import SolverBase, Solver
 from pycalphad.core.utils import get_state_variables, instantiate_models
@@ -1437,3 +1437,134 @@ def test_eq_more_than_25_unknowns():
     eq = equilibrium(dbf, comps, list(dbf.phases), conds)
     assert_allclose(eq.NP.values.squeeze()[:13], 1/13)
     assert_allclose(eq.MU.values.squeeze(), -1000*np.arange(1, 14))
+
+
+@pytest.mark.solver
+@select_database("CuFeC-Kang.dat")
+def test_eq_cufec_kang_liquid_fcc_and_graphite(load_database):
+    """Thermochimica TestThermo56 conditions: Cu-rich LIQUID + Fe-rich, carbon-bearing FCC_A1 + graphite (gh-746).
+
+    The starting LIQUID composition set has all carbon quadruplets at the lower bound, where the MQMQA
+    configurational entropy has negative curvature. Newton steps with that Hessian moved the liquid uphill
+    and the solver converged to a state with the LIQUID and FCC_A1 compositions swapped.
+    """
+    dbf = load_database()
+    conds = {v.N: 1, v.P: 101325, v.T: 1400, v.X('C'): 1/3, v.X('FE'): 1/3}
+    wks = Workspace(dbf, ['C', 'CU', 'FE', 'VA'], ['BCC_A2', 'C_GRAPHITE(S)', 'FCC_A1', 'LIQUID'], conds)
+    # Thermochimica: GM, phase amounts (moles of atoms) and phase compositions [X(C), X(CU), X(FE)]
+    assert_allclose(wks.get('GM'), -57775.063, atol=0.05)
+    assert_allclose(wks.get(v.NP('C_GRAPHITE(S)')), 0.305876, atol=1e-5)
+    assert_allclose(wks.get(v.NP('LIQUID')), 0.329627, atol=1e-5)
+    assert_allclose(wks.get(v.NP('FCC_A1')), 0.364497, atol=1e-5)
+    assert_allclose([wks.get(v.X('LIQUID', el)) for el in ['C', 'CU', 'FE']], [0.000024, 0.975694, 0.024281], atol=1e-5)
+    assert_allclose([wks.get(v.X('FCC_A1', el)) for el in ['C', 'CU', 'FE']], [0.075307, 0.032150, 0.892543], atol=1e-5)
+
+
+@pytest.mark.solver
+@select_database("CuFeC-Kang.dat")
+def test_eq_cufec_kang_liquid_miscibility_gap(load_database):
+    """At 1500 K: Cu-rich LIQUID + Fe-C-rich LIQUID + graphite (gh-746).
+
+    Both LIQUID composition sets of the starting point have a dilute species with all its quadruplets at the
+    lower bound. Without a descent step there, the solver converged to a single LIQUID at the Cu:Fe ratio
+    of the system, about 940 J/mol above the miscibility gap.
+    """
+    dbf = load_database()
+    conds = {v.N: 1, v.P: 101325, v.T: 1500, v.X('C'): 1/3, v.X('FE'): 1/3}
+    wks = Workspace(dbf, ['C', 'CU', 'FE', 'VA'], ['BCC_A2', 'C_GRAPHITE(S)', 'FCC_A1', 'LIQUID'], conds)
+    # Thermochimica: GM, phase amounts (moles of atoms) and phase compositions [X(C), X(CU), X(FE)]
+    assert_allclose(wks.get('GM'), -64947.714, atol=0.05)
+    assert_allclose(wks.get(v.NP('C_GRAPHITE(S)')), 0.266279, atol=1e-5)
+    # one entry per LIQUID composition set, compared in order of increasing X(CU): Fe-C-rich, then Cu-rich
+    liquid_np = np.ravel(wks.get(v.NP('LIQUID')))
+    liquid_x = np.array([np.ravel(wks.get(v.X('LIQUID', el))) for el in ['C', 'CU', 'FE']]).T
+    order = np.argsort(liquid_x[:, 1])
+    assert_allclose(liquid_np[order], [0.402307, 0.331414], atol=1e-5)
+    assert_allclose(liquid_x[order], [[0.166598, 0.033546, 0.799856], [0.000094, 0.965069, 0.034838]], atol=1e-5)
+
+
+def _kkt_matrix(hess, cons_jac):
+    "Phase matrix (LHS of Eq. 41, Sundman 2015): Hessian block and constraint rows"
+    n, m = hess.shape[0], cons_jac.shape[0]
+    phase_matrix = np.zeros((n + m, n + m))
+    phase_matrix[:n, :n] = hess
+    phase_matrix[n:, :n] = cons_jac
+    phase_matrix[:n, n:] = cons_jac.T
+    return phase_matrix
+
+
+def _reduced_hessian_eigenvalues(phase_matrix, n):
+    "Eigenvalues of Z^T H Z, Z an orthonormal basis for the null space of the constraint rows"
+    cons_jac = phase_matrix[n:, :n]
+    _, _, vt = np.linalg.svd(cons_jac)
+    z = vt[np.linalg.matrix_rank(cons_jac):].T
+    hess = phase_matrix[:n, :n]
+    return np.linalg.eigvalsh(z.T @ (0.5 * (hess + hess.T)) @ z)
+
+
+@pytest.mark.solver
+@pytest.mark.parametrize("phase_grad, chemical_potentials, mass_jac_y3, held", [
+    # the reduced gradient of y3 is its derivative of G - sum_i mu_i N_i less the constraint multiplier,
+    # which is estimated from y1 and y2 (above the bound)
+    ([0, 0, 5], [0, 0], [0, 0], True),
+    ([0, 0, -5], [0, 0], [0, 0], False),
+    ([3, 3, 5], [0, 0], [0, 0], True),
+    ([3, 3, 2], [0, 0], [0, 0], False),
+    ([0, 0, 0], [-5, 0], [1, 0], True),
+    ([0, 0, 0], [5, 0], [1, 0], False),
+])
+def test_make_reduced_hessian_positive_definite_holds_site_fractions_at_bound(phase_grad, chemical_potentials,
+                                                                              mass_jac_y3, held):
+    """One sublattice with three species, y3 at the lower bound. The reduced Hessian (in the null space of
+    y1 + y2 + y3 = 1) has eigenvalues 1 and -5/3, through the coupling of y3 to y1 and y2. A site fraction at the
+    bound with a positive reduced gradient (it would decrease) is held: its row and column of the Hessian are
+    made diagonal, which here makes the reduced Hessian positive definite. Otherwise the negative eigenvalue
+    is replaced by its absolute value, keeping the eigenvectors."""
+    from pycalphad.core.minimizer import _make_reduced_hessian_positive_definite
+    num_statevars, n = 2, 3
+    hess = np.array([[1., 0., 2.], [0., 1., 2.], [2., 2., 1.]])
+    cons_jac = np.array([[1., 1., 1.]])
+    phase_matrix = _kkt_matrix(hess, cons_jac)
+    original = phase_matrix.copy()
+    x = np.array([101325., 1000., 0.5, 0.5, 1e-14])
+    grad = np.array([0., 0.] + phase_grad, dtype=float)
+    mass_jac = np.zeros((2, num_statevars + n))
+    mass_jac[:, num_statevars + 2] = mass_jac_y3
+    assert_allclose(_reduced_hessian_eigenvalues(original, n), [-5/3, 1])
+    assert _make_reduced_hessian_positive_definite(phase_matrix, n, num_statevars, x, grad, mass_jac,
+                                                   np.array(chemical_potentials, dtype=float))
+    # The constraint rows and columns are unchanged
+    np.testing.assert_array_equal(phase_matrix[n:, :], original[n:, :])
+    np.testing.assert_array_equal(phase_matrix[:, n:], original[:, n:])
+    if held:
+        # Row and column of y3 made diagonal; the coupling of y1 and y2 is kept
+        np.testing.assert_array_equal(phase_matrix[:n, :n], np.eye(3))
+        assert_allclose(_reduced_hessian_eigenvalues(phase_matrix, n), [1, 1])
+    else:
+        # Negative eigenvalue flipped: H changes only in the null space, and the reduced Hessian is |Z^T H Z|
+        assert_allclose((phase_matrix[:n, :n] - hess) @ np.ones(3), 0, atol=1e-12)
+        assert_allclose(phase_matrix[:n, :n], phase_matrix[:n, :n].T, atol=1e-12)
+        assert_allclose(_reduced_hessian_eigenvalues(phase_matrix, n), [1, 5/3])
+        assert_allclose(phase_matrix[:n, :n], [[1., 0., 2.], [0., 1., 2.], [2., 2., 1.]] +
+                        (10/3) * np.outer([1, 1, -2], [1, 1, -2]) / 6)
+
+
+@pytest.mark.solver
+def test_make_reduced_hessian_positive_definite_no_change():
+    "Positive definite reduced Hessians, or negative eigenvalues within rounding of zero, are not modified."
+    from pycalphad.core.minimizer import _make_reduced_hessian_positive_definite
+    num_statevars, n = 2, 3
+    cons_jac = np.array([[1., 1., 1.]])
+    x = np.array([101325., 1000., 0.5, 0.5, 1e-14])
+    grad = np.array([0., 0., 0., 0., 5.])
+    mass_jac = np.zeros((2, num_statevars + n))
+    # Indefinite H, but positive definite in the null space of the constraint (-3 along [1, 1, 1] only)
+    hess = np.eye(3) - (4/3) * np.ones((3, 3))
+    # Negative eigenvalue of the reduced Hessian within 1e-10 of the largest, scaled to 1e17 (MQMQA entropy)
+    hess_near_singular = 1e17 * (np.eye(3) - (1 + 1e-11) * np.outer([1, 1, -2], [1, 1, -2]) / 6)
+    for h in [hess, hess_near_singular]:
+        phase_matrix = _kkt_matrix(h, cons_jac)
+        original = phase_matrix.copy()
+        assert not _make_reduced_hessian_positive_definite(phase_matrix, n, num_statevars, x, grad, mass_jac,
+                                                           np.zeros(2))
+        np.testing.assert_array_equal(phase_matrix, original)

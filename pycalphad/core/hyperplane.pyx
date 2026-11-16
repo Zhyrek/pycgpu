@@ -3,7 +3,22 @@ cimport numpy as np
 import numpy as np
 cimport cython
 from libc.stdlib cimport malloc, free
+from libc.math cimport fabs, fmin, fmax, INFINITY
 cimport scipy.linalg.cython_lapack as cython_lapack
+
+# Points are pruned in blocks of this many consecutive points (see find_lowest_driving_force)
+cdef enum:
+    BLOCK_SIZE = 32
+# Block states
+cdef enum:
+    BLOCK_UNSEEN = 0     # box not computed yet
+    BLOCK_BOXED = 1      # box computed, no reference potentials yet
+    BLOCK_BOUNDED = 2    # box and reference potentials available: the block can be skipped
+    BLOCK_UNBOUNDED = 3  # non-finite or huge values: always evaluated
+# Bounds are only used when all magnitudes are below this, so the bound arithmetic cannot overflow
+cdef double BOUND_MAGNITUDE_LIMIT = 1e100
+# Relative safety margin on bounds; many orders of magnitude above the rounding error of a driving force
+cdef double BOUND_ROUNDING_MARGIN = 1e-9
 
 
 @cython.boundscheck(False)
@@ -142,6 +157,136 @@ cdef void simplex_fractions(double[:,::1] compositions,
     free(target_point)
     free(int_tmp)
 
+
+cdef inline double driving_force_of(double energy, const double* composition, const double* potentials,
+                                    Py_ssize_t num_components) noexcept nogil:
+    cdef Py_ssize_t comp_idx
+    cdef double driving_force = energy
+    for comp_idx in range(num_components):
+        driving_force -= potentials[comp_idx] * composition[comp_idx]
+    return driving_force
+
+
+cdef bint compute_block_box(const double* compositions, const double* energies, Py_ssize_t num_components,
+                            Py_ssize_t block_start, Py_ssize_t block_stop, double* block_record) noexcept nogil:
+    """
+    Fill the composition bounding box (lower, upper), the largest absolute energy and the sum over components
+    of the largest absolute composition of the points [block_start, block_stop) into block_record.
+    Returns False if any value is non-finite or at least BOUND_MAGNITUDE_LIMIT.
+    """
+    cdef Py_ssize_t idx, comp_idx
+    cdef double value, lower, upper
+    cdef double energy_scale = 0
+    cdef double composition_scale = 0
+    cdef bint bounded = True
+    for idx in range(block_start, block_stop):
+        bounded &= fabs(energies[idx]) < BOUND_MAGNITUDE_LIMIT
+        energy_scale = fmax(energy_scale, fabs(energies[idx]))
+    for comp_idx in range(num_components):
+        lower = compositions[block_start*num_components + comp_idx]
+        upper = lower
+        for idx in range(block_start, block_stop):
+            value = compositions[idx*num_components + comp_idx]
+            bounded &= fabs(value) < BOUND_MAGNITUDE_LIMIT
+            lower = fmin(lower, value)
+            upper = fmax(upper, value)
+        block_record[comp_idx] = lower
+        block_record[num_components + comp_idx] = upper
+        composition_scale += fmax(fabs(lower), fabs(upper))
+    block_record[3*num_components + 2] = energy_scale
+    block_record[3*num_components + 3] = composition_scale
+    return bounded
+
+
+cdef Py_ssize_t find_lowest_driving_force(const double* compositions, const double* energies,
+                                          Py_ssize_t num_points, Py_ssize_t num_components,
+                                          const double* potentials, const int* simplex, Py_ssize_t simplex_size,
+                                          int* block_state, double* block_data, double* block_bounds,
+                                          double* out_lowest_df) noexcept nogil:
+    """
+    Index of the point with the lowest driving force below 1e10 for the given potentials (the first such index
+    on ties, -1 if there is none), as a plain scan over all points would find it. The driving force is written
+    to out_lowest_df (1e10 if there is no such point).
+
+    Points are grouped in blocks of BLOCK_SIZE consecutive points. Driving forces are linear in the potentials,
+    so for a point x in a block whose driving forces were evaluated at reference potentials mu_ref,
+        df(x, mu) = df(x, mu_ref) - (mu - mu_ref).x >= min_block df(mu_ref) - max_(x in block box) (mu - mu_ref).x
+    A block whose bound, less a margin for rounding, is above the lowest driving force found so far cannot
+    contain the minimizer, so it is skipped. Evaluated blocks take the current potentials as their reference.
+    block_state (one per block) and block_data (3*num_components + 4 per block) carry this between calls;
+    block_bounds (one per block) is scratch space.
+    """
+    cdef Py_ssize_t i, idx, comp_idx, block_idx, block_start, block_stop, block_min_idx
+    cdef Py_ssize_t record_size = 3*num_components + 4
+    cdef Py_ssize_t num_blocks = (num_points + BLOCK_SIZE - 1) // BLOCK_SIZE
+    cdef Py_ssize_t min_idx = -1
+    cdef double lowest_df = 1e10
+    cdef double driving_force, block_lowest_df, bound, delta, lower_term, upper_term
+    cdef double potential_scale = 0
+    cdef bint potentials_bounded = True
+    cdef double* block_record
+    # Driving forces of the current simplex are near zero; starting from them lets more blocks be skipped
+    for i in range(simplex_size):
+        idx = simplex[i]
+        if idx < 0 or idx >= num_points:
+            continue
+        driving_force = driving_force_of(energies[idx], &compositions[idx*num_components], potentials, num_components)
+        if driving_force < lowest_df or (driving_force == lowest_df and idx < min_idx):
+            lowest_df = driving_force
+            min_idx = idx
+    for comp_idx in range(num_components):
+        if not (fabs(potentials[comp_idx]) < BOUND_MAGNITUDE_LIMIT):
+            potentials_bounded = False
+        elif fabs(potentials[comp_idx]) > potential_scale:
+            potential_scale = fabs(potentials[comp_idx])
+    # Lower bounds on the driving forces in each block
+    for block_idx in range(num_blocks):
+        block_record = &block_data[block_idx*record_size]
+        if block_state[block_idx] == BLOCK_BOUNDED and potentials_bounded:
+            # block_record: lower[N], upper[N], reference potentials[N],
+            #               min df at reference minus fixed margin, margin per unit potential scale, scales[2]
+            bound = block_record[3*num_components] - block_record[3*num_components + 1] * potential_scale
+            for comp_idx in range(num_components):
+                delta = potentials[comp_idx] - block_record[2*num_components + comp_idx]
+                lower_term = delta * block_record[comp_idx]
+                upper_term = delta * block_record[num_components + comp_idx]
+                bound -= lower_term if lower_term > upper_term else upper_term
+            block_bounds[block_idx] = bound
+        else:
+            block_bounds[block_idx] = -INFINITY
+    for block_idx in range(num_blocks):
+        if block_bounds[block_idx] > lowest_df:
+            continue
+        block_start = block_idx * BLOCK_SIZE
+        block_stop = min(block_start + BLOCK_SIZE, num_points)
+        block_record = &block_data[block_idx*record_size]
+        if block_state[block_idx] == BLOCK_UNSEEN:
+            if compute_block_box(compositions, energies, num_components, block_start, block_stop, block_record):
+                block_state[block_idx] = BLOCK_BOXED
+            else:
+                block_state[block_idx] = BLOCK_UNBOUNDED
+        block_lowest_df = INFINITY
+        block_min_idx = -1
+        for idx in range(block_start, block_stop):
+            driving_force = driving_force_of(energies[idx], &compositions[idx*num_components], potentials, num_components)
+            if driving_force < block_lowest_df:
+                block_lowest_df = driving_force
+                block_min_idx = idx
+        if block_lowest_df < lowest_df or (block_lowest_df == lowest_df and block_min_idx < min_idx):
+            lowest_df = block_lowest_df
+            min_idx = block_min_idx
+        if potentials_bounded and block_state[block_idx] != BLOCK_UNBOUNDED:
+            # Rounding margin: 2*margin*(energy scale + composition scale * (reference + current potential scale))
+            block_state[block_idx] = BLOCK_BOUNDED
+            block_record[3*num_components] = block_lowest_df - 2 * BOUND_ROUNDING_MARGIN * (
+                block_record[3*num_components + 2] + block_record[3*num_components + 3] * potential_scale)
+            block_record[3*num_components + 1] = 2 * BOUND_ROUNDING_MARGIN * block_record[3*num_components + 3]
+            for comp_idx in range(num_components):
+                block_record[2*num_components + comp_idx] = potentials[comp_idx]
+    out_lowest_df[0] = lowest_df
+    return min_idx
+
+
 @cython.boundscheck(False)
 cpdef double hyperplane(double[:,::1] compositions,
                         double[::1] energies,
@@ -206,11 +351,16 @@ cpdef double hyperplane(double[:,::1] compositions,
     cdef Py_ssize_t min_df
     cdef int max_iterations = 1000
     cdef int iterations = 0
-    cdef Py_ssize_t i, j, idx, ici, comp_idx, simplex_idx, trial_idx, chempot_idx
+    cdef Py_ssize_t i, j, idx, ici, simplex_idx, trial_idx, chempot_idx
     cdef bint skip_index = False
     cdef double lowest_df = 0
     cdef double out_energy = 0
-    cdef double driving_force
+    cdef Py_ssize_t num_blocks = (num_points + BLOCK_SIZE - 1) // BLOCK_SIZE
+    cdef const double* compositions_ptr = NULL
+    cdef const double* energies_ptr = NULL
+    if num_points > 0:
+        compositions_ptr = &compositions[0, 0]
+        energies_ptr = &energies[0]
     # 1-D
     cdef int* best_guess_simplex = <int*>malloc(simplex_size * sizeof(int))
     for i in range(num_components):
@@ -242,6 +392,12 @@ cpdef double hyperplane(double[:,::1] compositions,
         for j in range(simplex_size):
             trial_simplices[i*simplex_size + j] = best_guess_simplex[j]
     cdef double* f_candidate_tieline = <double*>malloc(simplex_size * simplex_size * sizeof(double))
+    # Pruning state for find_lowest_driving_force
+    cdef int* block_state = <int*>malloc(num_blocks * sizeof(int))
+    for i in range(num_blocks):
+        block_state[i] = BLOCK_UNSEEN
+    cdef double* block_data = <double*>malloc(num_blocks * (3*num_components + 4) * sizeof(double))
+    cdef double* block_bounds = <double*>malloc(num_blocks * sizeof(double))
 
 
     while iterations < max_iterations:
@@ -274,15 +430,9 @@ cpdef double hyperplane(double[:,::1] compositions,
             break
         for ici in range(simplex_size):
             candidate_potentials[free_chempot_indices[ici]] = free_candidate_potentials[ici]
-        lowest_df = 1e10
-        min_df = -1
-        for idx in range(num_points):
-            driving_force = energies[idx]
-            for comp_idx in range(num_components):
-                driving_force -= candidate_potentials[comp_idx] * compositions[idx, comp_idx]
-            if driving_force < lowest_df:
-                lowest_df = driving_force
-                min_df = idx
+        min_df = find_lowest_driving_force(compositions_ptr, energies_ptr, num_points, num_components,
+                                           candidate_potentials, candidate_simplex, simplex_size,
+                                           block_state, block_data, block_bounds, &lowest_df)
         for i in range(simplex_size):
             best_guess_simplex[i] = candidate_simplex[i]
         for i in range(simplex_size):
@@ -324,5 +474,8 @@ cpdef double hyperplane(double[:,::1] compositions,
     free(trial_simplices)
     free(fractions)
     free(f_candidate_tieline)
+    free(block_state)
+    free(block_data)
+    free(block_bounds)
 
     return out_energy

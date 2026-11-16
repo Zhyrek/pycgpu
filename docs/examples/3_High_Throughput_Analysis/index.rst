@@ -7,3 +7,4 @@ High Throughput Analysis
    1_HighThroughputCalculations
    2_UsingCalculationResults
    3_ScreeningPhaseStability
+   4_ParallelCalculations

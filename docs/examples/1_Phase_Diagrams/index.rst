@@ -8,3 +8,4 @@ Phase Diagrams
    2_TernaryExamples
    3_Mapping
    4_ChargedPhases
+   5_CustomPhaseLegend
